@@ -451,6 +451,829 @@ async function loadAlbiViaClaudeZapier(){
   try {
     setMsg('Loading Albi jobs...');
     await Promise.all([
+      pullProxyLocation('appleton', 'Appleton', cutoffDate),
+      pullProxyLocation('stevens',  'Stevens Point', cutoffDate)
+    ]);
+    const total = Object.keys(jobs).length;
+    showToast('✓ '+total+' active jobs loaded from Albi');
+    document.getElementById('s7').textContent=fmtT(new Date().getHours()+new Date().getMinutes()/60);
+  } catch(e) {
+    showApiError('Albi proxy error: '+e.message);
+    console.error(e);
+  }
+}
+
+async function pullProxyLocation(locKey, locName, cutoffDate){
+  let page=1, hasMore=true;
+  while(hasMore){
+    const url=PROXY_URL+'?location='+encodeURIComponent(locName)+'&pageSize=50&page='+page;
+    const r=await fetch(url);
+    if(!r.ok) break;
+    const data=await r.json();
+    const items=Array.isArray(data)?data:(data.results||data.data||data.projects||data.items||[]);
+    if(!items.length){hasMore=false;break;}
+    items.forEach(p=>{
+      const st=(p.status||'').toLowerCase();
+      if(!SCHED.has(st)) return;
+      const pt=p.projectType||p.project_type||p.type||'';
+      if(!MIT_TYPES.has(pt)) return;
+      // Filter by location name (Albi returns location as a name string)
+      const pLoc=(p.locationId||p.location||'').toString().toLowerCase();
+      if(!pLoc.includes(locName.toLowerCase().split(' ')[0])) return;
+      // 6-month filter
+      const created=p.createdDate||p.created_at||p.dateCreated||'';
+      if(created && new Date(created) < new Date(cutoffDate)) return;
+      const tk=TYPE_KEY[pt]||'water';
+      const jid=String(p.id||p.projectId);
+      if(jobs[jid]) return; // dedupe
+      jobs[jid]={
+        name:p.name||p.projectName||jid,
+        type:tk, city:p.city||'',
+        addr:p.address1||p.address||'',
+        status:p.status,
+        lat:parseFloat(p.latitude||p.lat)||LOCATIONS[locKey].lat,
+        lng:parseFloat(p.longitude||p.lng)||LOCATIONS[locKey].lng,
+        hrs:HRS_DEF[tk]||3, loc:locKey
+      };
+      (unassigned[locKey]=unassigned[locKey]||[]).push(jid);
+    });
+    hasMore=items.length===50 && page<20;
+    page++;
+  }
+}
+// ── T-SHEETS: PULL GROUPS + BUILD TECH ROSTER ──
+async function lookupTSIds(){
+  setMsg('Loading technicians from T-Sheets...');
+  try{
+    const gr=await fetch(TS_BASE+'/groups',{headers:{'Authorization':'Bearer '+TS_TOKEN}});
+    if(!gr.ok)throw new Error(gr.status);
+    const gd=await gr.json();
+    const groups=Object.values(gd.results?.groups||{});
+    const groupIds={appleton:null,stevens:null};
+    Object.entries(TS_GROUPS).forEach(([l,name])=>{
+      const g=groups.find(g=>g.name.toLowerCase()===name.toLowerCase());
+      if(g)groupIds[l]=g.id;
+    });
+    let colorIdx=0;
+    techQ={appleton:{},stevens:{}};
+    for(const [l,gid] of Object.entries(groupIds)){
+      if(!gid){showToast('⚠ Group not found: '+TS_GROUPS[l]);continue;}
+      const ur=await fetch(TS_BASE+'/users?group_ids='+gid+'&active=yes',
+        {headers:{'Authorization':'Bearer '+TS_TOKEN}});
+      if(!ur.ok)continue;
+      const ud=await ur.json();
+      Object.values(ud.results?.users||{}).forEach(u=>{
+        const nm=u.first_name+' '+u.last_name;
+        tsIdMap[nm.toLowerCase()]=u.id;
+        techQ[l][nm]={tsId:u.id,initials:(u.first_name[0]||'')+(u.last_name[0]||'').toUpperCase(),color:AV_COLORS[colorIdx%AV_COLORS.length],jobs:[]};
+        colorIdx++;
+      });
+    }
+    const app=Object.keys(techQ.appleton).length, sp=Object.keys(techQ.stevens).length;
+    showToast(`✓ ${app} Appleton · ${sp} Stevens Point techs loaded`);
+  }catch(e){
+    console.warn('T-Sheets error:',e.message);
+    showToast('⚠ T-Sheets unavailable — techs will load from Albi data');
+  }
+}
+
+// ── REFRESH ───────────────────────────────
+async function refreshAll(){
+  clearCache();
+  hideCacheBanner();
+  showLoader('Refreshing from Albi...');
+  stepActive('cache'); stepDone('cache','↺ Cache cleared');
+  stepActive('techs');
+  await lookupTSIds();
+  stepDone('techs','✓ Technicians reloaded');
+  render(); hideLoader();
+  stepActive('albi');
+  showToast('Fetching fresh Albi data...');
+  await loadAlbiViaClaudeZapier();
+  stepDone('albi','✓ Live data loaded');
+  saveCache();
+  render();
+  showToast('Board refreshed from Albi');
+}
+
+// ── TECH OUT / AI ─────────────────────────
+function markSick(nm){
+  sick.add(nm);
+  const orphans=(techQ[loc][nm]?.jobs||[]).filter(jid=>
+    !Object.entries(techQ[loc]).some(([n,t])=>n!==nm&&t.jobs.includes(jid)));
+  render();
+  if(orphans.length)triggerAI(nm,orphans);
+  else showToast(nm.split(' ')[0]+' marked out — jobs already covered');
+}
+function undoSick(nm){sick.delete(nm);closeAI();render();showToast(nm.split(' ')[0]+' restored');}
+
+async function triggerAI(sickNm,orphans){
+  const key=getAnthKey(); if(!key)return;
+  const panel=document.getElementById('ai-panel');
+  const thinking=document.getElementById('ai-thinking');
+  const sugDiv=document.getElementById('ai-suggs');
+  panel.classList.add('open');thinking.classList.add('show');sugDiv.innerHTML='';
+  const avail=Object.entries(techQ[loc]).filter(([nm])=>!sick.has(nm))
+    .map(([nm,t])=>({name:nm,jobs:t.jobs.length,freeAt:fmtT(freeAt(t.jobs))}));
+  const jd=orphans.map(jid=>{const j=jobs[jid];return j?{id:jid,name:j.name,city:j.city,type:j.type,hrs:j.hrs}:null;}).filter(Boolean);
+  try{
+    const res=await fetch(ANTH_URL,{method:'POST',
+      headers:{'Content-Type':'application/json','x-api-key':key,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+      body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:600,
+        messages:[{role:'user',content:`Dispatch for JG Restoration. "${sickNm}" called out.
+Orphaned: ${JSON.stringify(jd)}
+Available: ${JSON.stringify(avail)}
+Rules: fewest jobs first, cluster same city, balance hours.
+JSON array only: [{"jobId":"...","techName":"...","reason":"short"}]`}]})});
+    const data=await res.json();
+    thinking.classList.remove('show');
+    renderSuggs(JSON.parse((data.content?.[0]?.text||'[]').replace(/```json|```/g,'').trim()));
+  }catch(e){thinking.classList.remove('show');renderSuggs(buildFallback(orphans,avail));}
+}
+function buildFallback(orphans,avail){
+  return orphans.map((jid,i)=>{
+    const s=[...avail].sort((a,b)=>a.jobs-b.jobs);const p=s[i%Math.max(1,s.length)];
+    return{jobId:jid,techName:p?.name||'',reason:`Fewest jobs · free ~${p?.freeAt}`};
+  });
+}
+function renderSuggs(suggs){
+  const div=document.getElementById('ai-suggs');div.innerHTML='';
+  if(!suggs.length){div.innerHTML='<div style="font-size:11px;color:var(--muted);padding:8px;">No available techs.</div>';return;}
+  suggs.forEach((s,i)=>{
+    const j=jobs[s.jobId];if(!j)return;
+    const el=document.createElement('div');el.className='ai-sugg';el.id='sg'+i;
+    el.innerHTML=`<div class="ai-sugg-txt">
+      <div class="ai-main">${s.techName} ← ${j.name} (${j.city})</div>
+      <div class="ai-why">${s.reason}</div>
+    </div>
+    <div class="ai-btns">
+      <button class="btn-cf" onclick="confirmSug(${i},'${s.jobId}','${s.techName}')">Confirm</button>
+      <button class="btn-sk" onclick="document.getElementById('sg${i}').remove()">Skip</button>
+    </div>`;
+    div.appendChild(el);
+  });
+}
+function confirmSug(i,jid,nm){
+  [...sick].forEach(snm=>{if(techQ[loc][snm])techQ[loc][snm].jobs=techQ[loc][snm].jobs.filter(j=>j!==jid);});
+  if(techQ[loc][nm]&&!techQ[loc][nm].jobs.includes(jid))techQ[loc][nm].jobs.push(jid);
+  document.getElementById('sg'+i)?.remove();
+  showToast(jobs[jid]?.name+' → '+nm.split(' ')[0]);render();
+}
+function closeAI(){document.getElementById('ai-panel').classList.remove('open');}
+
+// ── PUSH TO T-SHEETS ──────────────────────
+async function pushAll(){
+  const btn=document.getElementById('push-btn');
+  btn.disabled=true;btn.textContent='Pushing...';
+  let ok=0,fail=0,skip=0;
+  for(const nm of Object.keys(techQ[loc])){const r=await pushTech(nm);ok+=r.ok;fail+=r.fail;skip+=r.skip;}
+  btn.disabled=false;btn.textContent='Push All → T-Sheets';
+  showToast(`✓ ${ok} pushed${fail?' · '+fail+' failed':''}${skip?' · '+skip+' skipped':''}`);
+}
+async function pushOne(nm){
+  const r=await pushTech(nm);
+  showToast(`${nm.split(' ')[0]}: ${r.ok} pushed${r.fail?' · '+r.fail+' failed':''}${r.skip?' · no match':''}`);
+}
+async function pushTech(nm){
+  const tech=techQ[loc][nm];
+  if(!tech||!tech.jobs.length||sick.has(nm))return{ok:0,fail:0,skip:0};
+  const uid=tech.tsId||tsIdMap[nm.toLowerCase()];
+  if(!uid)return{ok:0,fail:0,skip:tech.jobs.length};
+  const today=new Date().toISOString().split('T')[0];
+  let ok=0,fail=0,runHr=START;
+  for(const jid of tech.jobs){
+    const j=jobs[jid];if(!j)continue;
+    const start=toISO(today,runHr);runHr+=j.hrs+0.25;const end=toISO(today,runHr-0.25);
+    try{
+      const r=await fetch(TS_BASE+'/scheduleevents',{method:'POST',
+        headers:{'Authorization':'Bearer '+TS_TOKEN,'Content-Type':'application/json'},
+        body:JSON.stringify({data:[{user_id:uid,start,end,active:true,
+          notes:`${j.name} — ${j.addr}, ${j.city}`}]})});
+      if(r.ok)ok++;else fail++;
+    }catch{fail++;}
+  }
+  return{ok,fail,skip:0};
+}
+function toISO(d,h){const hr=Math.floor(h),mn=Math.round((h-hr)*60);return `${d}T${String(hr).padStart(2,'0')}:${String(mn).padStart(2,'0')}:00`;}
+
+// ── RENDER ────────────────────────────────
+function render(){renderBoard();renderPool();updateStats();}
+
+function renderBoard(){
+  const techs=techQ[loc];const depot=LOCATIONS[loc];
+  const board=document.getElementById('board');board.innerHTML='';
+  if(!Object.keys(techs).length){
+    board.innerHTML='<div style="font-size:12px;color:var(--muted);padding:20px;background:var(--surface);border-radius:10px;border:1.5px dashed var(--border-mid);">No techs configured</div>';
+    return;
+  }
+  Object.entries(techs).forEach(([nm,tech])=>{
+    const isSick=sick.has(nm);const fa=freeAt(tech.jobs);
+    const lane=document.createElement('div');lane.className='lane'+(isSick?' sick':'');
+    const hd=document.createElement('div');hd.className='lane-hd'+(isSick?' sick-hd':'');
+    hd.innerHTML=`<div class="lane-hd-l">
+      <div class="av" style="background:${isSick?'#c02020':tech.color}">${tech.initials}</div>
+      <div style="min-width:0;">
+        <div class="tech-nm">${nm}</div>
+        <div class="tech-sb" id="sb_${tech.initials}"></div>
+      </div>
+    </div>
+    <div class="lane-hd-btns">
+      ${isSick
+        ?`<button class="undo-btn" onclick="undoSick('${nm}')">↩ Undo</button>`
+        :`<button class="tout-btn" onclick="markSick('${nm}')">Out</button>
+          <button class="push-one-btn" onclick="pushOne('${nm}')">↑ Push</button>`}
+    </div>`;
+    const body=document.createElement('div');body.className='lane-body';body.dataset.tech=nm;
+    let runHr=START,pLat=depot.lat,pLng=depot.lng;
+    tech.jobs.forEach((jid,i)=>{
+      const j=jobs[jid];if(!j)return;
+      const mi=dist(pLat,pLng,j.lat,j.lng);
+      const st=fmtT(runHr);runHr+=j.hrs+0.25;const en=fmtT(runHr-0.25);
+      const shared=Object.entries(techQ[loc]).filter(([n,t])=>n!==nm&&t.jobs.includes(jid)).map(([n])=>n.split(' ')[0]);
+      const tr=document.createElement('div');tr.className='trip-row';
+      tr.innerHTML=`<div class="trip-line"></div><span class="tb ${tripCls(mi)}">${i===0?mi.toFixed(1)+'mi from shop':tripLbl(mi)}</span>`;
+      body.appendChild(tr);
+      const card=document.createElement('div');
+      card.className='job-card jc-'+j.type+(isSick?' orphan':'');
+      card.draggable=true;card.dataset.jobId=jid;card.dataset.tech=nm;
+      card.innerHTML=`<div class="c-top">
+        <span class="c-jobname">${j.name}</span>
+        ${isSick?'<span style="font-size:8px;color:var(--danger);font-weight:700;flex-shrink:0">!</span>':'<span class="c-hdl">⠿</span>'}
+      </div>
+      <div class="c-city">${j.city}</div>
+      ${isSick?'':`<div class="c-meta">
+        <span class="chip">${j.status}</span>
+        <span class="t-chip">${st}–${en}</span>
+        <div class="hrs-wrap"><input class="hrs-in" type="number" min=".5" max="16" step=".5" value="${j.hrs}"
+          onchange="updHrs('${jid}',this.value)" onclick="event.stopPropagation()">h</div>
+        ${shared.length?`<span class="team-badge">+${shared.join('+')}</span>`:''}
+      </div>`}`;
+      card.addEventListener('dragstart',onDS);card.addEventListener('dragend',onDE);
+      body.appendChild(card);pLat=j.lat;pLng=j.lng;
+    });
+    const slot=document.createElement('div');slot.className='add-slot';
+    slot.textContent=isSick?'(drag jobs out)':'+ drop job here';
+    body.appendChild(slot);
+    if(!isSick){body.addEventListener('dragover',onDO);body.addEventListener('dragleave',onDL);body.addEventListener('drop',onDD);}
+    lane.appendChild(hd);lane.appendChild(body);board.appendChild(lane);
+    const sb=document.getElementById('sb_'+tech.initials);
+    if(sb)sb.textContent=isSick?'Called out':tech.jobs.length+' job'+(tech.jobs.length!==1?'s':'')+' · ~'+fmtT(fa);
+  });
+}
+
+function renderPool(){
+  const pool=document.getElementById('pool');
+  const list=unassigned[loc]||[];
+  document.getElementById('pool-lbl').textContent=LOCATIONS[loc].label+' · '+list.length+' unassigned';
+  pool.innerHTML='';
+  pool.addEventListener('dragover',e=>{e.preventDefault();pool.classList.add('drag-over');});
+  pool.addEventListener('dragleave',()=>pool.classList.remove('drag-over'));
+  pool.addEventListener('drop',e=>{
+    e.preventDefault();pool.classList.remove('drag-over');
+    if(!dragJob||dragPool)return;
+    if(dragSrc&&techQ[loc][dragSrc]){
+      techQ[loc][dragSrc].jobs=techQ[loc][dragSrc].jobs.filter(j=>j!==dragJob);
+      const still=Object.values(techQ[loc]).some(t=>t.jobs.includes(dragJob));
+      if(!still&&!unassigned[loc].includes(dragJob))unassigned[loc].push(dragJob);
+    }
+    showToast('Removed from '+dragSrc?.split(' ')[0]);render();
+  });
+  if(!list.length){pool.innerHTML='<div style="font-size:11px;color:var(--faint);padding:8px;">All jobs assigned</div>';return;}
+  list.forEach(jid=>{
+    const j=jobs[jid];if(!j)return;
+    const c=document.createElement('div');
+    c.className='uc uc-'+j.type;c.draggable=true;c.dataset.jobId=jid;c.dataset.pool='1';
+    c.innerHTML=`<div class="uc-jobname">${j.name}</div><div class="uc-city">${j.city}</div><div class="uc-st">${j.status}</div>`;
+    c.addEventListener('dragstart',onDS);c.addEventListener('dragend',onDE);
+    pool.appendChild(c);
+  });
+}
+
+// ── DRAG & DROP ───────────────────────────
+function onDS(e){dragJob=e.currentTarget.dataset.jobId;dragSrc=e.currentTarget.dataset.tech||null;dragPool=e.currentTarget.dataset.pool==='1';e.currentTarget.classList.add('dragging');e.dataTransfer.effectAllowed='move';}
+function onDE(e){e.currentTarget.classList.remove('dragging');if(ph&&ph.parentNode)ph.parentNode.removeChild(ph);ph=null;document.querySelectorAll('.lane-body').forEach(b=>b.classList.remove('drag-over'));}
+function onDO(e){
+  e.preventDefault();const body=e.currentTarget;body.classList.add('drag-over');
+  const cards=[...body.querySelectorAll('.job-card:not(.dragging):not(.drag-placeholder)')];
+  if(!ph){ph=document.createElement('div');ph.className='job-card drag-placeholder';}
+  let ins=false;
+  for(const c of cards){const r=c.getBoundingClientRect();if(e.clientY<r.top+r.height/2){body.insertBefore(ph,c);ins=true;break;}}
+  const slot=body.querySelector('.add-slot');if(!ins&&slot)body.insertBefore(ph,slot);
+}
+function onDL(e){if(!e.currentTarget.contains(e.relatedTarget))e.currentTarget.classList.remove('drag-over');}
+function onDD(e){
+  e.preventDefault();const body=e.currentTarget;body.classList.remove('drag-over');
+  const tT=body.dataset.tech;if(!dragJob||!tT)return;
+  if(sick.has(tT)){showToast(tT.split(' ')[0]+' is out');return;}
+  const isReorder=dragSrc===tT;
+  if(isReorder)techQ[loc][tT].jobs=techQ[loc][tT].jobs.filter(j=>j!==dragJob);
+  else if(dragPool)unassigned[loc]=unassigned[loc].filter(j=>j!==dragJob);
+  const curJobs=techQ[loc][tT].jobs.filter(j=>j!==dragJob);
+  const cards=[...body.querySelectorAll('.job-card:not(.dragging):not(.drag-placeholder)')];
+  let idx=curJobs.length;
+  for(let i=0;i<cards.length;i++){const r=cards[i].getBoundingClientRect();if(e.clientY<r.top+r.height/2){const fi=curJobs.indexOf(cards[i].dataset.jobId);idx=fi===-1?i:fi;break;}}
+  curJobs.splice(idx,0,dragJob);techQ[loc][tT].jobs=curJobs;
+  if(ph&&ph.parentNode)ph.parentNode.removeChild(ph);ph=null;
+  const j=jobs[dragJob];
+  if(isReorder)showToast('Reordered · mileage updated');
+  else if(dragPool)showToast((j?.name||dragJob)+' → '+tT.split(' ')[0]);
+  else showToast((j?.name||dragJob)+' also on '+tT.split(' ')[0]+' (team job)');
+  render();
+}
+
+// ── HELPERS ───────────────────────────────
+function dist(a,b,c,d){const R=3958.8,dLat=(c-a)*Math.PI/180,dLng=(d-b)*Math.PI/180;const x=Math.sin(dLat/2)**2+Math.cos(a*Math.PI/180)*Math.cos(c*Math.PI/180)*Math.sin(dLng/2)**2;return R*2*Math.atan2(Math.sqrt(x),Math.sqrt(1-x));}
+function tripCls(m){return m<5?'tb-ok':m<=15?'tb-warn':'tb-far';}
+function tripLbl(m){return m.toFixed(1)+'mi'+(m>15?' ⚠':'');}
+function fmtT(h){const hr=Math.floor(h),mn=Math.round((h-hr)*60),ap=hr>=12?'PM':'AM';const dh=hr>12?hr-12:(hr===0?12:hr);return dh+':'+(mn<10?'0':'')+mn+' '+ap;}
+function freeAt(jlist){let h=START;jlist.forEach(jid=>{const j=jobs[jid];if(j)h+=j.hrs+0.25;});return h;}
+function updHrs(jid,v){const n=parseFloat(v);if(!isNaN(n)&&n>0)jobs[jid].hrs=n;renderBoard();updateStats();}
+function updateStats(){
+  let asgn=0,unasgn=0,waste=0,active=0;
+  Object.entries(LOCATIONS).forEach(([l,depot])=>{
+    Object.entries(techQ[l]).forEach(([nm,t])=>{
+      if(!sick.has(nm))active++;asgn+=t.jobs.length;
+      let pLat=depot.lat,pLng=depot.lng;
+      t.jobs.forEach(jid=>{const j=jobs[jid];if(!j)return;if(dist(pLat,pLng,j.lat,j.lng)>15)waste++;pLat=j.lat;pLng=j.lng;});
+    });
+    unasgn+=(unassigned[l]||[]).length;
+  });
+  document.getElementById('s1').textContent=Object.keys(jobs).length;
+  document.getElementById('s2').textContent=asgn;
+  document.getElementById('s3').textContent=unasgn;
+  document.getElementById('s4').textContent=active;
+  document.getElementById('s5').textContent=sick.size;
+  document.getElementById('s6').textContent=waste;
+}
+function switchLoc(l,el){loc=l;document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));el.classList.add('active');render();}
+function showLoader(m){document.getElementById('loader').style.display='flex';setMsg(m);}
+function hideLoader(){const l=document.getElementById('loader');l.classList.add('hide');setTimeout(()=>l.style.display='none',450);}
+function setMsg(m){
+  const el=document.getElementById('load-msg');
+  if(el)el.textContent=m;
+  const hint=document.getElementById('load-hint');
+  if(hint&&m.toLowerCase().includes('albi'))hint.textContent='Albi data loads via Claude AI — this step takes 10–20 seconds';
+  else if(hint)hint.textContent='';
+}
+function showApiError(m){const e=document.getElementById('api-err');e.textContent='⚠ '+m;e.classList.add('show');}
+function showToast(m){const t=document.getElementById('toast');t.textContent=m;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),3000);}
+function tick(){const n=new Date();document.getElementById('clk').textContent=n.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'});}
+</script>
+</body>
+</html>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>JG Restoration — Dispatch Board</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500;600&display=swap');
+:root{
+  --navy:#0d2d5e;--orange:#e85d04;--gold:#f5a623;
+  --bg:#f0ede8;--surface:#faf9f7;--border:rgba(13,45,94,.12);--border-mid:rgba(13,45,94,.22);
+  --text:#0d1f3c;--muted:#6b7a96;--faint:#a0abbf;
+  --water:#1e6fb5;--water-bg:#deeefb;
+  --fire:#c94a14;--fire-bg:#fceee8;
+  --mold:#3a7d2c;--mold-bg:#e8f5e4;
+  --cat3:#9b3a8a;--cat3-bg:#f6ecf7;
+  --brd:#5a5a5a;--brd-bg:#efefed;
+  --con:#b07818;--con-bg:#fcf4e4;
+  --ok:#2d7a3a;--ok-bg:#e5f4e8;
+  --warn:#b06a00;--warn-bg:#fef2e0;
+  --danger:#c02020;--danger-bg:#fde8e8;
+  --shadow:0 1px 3px rgba(13,45,94,.08),0 4px 16px rgba(13,45,94,.06);
+}
+*{box-sizing:border-box;margin:0;padding:0;}
+body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;font-size:13px;}
+.hdr{background:var(--navy);padding:0 16px;height:50px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:100;}
+.hdr-l{display:flex;align-items:center;gap:10px;}
+.logo-mk{width:26px;height:26px;background:var(--orange);border-radius:5px;display:flex;align-items:center;justify-content:center;font-family:'DM Mono',monospace;font-size:10px;font-weight:500;color:#fff;flex-shrink:0;}
+.logo-tx{font-size:13px;font-weight:600;color:#fff;letter-spacing:-.3px;}
+.logo-tx span{color:var(--gold);}
+.pill{font-size:10px;padding:2px 8px;background:rgba(255,255,255,.12);color:rgba(255,255,255,.8);border-radius:20px;border:1px solid rgba(255,255,255,.18);display:flex;align-items:center;gap:4px;}
+.ldot{width:5px;height:5px;border-radius:50%;background:#4cdb7a;animation:pulse 2s infinite;flex-shrink:0;}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+.hdr-r{display:flex;align-items:center;gap:6px;}
+.clk{font-family:'DM Mono',monospace;font-size:11px;color:rgba(255,255,255,.55);}
+.btn{padding:5px 12px;border-radius:6px;font-size:11px;font-weight:500;cursor:pointer;border:none;font-family:'DM Sans',sans-serif;transition:all .15s;display:flex;align-items:center;gap:4px;white-space:nowrap;}
+.btn-ghost{background:rgba(255,255,255,.1);color:rgba(255,255,255,.85);}
+.btn-ghost:hover{background:rgba(255,255,255,.18);}
+.btn-gold{background:var(--gold);color:var(--navy);font-weight:600;}
+.btn-gold:hover{background:#e09510;}
+.btn-gold:disabled{opacity:.5;cursor:default;}
+.stats-bar{background:var(--surface);border-bottom:1px solid var(--border);padding:0 16px;display:flex;align-items:center;}
+.stat{padding:7px 14px 7px 0;margin-right:14px;border-right:1px solid var(--border);display:flex;flex-direction:column;gap:1px;}
+.stat:last-child{border-right:none;margin-left:auto;padding-right:0;}
+.stat-lbl{font-size:9px;font-weight:500;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;}
+.stat-val{font-size:18px;font-weight:600;color:var(--navy);font-family:'DM Mono',monospace;}
+.stat-val.red{color:var(--danger);}
+.stat-val.sm{font-size:12px;margin-top:2px;}
+.tabs{background:var(--surface);border-bottom:1px solid var(--border);padding:0 16px;display:flex;align-items:center;gap:2px;}
+.tab{padding:7px 14px;font-size:12px;font-weight:500;border:none;background:transparent;cursor:pointer;color:var(--muted);border-bottom:2px solid transparent;margin-bottom:-1px;transition:all .15s;font-family:'DM Sans',sans-serif;}
+.tab.active{color:var(--navy);border-bottom-color:var(--orange);}
+.legend{background:var(--surface);border-bottom:1px solid var(--border);padding:5px 16px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+.leg{display:flex;align-items:center;gap:3px;font-size:10px;color:var(--muted);}
+.leg-sw{width:9px;height:9px;border-radius:2px;flex-shrink:0;}
+.main{padding:10px 16px;display:flex;flex-direction:column;gap:8px;}
+.board-wrap{overflow-x:auto;padding-bottom:4px;}
+.board{display:flex;gap:8px;align-items:start;min-width:max-content;}
+.lane{width:185px;flex-shrink:0;background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden;box-shadow:var(--shadow);transition:border-color .15s;}
+.lane.sick{border-color:var(--danger);}
+.lane-hd{background:var(--navy);padding:7px 9px;display:flex;align-items:flex-start;justify-content:space-between;}
+.lane-hd.sick-hd{background:#6b1515;}
+.lane-hd-l{display:flex;align-items:center;gap:7px;min-width:0;flex:1;}
+.av{width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:700;flex-shrink:0;color:#fff;}
+.tech-nm{font-size:11px;font-weight:600;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.tech-sb{font-size:9px;color:rgba(255,255,255,.5);margin-top:1px;}
+.lane-hd-btns{display:flex;flex-direction:column;gap:3px;flex-shrink:0;margin-left:4px;}
+.tout-btn{font-size:9px;padding:2px 6px;border-radius:4px;border:1px solid rgba(255,255,255,.2);background:transparent;color:rgba(255,255,255,.7);cursor:pointer;font-family:'DM Sans',sans-serif;transition:all .12s;}
+.tout-btn:hover{background:var(--danger);border-color:var(--danger);color:#fff;}
+.undo-btn{font-size:9px;padding:2px 6px;border-radius:4px;border:1px solid rgba(255,160,160,.4);background:rgba(255,80,80,.12);color:#ffaaaa;cursor:pointer;font-family:'DM Sans',sans-serif;}
+.push-one-btn{font-size:9px;padding:2px 6px;border-radius:4px;border:1px solid rgba(245,166,35,.5);background:rgba(245,166,35,.15);color:var(--gold);cursor:pointer;font-family:'DM Sans',sans-serif;transition:all .12s;}
+.push-one-btn:hover{background:var(--gold);color:var(--navy);}
+.lane-body{padding:6px;min-height:50px;}
+.lane-body.drag-over{background:rgba(232,93,4,.05);}
+.job-card{border-radius:7px;border:1px solid var(--border);padding:6px 8px;margin-bottom:4px;border-left:3px solid #ccc;background:var(--surface);cursor:grab;user-select:none;transition:opacity .15s;}
+.job-card:active{cursor:grabbing;}
+.job-card.dragging{opacity:.2;}
+.job-card.drag-placeholder{border:1.5px dashed var(--border-mid);background:rgba(13,45,94,.03);height:58px;cursor:default;}
+.job-card.orphan{border-left-color:var(--danger)!important;background:var(--danger-bg)!important;animation:blink 1.4s ease-in-out infinite;}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.65}}
+.jc-water{border-left-color:var(--water);background:var(--water-bg);}
+.jc-fire{border-left-color:var(--fire);background:var(--fire-bg);}
+.jc-mold{border-left-color:var(--mold);background:var(--mold-bg);}
+.jc-cat3{border-left-color:var(--cat3);background:var(--cat3-bg);}
+.jc-boardup{border-left-color:var(--brd);background:var(--brd-bg);}
+.jc-contents{border-left-color:var(--con);background:var(--con-bg);}
+.c-top{display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:2px;}
+.c-jobname{font-size:10px;font-weight:700;font-family:'DM Mono',monospace;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0;}
+.c-hdl{font-size:10px;color:var(--faint);cursor:grab;flex-shrink:0;margin-left:3px;}
+.c-city{font-size:10px;color:var(--muted);margin-top:1px;}
+.c-meta{display:flex;align-items:center;gap:4px;margin-top:4px;flex-wrap:wrap;}
+.chip{font-size:9px;font-weight:500;padding:1px 5px;border-radius:4px;background:rgba(13,45,94,.08);color:var(--muted);}
+.t-chip{font-size:9px;font-family:'DM Mono',monospace;color:var(--muted);}
+.hrs-wrap{display:flex;align-items:center;gap:2px;font-size:9px;color:var(--muted);}
+.hrs-in{width:30px;font-size:9px;font-family:'DM Mono',monospace;border:1px solid var(--border-mid);border-radius:3px;padding:1px 3px;background:#fff;color:var(--text);text-align:center;}
+.team-badge{font-size:8px;padding:1px 5px;border-radius:8px;background:rgba(13,45,94,.12);color:var(--navy);font-weight:600;}
+.trip-row{display:flex;align-items:center;gap:4px;margin:2px 0 2px 8px;}
+.trip-line{width:1px;height:11px;background:var(--border-mid);margin-left:4px;}
+.tb{font-size:8px;font-weight:500;padding:1px 5px;border-radius:8px;font-family:'DM Mono',monospace;}
+.tb-ok{background:var(--ok-bg);color:var(--ok);}
+.tb-warn{background:var(--warn-bg);color:var(--warn);}
+.tb-far{background:var(--danger-bg);color:var(--danger);}
+.add-slot{border:1.5px dashed var(--border-mid);border-radius:6px;padding:6px;text-align:center;cursor:pointer;margin-top:4px;color:var(--faint);font-size:10px;transition:all .15s;}
+.add-slot:hover{border-color:var(--orange);color:var(--orange);}
+.ai-panel{background:var(--surface);border:2px solid var(--orange);border-radius:10px;overflow:hidden;display:none;}
+.ai-panel.open{display:block;}
+.ai-hd{padding:8px 12px;background:linear-gradient(135deg,#0d2d5e,#1a4a8a);display:flex;align-items:center;justify-content:space-between;}
+.ai-title{font-size:11px;font-weight:600;color:#fff;display:flex;align-items:center;gap:5px;}
+.ai-pulse{width:6px;height:6px;border-radius:50%;background:var(--orange);animation:pulse 1.2s infinite;}
+.ai-body{padding:8px;}
+.ai-thinking{font-size:11px;color:var(--muted);padding:8px;text-align:center;display:none;}
+.ai-thinking.show{display:block;}
+.ai-sugg{display:flex;align-items:center;gap:8px;padding:7px 10px;border:1px solid var(--border);border-radius:7px;margin-bottom:5px;background:var(--bg);}
+.ai-sugg:last-child{margin-bottom:0;}
+.ai-sugg-txt{flex:1;min-width:0;}
+.ai-main{font-size:11px;font-weight:500;color:var(--text);}
+.ai-why{font-size:10px;color:var(--muted);margin-top:1px;}
+.ai-btns{display:flex;gap:4px;flex-shrink:0;}
+.btn-cf{font-size:10px;padding:3px 9px;border-radius:5px;border:1px solid var(--navy);background:transparent;color:var(--navy);cursor:pointer;font-family:'DM Sans',sans-serif;}
+.btn-cf:hover{background:var(--navy);color:#fff;}
+.btn-sk{font-size:10px;padding:3px 9px;border-radius:5px;border:1px solid var(--border-mid);background:transparent;color:var(--muted);cursor:pointer;font-family:'DM Sans',sans-serif;}
+.pool-section{background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden;box-shadow:var(--shadow);}
+.sec-hd{padding:7px 12px;background:rgba(13,45,94,.04);border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;}
+.sec-title{font-size:10px;font-weight:600;color:var(--navy);text-transform:uppercase;letter-spacing:.5px;}
+.sec-sub{font-size:10px;color:var(--muted);}
+.pool{display:flex;flex-wrap:wrap;gap:7px;padding:8px;min-height:54px;}
+.pool.drag-over{background:rgba(232,93,4,.04);}
+.uc{border:1px solid var(--border);border-radius:7px;padding:7px 9px;min-width:130px;max-width:170px;border-left:3px solid #ccc;cursor:grab;user-select:none;background:var(--surface);}
+.uc:active{cursor:grabbing;}
+.uc.dragging{opacity:.2;}
+.uc-water{border-left-color:var(--water);}
+.uc-fire{border-left-color:var(--fire);}
+.uc-mold{border-left-color:var(--mold);}
+.uc-cat3{border-left-color:var(--cat3);}
+.uc-boardup{border-left-color:var(--brd);}
+.uc-contents{border-left-color:var(--con);}
+.uc-jobname{font-size:10px;font-weight:700;font-family:'DM Mono',monospace;color:var(--text);}
+.uc-city{font-size:10px;color:var(--muted);margin-top:2px;}
+.uc-st{font-size:9px;color:var(--faint);margin-top:1px;}
+.loader{position:fixed;inset:0;background:var(--navy);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;z-index:999;transition:opacity .4s;}
+.loader.hide{opacity:0;pointer-events:none;}
+.load-logo{font-size:20px;font-weight:700;color:#fff;}
+.load-logo span{color:var(--gold);}
+.load-msg{font-size:11px;color:rgba(255,255,255,.5);}
+.spinner{width:28px;height:28px;border:3px solid rgba(255,255,255,.15);border-top-color:var(--orange);border-radius:50%;animation:spin .8s linear infinite;}
+@keyframes spin{to{transform:rotate(360deg)}}
+.api-err{background:var(--danger-bg);border:1px solid var(--danger);border-radius:8px;padding:10px 14px;font-size:11px;color:var(--danger);display:none;margin-bottom:8px;}
+.api-err.show{display:block;}
+.toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:var(--navy);color:#fff;font-size:11px;font-weight:500;padding:7px 16px;border-radius:20px;opacity:0;transition:opacity .2s;pointer-events:none;z-index:500;white-space:nowrap;max-width:90vw;text-align:center;}
+.toast.show{opacity:1;}
+.prog-step{display:flex;align-items:center;gap:8px;font-size:11px;color:rgba(255,255,255,.5);}
+.ps-dot{font-size:13px;width:16px;text-align:center;transition:all .2s;}
+.ps-dot.done{color:#4cdb7a;}
+.ps-dot.active{color:var(--gold);animation:pulse 1s infinite;}
+.ps-dot.err{color:#ff6b6b;}
+.ps-txt{transition:color .2s;}
+.ps-txt.done{color:rgba(255,255,255,.8);}
+.ps-txt.active{color:#fff;font-weight:500;}
+.cache-banner{background:rgba(245,166,35,.12);border:1px solid rgba(245,166,35,.3);border-radius:7px;padding:6px 12px;font-size:10px;color:var(--gold);display:none;margin-bottom:8px;display:flex;align-items:center;gap:6px;}
+.cache-banner.show{display:flex;}
+.cache-age{font-weight:600;}
+/* API key setup modal */
+.modal-bg{position:fixed;inset:0;background:rgba(13,29,60,.85);display:flex;align-items:center;justify-content:center;z-index:2000;}
+.modal{background:#fff;border-radius:12px;padding:28px 32px;max-width:420px;width:90%;box-shadow:0 8px 40px rgba(0,0,0,.25);}
+.modal h2{font-size:15px;font-weight:600;color:var(--navy);margin-bottom:6px;}
+.modal p{font-size:12px;color:var(--muted);margin-bottom:16px;line-height:1.5;}
+.modal input{width:100%;padding:9px 12px;border:1px solid var(--border-mid);border-radius:7px;font-size:12px;font-family:'DM Mono',monospace;color:var(--text);margin-bottom:12px;}
+.modal input:focus{outline:none;border-color:var(--navy);}
+.modal-btns{display:flex;gap:8px;}
+.modal-save{flex:1;padding:9px;background:var(--navy);color:#fff;border:none;border-radius:7px;font-size:12px;font-weight:600;cursor:pointer;font-family:'DM Sans',sans-serif;}
+.modal-save:hover{background:#0a2550;}
+.modal-note{font-size:10px;color:var(--faint);margin-top:10px;line-height:1.4;}
+</style>
+</head>
+<body>
+
+<!-- API KEY SETUP MODAL -->
+<div class="modal-bg" id="key-modal" style="display:none;">
+  <div class="modal">
+    <h2>JG Dispatch Board — Setup</h2>
+    <p>Enter your Anthropic API key. It's saved only in this browser and never shared anywhere.</p>
+    <input type="password" id="key-input" placeholder="sk-ant-api03-..." />
+    <div class="modal-btns">
+      <button class="modal-save" onclick="saveKey()">Save & Load Board</button>
+    </div>
+    <div class="modal-note">Get your key at console.anthropic.com → API Keys. You only need to do this once per browser.</div>
+  </div>
+</div>
+
+<div class="loader" id="loader">
+  <div class="load-logo">JG <span>Restoration</span></div>
+  <div class="spinner"></div>
+  <div class="load-msg" id="load-msg">Starting up...</div>
+  <div style="margin-top:16px;display:flex;flex-direction:column;gap:7px;min-width:260px;">
+    <div class="prog-step" id="ps-cache"><span class="ps-dot" id="pd-cache">○</span><span class="ps-txt" id="pt-cache">Checking cached jobs...</span></div>
+    <div class="prog-step" id="ps-techs"><span class="ps-dot" id="pd-techs">○</span><span class="ps-txt" id="pt-techs">Loading technicians...</span></div>
+    <div class="prog-step" id="ps-albi"><span class="ps-dot" id="pd-albi">○</span><span class="ps-txt" id="pt-albi">Fetching live Albi jobs...</span></div>
+  </div>
+  <div style="margin-top:14px;font-size:10px;color:rgba(255,255,255,.3);max-width:280px;text-align:center;" id="load-hint"></div>
+</div>
+
+<div class="hdr">
+  <div class="hdr-l">
+    <div style="display:flex;align-items:center;gap:7px;">
+      <div class="logo-mk">JG</div>
+      <div class="logo-tx">Restoration <span>Dispatch</span></div>
+    </div>
+    <div class="pill"><div class="ldot"></div>Live · Mitigation</div>
+    <div style="font-size:10px;color:rgba(255,255,255,.45);font-family:'DM Mono',monospace;" id="date-badge"></div>
+  </div>
+  <div class="hdr-r">
+    <div class="clk" id="clk"></div>
+    <button class="btn btn-ghost" onclick="refreshAll()">↻ Refresh</button>
+    <button class="btn btn-ghost" style="font-size:10px;" onclick="clearKey()">⚙ API Key</button>
+    <button class="btn btn-gold" id="push-btn" onclick="pushAll()">Push All → T-Sheets</button>
+  </div>
+</div>
+
+<div class="stats-bar">
+  <div class="stat"><div class="stat-lbl">Jobs Today</div><div class="stat-val" id="s1">—</div></div>
+  <div class="stat"><div class="stat-lbl">Assigned</div><div class="stat-val" id="s2">—</div></div>
+  <div class="stat"><div class="stat-lbl">Unassigned</div><div class="stat-val" id="s3">—</div></div>
+  <div class="stat"><div class="stat-lbl">Techs Active</div><div class="stat-val" id="s4">—</div></div>
+  <div class="stat"><div class="stat-lbl">Techs Out</div><div class="stat-val red" id="s5">0</div></div>
+  <div class="stat"><div class="stat-lbl">Waste Flags</div><div class="stat-val red" id="s6">0</div></div>
+  <div class="stat"><div class="stat-lbl">Refreshed</div><div class="stat-val sm" id="s7">—</div></div>
+</div>
+
+<div class="tabs">
+  <button class="tab active" onclick="switchLoc('appleton',this)">Appleton</button>
+  <button class="tab" onclick="switchLoc('stevens',this)">Stevens Point</button>
+</div>
+
+<div class="legend">
+  <span style="font-size:9px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;">Type:</span>
+  <div class="leg"><div class="leg-sw" style="background:var(--water)"></div>WTR</div>
+  <div class="leg"><div class="leg-sw" style="background:var(--fire)"></div>FRE</div>
+  <div class="leg"><div class="leg-sw" style="background:var(--mold)"></div>MLD</div>
+  <div class="leg"><div class="leg-sw" style="background:var(--cat3)"></div>CT3</div>
+  <div class="leg"><div class="leg-sw" style="background:var(--brd)"></div>BRD</div>
+  <div class="leg"><div class="leg-sw" style="background:var(--con)"></div>CON</div>
+  <span style="font-size:9px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;margin-left:6px;">Trip:</span>
+  <div class="leg"><div class="leg-sw" style="background:var(--ok-bg);border:1px solid var(--ok)"></div>&lt;5mi</div>
+  <div class="leg"><div class="leg-sw" style="background:var(--warn-bg);border:1px solid var(--warn)"></div>5–15mi</div>
+  <div class="leg"><div class="leg-sw" style="background:var(--danger-bg);border:1px solid var(--danger)"></div>&gt;15mi⚠</div>
+  <span style="font-size:9px;color:var(--faint);margin-left:6px;">Same job → multiple lanes for teams · Push All or per-tech</span>
+</div>
+
+<div class="main">
+  <div class="cache-banner" id="cache-banner">
+    ⚡ Showing cached jobs from <span class="cache-age" id="cache-age"></span> ago — refreshing live data in background
+    <button onclick="forceRefresh()" style="margin-left:auto;font-size:10px;padding:2px 8px;border-radius:4px;border:1px solid rgba(245,166,35,.4);background:transparent;color:var(--gold);cursor:pointer;">Refresh now</button>
+  </div>
+  <div class="api-err" id="api-err"></div>
+  <div class="board-wrap"><div class="board" id="board"></div></div>
+
+  <div class="ai-panel" id="ai-panel">
+    <div class="ai-hd">
+      <div class="ai-title"><div class="ai-pulse"></div>AI Redistribution — confirm or skip each</div>
+      <button class="btn btn-ghost" style="font-size:10px;padding:2px 7px;" onclick="closeAI()">Dismiss</button>
+    </div>
+    <div class="ai-body">
+      <div class="ai-thinking" id="ai-thinking">Analyzing jobs, mileage, and availability...</div>
+      <div id="ai-suggs"></div>
+    </div>
+  </div>
+
+  <div class="pool-section">
+    <div class="sec-hd">
+      <span class="sec-title">Unassigned — drag to any tech lane · same job can go to multiple techs</span>
+      <span class="sec-sub" id="pool-lbl"></span>
+    </div>
+    <div class="pool" id="pool"></div>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+// ── CREDENTIALS (non-Anthropic ones stay here, Anthropic key in localStorage) ──
+const TS_TOKEN  = 'S.11__c8ce0dfe7c46b9fa45030539508f1cfdfcff50ea';
+const ALBI_KEY  = '135e4c0e-9d1b-46be-8f47-94951e93ffab';
+
+const ANTH_URL = 'https://api.anthropic.com/v1/messages';
+// ── API KEY MANAGEMENT ────────────────────
+function getAnthKey(){ return localStorage.getItem('jg_dispatch_api_key'); }
+function saveKey(){
+  const v = document.getElementById('key-input').value.trim();
+  if(!v.startsWith('sk-ant')){ alert('That doesn\'t look like an Anthropic key. It should start with sk-ant'); return; }
+  localStorage.setItem('jg_dispatch_api_key', v);
+  document.getElementById('key-modal').style.display='none';
+  boot();
+}
+function clearKey(){
+  localStorage.removeItem('jg_dispatch_api_key');
+  location.reload();
+}
+
+// ── LOCATION CONFIG ───────────────────────
+const LOCATIONS = {
+  appleton: {id:222,  lat:44.2832, lng:-88.4126, label:'Appleton'},
+  stevens:  {id:1477, lat:44.5236, lng:-89.5746, label:'Stevens Point'}
+};
+const START = 7;
+const MIT_TYPES = new Set(['Water Mitigation','Fire Mitigation','Mold','CAT3','Board Up','Contents']);
+const TYPE_KEY  = {
+  'Water Mitigation':'water','Fire Mitigation':'fire','Mold':'mold',
+  'CAT3':'cat3','Board Up':'boardup','Contents':'contents'
+};
+const HRS_DEF = {water:3,fire:4,mold:5,cat3:4,boardup:1.5,contents:3};
+const SCHED = new Set(['new','inspected','signed job','estimate shipped','in production','mitigation hold','waiting for adjuster']);
+const TS_BASE = 'https://rest.tsheets.com/api/v1';
+const TS_GROUPS = { appleton:'mitigation- appleton', stevens:'mitigation- point' };
+const AV_COLORS=['#e85d04','#1e6fb5','#3a7d2c','#9b3a8a','#b07818','#c94a14','#1a7a6a','#5a2d8a','#1a5b8a','#7a4a2d','#444444','#2d6b5a'];
+
+// ── STATE ─────────────────────────────────
+let jobs={}, techQ={appleton:{},stevens:{}};
+let unassigned={appleton:[],stevens:[]};
+let sick=new Set(), tsIdMap={};
+let loc='appleton';
+let dragJob=null,dragSrc=null,dragPool=false,ph=null;
+
+// ── BOOT ──────────────────────────────────
+window.addEventListener('load', ()=>{
+  tick(); setInterval(tick,30000);
+  document.getElementById('date-badge').textContent=
+    new Date().toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric',year:'numeric'});
+  if(!getAnthKey()){
+    document.getElementById('loader').style.display='none';
+    document.getElementById('key-modal').style.display='flex';
+  } else {
+    boot();
+  }
+});
+
+async function boot(){
+  document.getElementById('loader').style.display='flex';
+
+  // ── STEP 1: Check cache — load instantly if fresh enough ──
+  stepActive('cache');
+  const cached = loadCache();
+  if(cached){
+    jobs = cached.jobs;
+    unassigned = cached.unassigned;
+    stepDone('cache', '✓ Cached jobs loaded (' + Object.keys(jobs).length + ' jobs)');
+    showCacheBanner(cached.ts);
+    // Render skeleton board immediately with cached data
+    render();
+    hideLoader();
+    // Then load techs and refresh Albi in background silently
+    lookupTSIds().then(()=>render());
+    silentAlbiRefresh();
+    return;
+  }
+  stepDone('cache', '○ No cache — fetching fresh data');
+
+  // ── STEP 2: Load techs first (fast ~1-2s) so board renders early ──
+  stepActive('techs');
+  await lookupTSIds();
+  stepDone('techs', '✓ Technicians loaded');
+  render(); // Board shows with techs, jobs = empty (unassigned pool shows loading)
+  hideLoader(); // Show the board NOW, jobs will drop in
+
+  // ── STEP 3: Fetch Albi in background, board already visible ──
+  stepActive('albi');
+  showToast('Fetching live Albi jobs via Claude...');
+  await loadAlbiViaClaudeZapier();
+  stepDone('albi', '✓ Live Albi jobs loaded');
+  saveCache();
+  render();
+}
+
+// Silent background refresh (when serving from cache)
+async function silentAlbiRefresh(){
+  await loadAlbiViaClaudeZapier();
+  saveCache();
+  render();
+  hideCacheBanner();
+  showToast('✓ Live Albi data refreshed');
+}
+
+function forceRefresh(){
+  clearCache();
+  hideCacheBanner();
+  refreshAll();
+}
+
+// ── CACHE FUNCTIONS ──
+const CACHE_KEY = 'jg_dispatch_jobs_v1';
+const CACHE_TTL = 4 * 60 * 60 * 1000; // 4 hours
+
+function saveCache(){
+  try{
+    localStorage.setItem(CACHE_KEY, JSON.stringify({
+      jobs, unassigned, ts: Date.now()
+    }));
+  }catch(e){console.warn('Cache save failed:',e);}
+}
+
+function loadCache(){
+  try{
+    const raw = localStorage.getItem(CACHE_KEY);
+    if(!raw) return null;
+    const c = JSON.parse(raw);
+    if(Date.now() - c.ts > CACHE_TTL){ localStorage.removeItem(CACHE_KEY); return null; }
+    return c;
+  }catch(e){ return null; }
+}
+
+function clearCache(){
+  localStorage.removeItem(CACHE_KEY);
+}
+
+function showCacheBanner(ts){
+  const banner = document.getElementById('cache-banner');
+  const age = document.getElementById('cache-age');
+  const mins = Math.round((Date.now()-ts)/60000);
+  const label = mins < 60 ? mins+'m' : Math.round(mins/60)+'h '+((mins%60)||'')+'m';
+  age.textContent = label.trim();
+  banner.classList.add('show');
+}
+
+function hideCacheBanner(){
+  document.getElementById('cache-banner').classList.remove('show');
+}
+
+// ── PROGRESS STEP HELPERS ──
+function stepActive(id){
+  document.getElementById('pd-'+id).className='ps-dot active';
+  document.getElementById('pd-'+id).textContent='◉';
+  document.getElementById('pt-'+id).className='ps-txt active';
+}
+function stepDone(id, label){
+  document.getElementById('pd-'+id).className='ps-dot done';
+  document.getElementById('pd-'+id).textContent='✓';
+  document.getElementById('pt-'+id).className='ps-txt done';
+  if(label) document.getElementById('pt-'+id).textContent=label;
+}
+function stepErr(id, label){
+  document.getElementById('pd-'+id).className='ps-dot err';
+  document.getElementById('pd-'+id).textContent='✗';
+  if(label) document.getElementById('pt-'+id).textContent=label;
+}
+
+// ── ALBI VIA VERCEL PROXY (direct, fast) ─────────
+const PROXY_URL = 'https://jg-proxy.vercel.app/api/albi';
+
+async function loadAlbiViaClaudeZapier(){
+  jobs={}; unassigned={appleton:[],stevens:[]};
+  const sixMonthsAgo = new Date();
+  sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
+  const cutoffDate = sixMonthsAgo.toISOString().split('T')[0];
+  try {
+    setMsg('Loading Albi jobs...');
+    await Promise.all([
       pullProxyLocation('appleton', 222, cutoffDate),
       pullProxyLocation('stevens',  1477, cutoffDate)
     ]);
