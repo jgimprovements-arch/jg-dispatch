@@ -270,7 +270,7 @@ body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);min
     <div class="sec-hd">
       <span class="sec-title">Unassigned — drag to any tech lane · same job can go to multiple techs</span>
       <span class="sec-sub" id="pool-lbl"></span>
-      <input id="pool-search" type="text" placeholder="🔍 Search jobs..." oninput="renderPool()" style="margin-left:12px;padding:4px 10px;border-radius:6px;border:1.5px solid var(--border-mid);background:var(--surface);color:var(--text);font-size:12px;outline:none;width:180px;">
+      <input id="pool-search" type="text" placeholder="🔍 Search all locations..." oninput="renderPool()" style="margin-left:12px;padding:4px 10px;border-radius:6px;border:1.5px solid var(--border-mid);background:var(--surface);color:var(--text);font-size:12px;outline:none;width:200px;">
     </div>
     <div class="pool" id="pool"></div>
   </div>
@@ -331,7 +331,7 @@ body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);min
       <div style="background:rgba(255,255,255,0.07);border-radius:8px;padding:14px;">
         <div style="font-size:13px;font-weight:700;color:#f5a623;margin-bottom:6px;">🔄 Loading & Refreshing</div>
         <div style="font-size:12px;color:#cdd8e3;line-height:1.7;">
-          The board loads live jobs from <b>Albi</b> and techs from <b>T-Sheets</b> automatically on open. Jobs are cached for 4 hours for fast reloads. Click <b>↻ Refresh</b> in the top right to force a fresh pull from both systems. A banner at the top shows when cached data is being served.
+          The board loads live jobs from <b>Albi</b> and techs from <b>T-Sheets</b> automatically on open. Jobs are cached for 10 hours for fast reloads. Click <b>↻ Refresh</b> in the top right to force a fresh pull from both systems. A banner at the top shows when cached data is being served.
         </div>
       </div>
 
@@ -360,7 +360,7 @@ body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);min
       <div style="background:rgba(255,255,255,0.07);border-radius:8px;padding:14px;">
         <div style="font-size:13px;font-weight:700;color:#f5a623;margin-bottom:6px;">↑ Pushing to T-Sheets</div>
         <div style="font-size:12px;color:#cdd8e3;line-height:1.7;">
-          Once jobs are assigned to techs, click <b>↑ Push</b> on an individual tech lane to push that tech's schedule to T-Sheets, or click <b>Push All → T-Sheets</b> in the top right to push every tech at once. Events are created on the <b>JG Home Improvements & Emergency Service</b> schedule calendar starting at <b>7:30 AM</b>, with each job allocated time based on type. Jobs show the customer name and address in the event notes.
+          Once jobs are assigned to techs, click <b>↑ Push</b> on an individual tech lane to push that tech's schedule to T-Sheets, or click <b>Push All → T-Sheets</b> in the top right to push every tech at once. Events are created on the <b>JG Restoration</b> schedule calendar starting at <b>7:30 AM</b>, with each job allocated time based on type. Jobs show the customer name and address in the event notes.
         </div>
       </div>
 
@@ -519,7 +519,7 @@ function forceRefresh(){
 
 // ── CACHE FUNCTIONS ──
 const CACHE_KEY = 'jg_dispatch_jobs_v1';
-const CACHE_TTL = 4 * 60 * 60 * 1000; // 4 hours
+const CACHE_TTL = 10 * 60 * 60 * 1000; // 10 hours
 
 function saveBoardState(){
   try{
@@ -897,8 +897,20 @@ function renderBoard(){
 
 function renderPool(){
   const pool=document.getElementById('pool');
-  const list=unassigned[loc]||[];
-  document.getElementById('pool-lbl').textContent=LOCATIONS[loc].label+' · '+list.length+' unassigned';
+  const q=(document.getElementById('pool-search')?.value||'').toLowerCase().trim();
+  // When searching, include jobs from both locations
+  let list = unassigned[loc]||[];
+  let crossLocJobs = [];
+  if(q){
+    const otherLoc = loc==='appleton'?'stevens':'appleton';
+    const otherList = unassigned[otherLoc]||[];
+    crossLocJobs = otherList.filter(jid=>{
+      const j=jobs[jid];if(!j)return false;
+      return j.name.toLowerCase().includes(q)||j.city.toLowerCase().includes(q)||j.status.toLowerCase().includes(q)||j.type.toLowerCase().includes(q);
+    });
+  }
+  const otherLocLabel = loc==='appleton'?'Stevens Point':'Appleton';
+  document.getElementById('pool-lbl').textContent=LOCATIONS[loc].label+' · '+list.length+' unassigned'+(crossLocJobs.length?' · '+crossLocJobs.length+' from '+otherLocLabel:'');
   pool.innerHTML='';
   pool.addEventListener('dragover',e=>{e.preventDefault();pool.classList.add('drag-over');});
   pool.addEventListener('dragleave',()=>pool.classList.remove('drag-over'));
@@ -913,22 +925,35 @@ function renderPool(){
     showToast('Removed from '+dragSrc?.split(' ')[0]);render();
   });
   // Sort newest first (highest job number = newest)
-  const q=(document.getElementById('pool-search')?.value||'').toLowerCase();
-  const sorted=[...list].sort((a,b)=>{
+  const sortFn=(a,b)=>{
     const na=parseInt((jobs[a]?.name||'').match(/\d+/)?.[0]||0);
     const nb=parseInt((jobs[b]?.name||'').match(/\d+/)?.[0]||0);
     return nb-na;
-  });
+  };
+  const sorted=[...list].sort(sortFn);
   const filtered=q?sorted.filter(jid=>{
     const j=jobs[jid];if(!j)return false;
     return j.name.toLowerCase().includes(q)||j.city.toLowerCase().includes(q)||j.status.toLowerCase().includes(q)||j.type.toLowerCase().includes(q);
   }):sorted;
-  if(!filtered.length){pool.innerHTML='<div style="font-size:11px;color:var(--faint);padding:8px;">'+(q?'No jobs match search':'All jobs assigned')+'</div>';return;}
-  filtered.forEach(jid=>{
+  const sortedCross=[...crossLocJobs].sort(sortFn);
+  const allFiltered=[...filtered,...sortedCross];
+  if(!allFiltered.length){pool.innerHTML='<div style="font-size:11px;color:var(--faint);padding:8px;">'+(q?'No jobs match search':'All jobs assigned')+'</div>';return;}
+  // Track if we need a divider between local and cross-loc results
+  let crossDividerAdded=false;
+  allFiltered.forEach((jid,idx)=>{
+    if(idx===filtered.length&&sortedCross.length>0&&!crossDividerAdded){
+      crossDividerAdded=true;
+      const div=document.createElement('div');
+      div.style.cssText='font-size:10px;font-weight:700;color:var(--gold);text-transform:uppercase;letter-spacing:.5px;padding:6px 4px 2px;width:100%;';
+      div.textContent='↓ '+otherLocLabel+' Jobs';
+      pool.appendChild(div);
+    }
     const j=jobs[jid];if(!j)return;
     const c=document.createElement('div');
     c.className='uc uc-'+j.type;c.draggable=true;c.dataset.jobId=jid;c.dataset.pool='1';
-    c.innerHTML=`<div class="uc-jobname">${j.name}</div><div class="uc-city">${j.city}</div><div class="uc-st">${j.status}</div>`;
+    const isCross = idx >= filtered.length;
+    const locBadge = isCross ? `<div style="font-size:9px;font-weight:700;color:var(--gold);text-transform:uppercase;">${j.location||otherLocLabel}</div>` : '';
+    c.innerHTML=`<div class="uc-jobname">${j.name}</div><div class="uc-city">${j.city}</div>${locBadge}<div class="uc-st">${j.status}</div>`;
     c.addEventListener('dragstart',onDS);c.addEventListener('dragend',onDE);
     pool.appendChild(c);
   });
