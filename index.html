@@ -74,7 +74,7 @@ body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);min
 .lane-body.timeline-mode{padding:0;position:relative;background:var(--surface);overflow:hidden;}
 .tl-hour-grid{position:absolute;left:0;right:0;pointer-events:none;}
 .tl-hour-line{position:absolute;left:0;right:0;border-top:1px dashed var(--border-mid);font-size:8px;color:var(--muted);padding-left:2px;}
-.tl-card{position:absolute;left:4px;right:4px;border-radius:6px;border-left:3px solid #ccc;cursor:ns-resize;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.2);user-select:none;}
+.tl-card{position:absolute;left:4px;right:4px;border-radius:6px;border-left:3px solid #ccc;cursor:grab;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.2);user-select:none;}
 .tl-card-inner{padding:4px 6px;}
 .tl-card-name{font-size:10px;font-weight:700;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .tl-card-time{font-size:9px;color:rgba(255,255,255,.7);}
@@ -881,7 +881,6 @@ async function refreshAll(){
   stepActive('techs');
   await lookupTSIds();
   stepDone('techs','✓ Technicians reloaded');
-  render(); hideLoader();
   stepActive('albi');
   showToast('Fetching fresh Albi data...');
   // Save current board assignments
@@ -905,7 +904,7 @@ async function refreshAll(){
       }
     }
   }
-  render();
+  render(); hideLoader();
   showToast('✓ Board refreshed — assignments preserved');
 }
 
@@ -1394,8 +1393,8 @@ function updateStats(){
   document.getElementById('s6').textContent=waste;
 }
 function switchLoc(l,el){loc=l;document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));el.classList.add('active');document.getElementById('oncall-panel').style.display='none';document.getElementById('dispatch-view').style.display='';render();}
-function showLoader(m){document.getElementById('loader').style.display='flex';setMsg(m);}
-function hideLoader(){const l=document.getElementById('loader');l.classList.add('hide');setTimeout(()=>l.style.display='none',450);}
+function showLoader(m){const l=document.getElementById('loader');l.style.pointerEvents='auto';l.style.display='flex';setMsg(m);}
+function hideLoader(){const l=document.getElementById('loader');l.style.pointerEvents='none';l.classList.add('hide');setTimeout(()=>{l.style.display='none';l.classList.remove('hide');},450);}
 function setMsg(m){
   const el=document.getElementById('load-msg');
   if(el)el.textContent=m;
@@ -1956,7 +1955,7 @@ function yToHour(y){ return TL_START_HOUR + y / PX_PER_HOUR; }
 function renderTimelineLane(body, nm, tech){
   const totalH = TL_END_HOUR - TL_START_HOUR;
   const totalPx = totalH * PX_PER_HOUR;
-  body.style.cssText = `position:relative;height:${totalPx}px;background:var(--card);overflow:hidden;`;
+  body.style.cssText = `position:relative;height:${totalPx}px;background:var(--card);overflow:visible;`;
 
   // Hour grid lines
   for(let h = TL_START_HOUR; h <= TL_END_HOUR; h++){
@@ -2003,9 +2002,10 @@ function renderTimelineLane(body, nm, tech){
 
     const card = document.createElement('div');
     card.className = 'tl-card';
+    card.draggable = false;
     card.dataset.jobId = jid;
     card.dataset.tech = nm;
-    card.style.cssText = `top:${yTop}px;height:${cardH}px;background:${color};border-left-color:${color};left:20px;right:4px;z-index:${5+idx};`;
+    card.style.cssText = `top:${yTop}px;height:${cardH}px;background:${color};border-left-color:${color};left:20px;right:4px;z-index:${5+idx};cursor:grab;`;
 
     card.innerHTML = `
       <div class="tl-card-inner" style="height:calc(100% - 8px);overflow:hidden;">
@@ -2014,31 +2014,38 @@ function renderTimelineLane(body, nm, tech){
       </div>
       <div class="tl-card-resize"></div>`;
 
-    // Drag to move (top area)
-    let dragState = null;
+    // Drag to move
     card.addEventListener('mousedown', (e) => {
       if(e.target.classList.contains('tl-card-resize')) return;
       e.preventDefault();
+      e.stopPropagation();
       const startY = e.clientY;
       const origStart = startHr;
       const origEnd = endHr;
-      dragState = 'move';
+      const duration = origEnd - origStart;
+      card.style.cursor = 'grabbing';
+      card.style.zIndex = 999;
+      card.style.opacity = '0.85';
       const onMove = (em) => {
         const dy = em.clientY - startY;
         const dh = dy / PX_PER_HOUR;
         const newStart = Math.round((origStart + dh) * 4) / 4;
-        const newEnd = newStart + (origEnd - origStart);
+        const newEnd = newStart + duration;
         if(newStart >= TL_START_HOUR && newEnd <= TL_END_HOUR){
+          startHr = newStart; endHr = newEnd;
           jobOverrides[nm+'|'+jid] = {start:decToTime(newStart), end:decToTime(newEnd)};
           card.style.top = hourToY(newStart)+'px';
-          card.style.height = Math.max(hourToY(newEnd)-hourToY(newStart),24)+'px';
-          card.querySelector('.tl-card-inner > div:last-child') && 
-            (card.querySelector('.tl-card-time') && (card.querySelector('.tl-card-time').textContent = decToTime(newStart)+' – '+decToTime(newEnd)));
+          card.style.height = Math.max(hourToY(newEnd)-hourToY(newStart), 24)+'px';
+          const timeEl = card.querySelector('.tl-card-time');
+          if(timeEl) timeEl.textContent = decToTime(newStart)+' – '+decToTime(newEnd);
         }
       };
       const onUp = () => {
+        card.style.cursor = 'grab';
+        card.style.zIndex = 5+idx;
+        card.style.opacity = '1';
         saveBoardState();
-        render();
+        requestAnimationFrame(() => render());
         document.removeEventListener('mousemove', onMove);
         document.removeEventListener('mouseup', onUp);
       };
@@ -2055,16 +2062,18 @@ function renderTimelineLane(body, nm, tech){
       const onMove = (em) => {
         const dy = em.clientY - startY;
         const dh = dy / PX_PER_HOUR;
-        const newEnd = Math.round((origEnd + dh) * 4) / 4; // snap to 15 min
+        const newEnd = Math.round((origEnd + dh) * 4) / 4;
         if(newEnd > startHr + 0.25 && newEnd <= TL_END_HOUR){
+          endHr = newEnd;
           jobOverrides[nm+'|'+jid] = {start:decToTime(startHr), end:decToTime(newEnd)};
-          card.style.height = Math.max(hourToY(newEnd)-hourToY(startHr),24)+'px';
-          card.querySelector('.tl-card-time') && (card.querySelector('.tl-card-time').textContent = decToTime(startHr)+' – '+decToTime(newEnd));
+          card.style.height = Math.max(hourToY(newEnd)-hourToY(startHr), 24)+'px';
+          const timeEl = card.querySelector('.tl-card-time');
+          if(timeEl) timeEl.textContent = decToTime(startHr)+' – '+decToTime(newEnd);
         }
       };
       const onUp = () => {
         saveBoardState();
-        render();
+        requestAnimationFrame(() => render());
         document.removeEventListener('mousemove', onMove);
         document.removeEventListener('mouseup', onUp);
       };
