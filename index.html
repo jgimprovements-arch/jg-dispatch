@@ -1056,7 +1056,8 @@ function renderBoard(){
     const isSick=sick.has(nm);const fa=freeAt(tech.jobs);
     const lane=document.createElement('div');lane.className='lane'+(isSick?' sick':'');
     const hd=document.createElement('div');hd.className='lane-hd'+(isSick?' sick-hd':'');
-    hd.innerHTML=`<div class="lane-hd-l">
+    hd.innerHTML = `
+    <div class="lane-hd-l">
       <div class="av" style="background:${isSick?'#c02020':tech.color}">${tech.initials}</div>
       <div style="min-width:0;">
         <div class="tech-nm">${nm}</div>
@@ -1064,20 +1065,32 @@ function renderBoard(){
       </div>
     </div>
     <div class="lane-hd-btns" style="flex-direction:column;align-items:flex-end;gap:3px;">
-      <div style="display:flex;gap:4px;">
-        ${isSick
-          ?`<button class="undo-btn" onclick="undoSick('${nm}')">↩ Undo</button>`
-          :`<button class="tout-btn" onclick="promptOut('${nm}')">Out</button>
-            <button class="push-one-btn" onclick="pushOne('${nm}')">↑ Push</button>
-            <button class="btn btn-ghost" style="font-size:9px;padding:2px 6px;" onclick="toggleTimeline('${nm}')" id="tl-btn-${nm.replace(/ /g,'_')}">${timelineModes.has(nm)?'📋 List':'📅 Timeline'}</button>`}
-      </div>
+      <div style="display:flex;gap:4px;" id="hd-btns-${tech.initials}"></div>
       <div style="display:flex;align-items:center;gap:4px;">
         <span style="font-size:9px;color:var(--muted);">Start:</span>
-        <input type="time" value="${decToTime(techStartTimes['${nm}']||START)}" 
+        <input type="time" value="${decToTime(techStartTimes[nm]||START)}"
           style="font-size:9px;background:var(--surface);border:1px solid var(--border-mid);border-radius:4px;color:var(--text);padding:1px 3px;width:68px;"
-          onchange="setTechStart('${nm}',this.value)">
+          id="start-input-${tech.initials}">
       </div>
     </div>`;
+  // Build buttons via DOM to avoid nested template literal issues
+  const btnDiv = hd.querySelector('#hd-btns-'+tech.initials);
+  if(isSick){
+    const ub=document.createElement('button');ub.className='undo-btn';ub.textContent='↩ Undo';
+    ub.onclick=()=>undoSick(nm);btnDiv.appendChild(ub);
+  } else {
+    const ob=document.createElement('button');ob.className='tout-btn';ob.textContent='Out';
+    ob.onclick=()=>promptOut(nm);btnDiv.appendChild(ob);
+    const pb=document.createElement('button');pb.className='push-one-btn';pb.textContent='↑ Push';
+    pb.onclick=()=>pushOne(nm);btnDiv.appendChild(pb);
+    const tb=document.createElement('button');tb.className='btn btn-ghost';
+    tb.style.cssText='font-size:9px;padding:2px 6px;';
+    tb.textContent=timelineModes.has(nm)?'📋 List':'📅 Timeline';
+    tb.onclick=()=>toggleTimeline(nm);btnDiv.appendChild(tb);
+  }
+  // Wire up start time input
+  const startInput = hd.querySelector('#start-input-'+tech.initials);
+  if(startInput) startInput.addEventListener('change', (e)=>setTechStart(nm, e.target.value))
     const body=document.createElement('div');body.className='lane-body';body.dataset.tech=nm;
     let runHr=START,pLat=depot.lat,pLng=depot.lng;
     tech.jobs.forEach((jid,i)=>{
@@ -1954,120 +1967,116 @@ function hourToY(hour){ return (hour - TL_START_HOUR) * PX_PER_HOUR; }
 function yToHour(y){ return TL_START_HOUR + y / PX_PER_HOUR; }
 
 function renderTimelineLane(body, nm, tech){
-  const totalH = TL_END_HOUR - TL_START_HOUR;
-  const totalPx = totalH * PX_PER_HOUR;
-  body.style.cssText = `position:relative;height:${totalPx}px;background:var(--card);overflow:hidden;`;
+  const PX = 60; // px per hour
+  const H_START = 6, H_END = 20;
+  const totalPx = (H_END - H_START) * PX;
 
-  // Hour grid lines
-  for(let h = TL_START_HOUR; h <= TL_END_HOUR; h++){
-    const y = hourToY(h);
+  body.style.cssText = `position:relative;height:${totalPx}px;background:var(--card);overflow:hidden;min-height:${totalPx}px;`;
+
+  // Hour grid
+  for(let h = H_START; h <= H_END; h++){
+    const y = (h - H_START) * PX;
     const line = document.createElement('div');
-    line.style.cssText = `position:absolute;left:0;right:0;top:${y}px;border-top:1px ${h%2===0?'solid':'dashed'} var(--border-mid);`;
-    const label = document.createElement('span');
-    const ampm = h >= 12 ? 'PM' : 'AM';
-    const hr = h > 12 ? h-12 : h === 0 ? 12 : h;
-    label.style.cssText = 'font-size:8px;color:var(--muted);position:absolute;left:2px;top:1px;';
-    label.textContent = hr + (h%1===0&&h%2===0?ampm:'');
-    line.appendChild(label);
+    line.style.cssText = `position:absolute;left:0;right:0;top:${y}px;border-top:1px ${h%2===0?'solid':'dashed'} rgba(255,255,255,0.1);z-index:1;pointer-events:none;`;
+    if(h%2===0){
+      const lbl = document.createElement('span');
+      const hr = h>12?h-12:(h===0?12:h);
+      const ap = h>=12?'pm':'am';
+      lbl.textContent = hr+ap;
+      lbl.style.cssText = 'font-size:8px;color:var(--muted);position:absolute;left:2px;top:1px;';
+      line.appendChild(lbl);
+    }
     body.appendChild(line);
   }
 
-  // Now time indicator
+  // Now line
   const nowH = new Date().getHours() + new Date().getMinutes()/60;
-  if(nowH >= TL_START_HOUR && nowH <= TL_END_HOUR){
-    const nowLine = document.createElement('div');
-    nowLine.style.cssText = `position:absolute;left:0;right:0;top:${hourToY(nowH)}px;border-top:2px solid var(--danger);z-index:10;pointer-events:none;`;
-    body.appendChild(nowLine);
+  if(nowH >= H_START && nowH <= H_END){
+    const nl = document.createElement('div');
+    nl.style.cssText = `position:absolute;left:0;right:0;top:${(nowH-H_START)*PX}px;border-top:2px solid #ef4444;z-index:5;pointer-events:none;`;
+    body.appendChild(nl);
   }
 
-  // Job cards
-  let runHr = getTechStart(nm);
-  tech.jobs.forEach((jid, idx) => {
-    const j = jobs[jid]; if(!j) return;
-    const ov = jobOverrides[nm+'|'+jid];
-    let startHr, endHr;
-    if(ov){
-      startHr = timeToDec(ov.start);
-      endHr = timeToDec(ov.end);
-      runHr = endHr + 0.25;
-    } else {
-      startHr = runHr;
-      endHr = runHr + (j.hrs||2);
-      runHr = endHr + 0.25;
-    }
+  const TYPE_CLR = {
+    'Water Mitigation':'#2563eb','Fire Mitigation':'#dc2626','Mold':'#16a34a',
+    'CAT3':'#d97706','Board Up':'#6b7280','Contents':'#7c3aed',
+    'Reconstruction':'#0891b2','General Clean':'#92400e','Roofing/Exterior':'#065f46'
+  };
 
-    const yTop = hourToY(startHr);
-    const yBot = hourToY(endHr);
-    const cardH = Math.max(yBot - yTop, 24);
-    const color = TYPE_COLORS[j.type] || '#6b7280';
+  let runHr = getTechStart(nm);
+
+  tech.jobs.forEach((jid) => {
+    const j = jobs[jid];
+    if(!j) return;
+    const ov = jobOverrides[nm+'|'+jid];
+    let sHr, eHr;
+    if(ov){
+      sHr = timeToDec(ov.start);
+      eHr = timeToDec(ov.end);
+      runHr = eHr + 0.25;
+    } else {
+      sHr = runHr;
+      eHr = runHr + (j.hrs||2);
+      runHr = eHr + 0.25;
+    }
+    sHr = Math.max(sHr, H_START);
+    eHr = Math.min(eHr, H_END);
+
+    const yTop = (sHr - H_START) * PX;
+    const yBot = (eHr - H_START) * PX;
+    const cardH = Math.max(yBot - yTop, 20);
+    const clr = TYPE_CLR[j.type] || '#6b7280';
 
     const card = document.createElement('div');
-    card.className = 'tl-card';
-    card.dataset.jobId = jid;
-    card.dataset.tech = nm;
-    card.style.cssText = `top:${yTop}px;height:${cardH}px;background:${color};border-left-color:${color};left:20px;right:4px;z-index:${5+idx};`;
+    card.style.cssText = `position:absolute;left:20px;right:4px;top:${yTop}px;height:${cardH}px;background:${clr};border-radius:5px;border-left:3px solid rgba(255,255,255,0.4);z-index:${10};overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.3);`;
 
-    card.innerHTML = `
-      <div class="tl-card-inner" style="height:calc(100% - 8px);overflow:hidden;">
-        <div class="tl-card-name" style="color:#fff;">${j.name}</div>
-        ${cardH > 30 ? `<div class="tl-card-time" style="color:rgba(255,255,255,.8);">${decToTime(startHr)} – ${decToTime(endHr)}</div>` : ''}
-      </div>
-      <div class="tl-card-resize"></div>`;
+    const inner = document.createElement('div');
+    inner.style.cssText = 'padding:3px 5px;height:calc(100% - 8px);overflow:hidden;';
+    inner.innerHTML = `<div style="font-size:10px;font-weight:700;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${j.name}</div>${cardH>28?`<div style="font-size:9px;color:rgba(255,255,255,.75);">${decToTime(sHr)} – ${decToTime(eHr)}</div>`:''}`;
+    card.appendChild(inner);
 
-    // Drag to move (top area)
-    let dragState = null;
+    // Resize handle
+    const handle = document.createElement('div');
+    handle.style.cssText = 'position:absolute;bottom:0;left:0;right:0;height:8px;background:rgba(255,255,255,0.2);cursor:s-resize;display:flex;align-items:center;justify-content:center;';
+    handle.innerHTML = '<span style="font-size:8px;color:rgba(255,255,255,0.6);">▬</span>';
+    card.appendChild(handle);
+
+    // Drag to MOVE card
     card.addEventListener('mousedown', (e) => {
-      if(e.target.classList.contains('tl-card-resize')) return;
+      if(e.target === handle || handle.contains(e.target)) return;
       e.preventDefault();
       const startY = e.clientY;
-      const origStart = startHr;
-      const origEnd = endHr;
-      dragState = 'move';
+      const origS = sHr, origE = eHr;
+      const dur = origE - origS;
       const onMove = (em) => {
-        const dy = em.clientY - startY;
-        const dh = dy / PX_PER_HOUR;
-        const newStart = Math.round((origStart + dh) * 4) / 4;
-        const newEnd = newStart + (origEnd - origStart);
-        if(newStart >= TL_START_HOUR && newEnd <= TL_END_HOUR){
-          jobOverrides[nm+'|'+jid] = {start:decToTime(newStart), end:decToTime(newEnd)};
-          card.style.top = hourToY(newStart)+'px';
-          card.style.height = Math.max(hourToY(newEnd)-hourToY(newStart),24)+'px';
-          card.querySelector('.tl-card-inner > div:last-child') && 
-            (card.querySelector('.tl-card-time') && (card.querySelector('.tl-card-time').textContent = decToTime(newStart)+' – '+decToTime(newEnd)));
-        }
+        const dh = (em.clientY - startY) / PX;
+        let newS = Math.round((origS + dh) * 4) / 4;
+        newS = Math.max(H_START, Math.min(newS, H_END - dur));
+        const newE = newS + dur;
+        jobOverrides[nm+'|'+jid] = {start:decToTime(newS), end:decToTime(newE)};
+        card.style.top = (newS - H_START)*PX + 'px';
+        inner.innerHTML = `<div style="font-size:10px;font-weight:700;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${j.name}</div><div style="font-size:9px;color:rgba(255,255,255,.75);">${decToTime(newS)} – ${decToTime(newE)}</div>`;
       };
-      const onUp = () => {
-        saveBoardState();
-        render();
-        document.removeEventListener('mousemove', onMove);
-        document.removeEventListener('mouseup', onUp);
-      };
+      const onUp = () => { saveBoardState(); render(); document.removeEventListener('mousemove',onMove); document.removeEventListener('mouseup',onUp); };
       document.addEventListener('mousemove', onMove);
       document.addEventListener('mouseup', onUp);
     });
 
-    // Resize (bottom handle)
-    card.querySelector('.tl-card-resize').addEventListener('mousedown', (e) => {
+    // Drag to RESIZE (bottom handle)
+    handle.addEventListener('mousedown', (e) => {
       e.preventDefault();
       e.stopPropagation();
       const startY = e.clientY;
-      const origEnd = endHr;
+      const origE = eHr;
       const onMove = (em) => {
-        const dy = em.clientY - startY;
-        const dh = dy / PX_PER_HOUR;
-        const newEnd = Math.round((origEnd + dh) * 4) / 4; // snap to 15 min
-        if(newEnd > startHr + 0.25 && newEnd <= TL_END_HOUR){
-          jobOverrides[nm+'|'+jid] = {start:decToTime(startHr), end:decToTime(newEnd)};
-          card.style.height = Math.max(hourToY(newEnd)-hourToY(startHr),24)+'px';
-          card.querySelector('.tl-card-time') && (card.querySelector('.tl-card-time').textContent = decToTime(startHr)+' – '+decToTime(newEnd));
-        }
+        const dh = (em.clientY - startY) / PX;
+        let newE = Math.round((origE + dh) * 4) / 4;
+        newE = Math.max(sHr + 0.25, Math.min(newE, H_END));
+        jobOverrides[nm+'|'+jid] = {start:decToTime(sHr), end:decToTime(newE)};
+        card.style.height = Math.max((newE - sHr)*PX, 20)+'px';
+        inner.innerHTML = `<div style="font-size:10px;font-weight:700;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${j.name}</div><div style="font-size:9px;color:rgba(255,255,255,.75);">${decToTime(sHr)} – ${decToTime(newE)}</div>`;
       };
-      const onUp = () => {
-        saveBoardState();
-        render();
-        document.removeEventListener('mousemove', onMove);
-        document.removeEventListener('mouseup', onUp);
-      };
+      const onUp = () => { saveBoardState(); render(); document.removeEventListener('mousemove',onMove); document.removeEventListener('mouseup',onUp); };
       document.addEventListener('mousemove', onMove);
       document.addEventListener('mouseup', onUp);
     });
@@ -2076,6 +2085,6 @@ function renderTimelineLane(body, nm, tech){
   });
 }
 
-</script>
+/script>
 </body>
 </html>
