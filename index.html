@@ -228,6 +228,7 @@ body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);min
 <div class="tabs">
   <button class="tab active" onclick="switchLoc('appleton',this)">Appleton</button>
   <button class="tab" onclick="switchLoc('stevens',this)">Stevens Point</button>
+  <button class="tab" onclick="switchToOnCall(this)" id="oncall-tab">📅 On-Call</button>
 </div>
 
 <div class="legend">
@@ -251,7 +252,7 @@ body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);min
     <button onclick="forceRefresh()" style="margin-left:auto;font-size:10px;padding:2px 8px;border-radius:4px;border:1px solid rgba(245,166,35,.4);background:transparent;color:var(--gold);cursor:pointer;">Refresh now</button>
   </div>
   <div class="api-err" id="api-err"></div>
-  <div class="board-wrap"><div class="board" id="board"></div></div>
+  <div id="dispatch-view"><div class="board-wrap"><div class="board" id="board"></div></div>
 
   <div class="ai-panel" id="ai-panel">
     <div class="ai-hd">
@@ -268,10 +269,32 @@ body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);min
     <div class="sec-hd">
       <span class="sec-title">Unassigned — drag to any tech lane · same job can go to multiple techs</span>
       <span class="sec-sub" id="pool-lbl"></span>
+      <input id="pool-search" type="text" placeholder="🔍 Search jobs..." oninput="renderPool()" style="margin-left:12px;padding:4px 10px;border-radius:6px;border:1.5px solid var(--border-mid);background:var(--surface);color:var(--text);font-size:12px;outline:none;width:180px;">
     </div>
     <div class="pool" id="pool"></div>
   </div>
 </div>
+
+<div id="oncall-panel" style="display:none;padding:16px;">
+  <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap;">
+    <span style="font-size:13px;font-weight:700;color:var(--text);">On-Call Rotation</span>
+    <button onclick="prevOCWeek()" style="padding:4px 10px;border-radius:6px;border:1.5px solid var(--border-mid);background:var(--surface);color:var(--text);cursor:pointer;font-size:12px;">◀</button>
+    <span id="oc-week-label" style="font-size:12px;font-weight:600;color:var(--text);min-width:180px;text-align:center;"></span>
+    <button onclick="nextOCWeek()" style="padding:4px 10px;border-radius:6px;border:1.5px solid var(--border-mid);background:var(--surface);color:var(--text);cursor:pointer;font-size:12px;">▶</button>
+    <button onclick="saveOCData()" style="padding:4px 14px;border-radius:6px;border:none;background:var(--accent);color:#fff;cursor:pointer;font-size:12px;font-weight:600;">💾 Save</button>
+  </div>
+  <!-- Appleton -->
+  <div style="margin-bottom:20px;">
+    <div style="font-size:12px;font-weight:700;color:var(--accent);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px;padding:4px 8px;background:var(--surface);border-radius:6px;display:inline-block;">📍 Appleton</div>
+    <div id="oc-grid-appleton" style="display:grid;grid-template-columns:130px repeat(7,1fr);gap:4px;"></div>
+  </div>
+  <!-- Stevens Point -->
+  <div>
+    <div style="font-size:12px;font-weight:700;color:var(--gold);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px;padding:4px 8px;background:var(--surface);border-radius:6px;display:inline-block;">📍 Stevens Point</div>
+    <div id="oc-grid-stevens" style="display:grid;grid-template-columns:130px repeat(7,1fr);gap:4px;"></div>
+  </div>
+</div>
+
 <div class="toast" id="toast"></div>
 
 <script>
@@ -299,7 +322,7 @@ const LOCATIONS = {
   appleton: {id:222,  lat:44.2832, lng:-88.4126, label:'Appleton'},
   stevens:  {id:1477, lat:44.5236, lng:-89.5746, label:'Stevens Point'}
 };
-const START = 7;
+const START = 7.5;
 const MIT_TYPES = new Set(['Water Mitigation','Fire Mitigation','Mold','CAT3','Board Up','Contents']);
 const TYPE_KEY  = {
   'Water Mitigation':'water','Fire Mitigation':'fire','Mold':'mold',
@@ -741,8 +764,19 @@ function renderPool(){
     }
     showToast('Removed from '+dragSrc?.split(' ')[0]);render();
   });
-  if(!list.length){pool.innerHTML='<div style="font-size:11px;color:var(--faint);padding:8px;">All jobs assigned</div>';return;}
-  list.forEach(jid=>{
+  // Sort newest first (highest job number = newest)
+  const q=(document.getElementById('pool-search')?.value||'').toLowerCase();
+  const sorted=[...list].sort((a,b)=>{
+    const na=parseInt((jobs[a]?.name||'').match(/\d+/)?.[0]||0);
+    const nb=parseInt((jobs[b]?.name||'').match(/\d+/)?.[0]||0);
+    return nb-na;
+  });
+  const filtered=q?sorted.filter(jid=>{
+    const j=jobs[jid];if(!j)return false;
+    return j.name.toLowerCase().includes(q)||j.city.toLowerCase().includes(q)||j.status.toLowerCase().includes(q)||j.type.toLowerCase().includes(q);
+  }):sorted;
+  if(!filtered.length){pool.innerHTML='<div style="font-size:11px;color:var(--faint);padding:8px;">'+(q?'No jobs match search':'All jobs assigned')+'</div>';return;}
+  filtered.forEach(jid=>{
     const j=jobs[jid];if(!j)return;
     const c=document.createElement('div');
     c.className='uc uc-'+j.type;c.draggable=true;c.dataset.jobId=jid;c.dataset.pool='1';
@@ -808,7 +842,7 @@ function updateStats(){
   document.getElementById('s5').textContent=sick.size;
   document.getElementById('s6').textContent=waste;
 }
-function switchLoc(l,el){loc=l;document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));el.classList.add('active');render();}
+function switchLoc(l,el){loc=l;document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));el.classList.add('active');document.getElementById('oncall-panel').style.display='none';document.getElementById('dispatch-view').style.display='';render();}
 function showLoader(m){document.getElementById('loader').style.display='flex';setMsg(m);}
 function hideLoader(){const l=document.getElementById('loader');l.classList.add('hide');setTimeout(()=>l.style.display='none',450);}
 function setMsg(m){
@@ -821,6 +855,115 @@ function setMsg(m){
 function showApiError(m){const e=document.getElementById('api-err');e.textContent='⚠ '+m;e.classList.add('show');}
 function showToast(m){const t=document.getElementById('toast');t.textContent=m;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),3000);}
 function tick(){const n=new Date();document.getElementById('clk').textContent=n.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'});}
+
+// ── ON-CALL ROTATION ─────────────────────
+let ocWeekOffset = 0;
+let ocData = JSON.parse(localStorage.getItem('jg_oncall') || '{}');
+const OC_ROLES = ['On-Call Tech','Backup Tech','On-Call PM','Backup PM'];
+const DAYS = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+
+function getOCWeekStart(offset=0){
+  const d = new Date();
+  d.setDate(d.getDate() - d.getDay() + offset*7);
+  d.setHours(0,0,0,0);
+  return d;
+}
+
+function ocWeekKey(offset=0){
+  const d = getOCWeekStart(offset);
+  return d.toISOString().split('T')[0];
+}
+
+function switchToOnCall(el){
+  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+  el.classList.add('active');
+  document.getElementById('dispatch-view').style.display='none';
+  document.getElementById('oncall-panel').style.display='block';
+  renderOCGrid();
+}
+
+function switchLoc_orig(l,el){
+  document.getElementById('oncall-panel').style.display='none';
+  document.getElementById('dispatch-view').style.display='';
+}
+
+function prevOCWeek(){ ocWeekOffset--; renderOCGrid(); }
+function nextOCWeek(){ ocWeekOffset++; renderOCGrid(); }
+
+function saveOCData(){
+  localStorage.setItem('jg_oncall', JSON.stringify(ocData));
+  showToast('On-call schedule saved');
+}
+
+function renderOCGrid(){
+  const wk = getOCWeekStart(ocWeekOffset);
+  const wkKey = ocWeekKey(ocWeekOffset);
+  const end = new Date(wk); end.setDate(end.getDate()+6);
+  document.getElementById('oc-week-label').textContent =
+    wk.toLocaleDateString('en-US',{month:'short',day:'numeric'}) + ' – ' +
+    end.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});
+
+  renderOCLocation('appleton', wk, wkKey);
+  renderOCLocation('stevens', wk, wkKey);
+}
+
+function renderOCLocation(locKey, wk, wkKey){
+  const gridId = 'oc-grid-' + locKey;
+  const grid = document.getElementById(gridId);
+  if(!grid) return;
+  grid.innerHTML = '';
+  const techs = Object.keys(techQ[locKey]||{});
+
+  // Header row
+  const empty = document.createElement('div'); empty.textContent=''; grid.appendChild(empty);
+  DAYS.forEach((d,i)=>{
+    const dt = new Date(wk); dt.setDate(dt.getDate()+i);
+    const h = document.createElement('div');
+    h.style.cssText='text-align:center;font-size:11px;font-weight:700;color:var(--muted);padding:4px 0;border-bottom:1px solid var(--border-mid);';
+    h.textContent = d+' '+dt.getDate();
+    grid.appendChild(h);
+  });
+
+  // Role rows
+  OC_ROLES.forEach(role=>{
+    const rlbl = document.createElement('div');
+    rlbl.style.cssText='font-size:11px;font-weight:600;color:var(--text);padding:6px 4px;display:flex;align-items:center;';
+    rlbl.textContent = role;
+    grid.appendChild(rlbl);
+
+    DAYS.forEach((d,i)=>{
+      const dt = new Date(wk); dt.setDate(dt.getDate()+i);
+      const dayKey = dt.toISOString().split('T')[0];
+      const cellKey = wkKey+'|'+locKey+'|'+role+'|'+dayKey;
+      const val = ocData[cellKey] || '';
+
+      const cell = document.createElement('div');
+      cell.style.cssText='background:var(--surface);border:1.5px solid var(--border-mid);border-radius:6px;padding:4px;min-height:44px;';
+
+      const sel = document.createElement('select');
+      sel.style.cssText='width:100%;font-size:11px;background:transparent;border:none;color:var(--text);outline:none;cursor:pointer;';
+      
+      const blank = document.createElement('option');
+      blank.value=''; blank.textContent='—';
+      sel.appendChild(blank);
+      
+      techs.forEach(name=>{
+        const opt = document.createElement('option');
+        opt.value=name; opt.textContent=name.split(' ')[0];
+        if(val===name) opt.selected=true;
+        sel.appendChild(opt);
+      });
+      
+      sel.addEventListener('change',()=>{
+        ocData[cellKey] = sel.value;
+      });
+      
+      cell.appendChild(sel);
+      grid.appendChild(cell);
+    });
+  });
+}
+
 </script>
 </body>
 </html>
