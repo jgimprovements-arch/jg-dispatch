@@ -391,7 +391,7 @@ async function boot(){
     render();
     hideLoader();
     // Then load techs and refresh Albi in background silently
-    lookupTSIds().then(()=>render());
+    lookupTSIds().then(()=>{loadBoardState();render();});
     silentAlbiRefresh();
     return;
   }
@@ -410,6 +410,7 @@ async function boot(){
   await loadAlbiViaClaudeZapier();
   stepDone('albi', '✓ Live Albi jobs loaded');
   saveCache();
+  loadBoardState();
   render();
 }
 
@@ -431,6 +432,43 @@ function forceRefresh(){
 // ── CACHE FUNCTIONS ──
 const CACHE_KEY = 'jg_dispatch_jobs_v1';
 const CACHE_TTL = 4 * 60 * 60 * 1000; // 4 hours
+
+function saveBoardState(){
+  try{
+    const today = new Date().toISOString().split('T')[0];
+    const state = {date:today, assignments:{}};
+    for(const l of ['appleton','stevens']){
+      state.assignments[l]={};
+      for(const [nm,tech] of Object.entries(techQ[l]||{})){
+        if(tech.jobs.length) state.assignments[l][nm]=[...tech.jobs];
+      }
+    }
+    localStorage.setItem('jg_board_state_v1', JSON.stringify(state));
+  }catch(e){}
+}
+
+function loadBoardState(){
+  try{
+    const raw = localStorage.getItem('jg_board_state_v1');
+    if(!raw) return false;
+    const state = JSON.parse(raw);
+    const today = new Date().toISOString().split('T')[0];
+    if(state.date !== today) return false; // stale — different day, don't restore
+    let restored = 0;
+    for(const l of ['appleton','stevens']){
+      for(const [nm, jids] of Object.entries(state.assignments[l]||{})){
+        if(techQ[l]?.[nm]){
+          techQ[l][nm].jobs = jids.filter(jid=>jobs[jid]); // only restore jobs that still exist
+          // remove from unassigned pool
+          unassigned[l] = (unassigned[l]||[]).filter(jid=>!jids.includes(jid));
+          restored += techQ[l][nm].jobs.length;
+        }
+      }
+    }
+    if(restored>0) showToast('✓ Board assignments restored ('+restored+' jobs)');
+    return restored > 0;
+  }catch(e){ return false; }
+}
 
 function saveCache(){
   try{
@@ -705,7 +743,7 @@ async function pushTech(nm){
 function toISO(d,h){const hr=Math.floor(h),mn=Math.round((h-hr)*60);return `${d}T${String(hr).padStart(2,'0')}:${String(mn).padStart(2,'0')}:00-06:00`;}
 
 // ── RENDER ────────────────────────────────
-function render(){renderBoard();renderPool();updateStats();}
+function render(){renderBoard();renderPool();updateStats();saveBoardState();}
 
 function renderBoard(){
   const techs=techQ[loc];const depot=LOCATIONS[loc];
