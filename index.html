@@ -521,9 +521,12 @@ async function boot(){
     // Render skeleton board immediately with cached data
     render();
     hideLoader();
-    // Then load techs and refresh Albi in background silently
-    lookupTSIds().then(async()=>{await loadBoardState();render();});
-    silentAlbiRefresh();
+    // Load techs then board state then silently refresh Albi
+    lookupTSIds().then(async()=>{
+      await loadBoardState();
+      render();
+      await silentAlbiRefresh();
+    });
     return;
   }
   stepDone('cache', '○ No cache — fetching fresh data');
@@ -547,26 +550,9 @@ async function boot(){
 
 // Silent background refresh (when serving from cache)
 async function silentAlbiRefresh(){
-  // Save current board assignments before refreshing
-  const prevAssignments = {};
-  for(const l of ['appleton','stevens']){
-    prevAssignments[l]={};
-    for(const [nm,tech] of Object.entries(techQ[l]||{})){
-      if(tech.jobs.length) prevAssignments[l][nm]=[...tech.jobs];
-    }
-  }
   await loadAlbiViaClaudeZapier();
   saveCache();
-  // Restore assignments for jobs that still exist
-  for(const l of ['appleton','stevens']){
-    for(const [nm,jids] of Object.entries(prevAssignments[l]||{})){
-      if(techQ[l]?.[nm]){
-        const validJids = jids.filter(jid=>jobs[jid]);
-        techQ[l][nm].jobs = validJids;
-        unassigned[l] = (unassigned[l]||[]).filter(jid=>!validJids.includes(jid));
-      }
-    }
-  }
+  await loadBoardState(); // restore from shared server state
   render();
   hideCacheBanner();
   showToast('✓ Albi data refreshed — board assignments preserved');
@@ -1108,7 +1094,12 @@ function renderBoard(){
         const timeLabel=ov?`<div class="card-time" style="font-size:9px;color:var(--gold);font-weight:700;margin-top:2px;">⏰ ${ov.start} – ${ov.end}</div>`:'';
         c.innerHTML=`<div class="card-name">${j.name}</div><div class="card-addr">${j.addr}, ${j.city}</div>${timeLabel}`;
         c.addEventListener('dragstart',onDS);c.addEventListener('dragend',onDE);
-        c.addEventListener('click',(e)=>{if(!e.defaultPrevented)openTimeModal(nm,jid);});
+        c.addEventListener('mouseup',(e)=>{
+          if(e.button!==0)return;
+          if(c.dataset.wasDragged==='1'){c.dataset.wasDragged='0';return;}
+          openTimeModal(nm,jid);
+        });
+        c.addEventListener('dragstart',()=>{c.dataset.wasDragged='1';});
         body.appendChild(c);
       });
       const ph=document.createElement('div');ph.className='drop-ph';ph.textContent='+ drop job here';
@@ -1158,7 +1149,12 @@ function renderBoard(){
         const timeLabel=ov?`<div class="card-time" style="font-size:9px;color:var(--gold);font-weight:700;margin-top:2px;">⏰ ${ov.start} – ${ov.end}</div>`:'';
         c.innerHTML=`<div class="card-name">${j.name}</div><div class="card-addr">${j.addr}, ${j.city}</div>${timeLabel}`;
         c.addEventListener('dragstart',onDS);c.addEventListener('dragend',onDE);
-        c.addEventListener('click',(e)=>{if(!e.defaultPrevented)openTimeModal(nm,jid);});
+        c.addEventListener('mouseup',(e)=>{
+          if(e.button!==0)return;
+          if(c.dataset.wasDragged==='1'){c.dataset.wasDragged='0';return;}
+          openTimeModal(nm,jid);
+        });
+        c.addEventListener('dragstart',()=>{c.dataset.wasDragged='1';});
         body.appendChild(c);
       });
       const ph=document.createElement('div');ph.className='drop-ph';ph.textContent='+ drop job here';
