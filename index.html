@@ -475,6 +475,7 @@ const LOCATIONS = {
   stevens:  {id:1477, lat:44.5236, lng:-89.5746, label:'Stevens Point'}
 };
 const START = 7.5;
+let techStartTimes = {}; // nm -> decimal hour e.g. 7.5 = 7:30 AM
 const PM_NAMES = new Set(['Rylan Reoh','Brandon Olmsted','Chad Pansier','Anthony Alvarez','Paul Dischler','Jackson Sawall']);
 const MIT_TYPES = new Set(['Water Mitigation','Fire Mitigation','Mold','CAT3','Board Up','Contents']);
 const TYPE_KEY  = {
@@ -602,6 +603,7 @@ function getBoardStatePayload(){
     assignments,
     sick: [...sick],
     overrides: jobOverrides,
+    startTimes: {...techStartTimes},
     savedBy: 'dispatch-board'
   };
 }
@@ -688,6 +690,11 @@ async function loadBoardState(){
   // Restore time overrides
   if(state.overrides){
     Object.assign(jobOverrides, state.overrides);
+  }
+
+  // Restore per-tech start times
+  if(state.startTimes){
+    Object.assign(techStartTimes, state.startTimes);
   }
 
   if(restored>0){
@@ -976,6 +983,7 @@ async function pushTech(nm, locOverride){
   const uid=tech.tsId||tsIdMap[nm.toLowerCase()];
   if(!uid)return{ok:0,fail:0,skip:tech.jobs.length};
   const today=new Date().toISOString().split('T')[0];
+  let runHr=getTechStart(nm); // use per-tech start time
 
   // ── Delete existing T-Sheets events for this tech today before repushing ──
   try{
@@ -994,7 +1002,7 @@ async function pushTech(nm, locOverride){
     }
   }catch(e){ console.warn('Could not clear old events:', e); }
 
-  let ok=0,fail=0,runHr=START;
+  let ok=0,fail=0;
   for(const jid of tech.jobs){
     const j=jobs[jid];if(!j)continue;
     const ovKey=nm+'|'+jid;
@@ -1002,7 +1010,7 @@ async function pushTech(nm, locOverride){
     if(jobOverrides[ovKey]){
       start=today+'T'+jobOverrides[ovKey].start+':00-06:00';
       end=today+'T'+jobOverrides[ovKey].end+':00-06:00';
-      runHr+=j.hrs+0.25; // still advance runHr for subsequent jobs
+      runHr=timeToDec(jobOverrides[ovKey].end)+0.25;
     } else {
       start=toISO(today,runHr);runHr+=j.hrs+0.25;end=toISO(today,runHr-0.25);
     }
@@ -1044,11 +1052,19 @@ function renderBoard(){
         <div class="tech-sb" id="sb_${tech.initials}"></div>
       </div>
     </div>
-    <div class="lane-hd-btns">
-      ${isSick
-        ?`<button class="undo-btn" onclick="undoSick('${nm}')">↩ Undo</button>`
-        :`<button class="tout-btn" onclick="promptOut('${nm}')">Out</button>
-          <button class="push-one-btn" onclick="pushOne('${nm}')">↑ Push</button>`}
+    <div class="lane-hd-btns" style="flex-direction:column;align-items:flex-end;gap:3px;">
+      <div style="display:flex;gap:4px;">
+        ${isSick
+          ?`<button class="undo-btn" onclick="undoSick('${nm}')">↩ Undo</button>`
+          :`<button class="tout-btn" onclick="promptOut('${nm}')">Out</button>
+            <button class="push-one-btn" onclick="pushOne('${nm}')">↑ Push</button>`}
+      </div>
+      <div style="display:flex;align-items:center;gap:4px;">
+        <span style="font-size:9px;color:var(--muted);">Start:</span>
+        <input type="time" value="${decToTime(techStartTimes['${nm}']||START)}" 
+          style="font-size:9px;background:var(--surface);border:1px solid var(--border-mid);border-radius:4px;color:var(--text);padding:1px 3px;width:68px;"
+          onchange="setTechStart('${nm}',this.value)">
+      </div>
     </div>`;
     const body=document.createElement('div');body.className='lane-body';body.dataset.tech=nm;
     let runHr=START,pLat=depot.lat,pLng=depot.lng;
@@ -1120,15 +1136,34 @@ function renderBoard(){
         const c=document.createElement('div');c.className='card card-'+j.type;
         c.draggable=true;c.dataset.jobId=jid;c.dataset.src=nm;
         const ov=jobOverrides[nm+'|'+jid];
-        const timeLabel=ov?`<div class="card-time" style="font-size:9px;color:var(--gold);font-weight:700;margin-top:2px;">⏰ ${ov.start} – ${ov.end}</div>`:'';
-        c.innerHTML=`<div class="card-name">${j.name}</div><div class="card-addr">${j.addr}, ${j.city}</div>${timeLabel}`;
-        c.addEventListener('dragstart',onDS);c.addEventListener('dragend',onDE);
+        const jt=getJobTime(nm,jid);
+        const timeColor=ov?'var(--gold)':'var(--muted)';
+        const timeTxt=`${jt.start} – ${jt.end}`;
+        c.innerHTML=`
+          <div style="display:flex;align-items:flex-start;gap:4px;">
+            <div style="flex:1;min-width:0;">
+              <div class="card-name">${j.name}</div>
+              <div class="card-addr">${j.addr}, ${j.city}</div>
+              <div style="font-size:9px;color:${timeColor};font-weight:600;margin-top:2px;display:flex;align-items:center;gap:4px;">
+                <span>${ov?'⏰':'🕐'} ${timeTxt}</span>
+                <button onclick="event.stopPropagation();openTimeModal('${nm}','${jid}')" 
+                  style="font-size:9px;padding:0 4px;border-radius:3px;border:1px solid var(--border-mid);background:transparent;color:var(--muted);cursor:pointer;line-height:14px;">edit</button>
+              </div>
+            </div>
+            <div class="drag-handle" title="Drag to reorder" 
+              style="cursor:grab;color:var(--muted);font-size:14px;padding:2px;user-select:none;flex-shrink:0;">⋮⋮</div>
+          </div>`;
+        c.addEventListener('dragstart',(e)=>{
+          c.dataset.wasDragged='1';
+          onCardDragStart(e,nm,jid);
+        });
+        c.addEventListener('dragend',onDE);
+        c.addEventListener('dragover',(e)=>onCardDragOver(e,nm,jid));
+        c.addEventListener('drop',(e)=>onCardDrop(e,nm,jid));
         c.addEventListener('mouseup',(e)=>{
           if(e.button!==0)return;
           if(c.dataset.wasDragged==='1'){c.dataset.wasDragged='0';return;}
-          openTimeModal(nm,jid);
         });
-        c.addEventListener('dragstart',()=>{c.dataset.wasDragged='1';});
         body.appendChild(c);
       });
       const ph=document.createElement('div');ph.className='drop-ph';ph.textContent='+ drop job here';
@@ -1175,15 +1210,34 @@ function renderBoard(){
         const c=document.createElement('div');c.className='card card-'+j.type;
         c.draggable=true;c.dataset.jobId=jid;c.dataset.src=nm;
         const ov=jobOverrides[nm+'|'+jid];
-        const timeLabel=ov?`<div class="card-time" style="font-size:9px;color:var(--gold);font-weight:700;margin-top:2px;">⏰ ${ov.start} – ${ov.end}</div>`:'';
-        c.innerHTML=`<div class="card-name">${j.name}</div><div class="card-addr">${j.addr}, ${j.city}</div>${timeLabel}`;
-        c.addEventListener('dragstart',onDS);c.addEventListener('dragend',onDE);
+        const jt=getJobTime(nm,jid);
+        const timeColor=ov?'var(--gold)':'var(--muted)';
+        const timeTxt=`${jt.start} – ${jt.end}`;
+        c.innerHTML=`
+          <div style="display:flex;align-items:flex-start;gap:4px;">
+            <div style="flex:1;min-width:0;">
+              <div class="card-name">${j.name}</div>
+              <div class="card-addr">${j.addr}, ${j.city}</div>
+              <div style="font-size:9px;color:${timeColor};font-weight:600;margin-top:2px;display:flex;align-items:center;gap:4px;">
+                <span>${ov?'⏰':'🕐'} ${timeTxt}</span>
+                <button onclick="event.stopPropagation();openTimeModal('${nm}','${jid}')" 
+                  style="font-size:9px;padding:0 4px;border-radius:3px;border:1px solid var(--border-mid);background:transparent;color:var(--muted);cursor:pointer;line-height:14px;">edit</button>
+              </div>
+            </div>
+            <div class="drag-handle" title="Drag to reorder" 
+              style="cursor:grab;color:var(--muted);font-size:14px;padding:2px;user-select:none;flex-shrink:0;">⋮⋮</div>
+          </div>`;
+        c.addEventListener('dragstart',(e)=>{
+          c.dataset.wasDragged='1';
+          onCardDragStart(e,nm,jid);
+        });
+        c.addEventListener('dragend',onDE);
+        c.addEventListener('dragover',(e)=>onCardDragOver(e,nm,jid));
+        c.addEventListener('drop',(e)=>onCardDrop(e,nm,jid));
         c.addEventListener('mouseup',(e)=>{
           if(e.button!==0)return;
           if(c.dataset.wasDragged==='1'){c.dataset.wasDragged='0';return;}
-          openTimeModal(nm,jid);
         });
-        c.addEventListener('dragstart',()=>{c.dataset.wasDragged='1';});
         body.appendChild(c);
       });
       const ph=document.createElement('div');ph.className='drop-ph';ph.textContent='+ drop job here';
@@ -1775,6 +1829,90 @@ async function clearBoardState(){
 
 // Poll every 30 seconds for updates from other users
 setInterval(pollSharedState, 30000);
+
+// ── TECH START TIME & CARD REORDER ───────
+function decToTime(dec){
+  const h = Math.floor(dec);
+  const m = Math.round((dec - h) * 60);
+  return String(h).padStart(2,'0') + ':' + String(m).padStart(2,'0');
+}
+
+function timeToDec(timeStr){
+  const [h,m] = timeStr.split(':').map(Number);
+  return h + m/60;
+}
+
+function setTechStart(nm, timeStr){
+  techStartTimes[nm] = timeToDec(timeStr);
+  saveBoardState();
+  render();
+}
+
+function getTechStart(nm){
+  return techStartTimes[nm] !== undefined ? techStartTimes[nm] : START;
+}
+
+// Calculate running time for a tech's job at position idx
+function getJobTime(nm, jid){
+  const techLoc = Object.keys(techQ.appleton||{}).includes(nm) ? 'appleton' : 'stevens';
+  const tech = techQ[techLoc]?.[nm] || techQ[Object.keys(techQ).find(l=>techQ[l][nm])]?.[nm];
+  if(!tech) return {start:'', end:''};
+  let runHr = getTechStart(nm);
+  for(const qjid of tech.jobs){
+    const ov = jobOverrides[nm+'|'+qjid];
+    const j = jobs[qjid];
+    if(qjid === jid){
+      if(ov) return {start:ov.start, end:ov.end};
+      const endHr = runHr + (j?.hrs||2);
+      return {start:decToTime(runHr), end:decToTime(endHr)};
+    }
+    if(ov){
+      const endDec = timeToDec(ov.end);
+      runHr = endDec + 0.25;
+    } else {
+      runHr += (j?.hrs||2) + 0.25;
+    }
+  }
+  return {start:'', end:''};
+}
+
+// Reorder jobs within a lane via drag
+let reorderSrc = null;
+let reorderTech = null;
+
+function onCardDragStart(e, nm, jid){
+  reorderSrc = jid;
+  reorderTech = nm;
+  dragJob = jid;
+  dragSrc = nm;
+  dragPool = false;
+  e.dataTransfer.effectAllowed = 'move';
+}
+
+function onCardDragOver(e, nm, jid){
+  if(reorderTech !== nm) return; // only reorder within same lane
+  e.preventDefault();
+  e.stopPropagation();
+  e.dataTransfer.dropEffect = 'move';
+}
+
+function onCardDrop(e, nm, jid){
+  if(reorderTech !== nm || reorderSrc === jid) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const techLoc = Object.keys(techQ.appleton||{}).includes(nm) ? 'appleton' : 'stevens';
+  const tech = techQ[techLoc]?.[nm];
+  if(!tech) return;
+  const jobs = tech.jobs;
+  const fromIdx = jobs.indexOf(reorderSrc);
+  const toIdx = jobs.indexOf(jid);
+  if(fromIdx === -1 || toIdx === -1) return;
+  jobs.splice(fromIdx, 1);
+  jobs.splice(toIdx, 0, reorderSrc);
+  reorderSrc = null; reorderTech = null;
+  saveBoardState();
+  render();
+}
 
 </script>
 </body>
