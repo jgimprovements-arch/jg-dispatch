@@ -550,9 +550,25 @@ async function boot(){
 
 // Silent background refresh (when serving from cache)
 async function silentAlbiRefresh(){
+  // Save current assignments before Albi wipes unassigned pool
+  const snapshot = {};
+  for(const l of ['appleton','stevens']){
+    snapshot[l] = {};
+    for(const [nm,tech] of Object.entries(techQ[l]||{})){
+      if(tech.jobs.length) snapshot[l][nm] = [...tech.jobs];
+    }
+  }
   await loadAlbiViaClaudeZapier();
   saveCache();
-  await loadBoardState(); // restore from shared server state
+  // Restore snapshot assignments (Albi reload wipes unassigned, so re-apply)
+  for(const l of ['appleton','stevens']){
+    for(const [nm,jids] of Object.entries(snapshot[l]||{})){
+      if(techQ[l]?.[nm]){
+        techQ[l][nm].jobs = jids;
+        unassigned[l] = (unassigned[l]||[]).filter(jid=>!jids.includes(jid));
+      }
+    }
+  }
   render();
   hideCacheBanner();
   showToast('✓ Albi data refreshed — board assignments preserved');
@@ -646,10 +662,14 @@ async function loadBoardState(){
   for(const l of ['appleton','stevens']){
     for(const [nm, jids] of Object.entries(state.assignments?.[l]||{})){
       if(techQ[l]?.[nm]){
-        const validJids = jids.filter(jid=>jobs[jid]);
-        techQ[l][nm].jobs = validJids;
-        unassigned[l] = (unassigned[l]||[]).filter(jid=>!validJids.includes(jid));
-        restored += validJids.length;
+        // Restore ALL saved job IDs — don't filter by jobs[jid] yet
+        // Jobs may not be loaded from Albi yet, but we still want to show assignments
+        // Invalid jobs will naturally disappear when Albi loads if job no longer exists
+        const allJids = Array.isArray(jids) ? jids : [];
+        techQ[l][nm].jobs = allJids;
+        // Remove from unassigned pool
+        unassigned[l] = (unassigned[l]||[]).filter(jid=>!allJids.includes(jid));
+        restored += allJids.length;
       }
     }
   }
