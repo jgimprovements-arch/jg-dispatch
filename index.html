@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>JG Restoration — Dispatch Board</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%230d2d5e'/><text x='16' y='22' font-family='Arial' font-weight='bold' font-size='16' text-anchor='middle' fill='%23e85d04'>JG</text></svg>">
 <style>
 @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500;600&display=swap');
 :root{
@@ -70,6 +71,15 @@ body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);min
 .push-one-btn{font-size:9px;padding:2px 6px;border-radius:4px;border:1px solid rgba(245,166,35,.5);background:rgba(245,166,35,.15);color:var(--gold);cursor:pointer;font-family:'DM Sans',sans-serif;transition:all .12s;}
 .push-one-btn:hover{background:var(--gold);color:var(--navy);}
 .lane-body{padding:6px;min-height:50px;}
+.lane-body.timeline-mode{padding:0;position:relative;background:var(--surface);overflow:hidden;}
+.tl-hour-grid{position:absolute;left:0;right:0;pointer-events:none;}
+.tl-hour-line{position:absolute;left:0;right:0;border-top:1px dashed var(--border-mid);font-size:8px;color:var(--muted);padding-left:2px;}
+.tl-card{position:absolute;left:4px;right:4px;border-radius:6px;border-left:3px solid #ccc;cursor:ns-resize;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.2);user-select:none;}
+.tl-card-inner{padding:4px 6px;}
+.tl-card-name{font-size:10px;font-weight:700;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.tl-card-time{font-size:9px;color:rgba(255,255,255,.7);}
+.tl-card-resize{position:absolute;bottom:0;left:0;right:0;height:8px;cursor:s-resize;background:rgba(255,255,255,.15);display:flex;align-items:center;justify-content:center;}
+.tl-card-resize::after{content:'⋯';font-size:10px;color:rgba(255,255,255,.5);}
 .lane-body.drag-over{background:rgba(232,93,4,.05);}
 .job-card{border-radius:7px;border:1px solid var(--border);padding:6px 8px;margin-bottom:4px;border-left:3px solid #ccc;background:var(--surface);cursor:grab;user-select:none;transition:opacity .15s;}
 .job-card:active{cursor:grabbing;}
@@ -1057,7 +1067,8 @@ function renderBoard(){
         ${isSick
           ?`<button class="undo-btn" onclick="undoSick('${nm}')">↩ Undo</button>`
           :`<button class="tout-btn" onclick="promptOut('${nm}')">Out</button>
-            <button class="push-one-btn" onclick="pushOne('${nm}')">↑ Push</button>`}
+            <button class="push-one-btn" onclick="pushOne('${nm}')">↑ Push</button>
+            <button class="btn btn-ghost" style="font-size:9px;padding:2px 6px;" onclick="toggleTimeline('${nm}')" id="tl-btn-${nm.replace(/ /g,'_')}">${timelineModes.has('${nm}')?'📋 List':'📅 Timeline'}</button>`}
       </div>
       <div style="display:flex;align-items:center;gap:4px;">
         <span style="font-size:9px;color:var(--muted);">Start:</span>
@@ -1129,8 +1140,14 @@ function renderBoard(){
           :`<button class="tout-btn" onclick="promptOut('${nm}')">Out</button>
             <button class="push-one-btn" onclick="pushOne('${nm}')">↑ Push</button>`}
       </div>`;
-      const body=document.createElement('div');body.className='lane-body';
-      body.addEventListener('dragover',onDO);body.addEventListener('dragleave',onDL);body.addEventListener('drop',onDD);
+      const body=document.createElement('div');
+      body.className='lane-body'+(timelineModes.has(nm)?' timeline-mode':'');
+      if(!timelineModes.has(nm)){
+        body.addEventListener('dragover',onDO);body.addEventListener('dragleave',onDL);body.addEventListener('drop',onDD);
+      }
+      if(timelineModes.has(nm)){
+        renderTimelineLane(body, nm, tech);
+      } else {
       tech.jobs.forEach(jid=>{
         const j=jobs[jid];if(!j)return;
         const c=document.createElement('div');c.className='card card-'+j.type;
@@ -1168,6 +1185,7 @@ function renderBoard(){
       });
       const ph=document.createElement('div');ph.className='drop-ph';ph.textContent='+ drop job here';
       body.appendChild(ph);
+      } // end list mode
       lane.appendChild(hd);lane.appendChild(body);board.appendChild(lane);
       const sb=document.getElementById('sb_'+tech.initials);
       if(sb)sb.textContent=isSick?'Called out':tech.jobs.length+' job'+(tech.jobs.length!==1?'s':'')+' · ~'+fmtT(fa);
@@ -1912,6 +1930,150 @@ function onCardDrop(e, nm, jid){
   reorderSrc = null; reorderTech = null;
   saveBoardState();
   render();
+}
+
+// ── TIMELINE MODE ────────────────────────
+const timelineModes = new Set();
+const PX_PER_HOUR = 60; // 60px = 1 hour
+const TL_START_HOUR = 6; // timeline starts at 6 AM
+const TL_END_HOUR = 20;  // timeline ends at 8 PM
+
+const TYPE_COLORS = {
+  'Water Mitigation':'#2563eb','Fire Mitigation':'#dc2626','Mold':'#16a34a',
+  'CAT3':'#d97706','Board Up':'#6b7280','Contents':'#7c3aed',
+  'Reconstruction':'#0891b2','General Clean':'#92400e','Roofing/Exterior':'#065f46'
+};
+
+function toggleTimeline(nm){
+  if(timelineModes.has(nm)) timelineModes.delete(nm);
+  else timelineModes.add(nm);
+  render();
+}
+
+function hourToY(hour){ return (hour - TL_START_HOUR) * PX_PER_HOUR; }
+function yToHour(y){ return TL_START_HOUR + y / PX_PER_HOUR; }
+
+function renderTimelineLane(body, nm, tech){
+  const totalH = TL_END_HOUR - TL_START_HOUR;
+  const totalPx = totalH * PX_PER_HOUR;
+  body.style.cssText = `position:relative;height:${totalPx}px;background:var(--card);overflow:hidden;`;
+
+  // Hour grid lines
+  for(let h = TL_START_HOUR; h <= TL_END_HOUR; h++){
+    const y = hourToY(h);
+    const line = document.createElement('div');
+    line.style.cssText = `position:absolute;left:0;right:0;top:${y}px;border-top:1px ${h%2===0?'solid':'dashed'} var(--border-mid);`;
+    const label = document.createElement('span');
+    const ampm = h >= 12 ? 'PM' : 'AM';
+    const hr = h > 12 ? h-12 : h === 0 ? 12 : h;
+    label.style.cssText = 'font-size:8px;color:var(--muted);position:absolute;left:2px;top:1px;';
+    label.textContent = hr + (h%1===0&&h%2===0?ampm:'');
+    line.appendChild(label);
+    body.appendChild(line);
+  }
+
+  // Now time indicator
+  const nowH = new Date().getHours() + new Date().getMinutes()/60;
+  if(nowH >= TL_START_HOUR && nowH <= TL_END_HOUR){
+    const nowLine = document.createElement('div');
+    nowLine.style.cssText = `position:absolute;left:0;right:0;top:${hourToY(nowH)}px;border-top:2px solid var(--danger);z-index:10;pointer-events:none;`;
+    body.appendChild(nowLine);
+  }
+
+  // Job cards
+  let runHr = getTechStart(nm);
+  tech.jobs.forEach((jid, idx) => {
+    const j = jobs[jid]; if(!j) return;
+    const ov = jobOverrides[nm+'|'+jid];
+    let startHr, endHr;
+    if(ov){
+      startHr = timeToDec(ov.start);
+      endHr = timeToDec(ov.end);
+      runHr = endHr + 0.25;
+    } else {
+      startHr = runHr;
+      endHr = runHr + (j.hrs||2);
+      runHr = endHr + 0.25;
+    }
+
+    const yTop = hourToY(startHr);
+    const yBot = hourToY(endHr);
+    const cardH = Math.max(yBot - yTop, 24);
+    const color = TYPE_COLORS[j.type] || '#6b7280';
+
+    const card = document.createElement('div');
+    card.className = 'tl-card';
+    card.dataset.jobId = jid;
+    card.dataset.tech = nm;
+    card.style.cssText = `top:${yTop}px;height:${cardH}px;background:${color};border-left-color:${color};left:20px;right:4px;z-index:${5+idx};`;
+
+    card.innerHTML = `
+      <div class="tl-card-inner" style="height:calc(100% - 8px);overflow:hidden;">
+        <div class="tl-card-name" style="color:#fff;">${j.name}</div>
+        ${cardH > 30 ? `<div class="tl-card-time" style="color:rgba(255,255,255,.8);">${decToTime(startHr)} – ${decToTime(endHr)}</div>` : ''}
+      </div>
+      <div class="tl-card-resize"></div>`;
+
+    // Drag to move (top area)
+    let dragState = null;
+    card.addEventListener('mousedown', (e) => {
+      if(e.target.classList.contains('tl-card-resize')) return;
+      e.preventDefault();
+      const startY = e.clientY;
+      const origStart = startHr;
+      const origEnd = endHr;
+      dragState = 'move';
+      const onMove = (em) => {
+        const dy = em.clientY - startY;
+        const dh = dy / PX_PER_HOUR;
+        const newStart = Math.round((origStart + dh) * 4) / 4;
+        const newEnd = newStart + (origEnd - origStart);
+        if(newStart >= TL_START_HOUR && newEnd <= TL_END_HOUR){
+          jobOverrides[nm+'|'+jid] = {start:decToTime(newStart), end:decToTime(newEnd)};
+          card.style.top = hourToY(newStart)+'px';
+          card.style.height = Math.max(hourToY(newEnd)-hourToY(newStart),24)+'px';
+          card.querySelector('.tl-card-inner > div:last-child') && 
+            (card.querySelector('.tl-card-time') && (card.querySelector('.tl-card-time').textContent = decToTime(newStart)+' – '+decToTime(newEnd)));
+        }
+      };
+      const onUp = () => {
+        saveBoardState();
+        render();
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+      };
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    });
+
+    // Resize (bottom handle)
+    card.querySelector('.tl-card-resize').addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const startY = e.clientY;
+      const origEnd = endHr;
+      const onMove = (em) => {
+        const dy = em.clientY - startY;
+        const dh = dy / PX_PER_HOUR;
+        const newEnd = Math.round((origEnd + dh) * 4) / 4; // snap to 15 min
+        if(newEnd > startHr + 0.25 && newEnd <= TL_END_HOUR){
+          jobOverrides[nm+'|'+jid] = {start:decToTime(startHr), end:decToTime(newEnd)};
+          card.style.height = Math.max(hourToY(newEnd)-hourToY(startHr),24)+'px';
+          card.querySelector('.tl-card-time') && (card.querySelector('.tl-card-time').textContent = decToTime(startHr)+' – '+decToTime(newEnd));
+        }
+      };
+      const onUp = () => {
+        saveBoardState();
+        render();
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+      };
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    });
+
+    body.appendChild(card);
+  });
 }
 
 </script>
