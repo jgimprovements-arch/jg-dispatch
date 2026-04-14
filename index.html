@@ -510,42 +510,48 @@ window.addEventListener('load', ()=>{
 async function boot(){
   document.getElementById('loader').style.display='flex';
 
-  // ── STEP 1: Check cache — load instantly if fresh enough ──
+  // ── STEP 1: Load techs FIRST (always) ──
+  stepActive('techs');
+  await lookupTSIds();
+  stepDone('techs', '✓ Technicians loaded');
+
+  // ── STEP 2: Load board state from server (while techs are fresh) ──
+  await loadBoardState();
+
+  // ── STEP 3: Check job cache ──
   stepActive('cache');
   const cached = loadCache();
   if(cached){
     jobs = cached.jobs;
     unassigned = cached.unassigned;
+    // Remove from unassigned any jobs already assigned to techs
+    for(const l of ['appleton','stevens']){
+      const assignedJids = Object.values(techQ[l]||{}).flatMap(t=>t.jobs);
+      unassigned[l] = (unassigned[l]||[]).filter(jid=>!assignedJids.includes(jid));
+    }
     stepDone('cache', '✓ Cached jobs loaded (' + Object.keys(jobs).length + ' jobs)');
     showCacheBanner(cached.ts);
-    // Render skeleton board immediately with cached data
     render();
     hideLoader();
-    // Load techs then board state then silently refresh Albi
-    lookupTSIds().then(async()=>{
-      await loadBoardState();
-      render();
-      await silentAlbiRefresh();
-    });
+    // Silently refresh Albi in background
+    silentAlbiRefresh();
     return;
   }
   stepDone('cache', '○ No cache — fetching fresh data');
 
-  // ── STEP 2: Load techs first (fast ~1-2s) so board renders early ──
-  stepActive('techs');
-  await lookupTSIds();
-  stepDone('techs', '✓ Technicians loaded');
-  render(); // Board shows with techs, jobs = empty (unassigned pool shows loading)
-  hideLoader(); // Show the board NOW, jobs will drop in
-
-  // ── STEP 3: Fetch Albi in background, board already visible ──
+  // ── STEP 4: Fetch Albi ──
   stepActive('albi');
-  showToast('Fetching live Albi jobs via Claude...');
+  showToast('Fetching live Albi jobs...');
   await loadAlbiViaClaudeZapier();
   stepDone('albi', '✓ Live Albi jobs loaded');
+  // Remove from unassigned any jobs already assigned to techs
+  for(const l of ['appleton','stevens']){
+    const assignedJids = Object.values(techQ[l]||{}).flatMap(t=>t.jobs);
+    unassigned[l] = (unassigned[l]||[]).filter(jid=>!assignedJids.includes(jid));
+  }
   saveCache();
-  await loadBoardState();
   render();
+  hideLoader();
 }
 
 // Silent background refresh (when serving from cache)
