@@ -224,6 +224,8 @@ input[type=file]{display:none}
   <a href="qa.html" class="sb-lnk "><span class="sb-icon">🔍</span><span class="sb-label">QA Review</span></a>
   <a href="adjuster.html" class="sb-lnk active"><span class="sb-icon">⚖️</span><span class="sb-label">Adjuster Rebuttal</span></a>
   <a href="recon.html" class="sb-lnk "><span class="sb-icon">🏗️</span><span class="sb-label">Recon Estimate</span></a>
+  <div class="sb-sec">INSIGHTS</div>
+  <a href="intelligence.html" class="sb-lnk"><span class="sb-icon">🧠</span><span class="sb-label">Adjuster Intel</span></a>
   <div class="sb-btm">
     <div class="sb-user" onclick="jgSignOut()" title="Sign out">
       <span id="sb-av">👤</span>
@@ -435,7 +437,7 @@ Return ONLY valid JSON:
   ]
 }`;
 
-let S={apiKey:localStorage.getItem('jg_key')||'',mode:'landing',proj:'',enc:null,est:null,busy:false,prog:'',err:null,result:null,resp:{},reviewer:'',sev:'ALL',done:false,reb:false,ec:'',adjEst:null,adjEmail:'',adjResult:null,adjResp:{},adjDone:false,adjLetterEdited:null,adjNotes:{},
+let S={apiKey:localStorage.getItem('jg_key')||'',mode:'landing',proj:'',adjCarrierIntel:null,enc:null,est:null,busy:false,prog:'',err:null,result:null,resp:{},reviewer:'',sev:'ALL',done:false,reb:false,ec:'',adjEst:null,adjEmail:'',adjResult:null,adjResp:{},adjDone:false,adjLetterEdited:null,adjNotes:{},
   // NEW: Two-pass state
   phase:'upload', // upload -> review -> recheck_upload -> recheck_result -> signoff -> done
   correctedEst:null, recheckResult:null, recheckBusy:false,
@@ -1242,9 +1244,115 @@ async function regenerateAdjusterResponse(){
 }
 
 // ══ ADJUSTER SIGN-OFF ══
+
+// ── SAVE REBUTTAL TO SUPABASE ─────────────────────────────────────────────────
+async function saveRebuttalToSupabase() {
+  try {
+    const ar = S.adjResult;
+    if (!ar) return;
+    const defended = (ar.disputed_items||[]).filter(d=>S.adjResp[d.id]!=='concede');
+    const conceded = (ar.disputed_items||[]).filter(d=>S.adjResp[d.id]==='concede');
+    const user = JSON.parse(localStorage.getItem('jg_platform_user')||'null');
+    
+    const record = {
+      project_name: S.proj||'',
+      carrier: ar.adjuster_info?.company||ar.adjuster_info?.carrier||'',
+      adjuster_name: ar.adjuster_info?.name||'',
+      adjuster_company: ar.adjuster_info?.company||'',
+      claim_number: ar.adjuster_info?.claim_number||'',
+      date_of_loss: ar.job_info?.date_of_loss||'',
+      jg_total: ar.summary?.jg_total||'',
+      adjuster_total: ar.summary?.adjuster_total||'',
+      total_disputed: ar.summary?.total_disputed||'',
+      items_defended: defended.length,
+      items_conceded: conceded.length,
+      rebuttal_sent: true,
+      disputed_items: JSON.stringify((ar.disputed_items||[]).map(d => ({
+        id: d.id,
+        description: d.description,
+        category: d.category,
+        difference: d.difference,
+        jg_code: d.jg_code,
+        standard_reference: d.standard_reference,
+        outcome: S.adjResp[d.id]==='concede' ? 'conceded' : 'defended',
+        defense_statement: d.defense_statement,
+        notes: (S.adjNotes||{})[d.id]||''
+      }))),
+      response_letter: S.adjLetterEdited||ar.response_letter||'',
+      submitted_by: user?.name||user?.email||'',
+      location: S.proj?.includes('SP')||S.proj?.includes('STE')?'Stevens Point':'Appleton'
+    };
+    
+    await fetch('https://nuykvchgecpiuikoerze.supabase.co/rest/v1/adjuster_rebuttals', {
+      method: 'POST',
+      headers: {
+        'apikey': 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im51eWt2Y2hnZWNwaXVpa29lcnplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYyNjM3ODYsImV4cCI6MjA5MTgzOTc4Nn0.39hZ8DdjT_0iFJXPeAL2FXUSLw8FZBirDVzxZTO1W9s',
+        'Authorization': 'Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im51eWt2Y2hnZWNwaXVpa29lcnplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYyNjM3ODYsImV4cCI6MjA5MTgzOTc4Nn0.39hZ8DdjT_0iFJXPeAL2FXUSLw8FZBirDVzxZTO1W9s',
+        'Content-Type': 'application/json',
+        'Prefer': 'return=minimal'
+      },
+      body: JSON.stringify(record)
+    });
+    console.log('Rebuttal saved to database ✓');
+  } catch(e) { console.error('Save rebuttal failed:', e); }
+}
+
+// ── LOAD ADJUSTER INTELLIGENCE ────────────────────────────────────────────────
+async function loadAdjusterIntelligence(carrierOrAdjuster) {
+  if (!carrierOrAdjuster) return null;
+  try {
+    const term = encodeURIComponent(carrierOrAdjuster);
+    // Search by carrier or adjuster name
+    const r = await fetch('https://nuykvchgecpiuikoerze.supabase.co/rest/v1/adjuster_rebuttals?or=(carrier.ilike.*'+term+'*,adjuster_name.ilike.*'+term+'*)&order=created_at.desc&limit=20&select=carrier,adjuster_name,items_defended,items_conceded,total_disputed,disputed_items,created_at', {
+      headers: {'apikey':'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im51eWt2Y2hnZWNwaXVpa29lcnplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYyNjM3ODYsImV4cCI6MjA5MTgzOTc4Nn0.39hZ8DdjT_0iFJXPeAL2FXUSLw8FZBirDVzxZTO1W9s','Authorization':'Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im51eWt2Y2hnZWNwaXVpa29lcnplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYyNjM3ODYsImV4cCI6MjA5MTgzOTc4Nn0.39hZ8DdjT_0iFJXPeAL2FXUSLw8FZBirDVzxZTO1W9s'}
+    });
+    if (!r.ok) return null;
+    const rows = await r.json();
+    if (!rows.length) return null;
+    
+    // Analyze patterns locally
+    const totalJobs = rows.length;
+    const allDisputed = rows.flatMap(r => {
+      try { return JSON.parse(r.disputed_items||'[]'); } catch(e) { return []; }
+    });
+    
+    // Most disputed categories
+    const catCount = {};
+    const codeCount = {};
+    const defenseRate = {};
+    allDisputed.forEach(d => {
+      const cat = d.category||'other';
+      catCount[cat] = (catCount[cat]||0) + 1;
+      const code = d.jg_code||'';
+      if (code) codeCount[code] = (codeCount[code]||0) + 1;
+      defenseRate[cat] = defenseRate[cat]||{defended:0,total:0};
+      defenseRate[cat].total++;
+      if (d.outcome === 'defended') defenseRate[cat].defended++;
+    });
+    
+    const topCategories = Object.entries(catCount).sort((a,b)=>b[1]-a[1]).slice(0,5);
+    const avgDisputed = rows.reduce((s,r)=>s+(parseFloat((r.total_disputed||'$0').replace(/[$,]/g,''))||0),0)/totalJobs;
+    
+    return { totalJobs, topCategories, catCount, codeCount, defenseRate, avgDisputed, rows };
+  } catch(e) { return null; }
+}
+
+
+async function lookupCarrierIntel(projName) {
+  if (!projName || projName.length < 3) return;
+  // Try to get carrier from adjuster email/estimate if already loaded
+  const searchTerm = S.adjResult?.adjuster_info?.company || S.adjResult?.adjuster_info?.carrier || projName;
+  const intel = await loadAdjusterIntelligence(searchTerm);
+  if (intel && intel.totalJobs > 0) {
+    S.adjCarrierIntel = intel;
+    draw();
+  }
+}
+
 async function adjusterSignOff(){
   S.adjDone=true;draw();
   const ar=S.adjResult;
+  saveRebuttalToSupabase(); // Save to pattern database
   const defended=(ar.disputed_items||[]).filter(d=>S.adjResp[d.id]!=='concede');
   const conceded=(ar.disputed_items||[]).filter(d=>S.adjResp[d.id]==='concede');
   
@@ -1764,7 +1872,7 @@ Return ONLY valid JSON:
   ]
 }`;
 
-let S={apiKey:localStorage.getItem('jg_key')||'',mode:'landing',proj:'',enc:null,est:null,busy:false,prog:'',err:null,result:null,resp:{},reviewer:'',sev:'ALL',done:false,reb:false,ec:'',adjEst:null,adjEmail:'',adjResult:null,adjResp:{},adjDone:false,adjLetterEdited:null,adjNotes:{},
+let S={apiKey:localStorage.getItem('jg_key')||'',mode:'landing',proj:'',adjCarrierIntel:null,enc:null,est:null,busy:false,prog:'',err:null,result:null,resp:{},reviewer:'',sev:'ALL',done:false,reb:false,ec:'',adjEst:null,adjEmail:'',adjResult:null,adjResp:{},adjDone:false,adjLetterEdited:null,adjNotes:{},
   // NEW: Two-pass state
   phase:'upload', // upload -> review -> recheck_upload -> recheck_result -> signoff -> done
   correctedEst:null, recheckResult:null, recheckBusy:false,
@@ -2571,9 +2679,22 @@ async function regenerateAdjusterResponse(){
 }
 
 // ══ ADJUSTER SIGN-OFF ══
+
+async function lookupCarrierIntel(projName) {
+  if (!projName || projName.length < 3) return;
+  // Try to get carrier from adjuster email/estimate if already loaded
+  const searchTerm = S.adjResult?.adjuster_info?.company || S.adjResult?.adjuster_info?.carrier || projName;
+  const intel = await loadAdjusterIntelligence(searchTerm);
+  if (intel && intel.totalJobs > 0) {
+    S.adjCarrierIntel = intel;
+    draw();
+  }
+}
+
 async function adjusterSignOff(){
   S.adjDone=true;draw();
   const ar=S.adjResult;
+  saveRebuttalToSupabase(); // Save to pattern database
   const defended=(ar.disputed_items||[]).filter(d=>S.adjResp[d.id]!=='concede');
   const conceded=(ar.disputed_items||[]).filter(d=>S.adjResp[d.id]==='concede');
   
@@ -3094,7 +3215,7 @@ Return ONLY valid JSON:
   ]
 }`;
 
-let S={apiKey:localStorage.getItem('jg_key')||'',mode:'landing',proj:'',enc:null,est:null,busy:false,prog:'',err:null,result:null,resp:{},reviewer:'',sev:'ALL',done:false,reb:false,ec:'',adjEst:null,adjEmail:'',adjResult:null,adjResp:{},adjDone:false,adjLetterEdited:null,adjNotes:{},
+let S={apiKey:localStorage.getItem('jg_key')||'',mode:'landing',proj:'',adjCarrierIntel:null,enc:null,est:null,busy:false,prog:'',err:null,result:null,resp:{},reviewer:'',sev:'ALL',done:false,reb:false,ec:'',adjEst:null,adjEmail:'',adjResult:null,adjResp:{},adjDone:false,adjLetterEdited:null,adjNotes:{},
   // NEW: Two-pass state
   phase:'upload', // upload -> review -> recheck_upload -> recheck_result -> signoff -> done
   correctedEst:null, recheckResult:null, recheckBusy:false,
@@ -3901,9 +4022,22 @@ async function regenerateAdjusterResponse(){
 }
 
 // ══ ADJUSTER SIGN-OFF ══
+
+async function lookupCarrierIntel(projName) {
+  if (!projName || projName.length < 3) return;
+  // Try to get carrier from adjuster email/estimate if already loaded
+  const searchTerm = S.adjResult?.adjuster_info?.company || S.adjResult?.adjuster_info?.carrier || projName;
+  const intel = await loadAdjusterIntelligence(searchTerm);
+  if (intel && intel.totalJobs > 0) {
+    S.adjCarrierIntel = intel;
+    draw();
+  }
+}
+
 async function adjusterSignOff(){
   S.adjDone=true;draw();
   const ar=S.adjResult;
+  saveRebuttalToSupabase(); // Save to pattern database
   const defended=(ar.disputed_items||[]).filter(d=>S.adjResp[d.id]!=='concede');
   const conceded=(ar.disputed_items||[]).filter(d=>S.adjResp[d.id]==='concede');
   
@@ -4423,7 +4557,7 @@ Return ONLY valid JSON:
   ]
 }`;
 
-let S={apiKey:localStorage.getItem('jg_key')||'',mode:'landing',proj:'',enc:null,est:null,busy:false,prog:'',err:null,result:null,resp:{},reviewer:'',sev:'ALL',done:false,reb:false,ec:'',adjEst:null,adjEmail:'',adjResult:null,adjResp:{},adjDone:false,adjLetterEdited:null,adjNotes:{},
+let S={apiKey:localStorage.getItem('jg_key')||'',mode:'landing',proj:'',adjCarrierIntel:null,enc:null,est:null,busy:false,prog:'',err:null,result:null,resp:{},reviewer:'',sev:'ALL',done:false,reb:false,ec:'',adjEst:null,adjEmail:'',adjResult:null,adjResp:{},adjDone:false,adjLetterEdited:null,adjNotes:{},
   // NEW: Two-pass state
   phase:'upload', // upload -> review -> recheck_upload -> recheck_result -> signoff -> done
   correctedEst:null, recheckResult:null, recheckBusy:false,
@@ -5230,9 +5364,22 @@ async function regenerateAdjusterResponse(){
 }
 
 // ══ ADJUSTER SIGN-OFF ══
+
+async function lookupCarrierIntel(projName) {
+  if (!projName || projName.length < 3) return;
+  // Try to get carrier from adjuster email/estimate if already loaded
+  const searchTerm = S.adjResult?.adjuster_info?.company || S.adjResult?.adjuster_info?.carrier || projName;
+  const intel = await loadAdjusterIntelligence(searchTerm);
+  if (intel && intel.totalJobs > 0) {
+    S.adjCarrierIntel = intel;
+    draw();
+  }
+}
+
 async function adjusterSignOff(){
   S.adjDone=true;draw();
   const ar=S.adjResult;
+  saveRebuttalToSupabase(); // Save to pattern database
   const defended=(ar.disputed_items||[]).filter(d=>S.adjResp[d.id]!=='concede');
   const conceded=(ar.disputed_items||[]).filter(d=>S.adjResp[d.id]==='concede');
   
@@ -5428,7 +5575,32 @@ function draw(){
 
   // ══ ADJUSTER REBUTTAL UPLOAD PHASE ══
   if(S.mode==='adjuster'&&S.phase==='upload'){
-    h+=`<div style="margin-bottom:14px"><label style="display:block;font-size:11px;color:var(--dim);margin-bottom:4px;font-family:'DM Mono',monospace;text-transform:uppercase">Albi Project Name <span style="color:var(--red)">* required</span></label><input type="text" id="projIn" value="${S.proj}" placeholder="e.g. Wang-2798-WTR" style="width:100%;max-width:400px"></div>`;
+    h+=`<div style="margin-bottom:14px"><label style="display:block;font-size:11px;color:var(--dim);margin-bottom:4px;font-family:'DM Mono',monospace;text-transform:uppercase">Albi Project Name <span style="color:var(--red)">* required</span></label><input type="text" id="projIn" value="${S.proj}" placeholder="e.g. Wang-2798-WTR" style="width:100%;max-width:400px" onblur="lookupCarrierIntel(this.value)"></div>`;
+  // Carrier intelligence panel
+  if(S.adjCarrierIntel){
+    const ci=S.adjCarrierIntel;
+    h+=`<div style="background:rgba(21,101,192,.05);border:1.5px solid rgba(21,101,192,.2);border-radius:10px;padding:14px 16px;margin-bottom:16px;">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">
+        <span style="font-size:16px;">🧠</span>
+        <span style="font-size:12px;font-weight:700;color:var(--blu);font-family:'DM Mono',monospace;">ADJUSTER INTELLIGENCE — ${ci.rows[0]?.carrier||ci.rows[0]?.adjuster_name||'Known Adjuster'}</span>
+        <span style="font-size:10px;padding:2px 8px;background:rgba(21,101,192,.1);border-radius:20px;color:var(--blu);">${ci.totalJobs} prior rebuttals</span>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px;">
+        <div style="background:var(--s1);border:1px solid var(--brd);border-radius:6px;padding:10px;">
+          <div style="font-size:9px;color:var(--dim);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">Avg Disputed</div>
+          <div style="font-size:18px;font-weight:700;color:var(--red);font-family:'DM Mono',monospace;">$${Math.round(ci.avgDisputed).toLocaleString()}</div>
+        </div>
+        <div style="background:var(--s1);border:1px solid var(--brd);border-radius:6px;padding:10px;">
+          <div style="font-size:9px;color:var(--dim);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">Most Disputed</div>
+          <div style="font-size:13px;font-weight:700;color:var(--navy);font-family:'DM Mono',monospace;">${ci.topCategories[0]?ci.topCategories[0][0]:'—'}</div>
+        </div>
+      </div>
+      <div style="font-size:11px;font-weight:700;color:var(--dim);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;">Top Disputed Categories</div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;">
+        ${ci.topCategories.map(([cat,count])=>`<div style="background:var(--s1);border:1px solid var(--brd);border-radius:6px;padding:6px 10px;font-size:11px;display:flex;align-items:center;gap:6px;"><span style="font-weight:600;">${cat}</span><span style="background:var(--redD);color:var(--red);padding:1px 6px;border-radius:4px;font-size:10px;font-weight:700;">${count}x</span><span style="font-size:10px;color:var(--grn);">${ci.defenseRate[cat]?Math.round(ci.defenseRate[cat].defended/ci.defenseRate[cat].total*100)+'% won':'—'}</span></div>`).join('')}
+      </div>
+    </div>`;
+  }
     
     h+=`<div class="mono" style="font-size:12px;font-weight:700;color:var(--red);margin:16px 0 8px;text-transform:uppercase">Adjuster's Pushback</div>`;
     h+=`<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:12px"><div style="border:2px dashed ${S.adjEst?'var(--red)':'var(--brd)'};border-radius:10px;padding:${S.adjEst?'16px':'24px 16px'};text-align:${S.adjEst?'left':'center'};cursor:pointer;background:${S.adjEst?'var(--s1)':'transparent'}" onclick="document.getElementById('adjF').click()"><input type="file" id="adjF" accept=".pdf" onchange="if(this.files[0]){S.adjEst=this.files[0];draw()}">${S.adjEst?'<div style="display:flex;align-items:center;gap:10px"><span style="font-size:22">⚖️</span><div><p style="font-size:12px;font-weight:600;color:var(--red)">Adjuster estimate loaded</p><p style="font-size:11px;color:var(--dim);margin-top:2px">'+S.adjEst.name+'</p></div></div>':'<div style="font-size:24px;opacity:.4;margin-bottom:6px">⚖️</div><p style="font-size:12px;font-weight:600">Adjuster Xactimate</p><p style="font-size:11px;color:var(--dim);margin-top:4px">Their revised estimate PDF</p>'}</div>`;

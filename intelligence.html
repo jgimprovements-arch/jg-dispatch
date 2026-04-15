@@ -1,0 +1,514 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>JG Restoration — Adjuster Intelligence</title>
+<link rel="icon" type="image/png" href="https://jgimprovements-arch.github.io/jg-dispatch/logo.png">
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<style>
+
+:root{
+  --navy:#0d2d5e;--orange:#e85d04;--gold:#f5a623;
+  --bg:#f0ede8;--s1:#faf9f7;--s2:#f0ede8;--s3:#e8e4df;
+  --brd:rgba(13,45,94,.12);--brdH:rgba(13,45,94,.3);
+  --acc:#e85d04;--accD:rgba(232,93,4,.08);
+  --txt:#0d1f3c;--dim:#6b7a96;--mut:#a0abbf;
+  --red:#c02020;--redD:rgba(192,32,32,.08);
+  --grn:#2e7d32;--grnD:rgba(46,125,50,.08);
+  --wrn:#e65100;--wrnD:rgba(230,81,0,.08);
+  --blu:#1565c0;--bluD:rgba(21,101,192,.08);
+  --purp:#6a1b9a;--purpD:rgba(106,27,154,.08);
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--txt);font-family:'DM Sans',system-ui,sans-serif;min-height:100vh;padding:16px 20px;}
+.mono{font-family:DM Mono,monospace}
+.container{max-width:1020px;margin:0 auto;padding-left:8px;}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+input[type=text],input[type=password]{padding:10px 12px;border-radius:6px;background:#fff;border:1.5px solid var(--brd);color:var(--txt);font-size:13px;font-family:DM Mono,monospace;outline:none}
+input:focus{border-color:var(--acc)!important;box-shadow:0 0 0 2px var(--accD)}
+textarea{width:100%;min-height:60px;padding:10px;border-radius:6px;background:#fff;border:1.5px solid var(--brd);color:var(--txt);font-size:12px;font-family:'DM Sans',sans-serif;resize:vertical;line-height:1.5;outline:none;box-sizing:border-box}
+textarea:focus{border-color:var(--acc);box-shadow:0 0 0 2px var(--accD)}
+input[type=file]{display:none}
+.act-btn{border:1px solid var(--brd);background:transparent;color:var(--dim);padding:8px 16px;border-radius:6px;font-size:12px;font-weight:600;font-family:DM Mono,monospace;cursor:pointer;transition:all .15s;margin-right:8px}
+.act-btn:hover{border-color:var(--brdH);color:var(--txt)}
+.act-btn.sc{background:var(--grnD);border-color:var(--grn);color:var(--grn)}
+.act-btn.sj{background:var(--wrnD);border-color:var(--wrn);color:var(--wrn)}
+.badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;font-family:DM Mono,monospace}
+::-webkit-scrollbar{width:5px}::-webkit-scrollbar-thumb{background:var(--mut);border-radius:3px}
+
+#jg-login{position:fixed;inset:0;background:rgba(13,29,60,.96);align-items:center;justify-content:center;z-index:9999;display:none;}
+#jg-login-box{background:#fff;border-radius:16px;padding:40px 36px;width:100%;max-width:360px;text-align:center;box-shadow:0 24px 64px rgba(0,0,0,.4);}
+#jg-login-err{font-size:12px;color:#c0392b;margin-top:12px;min-height:16px;}
+
+/* ── COLLAPSIBLE SIDEBAR ── */
+#jg-sidebar{
+  position:fixed;left:0;top:0;bottom:0;
+  width:48px; /* collapsed = icon only */
+  background:#0d2d5e;
+  display:flex;flex-direction:column;
+  z-index:90;
+  box-shadow:2px 0 12px rgba(0,0,0,.15);
+  transition:width .22s cubic-bezier(.4,0,.2,1);
+  overflow:hidden;
+  white-space:nowrap;
+}
+#jg-sidebar:hover,
+#jg-sidebar.expanded{
+  width:200px;
+  z-index:200;
+  box-shadow:4px 0 24px rgba(0,0,0,.3);
+}
+#jg-sidebar .sb-logo{
+  padding:10px 12px;
+  border-bottom:1px solid rgba(255,255,255,.1);
+  display:flex;align-items:center;
+  min-height:52px;flex-shrink:0;
+}
+#jg-sidebar .sb-logo img{
+  height:28px;width:28px;
+  object-fit:contain;flex-shrink:0;
+  border-radius:4px;
+}
+#jg-sidebar .sb-sec{
+  font-size:9px;font-weight:700;color:rgba(255,255,255,.3);
+  text-transform:uppercase;letter-spacing:.1em;
+  padding:12px 14px 4px;
+  font-family:monospace;
+  opacity:0;
+  transition:opacity .15s .1s;
+}
+#jg-sidebar:hover .sb-sec,
+#jg-sidebar.expanded .sb-sec{opacity:1;}
+#jg-sidebar a.sb-lnk{
+  display:flex;align-items:center;gap:10px;
+  padding:9px 14px;
+  font-size:12px;font-weight:500;
+  color:rgba(255,255,255,.65);
+  text-decoration:none;
+  border-left:3px solid transparent;
+  transition:all .15s;
+  flex-shrink:0;
+}
+#jg-sidebar a.sb-lnk:hover{
+  background:rgba(255,255,255,.08);color:#fff;
+  border-left-color:rgba(255,255,255,.3);
+}
+#jg-sidebar a.sb-lnk.active{
+  background:rgba(255,255,255,.12);color:#fff;
+  border-left-color:#e85d04;font-weight:600;
+}
+#jg-sidebar .sb-icon{
+  font-size:16px;width:20px;text-align:center;flex-shrink:0;
+}
+#jg-sidebar .sb-label{
+  opacity:0;transition:opacity .15s .05s;
+  overflow:hidden;
+}
+#jg-sidebar:hover .sb-label,
+#jg-sidebar.expanded .sb-label{opacity:1;}
+#jg-sidebar .sb-btm{
+  margin-top:auto;padding:10px 14px;
+  border-top:1px solid rgba(255,255,255,.1);
+  flex-shrink:0;
+}
+#jg-sidebar .sb-user{
+  display:flex;align-items:center;gap:8px;
+  font-size:11px;color:rgba(255,255,255,.55);
+  cursor:pointer;padding:4px 0;
+}
+#jg-sidebar .sb-user:hover{color:#fff;}
+#jg-sidebar .sb-user-label{
+  opacity:0;transition:opacity .15s .05s;overflow:hidden;
+}
+#jg-sidebar:hover .sb-user-label,
+#jg-sidebar.expanded .sb-user-label{opacity:1;}
+/* Body offset — collapsed width only */
+body{padding-left:48px;box-sizing:border-box;}
+* {box-sizing:border-box;}
+
+/* ── QA DISPATCH STYLING ── */
+.qa-hdr{background:var(--navy);padding:0 16px;height:50px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:95;}
+.qa-hdr-l{display:flex;align-items:center;gap:10px;}
+.qa-logo-mk{width:26px;height:26px;background:var(--orange);border-radius:5px;display:flex;align-items:center;justify-content:center;font-family:DM Mono,monospace;font-size:10px;font-weight:700;color:#fff;flex-shrink:0;}
+.qa-hdr-title{font-size:13px;font-weight:600;color:#fff;letter-spacing:-.3px;}
+.qa-hdr-title span{color:var(--gold);}
+.qa-pill{font-size:10px;padding:2px 8px;background:rgba(255,255,255,.12);color:rgba(255,255,255,.8);border-radius:20px;border:1px solid rgba(255,255,255,.18);}
+.qa-hdr-r{display:flex;align-items:center;gap:6px;}
+.qa-body{padding:14px 16px;max-width:920px;margin:0 auto;}
+.qa-card{background:var(--s1);border:1px solid var(--brd);border-radius:10px;box-shadow:0 1px 3px rgba(13,45,94,.08),0 4px 16px rgba(13,45,94,.06);overflow:hidden;margin-bottom:14px;}
+.qa-card-hd{background:var(--navy);padding:9px 14px;display:flex;align-items:center;justify-content:space-between;}
+.qa-card-hd-title{font-size:11px;font-weight:600;color:#fff;font-family:DM Mono,monospace;text-transform:uppercase;letter-spacing:.06em;}
+.qa-card-body{padding:16px;}
+.qa-upload-zone{border:2px dashed var(--brd);border-radius:8px;padding:26px 16px;text-align:center;cursor:pointer;transition:all .15s;background:transparent;}
+.qa-upload-zone:hover{border-color:var(--orange);background:rgba(232,93,4,.04);}
+.qa-upload-zone.loaded{border-style:solid;border-color:var(--grn);background:rgba(46,125,50,.04);text-align:left;padding:12px 16px;}
+.qa-btn{padding:8px 18px;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;border:none;font-family:'DM Sans',sans-serif;transition:all .15s;white-space:nowrap;}
+.qa-btn-primary{background:var(--orange);color:#fff;}
+.qa-btn-primary:hover{background:#c94a00;}
+.qa-btn-primary:disabled{opacity:.45;cursor:default;}
+.qa-btn-ghost{background:transparent;border:1px solid var(--brd);color:var(--dim);}
+.qa-btn-ghost:hover{border-color:var(--navy);color:var(--navy);}
+.qa-btn-green{background:var(--grn);color:#fff;}
+.qa-btn-navy{background:var(--navy);color:#fff;}
+.qa-step-bar{display:flex;gap:6px;margin-bottom:16px;}
+.qa-step{flex:1;padding:8px 10px;border-radius:6px;border:1px solid var(--brd);text-align:center;background:var(--s2);}
+.qa-step.active{background:var(--s1);border-color:var(--orange);box-shadow:0 0 0 2px rgba(232,93,4,.12);}
+.qa-step.done{background:rgba(46,125,50,.06);border-color:var(--grn);}
+.qa-step-lbl{font-size:11px;font-weight:600;color:var(--dim);font-family:DM Mono,monospace;}
+.qa-step.active .qa-step-lbl{color:var(--orange);}
+.qa-step.done .qa-step-lbl{color:var(--grn);}
+.qa-gap-row{background:var(--s1);border:1px solid var(--brd);border-radius:8px;padding:14px;margin-bottom:8px;border-left:4px solid var(--brd);}
+.qa-gap-row.HIGH{border-left-color:var(--red);}
+.qa-gap-row.MEDIUM{border-left-color:var(--wrn);}
+.qa-gap-row.LOW{border-left-color:var(--blu);}
+.qa-gap-row.MANDATORY{border-left-color:var(--purp);}
+.sev-badge{display:inline-block;padding:2px 7px;border-radius:4px;font-size:9px;font-weight:700;font-family:DM Mono,monospace;text-transform:uppercase;letter-spacing:.04em;}
+.sev-HIGH{background:var(--redD);color:var(--red);}
+.sev-MEDIUM{background:var(--wrnD);color:var(--wrn);}
+.sev-LOW{background:var(--bluD);color:var(--blu);}
+.sev-MANDATORY{background:var(--purpD);color:var(--purp);}
+.qa-filter-bar{display:flex;gap:4px;margin-bottom:12px;flex-wrap:wrap;}
+.qa-filter-btn{padding:5px 12px;border-radius:20px;border:1px solid var(--brd);background:var(--s1);font-size:11px;font-weight:600;cursor:pointer;font-family:DM Mono,monospace;color:var(--dim);transition:all .15s;}
+.qa-filter-btn.on{background:var(--navy);border-color:var(--navy);color:#fff;}
+.qa-stat-row{display:flex;gap:0;border:1px solid var(--brd);border-radius:8px;overflow:hidden;margin-bottom:14px;}
+.qa-stat-box{flex:1;padding:10px 14px;border-right:1px solid var(--brd);background:var(--s1);}
+.qa-stat-box:last-child{border-right:none;}
+.qa-stat-val{font-size:22px;font-weight:700;color:var(--navy);font-family:DM Mono,monospace;}
+.qa-stat-val.red{color:var(--red);}
+.qa-stat-val.grn{color:var(--grn);}
+.qa-stat-lbl{font-size:9px;font-weight:500;color:var(--dim);text-transform:uppercase;letter-spacing:.04em;margin-top:2px;}
+.qa-progress-bar{background:var(--s1);border:1px solid var(--brd);border-radius:8px;padding:12px 16px;display:flex;align-items:center;gap:12px;margin-bottom:12px;}
+.qa-spin{width:16px;height:16px;border:2px solid var(--brd);border-top-color:var(--orange);border-radius:50%;animation:spin .7s linear infinite;flex-shrink:0;}
+@keyframes spin{to{transform:rotate(360deg)}}
+.qa-evidence-box{background:rgba(21,101,192,.04);border:1px solid rgba(21,101,192,.14);border-radius:6px;padding:9px 12px;margin-top:8px;}
+.qa-defense-box{background:rgba(46,125,50,.04);border:1px solid rgba(46,125,50,.14);border-radius:6px;padding:9px 12px;margin-top:8px;}
+.qa-dispute-box{background:rgba(176,106,0,.04);border:1px solid rgba(176,106,0,.14);border-radius:6px;padding:9px 12px;margin-top:8px;}
+.qa-textarea{width:100%;padding:10px 12px;border-radius:6px;background:#fff;border:1.5px solid var(--brd);color:var(--txt);font-size:12px;font-family:'DM Sans',sans-serif;resize:vertical;line-height:1.6;outline:none;box-sizing:border-box;}
+.qa-textarea:focus{border-color:var(--orange);box-shadow:0 0 0 2px rgba(232,93,4,.1);}
+.qa-input{width:100%;padding:9px 12px;border-radius:6px;background:#fff;border:1.5px solid var(--brd);color:var(--txt);font-size:13px;font-family:'DM Sans',sans-serif;outline:none;box-sizing:border-box;}
+.qa-input:focus{border-color:var(--orange);box-shadow:0 0 0 2px rgba(232,93,4,.1);}
+.qa-label{display:block;font-size:10px;font-weight:600;color:var(--dim);text-transform:uppercase;letter-spacing:.05em;margin-bottom:5px;font-family:DM Mono,monospace;}
+.no-op-badge{font-size:9px;padding:2px 8px;background:rgba(106,27,154,.1);border:1px solid rgba(106,27,154,.25);color:var(--purp);border-radius:20px;font-weight:700;font-family:DM Mono,monospace;}
+.qa-defend-btn{padding:5px 12px;border-radius:5px;border:1px solid var(--grn);background:rgba(46,125,50,.06);color:var(--grn);font-size:11px;font-weight:600;cursor:pointer;font-family:'DM Sans',sans-serif;}
+.qa-defend-btn.on{background:var(--grn);color:#fff;}
+.qa-concede-btn{padding:5px 12px;border-radius:5px;border:1px solid var(--wrn);background:rgba(176,106,0,.06);color:var(--wrn);font-size:11px;font-weight:600;cursor:pointer;font-family:'DM Sans',sans-serif;}
+.qa-concede-btn.on{background:var(--wrn);color:#fff;}
+input[type=file]{display:none}
+
+
+.btn{padding:5px 12px;border-radius:6px;font-size:11px;font-weight:500;cursor:pointer;border:none;font-family:'DM Sans',sans-serif;transition:all .15s;}
+.btn-gold{background:var(--gold);color:var(--navy);font-weight:600;}.btn-gold:disabled{opacity:.45;cursor:default;}
+.btn-ghost{background:rgba(255,255,255,.1);color:rgba(255,255,255,.85);}
+</style>
+</head>
+<body>
+<div id="jg-login" style="display:none;position:fixed;inset:0;background:rgba(13,29,60,.96);align-items:center;justify-content:center;z-index:9999;">
+  <div style="background:#fff;border-radius:16px;padding:40px 36px;width:100%;max-width:360px;text-align:center;box-shadow:0 24px 64px rgba(0,0,0,.4);">
+    <img src="https://jgimprovements-arch.github.io/jg-dispatch/logo.png" style="height:72px;width:auto;margin-bottom:14px;">
+    <div style="font-size:19px;font-weight:700;color:#0d2d5e;margin-bottom:4px;">JG Restoration</div>
+    <div style="font-size:13px;color:#6b82a0;margin-bottom:24px;">Sign in with your @jg-restoration.com account</div>
+    <div id="g_id_onload" data-client_id="209231675110-6id8vr3ehcocg4df7tvpc89jsmrvhogk.apps.googleusercontent.com" data-ux_mode="popup" data-callback="jgGoogleCb" data-auto_prompt="false"></div>
+    <div class="g_id_signin" data-type="standard" data-size="large" data-theme="outline" data-text="sign_in_with" data-shape="rectangular" data-logo_alignment="left" data-width="288"></div>
+    <div id="jg-login-err" style="font-size:12px;color:#c0392b;margin-top:12px;min-height:16px;"></div>
+  </div>
+</div>
+<nav id="jg-sidebar">
+  <div class="sb-logo">
+    <img src="https://jgimprovements-arch.github.io/jg-dispatch/logo.png" alt="JG">
+  </div>
+  <div class="sb-sec">PLATFORM</div>
+  <a href="hub.html" class="sb-lnk "><span class="sb-icon">🏠</span><span class="sb-label">Hub</span></a>
+  <a href="index.html" class="sb-lnk "><span class="sb-icon">📋</span><span class="sb-label">Dispatch</span></a>
+  <div class="sb-sec">AI TOOLS</div>
+  <a href="qa.html" class="sb-lnk"><span class="sb-icon">🔍</span><span class="sb-label">QA Review</span></a>
+  <a href="adjuster.html" class="sb-lnk "><span class="sb-icon">⚖️</span><span class="sb-label">Adjuster Rebuttal</span></a>
+  <a href="recon.html" class="sb-lnk "><span class="sb-icon">🏗️</span><span class="sb-label">Recon Estimate</span></a>
+  <div class="sb-sec">INSIGHTS</div>
+  <a href="intelligence.html" class="sb-lnk"><span class="sb-icon">🧠</span><span class="sb-label">Adjuster Intel</span></a>
+  <div class="sb-btm">
+    <div class="sb-user" onclick="jgSignOut()" title="Sign out">
+      <span id="sb-av">👤</span>
+      <span class="sb-user-label"><span id="sb-nm">...</span></span>
+    </div>
+  </div>
+</nav>
+<div id="app"><div style="padding:40px;text-align:center;color:#6b7a96;">Loading...</div></div>
+<script>
+const _JG_KEY='jg_platform_user',_JG_EXP='jg_platform_exp';
+function jgGoogleCb(r){try{const p=JSON.parse(atob(r.credential.split('.')[1]));if(!p.email.endsWith('@jg-restoration.com')){document.getElementById('jg-login-err').textContent='Access restricted to @jg-restoration.com accounts.';return;}const u={name:p.name||p.given_name,email:p.email,picture:p.picture||''};localStorage.setItem(_JG_KEY,JSON.stringify(u));localStorage.setItem(_JG_EXP,String(Date.now()+43200000));jgHideLogin();jgShowUser(u);}catch(e){document.getElementById('jg-login-err').textContent='Sign in failed.';}}
+function jgCheckAuth(){const r=localStorage.getItem(_JG_KEY),e=localStorage.getItem(_JG_EXP);if(r&&e&&Date.now()<parseInt(e)){jgHideLogin();jgShowUser(JSON.parse(r));return true;}jgShowLogin();return false;}
+function jgShowLogin(){const e=document.getElementById('jg-login');if(e)e.style.display='flex';}
+function jgHideLogin(){const e=document.getElementById('jg-login');if(e)e.style.display='none';}
+function jgShowUser(u){const n=document.getElementById('sb-nm'),a=document.getElementById('sb-av');if(n)n.textContent=u.name?u.name.split(' ')[0]:u.email.split('@')[0];if(a)a.innerHTML=u.picture?'<img src="'+u.picture+'" style="width:22px;height:22px;border-radius:50%;">':'👤';}
+function jgSignOut(){if(confirm('Sign out?')){localStorage.removeItem(_JG_KEY);localStorage.removeItem(_JG_EXP);window.location.href='hub.html';}}
+window.addEventListener('storage',e=>{if(e.key===_JG_KEY){if(e.newValue){jgHideLogin();jgShowUser(JSON.parse(e.newValue));}else jgShowLogin();}});
+Object.defineProperty(window,'currentUser',{get:()=>{try{return JSON.parse(localStorage.getItem(_JG_KEY)||'null')?.name||null;}catch(e){return null;}},configurable:true});
+function jgSignOut(){if(confirm('Sign out?')){localStorage.removeItem('jg_platform_user');localStorage.removeItem('jg_platform_exp');window.location.href='hub.html';}}
+function jgShowUser(u){var n=document.getElementById('sb-nm'),a=document.getElementById('sb-av');if(n)n.textContent=u.name?u.name.split(' ')[0]:u.email.split('@')[0];if(a&&u.picture)a.innerHTML='<img src="'+u.picture+'" style="width:22px;height:22px;border-radius:50%;">';}
+
+const SB_URL='https://nuykvchgecpiuikoerze.supabase.co';
+const SB_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im51eWt2Y2hnZWNwaXVpa29lcnplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYyNjM3ODYsImV4cCI6MjA5MTgzOTc4Nn0.39hZ8DdjT_0iFJXPeAL2FXUSLw8FZBirDVzxZTO1W9s';
+
+var state = {
+  rebuttals: [],
+  filtered: [],
+  loading: false,
+  analyzing: false,
+  analysisResult: null,
+  filterCarrier: '',
+  filterAdjuster: '',
+  apiKey: localStorage.getItem('jg_key')||''
+};
+
+async function sbFetch(path) {
+  var r = await fetch(SB_URL+path, {headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY}});
+  return r.ok ? r.json() : [];
+}
+
+async function loadRebuttals() {
+  state.loading = true; render();
+  try {
+    var rows = await sbFetch('/rest/v1/adjuster_rebuttals?order=created_at.desc&limit=200&select=*');
+    state.rebuttals = rows;
+    state.filtered = rows;
+  } catch(e) { console.error(e); }
+  state.loading = false; render();
+}
+
+function clearFilters(){state.filterCarrier="";state.filterAdjuster="";filterRebuttals();}
+function filterRebuttals() {
+  var fc = state.filterCarrier.toLowerCase();
+  var fa = state.filterAdjuster.toLowerCase();
+  state.filtered = state.rebuttals.filter(r => {
+    if(fc && !(r.carrier||'').toLowerCase().includes(fc)) return false;
+    if(fa && !(r.adjuster_name||'').toLowerCase().includes(fa)) return false;
+    return true;
+  });
+  render();
+}
+
+function getPatterns() {
+  var rows = state.filtered;
+  if(!rows.length) return null;
+  
+  var carriers = {};
+  var adjusters = {};
+  var allDisputed = [];
+  var totalDefended = 0, totalConceded = 0;
+  var totalDisputed = 0;
+  
+  rows.forEach(function(r) {
+    if(r.carrier) carriers[r.carrier] = (carriers[r.carrier]||0)+1;
+    if(r.adjuster_name) adjusters[r.adjuster_name] = (adjusters[r.adjuster_name]||0)+1;
+    totalDefended += r.items_defended||0;
+    totalConceded += r.items_conceded||0;
+    var amt = parseFloat((r.total_disputed||'$0').replace(/[$,]/g,''))||0;
+    totalDisputed += amt;
+    try { allDisputed = allDisputed.concat(JSON.parse(r.disputed_items||'[]')); } catch(e) {}
+  });
+  
+  var catStats = {};
+  allDisputed.forEach(function(d) {
+    var cat = d.category||'other';
+    if(!catStats[cat]) catStats[cat] = {total:0, defended:0, conceded:0, codes:{}};
+    catStats[cat].total++;
+    if(d.outcome==='defended') catStats[cat].defended++;
+    else catStats[cat].conceded++;
+    if(d.jg_code) catStats[cat].codes[d.jg_code] = (catStats[cat].codes[d.jg_code]||0)+1;
+  });
+  
+  return {
+    totalRebuttals: rows.length,
+    totalDefended, totalConceded,
+    winRate: totalDefended+totalConceded>0?Math.round(totalDefended/(totalDefended+totalConceded)*100):0,
+    avgDisputed: rows.length?Math.round(totalDisputed/rows.length):0,
+    topCarriers: Object.entries(carriers).sort((a,b)=>b[1]-a[1]).slice(0,8),
+    topAdjusters: Object.entries(adjusters).sort((a,b)=>b[1]-a[1]).slice(0,8),
+    catStats,
+    topCategories: Object.entries(catStats).sort((a,b)=>b[1].total-a[1].total).slice(0,10)
+  };
+}
+
+async function runAIAnalysis() {
+  if(!state.apiKey||state.analyzing||state.filtered.length<1) return;
+  state.analyzing = true; state.analysisResult = null; render();
+  
+  try {
+    var p = getPatterns();
+    var summary = JSON.stringify({
+      total_rebuttals: p.totalRebuttals,
+      win_rate: p.winRate+'%',
+      avg_disputed: '$'+p.avgDisputed.toLocaleString(),
+      top_carriers: p.topCarriers,
+      top_adjusters: p.topAdjusters,
+      category_breakdown: p.topCategories.map(function(c) {
+        return {
+          category: c[0],
+          total_disputes: c[1].total,
+          defended: c[1].defended,
+          conceded: c[1].conceded,
+          win_rate: Math.round(c[1].defended/c[1].total*100)+'%',
+          top_codes: Object.entries(c[1].codes).sort((a,b)=>b[1]-a[1]).slice(0,3).map(x=>x[0])
+        };
+      }),
+      recent_sample: state.filtered.slice(0,10).map(function(r) {
+        return {project:r.project_name,carrier:r.carrier,adjuster:r.adjuster_name,disputed:r.total_disputed,defended:r.items_defended,conceded:r.items_conceded};
+      })
+    }, null, 2);
+    
+    var r = await fetch('https://api.anthropic.com/v1/messages', {
+      method:'POST',
+      headers:{'Content-Type':'application/json','x-api-key':state.apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+      body: JSON.stringify({
+        model:'claude-sonnet-4-20250514',
+        max_tokens:2000,
+        system:'You are a claims analyst for JG Restoration, a Wisconsin restoration company. Analyze their adjuster rebuttal history and provide actionable intelligence. Focus on: patterns of disputing, which carriers/adjusters are most aggressive, what categories they dispute most, win rates, and specific recommendations for future rebuttals. Be concise and tactical. Format with clear sections using markdown.',
+        messages:[{role:'user',content:'Analyze this rebuttal history and give me tactical intelligence and predictions:\n\n'+summary}]
+      })
+    });
+    
+    if(r.ok) {
+      var d = await r.json();
+      state.analysisResult = d.content.filter(function(b){return b.type==='text';}).map(function(b){return b.text;}).join('');
+    }
+  } catch(e) { state.analysisResult = 'Analysis failed: '+e.message; }
+  state.analyzing = false; render();
+}
+
+function mdToHtml(t) {
+  t=t.replace(/\*\*(.*?)\*\*/g,"<strong>$1</strong>");
+  t=t.replace(/^## (.*)/gm,"<div style=\"font-size:14px;font-weight:700;color:#0d2d5e;margin:14px 0 6px;\">$1</div>");
+  t=t.replace(/^### (.*)/gm,"<div style=\"font-size:12px;font-weight:700;margin:10px 0 4px;\">$1</div>");
+  t=t.replace(/^- (.*)/gm,"<div style=\"padding:2px 0 2px 14px;font-size:12px;border-left:2px solid #e85d04;margin:2px 0;\">$1</div>");
+  t=t.replace(/\n\n/g,"<br>").replace(/\n/g,"");
+  return t;
+}
+
+function render() {
+  var a = document.getElementById('app');
+  if(!a) return;
+  var p = getPatterns();
+  var h = '';
+  
+  h += '<div class="qa-hdr"><div class="qa-hdr-l"><div class="qa-logo-mk">🧠</div><span class="qa-hdr-title">JG Restoration <span>Adjuster Intelligence</span></span><span class="qa-pill">'+state.rebuttals.length+' rebuttals stored</span></div>';
+  h += '<div class="qa-hdr-r"><button class="btn btn-gold" onclick="runAIAnalysis()" '+(state.analyzing||!state.apiKey||!state.filtered.length?'disabled':'')+'>'+( state.analyzing?'Analyzing...':'🧠 Run AI Analysis')+'</button></div></div>';
+  h += '<div class="qa-body">';
+  
+  if(state.loading) {
+    h += '<div class="qa-progress-bar"><div class="qa-spin"></div><span style="font-size:12px;color:var(--orange);font-family:DM Mono,monospace;">Loading rebuttal history...</span></div>';
+  }
+  
+  if(!state.loading && !state.rebuttals.length) {
+    h += '<div style="text-align:center;padding:60px 20px;color:var(--dim);">';
+    h += '<div style="font-size:48px;margin-bottom:16px;">📋</div>';
+    h += '<div style="font-size:16px;font-weight:600;color:var(--navy);margin-bottom:8px;">No rebuttal history yet</div>';
+    h += '<div style="font-size:13px;">Complete adjuster rebuttals and sign off to start building your intelligence database.</div>';
+    h += '</div>';
+  }
+  
+  if(p) {
+    // Stats bar
+    h += '<div class="qa-stat-row" style="margin-bottom:16px;">';
+    h += '<div class="qa-stat-box"><div class="qa-stat-val">'+p.totalRebuttals+'</div><div class="qa-stat-lbl">Total Rebuttals</div></div>';
+    h += '<div class="qa-stat-box"><div class="qa-stat-val" style="color:var(--grn);">'+p.winRate+'%</div><div class="qa-stat-lbl">Win Rate</div></div>';
+    h += '<div class="qa-stat-box"><div class="qa-stat-val">'+p.totalDefended+'</div><div class="qa-stat-lbl">Items Defended</div></div>';
+    h += '<div class="qa-stat-box"><div class="qa-stat-val" style="color:var(--wrn);">'+p.totalConceded+'</div><div class="qa-stat-lbl">Items Conceded</div></div>';
+    h += '<div class="qa-stat-box"><div class="qa-stat-val" style="color:var(--red);">$'+p.avgDisputed.toLocaleString()+'</div><div class="qa-stat-lbl">Avg Disputed</div></div>';
+    h += '</div>';
+    
+    // Filter bar
+    h += '<div style="display:flex;gap:10px;margin-bottom:16px;">';
+    h += '<input class="qa-input" type="text" placeholder="Filter by carrier..." value="'+state.filterCarrier+'" oninput="state.filterCarrier=this.value;filterRebuttals()" style="max-width:220px;">';
+    h += '<input class="qa-input" type="text" placeholder="Filter by adjuster name..." value="'+state.filterAdjuster+'" oninput="state.filterAdjuster=this.value;filterRebuttals()" style="max-width:220px;">';
+    if(state.filterCarrier||state.filterAdjuster) h += '<button class="qa-btn qa-btn-ghost" onclick="clearFilters()">Clear</button>';
+    h += '<span style="font-size:12px;color:var(--dim);align-self:center;">'+state.filtered.length+' of '+state.rebuttals.length+' rebuttals</span>';
+    h += '</div>';
+    
+    // Two-column layout
+    h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:16px;">';
+    
+    // Top carriers
+    h += '<div class="qa-card"><div class="qa-card-hd"><span class="qa-card-hd-title">🏢 Most Active Carriers</span></div><div class="qa-card-body" style="padding:10px;">';
+    p.topCarriers.forEach(function(c) {
+      h += '<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 8px;border-radius:6px;background:var(--s2);margin-bottom:4px;">';
+      h += '<span style="font-size:12px;font-weight:600;">'+c[0]+'</span>';
+      h += '<span style="font-size:11px;padding:2px 8px;background:var(--redD);color:var(--red);border-radius:4px;font-weight:700;">'+c[1]+'x</span>';
+      h += '</div>';
+    });
+    h += '</div></div>';
+    
+    // Top adjusters
+    h += '<div class="qa-card"><div class="qa-card-hd"><span class="qa-card-hd-title">👤 Repeat Adjusters</span></div><div class="qa-card-body" style="padding:10px;">';
+    p.topAdjusters.forEach(function(a) {
+      h += '<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 8px;border-radius:6px;background:var(--s2);margin-bottom:4px;">';
+      h += '<span style="font-size:12px;font-weight:600;">'+a[0]+'</span>';
+      h += '<span style="font-size:11px;padding:2px 8px;background:var(--wrnD);color:var(--wrn);border-radius:4px;font-weight:700;">'+a[1]+'x</span>';
+      h += '</div>';
+    });
+    if(!p.topAdjusters.length) h += '<div style="font-size:12px;color:var(--dim);padding:8px;">No named adjusters recorded yet</div>';
+    h += '</div></div>';
+    
+    h += '</div>';
+    
+    // Category breakdown
+    h += '<div class="qa-card" style="margin-bottom:16px;"><div class="qa-card-hd"><span class="qa-card-hd-title">📊 Disputed Categories — Win Rates</span></div><div style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;font-size:12px;">';
+    h += '<thead><tr style="background:var(--navy);color:#fff;"><th style="padding:8px 12px;text-align:left;font-size:10px;text-transform:uppercase;">Category</th><th style="padding:8px 12px;text-align:center;font-size:10px;text-transform:uppercase;">Total</th><th style="padding:8px 12px;text-align:center;font-size:10px;text-transform:uppercase;">Defended</th><th style="padding:8px 12px;text-align:center;font-size:10px;text-transform:uppercase;">Conceded</th><th style="padding:8px 12px;text-align:center;font-size:10px;text-transform:uppercase;">Win Rate</th><th style="padding:8px 12px;text-align:left;font-size:10px;text-transform:uppercase;">Top Codes</th></tr></thead><tbody>';
+    p.topCategories.forEach(function(c, i) {
+      var cat = c[0], s = c[1];
+      var wr = Math.round(s.defended/s.total*100);
+      var wrColor = wr>=70?'var(--grn)':wr>=50?'var(--wrn)':'var(--red)';
+      var topCodes = Object.entries(s.codes).sort((a,b)=>b[1]-a[1]).slice(0,3).map(x=>x[0]).join(', ');
+      h += '<tr style="background:'+(i%2===0?'var(--s1)':'var(--s2)')+';border-bottom:1px solid var(--brd);">';
+      h += '<td style="padding:8px 12px;font-weight:600;">'+cat+'</td>';
+      h += '<td style="padding:8px 12px;text-align:center;font-family:DM Mono,monospace;">'+s.total+'</td>';
+      h += '<td style="padding:8px 12px;text-align:center;color:var(--grn);font-weight:600;">'+s.defended+'</td>';
+      h += '<td style="padding:8px 12px;text-align:center;color:var(--wrn);font-weight:600;">'+s.conceded+'</td>';
+      h += '<td style="padding:8px 12px;text-align:center;"><span style="font-weight:700;font-family:DM Mono,monospace;color:'+wrColor+';">'+wr+'%</span></td>';
+      h += '<td style="padding:8px 12px;font-size:10px;color:var(--dim);font-family:DM Mono,monospace;">'+topCodes+'</td>';
+      h += '</tr>';
+    });
+    h += '</tbody></table></div></div>';
+    
+    // Recent rebuttals
+    h += '<div class="qa-card" style="margin-bottom:16px;"><div class="qa-card-hd"><span class="qa-card-hd-title">📋 Recent Rebuttals</span></div><div style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;font-size:12px;">';
+    h += '<thead><tr style="background:var(--navy);color:#fff;"><th style="padding:8px 12px;text-align:left;font-size:10px;text-transform:uppercase;">Project</th><th style="padding:8px 12px;text-align:left;font-size:10px;text-transform:uppercase;">Carrier</th><th style="padding:8px 12px;text-align:left;font-size:10px;text-transform:uppercase;">Adjuster</th><th style="padding:8px 12px;text-align:right;font-size:10px;text-transform:uppercase;">Disputed</th><th style="padding:8px 12px;text-align:center;font-size:10px;text-transform:uppercase;">Defended</th><th style="padding:8px 12px;text-align:center;font-size:10px;text-transform:uppercase;">Conceded</th><th style="padding:8px 12px;text-align:left;font-size:10px;text-transform:uppercase;">Date</th></tr></thead><tbody>';
+    state.filtered.slice(0,20).forEach(function(r, i) {
+      var dt = r.created_at ? new Date(r.created_at).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'2-digit'}) : '';
+      h += '<tr style="background:'+(i%2===0?'var(--s1)':'var(--s2)')+';border-bottom:1px solid var(--brd);">';
+      h += '<td style="padding:7px 12px;font-family:DM Mono,monospace;font-size:11px;font-weight:600;">'+( r.project_name||'—')+'</td>';
+      h += '<td style="padding:7px 12px;font-size:11px;">'+( r.carrier||'—')+'</td>';
+      h += '<td style="padding:7px 12px;font-size:11px;">'+( r.adjuster_name||'—')+'</td>';
+      h += '<td style="padding:7px 12px;text-align:right;font-family:DM Mono,monospace;color:var(--red);font-weight:600;">'+( r.total_disputed||'—')+'</td>';
+      h += '<td style="padding:7px 12px;text-align:center;color:var(--grn);font-weight:600;">'+( r.items_defended||0)+'</td>';
+      h += '<td style="padding:7px 12px;text-align:center;color:var(--wrn);font-weight:600;">'+( r.items_conceded||0)+'</td>';
+      h += '<td style="padding:7px 12px;font-size:11px;color:var(--dim);">'+dt+'</td>';
+      h += '</tr>';
+    });
+    h += '</tbody></table></div></div>';
+  }
+  
+  // AI Analysis result
+  if(state.analysisResult) {
+    h += '<div class="qa-card" style="margin-bottom:16px;"><div class="qa-card-hd" style="background:linear-gradient(135deg,#1565c0,#0d47a1);"><span class="qa-card-hd-title">🧠 AI Pattern Analysis</span><button class="btn btn-ghost" style="font-size:11px;padding:3px 10px;" onclick="runAIAnalysis()">Re-run</button></div>';
+    h += '<div class="qa-card-body" style="font-size:13px;line-height:1.7;color:var(--txt);">'+mdToHtml(state.analysisResult)+'</div></div>';
+  }
+  
+  h += '</div>';
+  a.innerHTML = h;
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+  jgCheckAuth();
+  var u = JSON.parse(localStorage.getItem('jg_platform_user')||'null');
+  if(u) jgShowUser(u);
+  var key = localStorage.getItem('jg_key');
+  if(key) state.apiKey = key;
+  loadRebuttals();
+});
+
+</script>
+</body>
+</html>
