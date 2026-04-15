@@ -687,8 +687,8 @@ async function boot(){
   await lookupTSIds();
   stepDone('techs', '✓ Technicians loaded');
 
-  // ── STEP 2: Load board state from server (while techs are fresh) ──
-  await loadBoardState();
+  // ── STEP 2: Restore from localStorage INSTANTLY, then sync Supabase in background ──
+  restoreBoardStateLocal(); // Instant — no network needed
 
   // ── STEP 3: Check job cache ──
   stepActive('cache');
@@ -785,7 +785,7 @@ function saveBoardState(){
   saveTimer = setTimeout(async ()=>{
     const payload = getBoardStatePayload();
     const stateWithDate = {
-      date: (()=>{ const n=new Date(); const d=new Date(n); if(n.getHours()<17) d.setDate(d.getDate()-1); return d.toISOString().split('T')[0]; })(),
+      date: (()=>{ const n=new Date(); const d=new Date(n); if(n.getHours()<5) d.setDate(d.getDate()-1); return d.toISOString().split('T')[0]; })(),
       ...payload,
       ts: Date.now()
     };
@@ -813,11 +813,42 @@ function updateSyncBadge(ts){
   }
 }
 
+function restoreBoardStateLocal(){
+  // Instantly restore from localStorage — no network wait
+  try{
+    const raw = localStorage.getItem('jg_board_state_v1');
+    if(!raw) return false;
+    const state = JSON.parse(raw);
+    const now = new Date();
+    const dispatchDay = new Date(now);
+    if(now.getHours() < 5) dispatchDay.setDate(dispatchDay.getDate()-1);
+    const today = dispatchDay.toISOString().split('T')[0];
+    if(state.date !== today) return false;
+    let restored = 0;
+    for(const l of ['appleton','stevens']){
+      for(const [nm, jids] of Object.entries(state.assignments?.[l]||{})){
+        if(techQ[l]?.[nm]){
+          techQ[l][nm].jobs = Array.isArray(jids)?jids:[];
+          unassigned[l] = (unassigned[l]||[]).filter(jid=>!jids.includes(jid));
+          restored += jids.length;
+        }
+      }
+    }
+    if(state.sick?.length) state.sick.forEach(nm=>sick.add(nm));
+    if(state.overrides) Object.assign(jobOverrides, state.overrides);
+    if(state.startTimes) Object.assign(techStartTimes, state.startTimes);
+    if(restored>0) updateSyncBadge(state.ts||Date.now());
+    // Sync from Supabase silently in background
+    setTimeout(()=>loadBoardState().catch(()=>{}), 2000);
+    return restored > 0;
+  }catch(e){ return false; }
+}
+
 async function loadBoardState(){
   const now = new Date();
-  // Dispatch day resets at 5PM — before 5PM use yesterday's date key
+  // Dispatch day resets at 5AM — before 5AM use yesterday's date key
   const dispatchDay = new Date(now);
-  if(now.getHours() < 17) dispatchDay.setDate(dispatchDay.getDate() - 1);
+  if(now.getHours() < 5) dispatchDay.setDate(dispatchDay.getDate() - 1);
   const today = dispatchDay.toISOString().split('T')[0];
   let state = null;
 
