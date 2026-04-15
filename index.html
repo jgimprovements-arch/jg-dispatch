@@ -1907,7 +1907,33 @@ function setJobTime(nm, jid, newStart, newEnd){
 }
 
 function setTechStart(nm, timeStr){
-  techStartTimes[nm] = timeToDec(timeStr);
+  const oldStart = getTechStart(nm);
+  const newStart = timeToDec(timeStr);
+  const delta = newStart - oldStart;
+  techStartTimes[nm] = newStart;
+
+  // Cascade delta to all card overrides for this tech that haven't been manually adjusted
+  // Only shift cards that were on the default sequential schedule (no manual override)
+  const techLoc = Object.keys(techQ.appleton||{}).includes(nm) ? 'appleton' : 'stevens';
+  const tech = techQ[techLoc]?.[nm];
+  if(tech){
+    let runHr = oldStart;
+    tech.jobs.forEach(jid => {
+      const key = nm+'|'+jid;
+      const j = jobs[jid];
+      const ov = jobOverrides[key];
+      const dur = ov ? timeToDec(ov.end) - timeToDec(ov.start) : (j?.hrs||2);
+      const curStart = ov ? timeToDec(ov.start) : runHr;
+      const curEnd = curStart + dur;
+      // Shift this card by delta
+      const ns = curStart + delta;
+      const ne = curEnd + delta;
+      jobOverrides[key] = {start:decToTime(ns), end:decToTime(ne)};
+      runHr = curEnd + 0.25;
+    });
+  }
+
+  lastLocalChange = Date.now();
   saveBoardState();
   render();
 }
