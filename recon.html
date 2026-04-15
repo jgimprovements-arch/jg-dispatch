@@ -511,6 +511,59 @@ function generateRebuildExcel(){
 var S={apiKey:localStorage.getItem('jg_key')||'',proj:'',enc:null,est:null,busy:false,prog:'',err:null,rebuildResult:null,result:null};
 
 
+
+function generateRebuildCSV() {
+  if(!S.rebuildResult||S.rebuildResult.error)return;
+  var rb=S.rebuildResult;
+  var rebName=S.proj.endsWith('-REB')?S.proj:S.proj.replace(/-WTR$/,'-REB').replace(/-FRE$/,'-REB').replace(/-MLD$/,'-REB').replace(/-CON$/,'-REB').replace(/-CT3$/,'-REB');
+  var today=new Date().toLocaleDateString('en-US',{month:'numeric',day:'numeric',year:'numeric'});
+
+  // Match template format: Date,Item,Group,Category,Description,Unit,Unit Price,Quantity,Tax
+  var rows=[];
+  rows.push(['Date','Item','Group','Category','Description','Unit','Unit Price','Quantity','Tax']);
+
+  (rb.line_items||[]).forEach(function(li){
+    function esc(v){var s=String(v||'');return(s.includes(',')||s.includes('"'))?'"'+s.replace(/"/g,'""')+'"':s;}
+    rows.push([
+      today,
+      esc((li.cat||'')+(li.sel?' '+li.sel:'')),  // Item = xactimate code e.g. "DRY HNG"
+      esc(li.room||''),                            // Group = room/area
+      esc(li.activity||'Labor'),                   // Category = Labor/Material
+      esc(li.description||''),
+      esc(li.unit||'SF'),
+      li.unit_cost||0,
+      li.qty||0,
+      li.sales_tax||0
+    ]);
+  });
+
+  // Additional items
+  (rb.additional_items||[]).forEach(function(ai){
+    if(!ai.description)return;
+    function esc(v){var s=String(v||'');return(s.includes(',')||s.includes('"'))?'"'+s.replace(/"/g,'""')+'"':s;}
+    rows.push([
+      today,
+      esc(ai.description),
+      'Additional',
+      'Material',
+      esc(ai.notes||ai.description),
+      'EA',
+      ai.estimated_cost||0,
+      ai.quantity||1,
+      0
+    ]);
+  });
+
+  var csv=rows.map(function(r){return r.join(',');}).join('\r\n');
+  var blob=new Blob([csv],{type:'text/csv;charset=utf-8;'});
+  var url=URL.createObjectURL(blob);
+  var a=document.createElement('a');
+  a.href=url;
+  a.download=rebName+'_Rebuild_Estimate.csv';
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 function draw(){
   var a=document.getElementById('app');
   if(!a)return;
@@ -559,6 +612,7 @@ function draw(){
     h+='<button class="qa-btn qa-btn-primary" onclick="generateRebuildPDF();setTimeout(function(){window.open(\'https://drive.google.com/drive/folders/1h6Vb0m-bIeoFIqIFyiteKMkvGwoeIUkz\',\'_blank\')},500)">PDF + Drive</button>';
     h+='<button class="qa-btn qa-btn-green" onclick="generateRebuildExcel()">📊 Download Excel</button>';
     h+='<button class="qa-btn qa-btn-ghost" onclick="generateRebuildExcel();setTimeout(function(){window.open(\'https://drive.google.com/drive/folders/1h6Vb0m-bIeoFIqIFyiteKMkvGwoeIUkz\',\'_blank\')},500)">Excel + Drive</button>';
+    h+='<button class="qa-btn qa-btn-ghost" onclick="generateRebuildCSV()">📋 Download CSV</button>';
     h+='<button class="qa-btn qa-btn-ghost" style="margin-left:auto;" onclick="S.rebuildResult=null;S.enc=null;S.est=null;S.proj=\'\';S.err=null;draw()">← New Estimate</button>';
     h+='</div>';
     h+='<div style="background:rgba(232,93,4,.06);border:1.5px solid rgba(232,93,4,.3);border-radius:8px;padding:12px 16px;margin-bottom:14px;display:flex;align-items:flex-start;gap:10px;">';
