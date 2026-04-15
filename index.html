@@ -621,22 +621,25 @@ function getBoardStatePayload(){
 
 let saveTimer = null;
 function saveBoardState(){
-  // Debounce — wait 1s after last change before saving
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(()=>{
+  saveTimer = setTimeout(async ()=>{
     const payload = getBoardStatePayload();
-    // Save to server
-    fetch(STATE_URL, {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify(payload)
-    }).catch(()=>{});
+    const stateWithDate = {
+      date: (()=>{ const n=new Date(); const d=new Date(n); if(n.getHours()<17) d.setDate(d.getDate()-1); return d.toISOString().split('T')[0]; })(),
+      ...payload,
+      ts: Date.now()
+    };
+    // Save to Supabase
+    try{
+      await sbFetch('/rest/v1/board_state', {
+        method: 'POST',
+        prefer: 'resolution=merge-duplicates',
+        body: JSON.stringify({id:'current', state: stateWithDate, updated_at: new Date().toISOString()})
+      });
+    }catch(e){}
     // Also save to localStorage as backup
     try{
-      localStorage.setItem('jg_board_state_v1', JSON.stringify({
-        date: (()=>{ const n=new Date(); const d=new Date(n); if(n.getHours()<17) d.setDate(d.getDate()-1); return d.toISOString().split('T')[0]; })(),
-        ...payload
-      }));
+      localStorage.setItem('jg_board_state_v1', JSON.stringify(stateWithDate));
     }catch(e){}
     updateSyncBadge(Date.now());
   }, 1000);
@@ -658,12 +661,12 @@ async function loadBoardState(){
   const today = dispatchDay.toISOString().split('T')[0];
   let state = null;
 
-  // Try server first
+  // Try Supabase first
   try{
-    const r = await fetch(STATE_URL);
+    const r = await sbFetch('/rest/v1/board_state?id=eq.current&select=state,updated_at');
     if(r.ok){
-      const data = await r.json();
-      if(data.ok && data.state) state = data.state;
+      const rows = await r.json();
+      if(rows.length && rows[0].state) state = rows[0].state;
     }
   }catch(e){}
 
@@ -774,8 +777,24 @@ function stepErr(id, label){
 
 // ── ALBI VIA VERCEL PROXY (direct, fast) ─────────
 const PROXY_URL = 'https://jg-proxy-v2.vercel.app/api/albi';
-const STATE_URL = 'https://jg-proxy-v2.vercel.app/api/state';
 const TS_PROXY = 'https://jg-proxy-v2.vercel.app/api/tsheets';
+
+// Supabase config
+const SB_URL = 'https://nuykvchgecpiuikoerze.supabase.co';
+const SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im51eWt2Y2hnZWNwaXVpa29lcnplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYyNjM3ODYsImV4cCI6MjA5MTgzOTc4Nn0.39hZ8DdjT_0iFJXPeAL2FXUSLw8FZBirDVzxZTO1W9s';
+async function sbFetch(path, opts={}){
+  const r = await fetch(SB_URL+path, {
+    ...opts,
+    headers: {
+      'apikey': SB_KEY,
+      'Authorization': 'Bearer '+SB_KEY,
+      'Content-Type': 'application/json',
+      'Prefer': opts.prefer||'',
+      ...(opts.headers||{})
+    }
+  });
+  return r;
+}
 
 async function loadAlbiViaClaudeZapier(){
   jobs={}; unassigned={appleton:[],stevens:[]};
@@ -1033,7 +1052,27 @@ async function pushTech(nm, locOverride){
         headers:{'Content-Type':'application/json'},
         body:JSON.stringify({data:[{assigned_user_ids:[uid],start,end,active:true,draft:false,schedule_calendar_id:'20981',title:j.name,
           notes:`${j.name} — ${j.addr}, ${j.city}`}]})});
-      if(r.ok)ok++;else fail++;
+      if(r.ok){
+        ok++;
+        // Log to Supabase dispatch history
+        const ovKey2=nm+'|'+jid;
+        const ov2=jobOverrides[ovKey2];
+        const startTime = ov2 ? ov2.start : decToTime(getTechStart(nm));
+        const endTime = ov2 ? ov2.end : decToTime(getTechStart(nm)+(j.hrs||2));
+        sbFetch('/rest/v1/dispatch_history', {
+          method:'POST',
+          body: JSON.stringify({
+            dispatch_date: today,
+            location: pushLoc,
+            tech_name: nm,
+            job_id: String(jid),
+            job_name: j.name,
+            job_type: j.type||'',
+            start_time: startTime,
+            end_time: endTime
+          })
+        }).catch(()=>{});
+      } else fail++;
     }catch{fail++;}
   }
   return{ok,fail,skip:0};
@@ -1173,7 +1212,6 @@ function renderBoard(){
             <button class="push-one-btn" onclick="pushOne('${nm}')">↑ Push</button>`}
       </div>`;
       const body=document.createElement('div');
-      console.log('renderBoard nm=['+nm+'] timeline:', timelineModes.has(nm), 'set:', [...timelineModes]);
       body.className='lane-body'+(timelineModes.has(nm)?' timeline-mode':'');
       body.dataset.tech=nm;
       if(!timelineModes.has(nm)){
@@ -1836,10 +1874,12 @@ let lastSyncTs = 0;
 
 async function pollSharedState(){
   try{
-    const r = await fetch(STATE_URL);
+    const r = await sbFetch('/rest/v1/board_state?id=eq.current&select=state,updated_at');
     if(!r.ok) return;
-    const data = await r.json();
-    if(!data.ok || !data.state) return;
+    const rows = await r.json();
+    if(!rows.length || !rows[0].state) return;
+    const data = {state: rows[0].state};
+    if(!data.state) return;
     // Only update if server state is newer than what we have
     if(data.state.ts > lastSyncTs + 5000){
       lastSyncTs = data.state.ts;
@@ -1872,7 +1912,10 @@ async function pollSharedState(){
 async function clearBoardState(){
   if(!confirm('Reset the entire board for all users? This cannot be undone.')) return;
   try{
-    await fetch(STATE_URL, {method:'DELETE'});
+    await sbFetch('/rest/v1/board_state?id=eq.current', {
+      method: 'PATCH',
+      body: JSON.stringify({state: {}, updated_at: new Date().toISOString()})
+    });
     localStorage.removeItem('jg_board_state_v1');
     // Clear all assignments
     for(const l of ['appleton','stevens']){
@@ -1969,7 +2012,6 @@ function getJobTime(nm, jid){
     const ov = jobOverrides[nm+'|'+qjid];
     const j = jobs[qjid];
     if(qjid === jid){
-      console.log('getJobTime key=['+nm+'|'+qjid+'] ov=',ov,'allKeys=',Object.keys(jobOverrides));
       if(ov) return {start:ov.start, end:ov.end};
       const endHr = runHr + (j?.hrs||2);
       return {start:decToTime(runHr), end:decToTime(endHr)};
@@ -2036,15 +2078,8 @@ const TYPE_COLORS = {
 function toggleTimeline(nm){
   if(timelineModes.has(nm)) timelineModes.delete(nm);
   else timelineModes.add(nm);
-  console.log('toggleTimeline nm=['+nm+'] has:', timelineModes.has(nm), 'all:', [...timelineModes]);
-  console.log('jobOverrides at toggle:', JSON.stringify(jobOverrides));
   render();
-  setTimeout(()=>{
-    const lanes = document.querySelectorAll('.lane-body');
-    lanes.forEach(b=>{
-      console.log('lane-body classes:', b.className, 'height:', b.offsetHeight, 'children:', b.children.length, 'tech:', b.dataset.tech);
-    });
-  }, 100);
+
 }
 
 function hourToY(hour){ return (hour - TL_START_HOUR) * PX_PER_HOUR; }
