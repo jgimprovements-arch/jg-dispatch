@@ -731,9 +731,20 @@ function render() {
       var skipCount = ST.importPreview.filter(function(r){ return  r.exists; }).length;
       h += '<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px;margin-bottom:14px;">';
       h += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">';
-      h += '<div><span style="font-size:13px;font-weight:700;color:var(--navy);">' + ST.importPreview.length + ' contacts found</span>';
+      // Type breakdown of NEW contacts
+      var typeCounts = {};
+      ST.importPreview.filter(function(r){return !r.exists;}).forEach(function(r){
+        typeCounts[r.type] = (typeCounts[r.type]||0) + 1;
+      });
+      h += '<div>';
+      h += '<span style="font-size:13px;font-weight:700;color:var(--navy);">' + ST.importPreview.length + ' contacts found</span>';
       h += '<span style="margin-left:10px;font-size:12px;padding:2px 8px;border-radius:4px;background:rgba(46,125,50,.1);color:var(--ok);font-weight:600;">' + newCount + ' new</span>';
       if (skipCount) h += '<span style="margin-left:6px;font-size:12px;padding:2px 8px;border-radius:4px;background:rgba(107,122,150,.1);color:var(--muted);font-weight:600;">' + skipCount + ' already exist</span>';
+      h += '</div>';
+      h += '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;margin-bottom:4px;">';
+      Object.entries(typeCounts).sort(function(a,b){return b[1]-a[1];}).forEach(function(e){
+        h += '<span style="font-size:10px;padding:2px 9px;border-radius:4px;background:' + typeColor(e[0]) + '22;color:' + typeColor(e[0]) + ';font-weight:700;border:1px solid ' + typeColor(e[0]) + '44;">' + e[0] + ': ' + e[1] + '</span>';
+      });
       h += '</div>';
       h += '<button style="padding:8px 20px;border-radius:6px;border:none;background:var(--orange);color:#fff;font-size:12px;font-weight:700;cursor:pointer;" onclick="runImport()">Import ' + newCount + ' New Contacts</button>';
       h += '</div>';
@@ -1091,6 +1102,16 @@ async function parseXLSX(file) {
   });
 }
 
+function detectPartnerType(title, org) {
+  var t = ((title||'') + ' ' + (org||'')).toLowerCase();
+  if (/plumb/.test(t))                                   return 'Plumber';
+  if (/realtor|real estate|realty|remax|keller|coldwell|century 21|exit realty|shorewest/.test(t)) return 'Realtor';
+  if (/insurance|adjuster|agent|allstate|state farm|american family|travelers|nationwide|erie|liberty mutual|farmers/.test(t)) return 'Insurance Agent';
+  if (/property manager|property mgmt|prop mgmt|property management|hoa|association manager/.test(t)) return 'Property Manager';
+  if (/general contractor|\bgc\b|builder|construction|remodel|restoration(?! tech)|renovate/.test(t)) return 'GC';
+  return 'Other';
+}
+
 function mapRow(obj) {
   function g(keys) {
     for (var i = 0; i < keys.length; i++) {
@@ -1099,18 +1120,21 @@ function mapRow(obj) {
     }
     return '';
   }
+  var title = g(['Job Title','job title','Title','title']);
+  var org   = g(['Organization','organization','Company','company']);
   return {
     name:         g(['Name','name','Full Name']),
-    type:         g(['Type','type','Contact Type']),
+    type:         detectPartnerType(title, org),
     phone:        g(['Mobile Number','Phone','mobile number','phone','Mobile','Cell']),
     email:        g(['Email','email','Email Address']),
     address:      g(['Address 1','Address','address']),
     city:         g(['City','city']),
     state:        g(['State','state']),
     zip:          g(['Zip Code','zip code','Zip','zip']),
-    organization: g(['Organization','organization','Company','company']),
+    organization: org,
     status:       g(['Status','status']),
-    referral_src: g(['Referral Source','referral source'])
+    referral_src: g(['Referral Source','referral source']),
+    job_title:    title
   };
 }
 
