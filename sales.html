@@ -1027,6 +1027,133 @@ async function runImport() {
   await loadAll();
 }
 
+
+// ── SPREADSHEET IMPORT ────────────────────────────────────────────────────────
+async function handleImportFile(file) {
+  if (!file) return;
+  var status = document.getElementById('imp-status');
+  if (status) status.innerHTML = '<div style="padding:10px;color:var(--muted);font-size:12px;">⏳ Reading file...</div>';
+  try {
+    var rows = file.name.toLowerCase().endsWith('.csv') ? await parseCSV(file) : await parseXLSX(file);
+    // Build dedup keys from existing partners
+    var existingKeys = new Set();
+    ST.partners.forEach(function(p) {
+      if (p.name)  existingKeys.add((p.name||'').toLowerCase().trim());
+      if (p.phone) existingKeys.add((p.phone||'').replace(/[^0-9]/g,''));
+      if (p.email) existingKeys.add((p.email||'').toLowerCase().trim());
+    });
+    ST.importPreview = rows.filter(function(r){ return r.name && r.name.trim(); }).map(function(r) {
+      var nameKey  = (r.name||'').toLowerCase().trim();
+      var phoneKey = (r.phone||'').replace(/[^0-9]/g,'');
+      var emailKey = (r.email||'').toLowerCase().trim();
+      var exists   = existingKeys.has(nameKey)
+                  || (phoneKey.length > 6 && existingKeys.has(phoneKey))
+                  || (emailKey.length > 3 && existingKeys.has(emailKey));
+      return Object.assign({}, r, {exists: exists});
+    });
+    ST.importResult = null;
+    render();
+    if (status) status.innerHTML = '';
+  } catch(e) {
+    if (status) status.innerHTML = '<div style="padding:10px;color:var(--danger);font-size:12px;">Error reading file: ' + e.message + '</div>';
+  }
+}
+
+async function parseCSV(file) {
+  var text = await file.text();
+  var lines = text.split('\n');
+  var headers = lines[0].split(',').map(function(h){ return h.trim().replace(/^"|"$/g,'').toLowerCase(); });
+  var rows = [];
+  for (var i = 1; i < lines.length; i++) {
+    if (!lines[i].trim()) continue;
+    var cells = lines[i].split(',').map(function(c){ return c.trim().replace(/^"|"$/g,''); });
+    var obj = {};
+    headers.forEach(function(h,j){ obj[h] = cells[j]||''; });
+    rows.push(mapRow(obj));
+  }
+  return rows;
+}
+
+async function parseXLSX(file) {
+  return new Promise(function(resolve, reject) {
+    var reader = new FileReader();
+    reader.onload = function(e) {
+      try {
+        var data = new Uint8Array(e.target.result);
+        var wb = XLSX.read(data, {type:'array', cellDates:true});
+        var ws = wb.Sheets[wb.SheetNames[0]];
+        var json = XLSX.utils.sheet_to_json(ws, {raw:false});
+        resolve(json.map(mapRow));
+      } catch(err) { reject(err); }
+    };
+    reader.onerror = reject;
+    reader.readAsArrayBuffer(file);
+  });
+}
+
+function mapRow(obj) {
+  function g(keys) {
+    for (var i = 0; i < keys.length; i++) {
+      var v = obj[keys[i]] || obj[keys[i].toLowerCase()] || obj[keys[i].toUpperCase()];
+      if (v && String(v).trim()) return String(v).trim();
+    }
+    return '';
+  }
+  return {
+    name:         g(['Name','name','Full Name']),
+    type:         g(['Type','type','Contact Type']),
+    phone:        g(['Mobile Number','Phone','mobile number','phone','Mobile','Cell']),
+    email:        g(['Email','email','Email Address']),
+    address:      g(['Address 1','Address','address']),
+    city:         g(['City','city']),
+    state:        g(['State','state']),
+    zip:          g(['Zip Code','zip code','Zip','zip']),
+    organization: g(['Organization','organization','Company','company']),
+    status:       g(['Status','status']),
+    referral_src: g(['Referral Source','referral source'])
+  };
+}
+
+async function runImport() {
+  var newContacts = (ST.importPreview||[]).filter(function(r){ return !r.exists; });
+  if (!newContacts.length) return;
+  var impType = document.getElementById('imp-type');
+  var impTier = document.getElementById('imp-tier');
+  var defType = impType ? impType.value : 'Customer';
+  var defTier = impTier ? impTier.value : 'C';
+  var btn = document.querySelector('[onclick="runImport()"]');
+  if (btn) { btn.textContent = 'Importing...'; btn.disabled = true; }
+  var imported = 0;
+  var skipped  = (ST.importPreview||[]).filter(function(r){ return r.exists; }).length;
+  // Batch insert 20 at a time
+  for (var i = 0; i < newContacts.length; i += 20) {
+    var batch = newContacts.slice(i, i+20).map(function(r) {
+      return {
+        name:    r.name,
+        company: r.organization||'',
+        type:    (r.type && r.type !== 'Customer') ? r.type : defType,
+        phone:   r.phone||'',
+        email:   r.email||'',
+        address: r.address||'',
+        city:    r.city||'',
+        market:  ST.market,
+        tier:    defTier,
+        status:  'Prospect',
+        notes:   r.referral_src ? 'Referral source: ' + r.referral_src : ''
+      };
+    });
+    await sb('/rest/v1/sales_partners', {
+      method:'POST',
+      headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json','Prefer':'return=minimal'},
+      body:JSON.stringify(batch)
+    });
+    imported += batch.length;
+  }
+  ST.importResult = {imported: imported, skipped: skipped};
+  ST.importPreview = null;
+  await loadAll();
+}
+
 document.addEventListener('DOMContentLoaded',function(){
   jgCheckAuth();
   var u=JSON.parse(localStorage.getItem('jg_platform_user')||'null');
