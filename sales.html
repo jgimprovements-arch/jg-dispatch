@@ -349,19 +349,57 @@ var ST = {
 };
 
 async function sb(path, opts) {
-  var r = await fetch(SB_URL+path, Object.assign({headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json'}}, opts||{}));
-  return r.ok ? r.json() : [];
+  try {
+    var r = await fetch(SB_URL+path, Object.assign({headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json','Prefer':'return=representation'}}, opts||{}));
+    if (!r.ok) {
+      var errBody = await r.text();
+      console.error('Supabase error', r.status, path, errBody);
+      showErr('DB error ' + r.status + ': ' + errBody.slice(0,120));
+      return [];
+    }
+    var ct = r.headers.get('content-type')||'';
+    return ct.includes('json') ? r.json() : [];
+  } catch(e) {
+    console.error('Supabase fetch failed:', e);
+    showErr('Network error: ' + e.message);
+    return [];
+  }
+}
+
+function showErr(msg) {
+  var el = document.getElementById('sb-err');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'sb-err';
+    el.style.cssText = 'position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:#c0392b;color:#fff;padding:10px 20px;border-radius:8px;font-size:12px;font-weight:600;z-index:9999;max-width:600px;text-align:center;box-shadow:0 4px 20px rgba(0,0,0,.3);';
+    document.body.appendChild(el);
+  }
+  el.textContent = msg;
+  el.style.display = 'block';
+  setTimeout(function(){ el.style.display = 'none'; }, 6000);
 }
 
 async function loadAll() {
   ST.loading=true; render();
   var m = ST.market;
-  var [partners, touches, followups, routes] = await Promise.all([
-    sb('/rest/v1/sales_partners?market=eq.'+encodeURIComponent(m)+'&order=tier.asc,name.asc&limit=500'),
-    sb('/rest/v1/sales_touches?market=eq.'+encodeURIComponent(m)+'&order=touch_date.desc&limit=200'),
-    sb('/rest/v1/sales_followups?market=eq.'+encodeURIComponent(m)+'&completed=eq.false&order=due_date.asc&limit=200'),
+  // Supabase default page size is 1000 - fetch all partners in pages
+  var allPartners = [];
+  var page = 0;
+  var pageSize = 1000;
+  while(true) {
+    var chunk = await fetch(SB_URL+'/rest/v1/sales_partners?market=eq.'+encodeURIComponent(m)+'&order=tier.asc,name.asc&limit='+pageSize+'&offset='+(page*pageSize), {
+      headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Prefer':'count=none'}
+    }).then(function(r){ return r.ok ? r.json() : []; });
+    allPartners = allPartners.concat(chunk);
+    if(chunk.length < pageSize) break;
+    page++;
+  }
+  var [touches, followups, routes] = await Promise.all([
+    sb('/rest/v1/sales_touches?market=eq.'+encodeURIComponent(m)+'&order=touch_date.desc&limit=500'),
+    sb('/rest/v1/sales_followups?market=eq.'+encodeURIComponent(m)+'&completed=eq.false&order=due_date.asc&limit=500'),
     sb('/rest/v1/sales_routes?market=eq.'+encodeURIComponent(m)+'&order=route_date.desc&limit=30')
   ]);
+  var partners = allPartners;
   ST.partners=partners||[]; ST.touches=touches||[]; ST.followups=followups||[]; ST.routes=routes||[];
   ST.loading=false; render();
 }
@@ -993,50 +1031,7 @@ function mapRow(obj) {
   };
 }
 
-async function runImport() {
-  var newContacts = (ST.importPreview||[]).filter(function(r){return !r.exists;});
-  if(!newContacts.length) return;
 
-  var impType = document.getElementById('imp-type');
-  var impTier = document.getElementById('imp-tier');
-  var defType = impType ? impType.value : 'Customer';
-  var defTier = impTier ? impTier.value : 'C';
-
-  var btn = document.querySelector('[onclick="runImport()"]');
-  if(btn) btn.textContent = 'Importing...';
-
-  var imported = 0;
-  var skipped = (ST.importPreview||[]).filter(function(r){return r.exists;}).length;
-
-  // Batch insert in groups of 20
-  for(var i=0; i<newContacts.length; i+=20) {
-    var batch = newContacts.slice(i, i+20).map(function(r) {
-      return {
-        name: r.name,
-        company: r.organization || '',
-        type: (r.type && r.type !== 'Customer') ? r.type : defType,
-        phone: r.phone || '',
-        email: r.email || '',
-        address: r.address || '',
-        city: r.city || '',
-        market: ST.market,
-        tier: defTier,
-        status: 'Prospect',
-        notes: r.referral_src ? 'Referral source: ' + r.referral_src : ''
-      };
-    });
-    await sb('/rest/v1/sales_partners', {
-      method:'POST',
-      headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json','Prefer':'return=minimal'},
-      body:JSON.stringify(batch)
-    });
-    imported += batch.length;
-  }
-
-  ST.importResult = {imported: imported, skipped: skipped};
-  ST.importPreview = null;
-  await loadAll();
-}
 
 
 // ── SPREADSHEET IMPORT ────────────────────────────────────────────────────────
@@ -1155,7 +1150,7 @@ async function runImport() {
       return {
         name:    r.name,
         company: r.organization||'',
-        type:    (r.type && r.type !== 'Customer') ? r.type : defType,
+        type:    (r.type && r.type !== 'Customer' && r.type !== 'Other') ? r.type : defType,
         phone:   r.phone||'',
         email:   r.email||'',
         address: r.address||'',
@@ -1166,12 +1161,29 @@ async function runImport() {
         notes:   r.referral_src ? 'Referral source: ' + r.referral_src : ''
       };
     });
-    await sb('/rest/v1/sales_partners', {
-      method:'POST',
-      headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json','Prefer':'return=minimal'},
-      body:JSON.stringify(batch)
-    });
-    imported += batch.length;
+    try {
+      var resp = await fetch(SB_URL + '/rest/v1/sales_partners', {
+        method: 'POST',
+        headers: {
+          'apikey': SB_KEY,
+          'Authorization': 'Bearer ' + SB_KEY,
+          'Content-Type': 'application/json',
+          'Prefer': 'return=minimal'
+        },
+        body: JSON.stringify(batch)
+      });
+      if (!resp.ok) {
+        var errText = await resp.text();
+        console.error('Insert failed:', resp.status, errText);
+        showErr('Import error ' + resp.status + ': ' + errText.slice(0,150));
+        break;
+      }
+      imported += batch.length;
+      if (btn) btn.textContent = 'Importing... ' + imported + '/' + newContacts.length;
+    } catch(e) {
+      showErr('Insert failed: ' + e.message);
+      break;
+    }
   }
   ST.importResult = {imported: imported, skipped: skipped};
   ST.importPreview = null;
