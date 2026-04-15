@@ -521,8 +521,8 @@ function render() {
   h+='<div style="background:var(--surface);border-bottom:1px solid var(--border);padding:8px 16px 0;display:flex;align-items:center;justify-content:space-between;">';
   h+=mkMarketToggle();
   h+='<div class="sales-tabs" style="border:none;padding:0;">';
-  ['partners','touches','routes','followups'].forEach(function(t) {
-    var labels={'partners':'👥 Partners','touches':'📋 Touches','routes':'🚗 Routes','followups':'🔔 Follow-ups'};
+  ['partners','touches','routes','followups','import'].forEach(function(t) {
+    var labels={'partners':'👥 Partners','touches':'📋 Touches','routes':'🚗 Routes','followups':'🔔 Follow-ups','import':'📥 Import'};
     var cnt=''; 
     if(t==='followups') cnt=' <span style="background:var(--danger);color:#fff;font-size:9px;padding:1px 5px;border-radius:8px;margin-left:4px;">'+ST.followups.filter(function(f){return !f.completed&&daysUntil(f.due_date)<=0;}).length+'</span>';
     h+=mkTab(t, labels[t]+cnt);
@@ -700,6 +700,69 @@ function render() {
     if(!ST.followups.length) h+='<div style="text-align:center;padding:40px;color:var(--muted);">No open follow-ups. Nice work!</div>';
   }
 
+
+  // ── IMPORT TAB ────────────────────────────────────────────────────────────
+  if(ST.tab==='import') {
+    h+="<div style=\"margin-bottom:16px;\">";
+    h+="<div style=\"font-size:13px;font-weight:700;color:var(--navy);margin-bottom:4px;\">📥 Import Contacts from Spreadsheet</div>";
+    h+="<div style=\"font-size:12px;color:var(--muted);\">Upload an Albi contacts export (.xlsx or .csv). Only new contacts not already in your partner list will be added. Duplicates are detected by name + phone or name + email.</div>";
+    h+="</div>";
+
+    h+="<div style=\"background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:20px;margin-bottom:16px;\">";
+    h+="<div style=\"display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:16px;\">";
+    h+="<div class=\"form-group\"><label class=\"form-label\">Default Partner Type</label><select class=\"form-select\" id=\"imp-type\"><option>Customer</option><option>Plumber</option><option>Realtor</option><option>Insurance Agent</option><option>Property Manager</option><option>GC</option><option>Other</option></select></div>";
+    h+="<div class=\"form-group\"><label class=\"form-label\">Default Tier</label><select class=\"form-select\" id=\"imp-tier\"><option value=\"C\">C - Cold / Prospect</option><option value=\"B\">B - Active</option><option value=\"A\">A - Top Partner</option></select></div>";
+    h+="</div>";
+    h+="<div style=\"border:2px dashed var(--border);border-radius:8px;padding:32px 16px;text-align:center;cursor:pointer;\" onclick=\"document.getElementById('imp-file').click()\" id=\"imp-dropzone\">";
+    h+="<div style=\"font-size:32px;margin-bottom:10px;opacity:.4;\">📊</div>";
+    h+="<div style=\"font-size:13px;font-weight:600;color:var(--navy);margin-bottom:4px;\">Click to upload contacts spreadsheet</div>";
+    h+="<div style=\"font-size:11px;color:var(--muted);\">Supports .xlsx and .csv — Albi contacts export format</div>";
+    h+="<input type=\"file\" id=\"imp-file\" accept=\".xlsx,.csv\" style=\"display:none\" onchange=\"handleImportFile(this.files[0])\">";
+    h+="</div>";
+    h+="<div id=\"imp-status\"></div>";
+    h+="</div>";
+
+    if(ST.importPreview && ST.importPreview.length) {
+      var newCount = ST.importPreview.filter(function(r){return !r.exists;}).length;
+      var skipCount = ST.importPreview.filter(function(r){return r.exists;}).length;
+      h+="<div style=\"background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px;margin-bottom:14px;\">";
+      h+="<div style=\"display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;\">";
+      h+="<div>";
+      h+="<span style=\"font-size:13px;font-weight:700;color:var(--navy);\">"+ST.importPreview.length+" contacts found</span>";
+      h+="<span style=\"margin-left:10px;font-size:12px;padding:2px 8px;border-radius:4px;background:rgba(46,125,50,.1);color:var(--ok);font-weight:600;\">"+newCount+" new</span>";
+      if(skipCount) h+="<span style=\"margin-left:6px;font-size:12px;padding:2px 8px;border-radius:4px;background:rgba(107,122,150,.1);color:var(--muted);font-weight:600;\">"+skipCount+" already exist</span>";
+      h+="</div>";
+      h+="<button style=\"padding:8px 20px;border-radius:6px;border:none;background:var(--orange);color:#fff;font-size:12px;font-weight:700;cursor:pointer;\" onclick=\"runImport()\">Import "+newCount+" New Contacts</button>";
+      h+="</div>";
+      h+="<div style=\"max-height:320px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;\">";
+      h+="<table style=\"width:100%;border-collapse:collapse;font-size:11px;\">";
+      h+="<thead><tr style=\"background:var(--navy);color:#fff;\"><th style=\"padding:7px 10px;text-align:left;font-size:9px;text-transform:uppercase;\">Status</th><th style=\"padding:7px 10px;text-align:left;font-size:9px;text-transform:uppercase;\">Name</th><th style=\"padding:7px 10px;text-align:left;font-size:9px;text-transform:uppercase;\">Type</th><th style=\"padding:7px 10px;text-align:left;font-size:9px;text-transform:uppercase;\">Phone</th><th style=\"padding:7px 10px;text-align:left;font-size:9px;text-transform:uppercase;\">City</th><th style=\"padding:7px 10px;text-align:left;font-size:9px;text-transform:uppercase;\">Organization</th></tr></thead>";
+      h+="<tbody>";
+      ST.importPreview.slice(0,100).forEach(function(r,i) {
+        var bg = r.exists ? 'rgba(107,122,150,.05)' : (i%2===0?'var(--s1)':'#fff');
+        var statusBadge = r.exists
+          ? "<span style=\"font-size:9px;padding:1px 6px;border-radius:4px;background:rgba(107,122,150,.12);color:var(--muted);font-weight:700;\">EXISTS</span>"
+          : "<span style=\"font-size:9px;padding:1px 6px;border-radius:4px;background:rgba(46,125,50,.12);color:var(--ok);font-weight:700;\">NEW</span>";
+        h+="<tr style=\"background:"+bg+";border-bottom:1px solid var(--border);opacity:"+(r.exists?'0.5':'1')+";\">";
+        h+="<td style=\"padding:6px 10px;\">"+statusBadge+"</td>";
+        h+="<td style=\"padding:6px 10px;font-weight:600;\">"+(r.name||'—')+"</td>";
+        h+="<td style=\"padding:6px 10px;color:var(--muted);\">"+(r.type||'—')+"</td>";
+        h+="<td style=\"padding:6px 10px;font-family:DM Mono,monospace;\">"+(r.phone||'—')+"</td>";
+        h+="<td style=\"padding:6px 10px;color:var(--muted);\">"+(r.city||'—')+"</td>";
+        h+="<td style=\"padding:6px 10px;color:var(--muted);\">"+(r.organization||'—')+"</td>";
+        h+="</tr>";
+      });
+      if(ST.importPreview.length > 100) h+="<tr><td colspan=\"6\" style=\"padding:8px 10px;text-align:center;color:var(--muted);font-size:11px;\">... and "+(ST.importPreview.length-100)+" more</td></tr>";
+      h+="</tbody></table></div></div>";
+    }
+
+    if(ST.importResult) {
+      h+="<div style=\"padding:14px 16px;border-radius:8px;background:rgba(46,125,50,.08);border:1.5px solid var(--ok);color:var(--ok);font-size:13px;font-weight:600;\">";
+      h+="✓ "+ST.importResult.imported+" contacts imported successfully. "+ST.importResult.skipped+" duplicates skipped.";
+      h+="</div>";
+    }
+  }
+
   h+='</div>'; // end sales-body
 
   // ── MODALS ────────────────────────────────────────────────────────────────
@@ -844,6 +907,156 @@ function render() {
   }
 
   a.innerHTML=h;
+}
+
+
+// ── SPREADSHEET IMPORT ────────────────────────────────────────────────────────
+// Add to state
+ST.importPreview = null;
+ST.importResult = null;
+
+async function handleImportFile(file) {
+  if(!file) return;
+  var status = document.getElementById('imp-status');
+  if(status) status.innerHTML = '<div style="padding:10px;color:var(--muted);font-size:12px;">Reading file...</div>';
+
+  try {
+    var rows = [];
+    if(file.name.endsWith('.csv')) {
+      rows = await parseCSV(file);
+    } else {
+      rows = await parseXLSX(file);
+    }
+
+    // Build dedup keys from existing partners
+    var existingKeys = new Set();
+    ST.partners.forEach(function(p) {
+      if(p.name) existingKeys.add((p.name||'').toLowerCase().trim());
+      if(p.phone) existingKeys.add((p.phone||'').replace(/\D/g,''));
+      if(p.email) existingKeys.add((p.email||'').toLowerCase().trim());
+    });
+
+    // Map rows to preview
+    ST.importPreview = rows.filter(function(r){ return r.name && r.name.trim(); }).map(function(r) {
+      var nameKey = (r.name||'').toLowerCase().trim();
+      var phoneKey = (r.phone||'').replace(/\D/g,'');
+      var emailKey = (r.email||'').toLowerCase().trim();
+      var exists = existingKeys.has(nameKey) ||
+                   (phoneKey.length > 6 && existingKeys.has(phoneKey)) ||
+                   (emailKey && existingKeys.has(emailKey));
+      return Object.assign({}, r, {exists: exists});
+    });
+
+    ST.importResult = null;
+    render();
+    if(status) status.innerHTML = '';
+  } catch(e) {
+    if(status) status.innerHTML = '<div style="padding:10px;color:var(--danger);font-size:12px;">Error reading file: ' + e.message + '</div>';
+  }
+}
+
+async function parseCSV(file) {
+  var text = await file.text();
+  var lines = text.split('\n');
+  var headers = lines[0].split(',').map(function(h){return h.trim().replace(/^"|"$/g,'').toLowerCase();});
+  var rows = [];
+  for(var i=1;i<lines.length;i++) {
+    if(!lines[i].trim()) continue;
+    var cells = lines[i].split(',').map(function(c){return c.trim().replace(/^"|"$/g,'');});
+    var obj = {};
+    headers.forEach(function(h,j){obj[h]=cells[j]||'';});
+    rows.push(mapRow(obj));
+  }
+  return rows;
+}
+
+async function parseXLSX(file) {
+  return new Promise(function(resolve, reject) {
+    var reader = new FileReader();
+    reader.onload = function(e) {
+      try {
+        var data = new Uint8Array(e.target.result);
+        var wb = XLSX.read(data, {type:'array',cellDates:true});
+        var ws = wb.Sheets[wb.SheetNames[0]];
+        var json = XLSX.utils.sheet_to_json(ws, {raw:false});
+        resolve(json.map(mapRow));
+      } catch(err) { reject(err); }
+    };
+    reader.onerror = reject;
+    reader.readAsArrayBuffer(file);
+  });
+}
+
+function mapRow(obj) {
+  // Map column names from Albi export format
+  // Headers: Name, Type, Mobile Number, Email, Job Title, Address, Address 1, City, State, Zip Code, Organization, Status, Referral Source, Salesperson
+  function g(keys) {
+    for(var i=0;i<keys.length;i++) {
+      var v = obj[keys[i]] || obj[keys[i].toLowerCase()] || obj[keys[i].toUpperCase()];
+      if(v && String(v).trim()) return String(v).trim();
+    }
+    return '';
+  }
+  return {
+    name:         g(['Name','name','Full Name','full name']),
+    type:         g(['Type','type','Contact Type']),
+    phone:        g(['Mobile Number','Phone','mobile number','phone','Mobile','Cell']),
+    email:        g(['Email','email','Email Address']),
+    job_title:    g(['Job Title','job title','Title']),
+    address:      g(['Address 1','Address','address']),
+    city:         g(['City','city']),
+    state:        g(['State','state']),
+    zip:          g(['Zip Code','zip code','Zip','zip']),
+    organization: g(['Organization','organization','Company','company']),
+    status:       g(['Status','status']),
+    referral_src: g(['Referral Source','referral source']),
+    salesperson:  g(['Salesperson','salesperson'])
+  };
+}
+
+async function runImport() {
+  var newContacts = (ST.importPreview||[]).filter(function(r){return !r.exists;});
+  if(!newContacts.length) return;
+
+  var impType = document.getElementById('imp-type');
+  var impTier = document.getElementById('imp-tier');
+  var defType = impType ? impType.value : 'Customer';
+  var defTier = impTier ? impTier.value : 'C';
+
+  var btn = document.querySelector('[onclick="runImport()"]');
+  if(btn) btn.textContent = 'Importing...';
+
+  var imported = 0;
+  var skipped = (ST.importPreview||[]).filter(function(r){return r.exists;}).length;
+
+  // Batch insert in groups of 20
+  for(var i=0; i<newContacts.length; i+=20) {
+    var batch = newContacts.slice(i, i+20).map(function(r) {
+      return {
+        name: r.name,
+        company: r.organization || '',
+        type: (r.type && r.type !== 'Customer') ? r.type : defType,
+        phone: r.phone || '',
+        email: r.email || '',
+        address: r.address || '',
+        city: r.city || '',
+        market: ST.market,
+        tier: defTier,
+        status: 'Prospect',
+        notes: r.referral_src ? 'Referral source: ' + r.referral_src : ''
+      };
+    });
+    await sb('/rest/v1/sales_partners', {
+      method:'POST',
+      headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json','Prefer':'return=minimal'},
+      body:JSON.stringify(batch)
+    });
+    imported += batch.length;
+  }
+
+  ST.importResult = {imported: imported, skipped: skipped};
+  ST.importPreview = null;
+  await loadAll();
 }
 
 document.addEventListener('DOMContentLoaded',function(){
