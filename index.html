@@ -1058,7 +1058,7 @@ function renderBoard(){
     hd.innerHTML=`<div class="lane-hd-l">
       <div class="av" style="background:${isSick?'#c02020':tech.color}">${tech.initials}</div>
       <div style="min-width:0;">
-        <div class="tech-nm">${nm}</div>
+        <div class="tech-nm">${(()=>{const p=nm.trim().split(' ');return p[0]+(p[1]?' '+p[1][0]+'.':'')})()} </div>
         <div class="tech-sb" id="sb_${tech.initials}"></div>
       </div>
     </div>
@@ -1139,7 +1139,7 @@ function renderBoard(){
       hd.innerHTML=`<div class="lane-hd-l">
         <div class="av" style="background:${isSick?'#c02020':tech.color};border:2px solid #a0b4cc;">${tech.initials}</div>
         <div style="min-width:0;">
-          <div class="tech-nm">${nm}</div>
+          <div class="tech-nm">${(()=>{const p=nm.trim().split(' ');return p[0]+(p[1]?' '+p[1][0]+'.':'')})()} </div>
           <div class="tech-sb" style="color:#a0b4cc;" id="sb_${tech.initials}"></div>
         </div>
       </div>
@@ -1224,7 +1224,7 @@ function renderBoard(){
       hd.innerHTML=`<div class="lane-hd-l">
         <div class="av" style="background:${isSick?'#c02020':tech.color};border:2px solid var(--gold);">${tech.initials}</div>
         <div style="min-width:0;">
-          <div class="tech-nm">${nm}</div>
+          <div class="tech-nm">${(()=>{const p=nm.trim().split(' ');return p[0]+(p[1]?' '+p[1][0]+'.':'')})()} </div>
           <div class="tech-sb" style="color:var(--gold);">${otherLabel2}</div>
         </div>
       </div>
@@ -2037,10 +2037,14 @@ function renderTimelineLane(body, nm, tech){
 
     card.innerHTML = `
       <div class="tl-card-inner" style="height:calc(100% - 8px);overflow:hidden;">
-        <div class="tl-card-name" style="color:#fff;font-size:9px;">${j.name}</div>
+        <div class="tl-card-name" style="color:#fff;font-size:9px;">${(()=>{const p=j.name.split(' ');return p[0]+' '+p[1][0]+'.';})()} </div>
         <div class="tl-card-time" style="color:rgba(255,255,255,.85);font-size:9px;">${decToTime12(startHr)} – ${decToTime12(endHr)}</div>
       </div>
       <div class="tl-card-resize"></div>`;
+
+    // Store live position in dataset — no closure dependency
+    card.dataset.startHr = startHr;
+    card.dataset.endHr = endHr;
 
     // Drag to move
     card.addEventListener('mousedown', (e) => {
@@ -2048,8 +2052,8 @@ function renderTimelineLane(body, nm, tech){
       e.preventDefault();
       e.stopPropagation();
       const startY = e.clientY;
-      const origStart = startHr;
-      const origEnd = endHr;
+      const origStart = parseFloat(card.dataset.startHr);
+      const origEnd = parseFloat(card.dataset.endHr);
       const duration = origEnd - origStart;
       card.style.cursor = 'grabbing';
       card.style.zIndex = 999;
@@ -2058,29 +2062,26 @@ function renderTimelineLane(body, nm, tech){
         em.preventDefault();
         const dy = em.clientY - startY;
         const dh = dy / PX_PER_HOUR;
-        const newStart = Math.round((origStart + dh) * 4) / 4;
-        const newEnd = newStart + duration;
-        // Clamp to bounds
-        const clampedStart = Math.max(TL_START_HOUR, Math.min(newStart, TL_END_HOUR - duration));
-        const clampedEnd = clampedStart + duration;
-        startHr = clampedStart; endHr = clampedEnd;
-        jobOverrides[nm+'|'+jid] = {start:decToTime(clampedStart), end:decToTime(clampedEnd)};
-        card.style.top = hourToY(clampedStart)+'px';
-        card.style.height = Math.max(hourToY(clampedEnd)-hourToY(clampedStart), 48)+'px';
+        const raw = Math.round((origStart + dh) * 4) / 4;
+        const cs = Math.max(TL_START_HOUR, Math.min(raw, TL_END_HOUR - duration));
+        const ce = cs + duration;
+        card.dataset.startHr = cs;
+        card.dataset.endHr = ce;
+        jobOverrides[nm+'|'+jid] = {start:decToTime(cs), end:decToTime(ce)};
+        card.style.top = hourToY(cs)+'px';
+        card.style.height = Math.max(hourToY(ce)-hourToY(cs), 48)+'px';
         const timeEl = card.querySelector('.tl-card-time');
-        if(timeEl) timeEl.textContent = decToTime12(clampedStart)+' – '+decToTime12(clampedEnd);
+        if(timeEl) timeEl.textContent = decToTime12(cs)+' – '+decToTime12(ce);
       };
       const onUp = () => {
         card.style.cursor = 'grab';
         card.style.zIndex = 5+idx;
         card.style.opacity = '1';
-        // Force-write final position
-        jobOverrides[nm+'|'+jid] = {start:decToTime(startHr), end:decToTime(endHr)};
+        const cs = parseFloat(card.dataset.startHr);
+        const ce = parseFloat(card.dataset.endHr);
+        jobOverrides[nm+'|'+jid] = {start:decToTime(cs), end:decToTime(ce)};
         lastLocalChange = Date.now();
         saveBoardState();
-        // Don't call render() — it resets closures. Just update the time label in place.
-        const timeEl = card.querySelector('.tl-card-time');
-        if(timeEl) timeEl.textContent = decToTime12(startHr)+' – '+decToTime12(endHr);
         document.removeEventListener('mousemove', onMove);
         document.removeEventListener('mouseup', onUp);
       };
@@ -2093,27 +2094,25 @@ function renderTimelineLane(body, nm, tech){
       e.preventDefault();
       e.stopPropagation();
       const startY = e.clientY;
-      const origEnd = endHr;
+      const origEnd = parseFloat(card.dataset.endHr);
       const onMove = (em) => {
+        em.preventDefault();
         const dy = em.clientY - startY;
         const dh = dy / PX_PER_HOUR;
-        const newEnd = Math.round((origEnd + dh) * 4) / 4;
-        if(newEnd > startHr + 0.25 && newEnd <= TL_END_HOUR){
-          endHr = newEnd;
-          jobOverrides[nm+'|'+jid] = {start:decToTime(startHr), end:decToTime(newEnd)};
-          card.style.height = Math.max(hourToY(newEnd)-hourToY(startHr), 24)+'px';
-          const timeEl = card.querySelector('.tl-card-time');
-          if(timeEl) timeEl.textContent = decToTime12(startHr)+' – '+decToTime12(newEnd);
-        }
+        const cs = parseFloat(card.dataset.startHr);
+        const ne = Math.max(cs + 0.25, Math.min(Math.round((origEnd + dh) * 4) / 4, TL_END_HOUR));
+        card.dataset.endHr = ne;
+        jobOverrides[nm+'|'+jid] = {start:decToTime(cs), end:decToTime(ne)};
+        card.style.height = Math.max(hourToY(ne)-hourToY(cs), 48)+'px';
+        const timeEl = card.querySelector('.tl-card-time');
+        if(timeEl) timeEl.textContent = decToTime12(cs)+' – '+decToTime12(ne);
       };
       const onUp = () => {
-        // Force-write final size
-        jobOverrides[nm+'|'+jid] = {start:decToTime(startHr), end:decToTime(endHr)};
+        const cs = parseFloat(card.dataset.startHr);
+        const ce = parseFloat(card.dataset.endHr);
+        jobOverrides[nm+'|'+jid] = {start:decToTime(cs), end:decToTime(ce)};
         lastLocalChange = Date.now();
         saveBoardState();
-        // Update label in place — no render() to avoid resetting closures
-        const timeEl2 = card.querySelector('.tl-card-time');
-        if(timeEl2) timeEl2.textContent = decToTime12(startHr)+' – '+decToTime12(endHr);
         document.removeEventListener('mousemove', onMove);
         document.removeEventListener('mouseup', onUp);
       };
