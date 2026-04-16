@@ -284,6 +284,7 @@ body{padding-left:48px;box-sizing:border-box;}
 </style>
 
 <script src="https://accounts.google.com/gsi/client" async defer></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
 <div id="jg-login">
@@ -2130,8 +2131,80 @@ async function clearBoardState(){
   }catch(e){ showToast('Reset failed'); }
 }
 
-// Poll every 30 seconds for updates from other users
-setInterval(pollSharedState, 30000);
+// ── SUPABASE REALTIME ─────────────────────────────────────────────────────
+// Replace 30s polling with instant WebSocket push
+let _sbClient = null;
+let _realtimeChannel = null;
+
+function initRealtime() {
+  try {
+    _sbClient = supabase.createClient(SB_URL, SB_KEY);
+    _realtimeChannel = _sbClient
+      .channel('board_state_changes')
+      .on('postgres_changes', {
+        event: 'UPDATE',
+        schema: 'public',
+        table: 'board_state',
+        filter: 'id=eq.current'
+      }, function(payload) {
+        // Received a live update from another user
+        var data = payload.new;
+        if (!data || !data.state) return;
+        var state = data.state;
+        if (!state.ts) return;
+        if (state.ts === lastSyncTs) return; // exact duplicate, skip
+        // Only skip if this looks like our own save (within 3s of our last local change)
+        if (state.ts <= lastSyncTs && Date.now() - lastLocalChange < 3000) return;
+        lastSyncTs = state.ts; // track last received ts
+        var today = new Date().toISOString().split('T')[0];
+        if (state.date !== today) return;
+        var changed = false;
+        for (var l of ['appleton','stevens']) {
+          for (var [nm, jids] of Object.entries(state.assignments?.[l]||{})) {
+            if (techQ[l]?.[nm]) {
+              var validJids = jids.filter(function(jid){ return jobs[jid]; });
+              var current  = JSON.stringify(techQ[l][nm].jobs);
+              var incoming = JSON.stringify(validJids);
+              if (current !== incoming) {
+                techQ[l][nm].jobs = validJids;
+                unassigned[l] = (unassigned[l]||[]).filter(function(jid){ return !validJids.includes(jid); });
+                changed = true;
+              }
+            }
+          }
+        }
+        if (state.overrides && Date.now() - lastLocalChange > 5000) Object.assign(jobOverrides, state.overrides);
+        if (state.sick) state.sick.forEach(function(nm){ sick.add(nm); });
+        if (changed) { render(); showToast('🔄 Board updated'); }
+        updateSyncBadge(state.ts);
+      })
+      .subscribe(function(status) {
+        if (status === 'SUBSCRIBED') {
+          console.log('Realtime connected — live sync active');
+          // Update sync badge to show realtime status
+          var badge = document.getElementById('sync-badge');
+          if (badge) badge.title = 'Live sync active';
+        } else if (status === 'CLOSED' || status === 'CHANNEL_ERROR') {
+          console.warn('Realtime disconnected — falling back to polling');
+          // Fall back to polling if realtime fails
+          setTimeout(pollSharedState, 5000);
+          setInterval(pollSharedState, 15000);
+        }
+      });
+  } catch(e) {
+    console.warn('Realtime setup failed, using polling:', e);
+    setInterval(pollSharedState, 15000);
+  }
+}
+
+// Initialize realtime after page loads, and poll immediately for current state
+document.addEventListener('DOMContentLoaded', function() {
+  setTimeout(initRealtime, 2000); // wait for board to load first
+  setTimeout(pollSharedState, 3000); // fetch current state on load
+});
+
+// Keep polling as fallback at longer interval (catches any missed realtime events)
+setInterval(pollSharedState, 60000);
 
 // ── TECH START TIME & CARD REORDER ───────
 function decToTime(dec){
@@ -2519,7 +2592,6 @@ Object.defineProperty(window, 'currentUser', { get: () => { try { return JSON.pa
 
 document.addEventListener('DOMContentLoaded', () => { jgCheckAuth(); });</script>
 <script>
-const _JG_KEY='jg_platform_user',_JG_EXP='jg_platform_exp';
 function jgGoogleCb(r){try{const p=JSON.parse(atob(r.credential.split('.')[1]));if(!p.email.endsWith('@jg-restoration.com')){document.getElementById('jg-login-err').textContent='Access restricted to @jg-restoration.com accounts.';return;}const u={name:p.name||p.given_name,email:p.email,picture:p.picture||''};localStorage.setItem(_JG_KEY,JSON.stringify(u));localStorage.setItem(_JG_EXP,String(Date.now()+43200000));jgHideLogin();jgShowUser(u);}catch(e){document.getElementById('jg-login-err').textContent='Sign in failed.';}}
 function jgCheckAuth(){const r=localStorage.getItem(_JG_KEY),e=localStorage.getItem(_JG_EXP);if(r&&e&&Date.now()<parseInt(e)){jgHideLogin();jgShowUser(JSON.parse(r));return true;}jgShowLogin();return false;}
 function jgShowLogin(){const e=document.getElementById('jg-login');if(e)e.style.display='flex';}
@@ -2527,7 +2599,6 @@ function jgHideLogin(){const e=document.getElementById('jg-login');if(e)e.style.
 function jgShowUser(u){const n=document.getElementById('sb-nm'),a=document.getElementById('sb-av');if(n)n.textContent=u.name?u.name.split(' ')[0]:u.email.split('@')[0];if(a)a.innerHTML=u.picture?'<img src="'+u.picture+'" style="width:22px;height:22px;border-radius:50%;">':'👤';}
 function jgSignOut(){if(confirm('Sign out?')){localStorage.removeItem(_JG_KEY);localStorage.removeItem(_JG_EXP);window.location.href='hub.html';}}
 window.addEventListener('storage',e=>{if(e.key===_JG_KEY){if(e.newValue){jgHideLogin();jgShowUser(JSON.parse(e.newValue));}else jgShowLogin();}});
-Object.defineProperty(window,'currentUser',{get:()=>{try{return JSON.parse(localStorage.getItem(_JG_KEY)||'null')?.name||null;}catch(e){return null;}},configurable:true});
 
 document.addEventListener("DOMContentLoaded",()=>jgCheckAuth());
 </script>
