@@ -302,23 +302,36 @@ var AD = {
 };
 
 async function sbGet(path) {
-  var r = await fetch(SB_URL+path, {headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY}});
-  return r.ok ? r.json() : [];
+  try {
+    var ctrl = new AbortController();
+    var tid = setTimeout(function(){ ctrl.abort(); }, 8000);
+    var r = await fetch(SB_URL+path, {
+      signal: ctrl.signal,
+      headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Prefer':'count=none'}
+    });
+    clearTimeout(tid);
+    if (!r.ok) return [];
+    return await r.json();
+  } catch(e) {
+    console.error('sbGet:', e.message, path);
+    return [];
+  }
 }
 
 async function loadAdminData() {
   AD.loading = true; render();
+  try {
   var cutoff = new Date(); cutoff.setDate(cutoff.getDate() - AD.period);
   var cutoffStr = cutoff.toISOString().split('T')[0];
   var mFilter = AD.market === 'All' ? '' : '&market=eq.'+encodeURIComponent(AD.market);
 
-  // Paginate partners
-  var allP = []; var pg = 0;
-  while(true) {
+  // Fetch partners (max 5 pages = 5000 partners)
+  var allP = [];
+  for (var pg = 0; pg < 5; pg++) {
     var chunk = await sbGet('/rest/v1/sales_partners?order=name.asc&limit=1000&offset='+(pg*1000)+mFilter);
-    allP = allP.concat(chunk||[]);
-    if((chunk||[]).length < 1000) break;
-    pg++;
+    if (!chunk || !chunk.length) break;
+    allP = allP.concat(chunk);
+    if (chunk.length < 1000) break;
   }
 
   var [touches, routes, followups] = await Promise.all([
@@ -332,6 +345,9 @@ async function loadAdminData() {
   AD.routes    = routes||[];
   AD.followups = followups||[];
   AD.lastRefresh = new Date();
+  } catch(e) {
+    console.error('loadAdminData failed:', e);
+  }
   AD.loading = false;
   render();
 }
