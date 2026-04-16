@@ -417,8 +417,17 @@ async function savePartner(data) {
 
 async function logTouch(data) {
   data.market = ST.market;
-  var user = JSON.parse(localStorage.getItem('jg_platform_user')||'null');
-  data.logged_by = user&&user.name ? user.name.split(' ')[0] : '';
+  var rep = currentRepName();
+  data.logged_by = rep;
+  // Auto-assign partner if unclaimed (first touch claims it)
+  if (data.partner_id) {
+    var partner = ST.partners.find(function(p){ return p.id === data.partner_id; });
+    if (partner && !partner.assigned_to) {
+      await sb('/rest/v1/sales_partners?id=eq.'+data.partner_id, {
+        method:'PATCH', body:JSON.stringify({assigned_to: rep, updated_at: new Date().toISOString()})
+      });
+    }
+  }
   await sb('/rest/v1/sales_touches', {method:'POST',headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json','Prefer':'return=minimal'},body:JSON.stringify(data)});
   // Update partner last_touch_date and touch_count
   if(data.partner_id) {
@@ -553,16 +562,16 @@ function render() {
   h += '<span style="font-size:10px;padding:2px 8px;background:rgba(255,255,255,.12);color:rgba(255,255,255,.8);border-radius:20px;border:1px solid rgba(255,255,255,.18);">' + ST.market + '</span>';
   h += '</div>';
   h += '<div style="display:flex;gap:6px;">';
-  h += '<button class="btn btn-ghost" style="font-size:11px;" onclick="importAlbi()">↓ Import Albi</button>';
-  h += '<button class="btn btn-gold" style="font-size:11px;" onclick="addPartner()">+ Partner</button>';
+  if(isAdmin()) h += '<button class="btn btn-ghost" style="font-size:11px;" onclick="importAlbi()">↓ Import Albi</button>';
+  if(isAdmin()) h += '<button class="btn btn-gold" style="font-size:11px;" onclick="addPartner()">+ Partner</button>';
   h += '</div></div>';
 
   // MARKET TOGGLE + TABS
   h += '<div style="background:var(--surface);border-bottom:1px solid var(--border);padding:8px 16px 0;display:flex;align-items:center;justify-content:space-between;">';
   h += mkMarketToggle();
   h += '<div class="sales-tabs" style="border:none;padding:0;">';
-  var tabs = ['partners','touches','routes','followups','import'];
-  var tabLabels = {partners:'👥 Partners', touches:'📋 Touches', routes:'🚗 Routes', followups:'🔔 Follow-ups', import:'📥 Import'};
+  var tabs = isAdmin() ? ['partners','touches','routes','followups','import','admin'] : ['partners','touches','routes','followups'];
+  var tabLabels = {partners:'👥 Partners', touches:'📋 Touches', routes:'🚗 Routes', followups:'🔔 Follow-ups', import:'📥 Import', admin:'🔐 Admin'};
   var overdueCount = ST.followups.filter(function(f){ return !f.completed && daysUntil(f.due_date) <= 0; }).length;
   tabs.forEach(function(t) {
     var label = tabLabels[t];
@@ -650,7 +659,8 @@ function render() {
     h += '<div class="sales-stat"><div class="sales-stat-val">' + ST.touches.length + '</div><div class="sales-stat-lbl">Total Logged</div></div>';
     h += '</div>';
 
-    ST.touches.slice(0,50).forEach(function(t) {
+    var visibleTouches = isAdmin() ? ST.touches : ST.touches.filter(function(t){return t.logged_by===currentRepName();});
+    visibleTouches.slice(0,50).forEach(function(t) {
       h += '<div class="touch-row">';
       h += '<div class="touch-icon" style="background:rgba(13,45,94,.08);">' + touchIcon(t.touch_type) + '</div>';
       h += '<div style="flex:1;min-width:0;">';
@@ -675,7 +685,8 @@ function render() {
     h += '<button class="btn btn-gold" onclick="ST.modal=\'add-route\';render()">+ Plan Route</button>';
     h += '</div>';
     if (!ST.routes.length) h += '<div style="text-align:center;padding:40px;color:var(--muted);">No routes yet. Plan your first route for today.</div>';
-    ST.routes.slice(0,10).forEach(function(route) {
+    var visibleRoutes = isAdmin() ? ST.routes : ST.routes.filter(function(r){return r.rep_name===currentRepName();});
+    visibleRoutes.slice(0,10).forEach(function(route) {
       var stops = route.stops || [];
       var done = stops.filter(function(s){ return s.completed; }).length;
       h += '<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;margin-bottom:12px;overflow:hidden;">';
@@ -704,9 +715,10 @@ function render() {
 
   // ── FOLLOW-UPS TAB ────────────────────────────────────────────────────────
   if (ST.tab === 'followups') {
-    var overdue  = ST.followups.filter(function(f){ return daysUntil(f.due_date) < 0; });
-    var today2   = ST.followups.filter(function(f){ return daysUntil(f.due_date) === 0; });
-    var upcoming = ST.followups.filter(function(f){ return daysUntil(f.due_date) > 0; });
+    var myFU = isAdmin() ? ST.followups : ST.followups.filter(function(f){return f.assigned_to===currentRepName();});
+    var overdue  = myFU.filter(function(f){ return daysUntil(f.due_date) < 0; });
+    var today2   = myFU.filter(function(f){ return daysUntil(f.due_date) === 0; });
+    var upcoming = myFU.filter(function(f){ return daysUntil(f.due_date) > 0; });
 
     h += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">';
     h += '<div style="font-size:13px;font-weight:700;color:var(--navy);">' + ST.followups.length + ' open follow-ups</div>';
@@ -741,7 +753,7 @@ function render() {
     h += renderFUSection(overdue, '⚠ Overdue');
     h += renderFUSection(today2, '📅 Today');
     h += renderFUSection(upcoming, '⏳ Upcoming');
-    if (!ST.followups.length) h += '<div style="text-align:center;padding:40px;color:var(--muted);">No open follow-ups. Nice work!</div>';
+    if (!myFU.length) h += '<div style="text-align:center;padding:40px;color:var(--muted);">No open follow-ups. Nice work!</div>';
   }
 
   // ── IMPORT TAB ────────────────────────────────────────────────────────────
@@ -811,6 +823,67 @@ function render() {
     if (ST.importResult) {
       h += '<div style="padding:14px 16px;border-radius:8px;background:rgba(46,125,50,.08);border:1.5px solid var(--ok);color:var(--ok);font-size:13px;font-weight:600;">✓ ' + ST.importResult.imported + ' contacts imported. ' + ST.importResult.skipped + ' duplicates skipped.</div>';
     }
+  }
+
+
+  // ── ADMIN TAB ─────────────────────────────────────────────────────────────
+  if (ST.tab === 'admin' && isAdmin()) {
+    var reps = ['Kristina','Rylan','David','Brent','Josh'];
+    h += '<div style="margin-bottom:20px;">';
+    h += '<div style="font-size:13px;font-weight:700;color:var(--navy);margin-bottom:4px;">🔐 Admin Panel</div>';
+    h += '<div style="font-size:12px;color:var(--muted);">Manage rep assignments, partner ownership, and platform access.</div>';
+    h += '</div>';
+
+    // Rep activity cards
+    h += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px;margin-bottom:24px;">';
+    reps.forEach(function(rep) {
+      var assigned  = ST.partners.filter(function(p){ return p.assigned_to===rep; }).length;
+      var allTouches= ST.touches.filter(function(t){ return t.logged_by===rep; });
+      var weekAgo   = new Date(); weekAgo.setDate(weekAgo.getDate()-7);
+      var weekT     = allTouches.filter(function(t){ return new Date(t.touch_date)>=weekAgo; }).length;
+      var openFU    = ST.followups.filter(function(f){ return f.assigned_to===rep&&!f.completed; }).length;
+      h += '<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px;">';
+      h += '<div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">';
+      h += '<div style="width:36px;height:36px;border-radius:50%;background:var(--navy);display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:700;color:#fff;">'+rep[0]+'</div>';
+      h += '<div><div style="font-size:13px;font-weight:700;color:var(--navy);">'+rep+'</div>';
+      h += '<div style="font-size:10px;color:var(--muted);">'+(rep==='Josh'?'Admin':'Sales Rep')+'</div></div></div>';
+      h += '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;">';
+      h += '<div style="text-align:center;background:rgba(13,45,94,.05);border-radius:6px;padding:6px;"><div style="font-size:16px;font-weight:700;color:var(--navy);">'+assigned+'</div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;">Assigned</div></div>';
+      h += '<div style="text-align:center;background:rgba(232,93,4,.05);border-radius:6px;padding:6px;"><div style="font-size:16px;font-weight:700;color:var(--orange);">'+weekT+'</div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;">This Week</div></div>';
+      h += '<div style="text-align:center;background:rgba(192,32,32,.05);border-radius:6px;padding:6px;"><div style="font-size:16px;font-weight:700;color:var(--danger);">'+openFU+'</div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;">Open FU</div></div>';
+      h += '</div></div>';
+    });
+    h += '</div>';
+
+    // Unassigned partners
+    var unassigned = ST.partners.filter(function(p){ return !p.assigned_to; });
+    if (unassigned.length) {
+      h += '<div class="qa-card" style="margin-bottom:16px;">';
+      h += '<div class="qa-card-hd"><span class="qa-card-hd-title">⚠ Unassigned Partners ('+unassigned.length+')</span></div>';
+      h += '<div style="padding:10px;max-height:300px;overflow-y:auto;">';
+      unassigned.slice(0,50).forEach(function(p) {
+        h += '<div style="display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:6px;background:var(--s2);margin-bottom:4px;">';
+        h += '<div class="partner-avatar" style="width:30px;height:30px;font-size:11px;background:var(--muted);">'+partnerInitials(p.name)+'</div>';
+        h += '<div style="flex:1;font-size:12px;font-weight:600;">'+p.name+'<span style="font-size:10px;font-weight:400;color:var(--muted);margin-left:6px;">'+(p.city||'')+'</span></div>';
+        var pid2=p.id; h += '<select style="font-size:11px;padding:4px 8px;border-radius:5px;border:1px solid var(--border);background:#fff;" onchange="assignPartner(\''+pid2+'\',this.value)">';
+        h += '<option value="">Assign to...</option>';
+        ['Kristina','Rylan','David','Brent','Josh'].forEach(function(n){
+          h += '<option>'+n+'</option>';
+        });
+        h += '</select></div>';
+      });
+      if(unassigned.length>50) h += '<div style="text-align:center;padding:8px;font-size:11px;color:var(--muted);">...and '+(unassigned.length-50)+' more</div>';
+      h += '</div></div>';
+    }
+
+    // Bulk assign unassigned
+    h += '<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px;">';
+    h += '<div style="font-size:12px;font-weight:700;color:var(--navy);margin-bottom:10px;">Bulk Assign Unassigned Partners</div>';
+    h += '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">';
+    ['Kristina','Rylan','David','Brent','Josh'].forEach(function(rep) {
+      h += '<button style="padding:6px 14px;border-radius:6px;border:none;background:var(--navy);color:#fff;font-size:11px;font-weight:600;cursor:pointer;" onclick="bulkAssign(\''+rep+'\')">' + 'Assign all → '+rep+'</button>';
+    });
+    h += '</div></div>';
   }
 
   // ── MODALS ────────────────────────────────────────────────────────────────
@@ -916,7 +989,7 @@ function render() {
         h += '<div><div style="font-size:18px;font-weight:700;color:var(--navy);">' + p.name + '</div>';
         h += '<div style="font-size:12px;color:var(--muted);">' + (p.company||'') + '</div></div>';
         h += '<div style="margin-left:auto;"><select class="form-select" style="width:120px;font-size:11px;" onchange="savePartner({id:\'' + p.id + '\',tier:this.value})">';
-        ['A','B','C'].forEach(function(t){ h += '<option ' + (p.tier===t?'selected':'') + ' value="' + t + '">' + t + '-Tier</option>'; });
+        ['A','B','C'].forEach(function(t){ h += '<option '+(p.tier===t?'selected':'')+' value="'+t+'">'+t+'-Tier</option>'; });
         h += '</select></div></div>';
         h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px;">';
         if (p.phone) h += '<a href="tel:' + p.phone + '" style="padding:8px 12px;border-radius:6px;background:rgba(13,45,94,.06);font-size:12px;font-weight:600;color:var(--navy);text-decoration:none;">📞 ' + p.phone + '</a>';
@@ -1187,6 +1260,60 @@ async function runImport() {
   }
   ST.importResult = {imported: imported, skipped: skipped};
   ST.importPreview = null;
+  await loadAll();
+}
+
+
+// ── ROLES & PERMISSIONS ───────────────────────────────────────────────────────
+var ADMINS = ['josh@jg-restoration.com','josh.greil@jg-restoration.com'];
+var REPS = {
+  'kristina@jg-restoration.com': 'Kristina',
+  'rylan@jg-restoration.com':    'Rylan',
+  'rylan.reoh@jg-restoration.com': 'Rylan',
+  'david@jg-restoration.com':    'David',
+  'brent@jg-restoration.com':    'Brent',
+  'josh@jg-restoration.com':     'Josh',
+  'josh.greil@jg-restoration.com': 'Josh'
+};
+
+function currentUser() {
+  try { return JSON.parse(localStorage.getItem('jg_platform_user')||'null'); } catch(e) { return null; }
+}
+function isAdmin() {
+  var u = currentUser();
+  return u && ADMINS.includes(u.email.toLowerCase());
+}
+function currentRepName() {
+  var u = currentUser();
+  if (!u) return '';
+  return REPS[u.email.toLowerCase()] || u.name || u.email.split('@')[0];
+}
+function canEdit(partner) {
+  if (isAdmin()) return true;
+  var rep = currentRepName();
+  return partner && (partner.assigned_to === rep || !partner.assigned_to);
+}
+function canDelete() { return isAdmin(); }
+function canImport() { return isAdmin(); }
+function canChangeTier(partner) {
+  if (isAdmin()) return true;
+  var rep = currentRepName();
+  return partner && partner.assigned_to === rep;
+}
+
+function assignPartner(id, rep) { savePartner({id:id, assigned_to:rep}); ST.tab="admin"; }
+async function bulkAssign(rep) {
+  if (!isAdmin()) return;
+  if (!confirm('Assign all ' + ST.partners.filter(function(p){return !p.assigned_to;}).length + ' unassigned partners to ' + rep + '?')) return;
+  var unassigned = ST.partners.filter(function(p){ return !p.assigned_to; });
+  for (var i = 0; i < unassigned.length; i += 50) {
+    var batch = unassigned.slice(i, i+50);
+    for (var j = 0; j < batch.length; j++) {
+      await sb('/rest/v1/sales_partners?id=eq.'+batch[j].id, {
+        method:'PATCH', body:JSON.stringify({assigned_to: rep, updated_at: new Date().toISOString()})
+      });
+    }
+  }
   await loadAll();
 }
 
