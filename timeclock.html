@@ -261,6 +261,30 @@ body {
 }
 
 /* -- TOAST -- */
+/* Install banner */
+.install-banner {
+  position: fixed;
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 12px);
+  left: 12px; right: 12px;
+  background: var(--navy);
+  color: #fff;
+  border-radius: 14px;
+  padding: 14px 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  box-shadow: 0 4px 20px rgba(13,45,94,.5);
+  z-index: 200;
+  animation: slideUp .4s ease;
+  display: none;
+}
+@keyframes slideUp { from { transform: translateY(20px); opacity:0; } to { transform: translateY(0); opacity:1; } }
+.install-banner-text { flex: 1; }
+.install-banner-title { font-size: 13px; font-weight: 700; }
+.install-banner-sub { font-size: 11px; color: rgba(255,255,255,.6); margin-top: 2px; }
+.install-banner-btn { background: var(--orange); border: none; color: #fff; padding: 9px 16px; border-radius: 9px; font-size: 13px; font-weight: 700; cursor: pointer; white-space: nowrap; font-family: 'DM Sans', sans-serif; flex-shrink: 0; }
+.install-banner-close { background: none; border: none; color: rgba(255,255,255,.5); font-size: 20px; cursor: pointer; padding: 0; line-height: 1; flex-shrink: 0; }
+
 .toast {
   position: fixed; bottom: calc(var(--safe-bottom) + 16px);
   left: 50%; transform: translateX(-50%) translateY(20px);
@@ -424,6 +448,16 @@ body {
 <!-- TOAST -->
 <div class="toast" id="toast"></div>
 
+<!-- INSTALL BANNER -->
+<div class="install-banner" id="install-banner">
+  <div class="install-banner-text">
+    <div class="install-banner-title">📲 Add JG Time to Home Screen</div>
+    <div class="install-banner-sub" id="install-sub">Install for quick one-tap access</div>
+  </div>
+  <button class="install-banner-btn" id="install-action-btn" onclick="triggerInstall()">Install</button>
+  <button class="install-banner-close" onclick="dismissInstallBanner()">×</button>
+</div>
+
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <script>
 // CONSTANTS -
@@ -492,7 +526,46 @@ var _deferredInstallPrompt = null;
 window.addEventListener('beforeinstallprompt', function(e) {
   e.preventDefault();
   _deferredInstallPrompt = e;
+  // Show install banner automatically on Android
+  if (!localStorage.getItem('jg_tc_install_dismissed')) {
+    showInstallBanner();
+  }
 });
+
+function showInstallBanner() {
+  if (window.matchMedia('(display-mode: standalone)').matches) return;
+  if (localStorage.getItem('jg_tc_install_dismissed')) return;
+  var banner = document.getElementById('install-banner');
+  if (!banner) return;
+  var isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+  if (isIOS) {
+    document.getElementById('install-sub').textContent = 'Tap Share ↗ then "Add to Home Screen"';
+    document.getElementById('install-action-btn').textContent = 'How to Install';
+    document.getElementById('install-action-btn').onclick = function() { showInstallHelp(); dismissInstallBanner(); };
+  }
+  banner.style.display = 'flex';
+}
+
+function dismissInstallBanner() {
+  var banner = document.getElementById('install-banner');
+  if (banner) banner.style.display = 'none';
+  localStorage.setItem('jg_tc_install_dismissed', '1');
+}
+
+function triggerInstall() {
+  if (_deferredInstallPrompt) {
+    _deferredInstallPrompt.prompt();
+    _deferredInstallPrompt.userChoice.then(function(r) {
+      if (r.outcome === 'accepted') {
+        dismissInstallBanner();
+        localStorage.setItem('jg_tc_installed', '1');
+      }
+      _deferredInstallPrompt = null;
+    });
+  } else {
+    showInstallHelp();
+  }
+}
 
 function signOut() {
   localStorage.removeItem(TC_KEY); localStorage.removeItem(TC_EXP);
@@ -610,6 +683,8 @@ async function loadAll() {
 
  // Load active jobs from dispatch board state
   await loadJobs();
+  // Show install banner if not yet installed
+  setTimeout(function() { showInstallBanner(); }, 3000);
 
   renderStatus();
   renderEntries();
