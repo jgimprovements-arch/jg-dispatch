@@ -6,6 +6,30 @@
 <title>JG Restoration — Sales Dashboard</title>
 <link rel="icon" type="image/png" href="https://jgimprovements-arch.github.io/jg-dispatch/logo.png">
 <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script>
+// Pre-declare callback so GSI async script can find it immediately on load
+window.jgGoogleCb = function(r){
+  try {
+    var p = JSON.parse(atob(r.credential.split('.')[1]));
+    if (!p.email.endsWith('@jg-restoration.com')) {
+      var el = document.getElementById('jg-login-err');
+      if (el) el.textContent = 'Access restricted to @jg-restoration.com accounts.';
+      return;
+    }
+    var u = {name:p.name||p.given_name, email:p.email, picture:p.picture||''};
+    localStorage.setItem('jg_platform_user', JSON.stringify(u));
+    localStorage.setItem('jg_platform_exp', String(Date.now()+43200000));
+    var loginEl = document.getElementById('jg-login');
+    if (loginEl) loginEl.style.display = 'none';
+    // jgShowUser may not be defined yet if page is still loading — defer it
+    if (typeof jgShowUser === 'function') jgShowUser(u);
+    else window._pendingUser = u;
+  } catch(e) {
+    var el = document.getElementById('jg-login-err');
+    if (el) el.textContent = 'Sign in failed.';
+  }
+};
+</script>
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <style>
@@ -473,7 +497,7 @@ async function savePartnerIntel(id) {
   render();
 }
 
-
+async function logTouch(data) {
   data.market = ST.market;
   var rep = currentRepName();
   data.logged_by = rep;
@@ -1499,6 +1523,8 @@ document.addEventListener('DOMContentLoaded',function(){
   jgCheckAuth();
   var u=JSON.parse(localStorage.getItem('jg_platform_user')||'null');
   if(u) jgShowUser(u);
+  // Handle case where GSI fired before jgShowUser was defined
+  if(window._pendingUser){ jgShowUser(window._pendingUser); window._pendingUser=null; }
   _loadAllSafe();
   // Escape hatch: if still loading after 15s, force-clear
   setTimeout(function(){
