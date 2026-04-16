@@ -431,6 +431,44 @@ input[type=file]{display:none}
   </div>
 </div>
 
+<!-- Load Route Template Modal -->
+<div id="load-template-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:2000;align-items:flex-end;justify-content:center;" onclick="if(event.target===this)closeLoadTemplate()">
+  <div style="background:#fff;border-radius:16px 16px 0 0;width:100%;max-width:520px;max-height:80vh;display:flex;flex-direction:column;box-shadow:0 -8px 40px rgba(0,0,0,.2);">
+    <div style="background:#0d2d5e;border-radius:16px 16px 0 0;padding:14px 20px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0;">
+      <div style="color:#fff;font-size:15px;font-weight:700;font-family:DM Sans,sans-serif;">Load Route Template</div>
+      <button onclick="closeLoadTemplate()" style="background:rgba(255,255,255,.15);border:none;color:#fff;border-radius:6px;padding:4px 12px;cursor:pointer;font-size:12px;">Close</button>
+    </div>
+    <div style="padding:16px 20px;overflow-y:auto;flex:1;">
+      <div id="lt_template_stops" style="margin-bottom:14px;"></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px;">
+        <div>
+          <div style="font-size:10px;font-weight:600;color:#6b7a96;text-transform:uppercase;margin-bottom:4px;">Date</div>
+          <input id="lt_date" type="date" style="width:100%;padding:8px 10px;border-radius:6px;border:1.5px solid #d0d5dd;font-size:12px;font-family:DM Sans,sans-serif;box-sizing:border-box;background:#fff;">
+        </div>
+        <div>
+          <div style="font-size:10px;font-weight:600;color:#6b7a96;text-transform:uppercase;margin-bottom:4px;">Rep</div>
+          <input id="lt_rep" type="text" placeholder="Your name" style="width:100%;padding:8px 10px;border-radius:6px;border:1.5px solid #d0d5dd;font-size:12px;font-family:DM Sans,sans-serif;box-sizing:border-box;background:#fff;">
+        </div>
+      </div>
+      <button onclick="scheduleTemplate()" style="width:100%;padding:10px;border-radius:8px;border:none;background:#e85d04;color:#fff;font-size:13px;font-weight:700;cursor:pointer;font-family:DM Sans,sans-serif;">Schedule Route</button>
+    </div>
+  </div>
+</div>
+
+<!-- Save Template Name Modal -->
+<div id="save-template-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:2000;align-items:center;justify-content:center;" onclick="if(event.target===this)closeSaveTemplate()">
+  <div style="background:#fff;border-radius:12px;width:100%;max-width:380px;padding:24px;box-shadow:0 20px 60px rgba(0,0,0,.3);">
+    <div style="font-size:15px;font-weight:700;color:#0d2d5e;margin-bottom:4px;font-family:DM Sans,sans-serif;">Save as Template</div>
+    <div style="font-size:12px;color:#6b7a96;margin-bottom:16px;" id="st_stop_count"></div>
+    <div style="font-size:10px;font-weight:600;color:#6b7a96;text-transform:uppercase;margin-bottom:4px;">Template Name</div>
+    <input id="st_name" type="text" placeholder="e.g. Appleton Plumbers North Loop" style="width:100%;padding:9px 12px;border-radius:6px;border:1.5px solid #d0d5dd;font-size:13px;font-family:DM Sans,sans-serif;box-sizing:border-box;background:#fff;margin-bottom:16px;">
+    <div style="display:flex;gap:8px;">
+      <button onclick="confirmSaveTemplate()" style="flex:1;padding:9px;border-radius:6px;border:none;background:#0d2d5e;color:#fff;font-size:13px;font-weight:600;cursor:pointer;font-family:DM Sans,sans-serif;">Save Template</button>
+      <button onclick="closeSaveTemplate()" style="padding:9px 16px;border-radius:6px;border:1.5px solid #d0d5dd;background:transparent;font-size:13px;cursor:pointer;">Cancel</button>
+    </div>
+  </div>
+</div>
+
 <!-- Partner Edit Modal - lives outside render() cycle so inputs persist -->
 <div id="partner-edit-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:2000;align-items:center;justify-content:center;" onclick="if(event.target===this)closePartnerEdit()">
   <div style="background:#fff;border-radius:12px;padding:24px;width:100%;max-width:520px;max-height:90vh;overflow-y:auto;box-shadow:0 20px 60px rgba(0,0,0,.3);">
@@ -505,6 +543,7 @@ var ST = {
   touches: [],
   followups: [],
   routes: [],
+  routeTemplates: [],
   loading: false,
   modal: null,   // 'add-partner' | 'log-touch' | 'add-route' | 'add-followup' | 'partner-detail'
   detailEditMode: null,
@@ -581,6 +620,10 @@ async function loadAll() {
     var r = await sbSafe('/rest/v1/sales_routes?market=eq.'+mq+'&order=route_date.desc&limit=30');
     ST.routes = r || [];
   } catch(e) { console.error('routes fetch:', e); ST.routes = []; }
+  try {
+    var rt = await sbSafe('/rest/v1/sales_route_templates?market=eq.'+mq+'&order=name.asc&limit=100');
+    ST.routeTemplates = rt || [];
+  } catch(e) { console.error('route templates fetch:', e); ST.routeTemplates = []; }
   // Always clear loading — guaranteed even if something above threw
   ST.loading = false;
   render();
@@ -957,11 +1000,31 @@ function render() {
   if (ST.tab === 'routes') {
     h += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">';
     h += '<div style="font-size:13px;font-weight:700;color:var(--navy);">Sales Routes — ' + ST.market + '</div>';
-    h += '<div style="display:flex;gap:8px;">';
+    h += '<div style="display:flex;gap:8px;flex-wrap:wrap;">';
     h += '<button class="btn btn-gold" onclick="ST.modal=\'add-route\';render()">+ Plan Route</button>';
     h += '<button class="btn" style="background:var(--navy);color:#fff;border:none;" onclick="openContactMap()">Map Contacts</button>';
     h += '</div>';
     h += '</div>';
+
+    // ── SAVED TEMPLATES ────────────────────────────────────────────────────
+    if (ST.routeTemplates.length) {
+      h += '<div style="margin-bottom:16px;">';
+      h += '<div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px;font-family:DM Mono,monospace;">Saved Templates</div>';
+      h += '<div style="display:flex;gap:8px;flex-wrap:wrap;">';
+      ST.routeTemplates.forEach(function(tmpl) {
+        var stopCount = (tmpl.stops||[]).length;
+        h += '<div style="display:flex;align-items:center;gap:0;border:1.5px solid var(--border);border-radius:8px;overflow:hidden;background:var(--surface);">';
+        h += '<button onclick="loadRouteTemplate(\'' + tmpl.id + '\')" style="padding:7px 12px;border:none;background:transparent;font-size:12px;font-weight:600;color:var(--navy);cursor:pointer;text-align:left;">';
+        h += tmpl.name + ' <span style="font-size:10px;font-weight:400;color:var(--muted);">(' + stopCount + ' stops)</span>';
+        h += '</button>';
+        h += '<button onclick="deleteRouteTemplate(\'' + tmpl.id + '\')" style="padding:7px 10px;border:none;border-left:1px solid var(--border);background:transparent;color:var(--muted);font-size:12px;cursor:pointer;" title="Delete template">x</button>';
+        h += '</div>';
+      });
+      h += '</div></div>';
+    } else {
+      h += '<div style="margin-bottom:12px;font-size:11px;color:var(--muted);">No saved templates yet. Save a route as a template to reuse it.</div>';
+    }
+
     if (!ST.routes.length) h += '<div style="text-align:center;padding:40px;color:var(--muted);">No routes yet. Plan your first route for today.</div>';
     var visibleRoutes = isAdmin() ? ST.routes : ST.routes.filter(function(r){return r.rep_name===currentRepName();});
     visibleRoutes.slice(0,10).forEach(function(route) {
@@ -976,14 +1039,14 @@ function render() {
       var stTxt   = route.status === 'Completed' ? '#4cdb7a' : 'var(--gold)';
       h += '<span style="font-size:10px;padding:2px 8px;border-radius:4px;background:' + stColor + ';color:' + stTxt + ';">' + (route.status||'Planned') + '</span>';
       h += '</div>';
-      h += '<div style="display:flex;align-items:center;gap:8px;">';
+      h += '<div style="display:flex;align-items:center;gap:6px;">';
       h += '<span style="font-size:11px;color:rgba(255,255,255,.7);">' + done + '/' + stops.length + ' stops</span>';
-      // Build Google Maps URL from stops
       var mapsAddrs = stops.map(function(s){ return encodeURIComponent((s.address||s.partner_name||'').trim()||'Appleton WI'); });
       if (mapsAddrs.length) {
         var mapsUrl = 'https://www.google.com/maps/dir/' + mapsAddrs.join('/');
-        h += '<a href="' + mapsUrl + '" target="_blank" style="display:inline-flex;align-items:center;gap:4px;padding:3px 10px;border-radius:5px;background:rgba(255,255,255,.15);color:#fff;text-decoration:none;font-size:10px;font-weight:600;">Map</a>';
+        h += '<a href="' + mapsUrl + '" target="_blank" style="display:inline-flex;align-items:center;padding:3px 8px;border-radius:5px;background:rgba(255,255,255,.15);color:#fff;text-decoration:none;font-size:10px;font-weight:600;">Map</a>';
       }
+      h += '<button onclick="event.stopPropagation();saveAsTemplate(\'' + route.id + '\')" style="padding:3px 8px;border-radius:5px;border:none;background:rgba(245,166,35,.3);color:var(--gold);font-size:10px;font-weight:600;cursor:pointer;">Save Template</button>';
       h += '</div>';
       h += '</div><div style="padding:10px;">';
       stops.forEach(function(stop, idx) {
@@ -1963,6 +2026,100 @@ async function deletePartner(id) {
   await sb('/rest/v1/sales_partners?id=eq.' + id, { method: 'DELETE' });
   ST.modal = null;
   ST.selected = null;
+  await loadAll();
+}
+
+
+// ── ROUTE TEMPLATES ───────────────────────────────────────────────────────
+var _saveTemplateRouteId = null;
+var _loadTemplateId = null;
+
+function saveAsTemplate(routeId) {
+  var route = ST.routes.find(function(r){ return r.id === routeId; });
+  if (!route) return;
+  _saveTemplateRouteId = routeId;
+  var stopCount = (route.stops||[]).length;
+  var nameEl = document.getElementById('st_name');
+  var countEl = document.getElementById('st_stop_count');
+  if (nameEl) nameEl.value = '';
+  if (countEl) countEl.textContent = stopCount + ' stop' + (stopCount !== 1 ? 's' : '') + ' will be saved';
+  document.getElementById('save-template-modal').style.display = 'flex';
+  setTimeout(function(){ var el = document.getElementById('st_name'); if(el) el.focus(); }, 50);
+}
+
+function closeSaveTemplate() {
+  document.getElementById('save-template-modal').style.display = 'none';
+  _saveTemplateRouteId = null;
+}
+
+async function confirmSaveTemplate() {
+  var name = (document.getElementById('st_name').value || '').trim();
+  if (!name) { alert('Please enter a template name.'); return; }
+  var route = ST.routes.find(function(r){ return r.id === _saveTemplateRouteId; });
+  if (!route) return;
+  // Strip completed flags from stops for the template
+  var stops = (route.stops||[]).map(function(s){
+    return { partner_id: s.partner_id, partner_name: s.partner_name, address: s.address||'', order: s.order };
+  });
+  await sb('/rest/v1/sales_route_templates', {
+    method: 'POST',
+    headers: {'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json','Prefer':'return=minimal'},
+    body: JSON.stringify({ name: name, market: ST.market, stops: stops, created_at: new Date().toISOString() })
+  });
+  closeSaveTemplate();
+  await loadAll();
+}
+
+function loadRouteTemplate(templateId) {
+  var tmpl = ST.routeTemplates.find(function(t){ return t.id === templateId; });
+  if (!tmpl) return;
+  _loadTemplateId = templateId;
+  // Show stops preview
+  var stops = tmpl.stops || [];
+  var stopsHtml = '<div style="font-size:11px;font-weight:700;color:#0d2d5e;text-transform:uppercase;margin-bottom:8px;">' + tmpl.name + ' — ' + stops.length + ' stops</div>';
+  stops.forEach(function(s, i) {
+    stopsHtml += '<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #f0f0f0;">' +
+      '<div style="min-width:18px;height:18px;border-radius:4px;background:#0d2d5e;color:#fff;font-size:10px;font-weight:700;display:flex;align-items:center;justify-content:center;">' + (i+1) + '</div>' +
+      '<div style="font-size:12px;font-weight:600;color:#0d2d5e;">' + (s.partner_name||'') + '</div>' +
+      '<div style="font-size:11px;color:#aaa;margin-left:auto;">' + (s.address||'') + '</div>' +
+    '</div>';
+  });
+  document.getElementById('lt_template_stops').innerHTML = stopsHtml;
+  // Set default date and rep
+  var dateEl = document.getElementById('lt_date');
+  if (dateEl) dateEl.value = ST.today || new Date().toISOString().split('T')[0];
+  var repEl = document.getElementById('lt_rep');
+  if (repEl && !repEl.value) {
+    var u = JSON.parse(localStorage.getItem('jg_platform_user')||'null');
+    if (u && u.name) repEl.value = u.name.split(' ')[0];
+  }
+  document.getElementById('load-template-modal').style.display = 'flex';
+}
+
+function closeLoadTemplate() {
+  document.getElementById('load-template-modal').style.display = 'none';
+  _loadTemplateId = null;
+}
+
+async function scheduleTemplate() {
+  var tmpl = ST.routeTemplates.find(function(t){ return t.id === _loadTemplateId; });
+  if (!tmpl) return;
+  var routeDate = document.getElementById('lt_date').value;
+  var repName = document.getElementById('lt_rep').value || currentRepName() || '';
+  var stops = (tmpl.stops||[]).map(function(s, i){
+    return { partner_id: s.partner_id, partner_name: s.partner_name, address: s.address||'', order: i, completed: false };
+  });
+  await saveRoute({ route_date: routeDate, rep_name: repName, stops: stops, notes: 'From template: ' + tmpl.name, status: 'Planned' });
+  closeLoadTemplate();
+  ST.tab = 'routes';
+  render();
+}
+
+async function deleteRouteTemplate(templateId) {
+  var tmpl = ST.routeTemplates.find(function(t){ return t.id === templateId; });
+  if (!tmpl) return;
+  if (!confirm('Delete template "' + tmpl.name + '"?')) return;
+  await sb('/rest/v1/sales_route_templates?id=eq.' + templateId, { method: 'DELETE' });
   await loadAll();
 }
 
