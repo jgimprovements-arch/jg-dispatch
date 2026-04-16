@@ -627,6 +627,8 @@ var ST = {
   filterTier: 'All',
   hideCustomers: false,
   searchQ: '',
+  bulkMode: false,
+  selectedPartners: new Set(),
   today: new Date().toISOString().split('T')[0],
   apiKey: localStorage.getItem('jg_key')||''
 };
@@ -663,6 +665,58 @@ function showErr(msg) {
   setTimeout(function(){ el.style.display = 'none'; }, 6000);
 }
 
+
+
+// ── BULK DELETE ───────────────────────────────────────────────────────────
+function toggleBulkMode() {
+  ST.bulkMode = !ST.bulkMode;
+  ST.selectedPartners = new Set();
+  render();
+}
+
+function togglePartnerSelect(pid) {
+  if (ST.selectedPartners.has(pid)) {
+    ST.selectedPartners.delete(pid);
+  } else {
+    ST.selectedPartners.add(pid);
+  }
+  render();
+}
+
+function selectAllPartners() {
+  var fp = filteredPartners();
+  if (ST.selectedPartners.size === fp.length) {
+    ST.selectedPartners = new Set(); // deselect all
+  } else {
+    ST.selectedPartners = new Set(fp.map(function(p){ return p.id; }));
+  }
+  render();
+}
+
+async function bulkDeletePartners() {
+  var ids = Array.from(ST.selectedPartners);
+  if (!ids.length) return;
+  var names = ids.map(function(id){
+    var p = ST.partners.find(function(x){ return x.id === id; });
+    return p ? p.name : id;
+  });
+  if (!confirm('Permanently delete ' + ids.length + ' partner' + (ids.length!==1?'s':'') + '?\n\n' + names.slice(0,10).join('\n') + (names.length>10?'\n...and '+(names.length-10)+' more':''))) return;
+  showToast('Deleting...');
+  var errors = 0;
+  for (var id of ids) {
+    try {
+      await fetch(SB_URL + '/rest/v1/sales_partners?id=eq.' + id, {
+        method: 'DELETE',
+        headers: {'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY}
+      });
+      ST.partners = ST.partners.filter(function(p){ return p.id !== id; });
+    } catch(e) { errors++; }
+  }
+  ST.selectedPartners = new Set();
+  ST.bulkMode = false;
+  render();
+  showToast(errors ? '⚠ Deleted with ' + errors + ' errors' : '✓ Deleted ' + ids.length + ' partner' + (ids.length!==1?'s':''));
+}
 
 // ── REFERRAL MATCHING ─────────────────────────────────────────────────────
 function toggleRefGroup(el) {
@@ -1111,6 +1165,7 @@ function render() {
     h += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">';
     h += '<input id="partner-search" style="flex:1;padding:8px 12px;border-radius:6px;border:1.5px solid var(--border);font-size:13px;font-family:DM Sans,sans-serif;outline:none;" placeholder="Search partners..." value="' + ST.searchQ + '" oninput="ST.searchQ=this.value;renderPartnerList()">';
     h += '<button class="btn btn-gold" onclick="addPartner()">+ Add Partner</button>';
+    h += '<button onclick="toggleBulkMode()" style="padding:8px 14px;border-radius:6px;border:1.5px solid var(--border);font-size:12px;font-weight:600;cursor:pointer;background:' + (ST.bulkMode?'var(--danger)':'transparent') + ';color:' + (ST.bulkMode?'#fff':'var(--muted)') + ';font-family:DM Sans,sans-serif;">' + (ST.bulkMode ? '✕ Cancel' : '☑ Select') + '</button>';
     if(isAdmin()) h += '<button class="btn" style="background:rgba(13,45,94,.08);color:var(--navy);border:none;" onclick="importAlbi()">Import</button>';
     h += '</div>';
 
@@ -1138,6 +1193,15 @@ function render() {
     h += '</div>'; // end filter card
 
     var fp = filteredPartners();
+    // Bulk action bar
+    if (ST.bulkMode) {
+      var selCount = ST.selectedPartners.size;
+      h += '<div style="display:flex;align-items:center;gap:10px;padding:10px 14px;background:rgba(198,40,40,.06);border:1.5px solid rgba(198,40,40,.2);border-radius:8px;margin-bottom:10px;">';
+      h += '<div style="flex:1;font-size:13px;font-weight:600;color:var(--danger);">' + selCount + ' partner' + (selCount!==1?'s':'') + ' selected</div>';
+      h += '<button onclick="selectAllPartners()" style="padding:5px 12px;border-radius:6px;border:1.5px solid var(--border);background:transparent;font-size:12px;font-weight:600;cursor:pointer;">Select All</button>';
+      h += '<button onclick="bulkDeletePartners()" ' + (selCount?'':'disabled') + ' style="padding:5px 14px;border-radius:6px;border:none;background:' + (selCount?'var(--danger)':'#ccc') + ';color:#fff;font-size:12px;font-weight:600;cursor:' + (selCount?'pointer':'default') + ';">Delete ' + (selCount?selCount+' ':'') + 'Selected</button>';
+      h += '</div>';
+    }
     h += '<div id="partner-list">';
     if (!fp.length) {
       h += '<div style="text-align:center;padding:40px;color:var(--muted);">No partners found. Add your first partner or import from Albi.</div>';
@@ -1147,7 +1211,14 @@ function render() {
       var daysSince = p.last_touch_date ? Math.round((new Date() - new Date(p.last_touch_date + 'T00:00:00')) / (1000*60*60*24)) : 999;
       var stale = daysSince > 30;
       var pid = p.id;
-      h += '<div class="partner-card" onclick="ST.selected=\'' + pid + '\';ST.modal=\'partner-detail\';render()">';
+      var isSelected = ST.bulkMode && ST.selectedPartners.has(pid);
+      var cardBg = isSelected ? 'rgba(198,40,40,.06)' : '';
+      var cardBorder = isSelected ? 'border:1.5px solid var(--danger);' : '';
+      var cardClick = ST.bulkMode ? 'togglePartnerSelect(\'' + pid + '\')' : 'ST.selected=\'' + pid + '\';ST.modal=\'partner-detail\';render()';
+      h += '<div class="partner-card" onclick="' + cardClick + '" style="' + (cardBg?'background:'+cardBg+';':'') + cardBorder + '">';
+      if (ST.bulkMode) {
+        h += '<div style="width:20px;height:20px;border-radius:4px;border:2px solid ' + (isSelected?'var(--danger)':'var(--border)') + ';background:' + (isSelected?'var(--danger)':'#fff') + ';display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-right:4px;">' + (isSelected?'<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>':'') + '</div>';
+      }
       h += '<div class="partner-avatar" style="background:' + tierColor(p.tier||'C') + ';">' + partnerInitials(p.name) + '</div>';
       h += '<div style="flex:1;min-width:0;">';
       h += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:3px;">';
@@ -1162,7 +1233,7 @@ function render() {
       h += '<div style="font-size:11px;font-weight:600;color:' + (stale ? 'var(--danger)' : 'var(--muted)') + ';">' + lastTouch + '</div>';
       h += '<div style="font-size:10px;color:var(--muted);">' + (p.touch_count||0) + ' touches · ' + (p.referral_count||0) + ' refs</div>';
       h += '</div>';
-      h += '<button style="padding:5px 12px;border-radius:6px;border:none;background:var(--orange);color:#fff;font-size:11px;font-weight:600;cursor:pointer;" onclick="event.stopPropagation();ST.modal=\'log-touch\';ST.selected=\'' + pid + '\';render()">Log Touch</button>';
+      if (!ST.bulkMode) h += '<button style="padding:5px 12px;border-radius:6px;border:none;background:var(--orange);color:#fff;font-size:11px;font-weight:600;cursor:pointer;" onclick="event.stopPropagation();ST.modal=\'log-touch\';ST.selected=\'' + pid + '\';render()">Log Touch</button>';
       h += '</div>';
     });
     h += '</div>'; // end partner-list
