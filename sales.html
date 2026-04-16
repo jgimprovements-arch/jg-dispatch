@@ -1952,7 +1952,7 @@ async function geocodeAddress(address) {
   return null;
 }
 
-async function refreshContactMap() {
+function refreshContactMap() {
   if (!_cmMap) return;
   _cmMarkers.forEach(function(m) { _cmMap.removeLayer(m); });
   _cmMarkers = [];
@@ -1960,100 +1960,113 @@ async function refreshContactMap() {
   var typeFilter  = document.getElementById('cm_type').value;
   var tierFilter  = document.getElementById('cm_tier').value;
   var touchFilter = document.getElementById('cm_touch').value;
+  var cache = getGeocodeCache();
+  var defaultCenter = ST.market === 'Stevens Point' ? [44.5236, -89.5746] : [44.2619, -88.4154];
+
+  // Wisconsin city fallback coords
+  var cityCoords = {
+    'appleton':[44.2619,-88.4154],'stevens point':[44.5236,-89.5746],'neenah':[44.1858,-88.4626],
+    'oshkosh':[44.0247,-88.5426],'green bay':[44.5133,-88.0133],'fond du lac':[43.7730,-88.4470],
+    'wausau':[44.9591,-89.6301],'kaukauna':[44.2783,-88.2601],'little chute':[44.2811,-88.3179],
+    'menasha':[44.2022,-88.4415],'kimberly':[44.2697,-88.3415],'combined locks':[44.2650,-88.3337],
+    'de pere':[44.4489,-88.0601],'sheboygan':[43.7508,-87.7145],'manitowoc':[44.0886,-87.6565],
+    'two rivers':[44.1525,-87.5690],'waupaca':[44.3580,-89.0773],'plover':[44.4536,-89.5440],
+    'marshfield':[44.6688,-90.1718],'wausau':[44.9591,-89.6301],'merrill':[45.1802,-89.6829],
+    'clintonville':[44.6191,-88.7651],'pulaski':[44.6827,-88.2340],'madison':[43.0731,-89.4012],
+    'milwaukee':[43.0389,-87.9065],'racine':[42.7261,-87.7829],'kenosha':[42.5847,-87.8212]
+  };
+
+  function fallbackCoords(p) {
+    // Try city field
+    var city = (p.city||'').toLowerCase().trim();
+    if (city && cityCoords[city]) return cityCoords[city];
+    // Try to extract city from address "123 Main St, Appleton, WI"
+    var parts = (p.address||'').split(',');
+    if (parts.length >= 2) {
+      var c = parts[1].trim().toLowerCase().replace(/\s+wi\s*\d*/i,'').trim();
+      if (cityCoords[c]) return cityCoords[c];
+    }
+    // Scatter outside center
+    var angle = Math.random() * 2 * Math.PI;
+    return [defaultCenter[0] + Math.sin(angle)*0.25, defaultCenter[1] + Math.cos(angle)*0.25];
+  }
+
+  function placeMarker(p, coords) {
+    var days = p.last_touch_date
+      ? Math.floor((Date.now() - new Date(p.last_touch_date).getTime()) / 86400000)
+      : null;
+    var color = cmTypeColor(p.type);
+    var isSelected = _cmSelectedStops.some(function(s){ return s.id === p.id; });
+    var icon = L.divIcon({
+      className: '',
+      html: '<div style="width:12px;height:12px;border-radius:50%;background:' + color + ';border:' + (isSelected?3:2) + 'px solid ' + (isSelected?'#f5a623':'#fff') + ';box-shadow:0 1px 4px rgba(0,0,0,.4);cursor:pointer;"></div>',
+      iconSize: [12,12], iconAnchor: [6,6]
+    });
+    var daysTxt = days === null ? 'Never contacted' : (days===0?'Contacted today':days+'d since last touch');
+    var openFU = ST.followups.filter(function(f){ return f.partner_id===p.id; }).length;
+    var marker = L.marker(coords, {icon:icon}).addTo(_cmMap);
+    marker._partnerId = p.id;
+    marker.bindPopup(
+      '<div style="font-family:DM Sans,sans-serif;min-width:180px;">' +
+      '<div style="font-size:13px;font-weight:700;color:#0d2d5e;">' + p.name + '</div>' +
+      '<div style="font-size:11px;color:#6b7a96;margin-bottom:4px;">' + (p.company||'') + (p.type?' &bull; '+p.type:'') + '</div>' +
+      '<div style="font-size:11px;color:#333;margin-bottom:2px;">' + (p.address||p.city||'No address') + '</div>' +
+      '<div style="font-size:11px;color:' + (days!==null&&days>21?'#c62828':'#555') + ';margin-bottom:2px;">' + daysTxt + '</div>' +
+      (openFU?'<div style="font-size:11px;color:#e85d04;margin-bottom:6px;">'+openFU+' open follow-up'+(openFU>1?'s':'')+'</div>':'<div style="margin-bottom:6px;"></div>') +
+      '<button onclick="toggleMapStop(\'' + p.id + '\')" style="width:100%;padding:6px;border-radius:5px;border:none;background:' + (isSelected?'#c0392b':'#0d2d5e') + ';color:#fff;font-size:11px;font-weight:600;cursor:pointer;">'+
+      (isSelected?'Remove from Route':'+ Add to Route')+'</button></div>'
+    , {maxWidth:220});
+    _cmMarkers.push(marker);
+    return marker;
+  }
 
   // Filter partners
   var filtered = ST.partners.filter(function(p) {
     if (typeFilter && p.type !== typeFilter) return false;
     if (tierFilter && p.tier !== tierFilter) return false;
-    var days = p.last_touch_date
-      ? Math.floor((Date.now() - new Date(p.last_touch_date).getTime()) / 86400000)
-      : null;
-    if (touchFilter === '7'         && (days === null || days > 7)) return false;
-    if (touchFilter === 'overdue14' && (days === null || days < 14)) return false;
-    if (touchFilter === 'overdue30' && (days === null || days < 30)) return false;
-    if (touchFilter === 'never'     && days !== null) return false;
+    var days = p.last_touch_date ? Math.floor((Date.now()-new Date(p.last_touch_date).getTime())/86400000) : null;
+    if (touchFilter==='7' && (days===null||days>7)) return false;
+    if (touchFilter==='overdue14' && (days===null||days<14)) return false;
+    if (touchFilter==='overdue30' && (days===null||days<30)) return false;
+    if (touchFilter==='never' && days!==null) return false;
     return true;
   });
 
   var countEl = document.getElementById('cm_count');
-  if (countEl) countEl.textContent = 'Placing ' + filtered.length + ' pins...';
+  var uncached = [];
 
-  // Geocode all addresses, batching requests with small delay to respect Nominatim rate limit (1 req/sec)
-  var cache = getGeocodeCache();
-  var toGeocode = filtered.filter(function(p) {
-    var addr = (p.address || '').trim();
-    return addr && !cache[addr.toLowerCase()];
-  });
-
-  // Geocode uncached addresses sequentially
-  for (var gi = 0; gi < toGeocode.length; gi++) {
-    var addr = (toGeocode[gi].address || '').trim();
-    if (addr) {
-      await geocodeAddress(addr);
-      if (gi < toGeocode.length - 1) await new Promise(function(r){ setTimeout(r, 1100); }); // 1.1s between requests
-    }
-  }
-
-  var defaultCenter = ST.market === 'Stevens Point' ? [44.5236, -89.5746] : [44.2619, -88.4154];
-  var shown = 0;
-
+  // Place all pins immediately — cached get exact coords, uncached get city fallback for now
   filtered.forEach(function(p) {
-    var days = p.last_touch_date
-      ? Math.floor((Date.now() - new Date(p.last_touch_date).getTime()) / 86400000)
-      : null;
-
-    // Get coords from cache
-    var addr = (p.address || '').trim();
+    var addr = (p.address||'').trim();
     var coords = addr ? cache[addr.toLowerCase()] : null;
-
-    // Fall back to city-level if address not cached yet
     if (!coords) {
-      var cityFallback = (p.city || '').trim();
-      if (cityFallback) coords = cache[cityFallback.toLowerCase()];
+      coords = fallbackCoords(p);
+      if (addr) uncached.push(p); // queue for background geocoding
     }
-    if (!coords) {
-      // Place outside visible area so it's clear it's not geocoded
-      var angle = Math.random() * 2 * Math.PI;
-      coords = [defaultCenter[0] + Math.sin(angle)*0.3, defaultCenter[1] + Math.cos(angle)*0.3];
-    }
-
-    var color = cmTypeColor(p.type);
-    var isSelected = _cmSelectedStops.some(function(s){ return s.id === p.id; });
-    var borderColor = isSelected ? '#f5a623' : '#fff';
-    var borderWidth = isSelected ? 3 : 2;
-
-    var icon = L.divIcon({
-      className: '',
-      html: '<div style="width:12px;height:12px;border-radius:50%;background:' + color + ';border:' + borderWidth + 'px solid ' + borderColor + ';box-shadow:0 1px 4px rgba(0,0,0,.4);cursor:pointer;"></div>',
-      iconSize: [12, 12],
-      iconAnchor: [6, 6]
-    });
-
-    var daysTxt = days === null ? 'Never contacted' : (days === 0 ? 'Contacted today' : days + 'd since last touch');
-    var openFU = ST.followups.filter(function(f){ return f.partner_id === p.id; }).length;
-
-    var marker = L.marker(coords, {icon: icon}).addTo(_cmMap);
-    marker._partnerId = p.id;
-    marker._partnerData = p;
-
-    marker.bindPopup(
-      '<div style="font-family:DM Sans,sans-serif;min-width:180px;">' +
-        '<div style="font-size:13px;font-weight:700;color:#0d2d5e;">' + p.name + '</div>' +
-        '<div style="font-size:11px;color:#6b7a96;margin-bottom:4px;">' + (p.company||'') + (p.type ? ' &bull; ' + p.type : '') + '</div>' +
-        '<div style="font-size:11px;color:#333;margin-bottom:2px;">' + (p.address||p.city||'No address') + '</div>' +
-        '<div style="font-size:11px;color:' + (days !== null && days > 21 ? '#c62828' : '#555') + ';margin-bottom:2px;">' + daysTxt + '</div>' +
-        (openFU ? '<div style="font-size:11px;color:#e85d04;margin-bottom:6px;">' + openFU + ' open follow-up' + (openFU>1?'s':'') + '</div>' : '<div style="margin-bottom:6px;"></div>') +
-        '<button onclick="toggleMapStop(\'' + p.id + '\')" style="width:100%;padding:6px;border-radius:5px;border:none;background:' + (isSelected?'#c0392b':'#0d2d5e') + ';color:#fff;font-size:11px;font-weight:600;cursor:pointer;font-family:DM Sans,sans-serif;">' +
-          (isSelected ? 'Remove from Route' : '+ Add to Route') +
-        '</button>' +
-      '</div>'
-    , {maxWidth: 220});
-
-    _cmMarkers.push(marker);
-    shown++;
+    placeMarker(p, coords);
   });
 
-  if (countEl) countEl.textContent = shown + ' contact' + (shown !== 1 ? 's' : '') + ' shown';
+  if (countEl) countEl.textContent = filtered.length + ' contact' + (filtered.length!==1?'s':'') + ' shown' + (uncached.length?' ('+uncached.length+' geocoding...)':'');
+
+  // Background geocode uncached addresses and update pins as results come in
+  if (uncached.length) {
+    (async function() {
+      for (var gi = 0; gi < uncached.length; gi++) {
+        var p = uncached[gi];
+        var addr = (p.address||'').trim();
+        var coords = await geocodeAddress(addr);
+        if (coords) {
+          // Remove old marker and replace with accurate one
+          var old = _cmMarkers.find(function(m){ return m._partnerId === p.id; });
+          if (old) { _cmMap.removeLayer(old); _cmMarkers = _cmMarkers.filter(function(m){ return m._partnerId !== p.id; }); }
+          placeMarker(p, coords);
+        }
+        if (gi < uncached.length-1) await new Promise(function(r){ setTimeout(r,1100); });
+      }
+      var remaining = uncached.length - Object.keys(cache).length;
+      if (countEl) countEl.textContent = filtered.length + ' contact' + (filtered.length!==1?'s':'') + ' shown';
+    })();
+  }
 }
 function toggleMapStop(partnerId) {
   var existing = _cmSelectedStops.findIndex(function(s){ return s.id === partnerId; });
