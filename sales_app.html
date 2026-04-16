@@ -617,6 +617,16 @@
   <button class="install-banner-close" onclick="document.getElementById('install-banner').style.display='none'">×</button>
 </div>
 
+<!-- PARTNER EDIT SHEET -->
+<div class="sheet-overlay" id="partner-edit-overlay" onclick="if(event.target===this)closePartnerEdit()">
+  <div class="sheet" onclick="event.stopPropagation()">
+    <div class="sheet-handle"></div>
+    <div class="sheet-title">Edit Partner</div>
+    <div id="partner-edit-body"></div>
+    <button class="submit-btn" onclick="submitPartnerEdit()">Save Changes</button>
+  </div>
+</div>
+
 <!-- LOG TOUCH SHEET -->
 <div class="sheet-overlay" id="log-touch-overlay" onclick="if(event.target===this)closeLogTouch()">
   <div class="sheet" onclick="event.stopPropagation()">
@@ -894,6 +904,84 @@ function renderPartners() {
 
 function filterPartners() { renderPartners(); }
 
+
+// ── PARTNER EDIT ──────────────────────────────────────────────────────────
+var _editPid = null;
+
+function openPartnerEdit(pid) {
+  var p = APP.partners.find(function(x){ return x.id === pid; });
+  if (!p) return;
+  _editPid = pid;
+
+  var INP = 'width:100%;padding:13px 14px;border:1.5px solid var(--border);border-radius:12px;font-size:15px;font-family:DM Sans,sans-serif;outline:none;background:var(--bg);box-sizing:border-box;margin-top:4px;';
+  var SEL = INP + 'appearance:none;-webkit-appearance:none;';
+  var TYPES = ['Plumber','Realtor','Insurance Agent','Property Manager','GC','Fire Department','Firefighter','Charity','Chamber of Commerce','Customer','Other'];
+
+  var html =
+    '<div class="field-label">Name</div><input id="pe-name" type="text" style="' + INP + '" value="' + (p.name||'').replace(/"/g,'&quot;') + '">' +
+    '<div class="field-label">Company</div><input id="pe-company" type="text" style="' + INP + '" value="' + (p.company||'').replace(/"/g,'&quot;') + '">' +
+    '<div class="field-label">Contact Type</div>' +
+    '<select id="pe-type" style="' + SEL + '">' +
+      TYPES.map(function(t){ return '<option value="'+t+'"'+(p.type===t?' selected':'')+'>'+t+'</option>'; }).join('') +
+    '</select>' +
+    '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">' +
+      '<div><div class="field-label">Phone</div><input id="pe-phone" type="text" style="' + INP + '" value="' + (p.phone||'') + '"></div>' +
+      '<div><div class="field-label">Tier</div>' +
+        '<select id="pe-tier" style="' + SEL + '">' +
+          ['A','B','C'].map(function(t){ return '<option value="'+t+'"'+(p.tier===t?' selected':'')+'>'+t+'-Tier</option>'; }).join('') +
+        '</select>' +
+      '</div>' +
+    '</div>' +
+    '<div class="field-label">Email</div><input id="pe-email" type="text" style="' + INP + '" value="' + (p.email||'') + '">' +
+    '<div class="field-label">Address</div><input id="pe-address" type="text" style="' + INP + '" value="' + (p.address||'').replace(/"/g,'&quot;') + '">' +
+    '<div class="field-label">Favorite Treats</div><input id="pe-treats" type="text" style="' + INP + '" value="' + (p.favorite_treats||'').replace(/"/g,'&quot;') + '" placeholder="Coffee, donuts...">' +
+    '<div class="field-label">Family / Kids / Pets</div><input id="pe-family" type="text" style="' + INP + '" value="' + (p.family_members||'').replace(/"/g,'&quot;') + '" placeholder="Wife Sarah, 2 kids...">' +
+    '<div class="field-label">Last Conversation</div><textarea id="pe-convo" style="' + INP + 'height:70px;resize:none;">' + (p.last_convo_note||'') + '</textarea>' +
+    '<div class="field-label">Notes</div><textarea id="pe-notes" style="' + INP + 'height:60px;resize:none;">' + (p.notes||'') + '</textarea>';
+
+  document.getElementById('partner-edit-body').innerHTML = html;
+  document.getElementById('partner-edit-overlay').classList.add('open');
+  closePartnerDetail();
+}
+
+function closePartnerEdit() {
+  document.getElementById('partner-edit-overlay').classList.remove('open');
+  _editPid = null;
+}
+
+async function submitPartnerEdit() {
+  if (!_editPid) return;
+  var g = function(id){ var el=document.getElementById(id); return el?el.value:''; };
+  var data = {
+    id: _editPid,
+    name:            g('pe-name'),
+    company:         g('pe-company'),
+    type:            g('pe-type'),
+    tier:            g('pe-tier'),
+    phone:           g('pe-phone'),
+    email:           g('pe-email'),
+    address:         g('pe-address'),
+    favorite_treats: g('pe-treats'),
+    family_members:  g('pe-family'),
+    last_convo_note: g('pe-convo'),
+    notes:           g('pe-notes'),
+    updated_at:      new Date().toISOString()
+  };
+  try {
+    await fetch(SB_URL + '/rest/v1/sales_partners?id=eq.' + _editPid, {
+      method: 'PATCH',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify(data)
+    });
+    // Update local state
+    var idx = APP.partners.findIndex(function(p){ return p.id === _editPid; });
+    if (idx !== -1) Object.assign(APP.partners[idx], data);
+    closePartnerEdit();
+    toast('✓ Partner updated');
+    renderPartners();
+  } catch(e) { toast('Error saving — try again'); }
+}
+
 // ── PARTNER DETAIL ────────────────────────────────────────────────────────
 function openPartnerDetail(pid) {
   var p = APP.partners.find(function(x){ return x.id === pid; });
@@ -912,8 +1000,18 @@ function openPartnerDetail(pid) {
   // Contact buttons
   html += '<div class="contact-row">';
   if (p.phone) html += '<a href="tel:' + p.phone + '" class="contact-btn call">📞 ' + p.phone + '</a>';
-  if (p.email) html += '<a href="https://mail.google.com/mail/?view=cm&to=' + encodeURIComponent(p.email) + '" target="_blank" class="contact-btn email">✉️ Email</a>';
+  if (p.email) html += '<a href="mailto:' + p.email + '" class="contact-btn email">✉️ Email</a>';
   html += '</div>';
+  // Address — clickable to Google Maps
+  var addr = (p.address || '') + (p.city ? (p.address ? ', ' : '') + p.city : '');
+  if (addr.trim()) {
+    var mapsUrl = 'https://maps.google.com/?q=' + encodeURIComponent(addr);
+    html += '<a href="' + mapsUrl + '" style="display:flex;align-items:center;gap:8px;padding:10px 14px;background:rgba(13,45,94,.05);border-radius:12px;text-decoration:none;color:var(--navy);font-size:13px;margin-bottom:14px;">' +
+      '<span style="font-size:16px;">📍</span>' +
+      '<span style="flex:1;font-weight:500;">' + addr + '</span>' +
+      '<span style="font-size:11px;color:var(--orange);font-weight:700;">Maps →</span>' +
+    '</a>';
+  }
 
   // Stats
   html += '<div class="detail-stat-row">';
@@ -929,7 +1027,10 @@ function openPartnerDetail(pid) {
   if (p.notes)           html += '<div class="intel-chip" style="color:var(--muted);">' + p.notes + '</div>';
 
   // Log touch button
-  html += '<button class="submit-btn" style="margin-top:16px;" onclick="closePartnerDetail();openLogTouchForStop(\'' + p.id + '\',\'' + (p.name||'').replace(/'/g,"\\x27") + '\')">📋 Log Touch</button>';
+  html += '<div style="display:flex;gap:8px;margin-top:16px;">';
+  html += '<button class="submit-btn" style="flex:1;" onclick="closePartnerDetail();openLogTouchForStop(\'' + p.id + '\',\'' + (p.name||'').replace(/\'/, '\\x27') + '\')">📋 Log Touch</button>';
+  html += '<button onclick="openPartnerEdit(\'' + p.id + '\')" style="padding:16px 18px;border-radius:14px;border:1.5px solid var(--border);background:transparent;font-size:15px;cursor:pointer;">✏️</button>';
+  html += '</div>';
 
   document.getElementById('partner-detail-body').innerHTML = html;
   document.getElementById('partner-detail-overlay').classList.add('open');
