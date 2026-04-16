@@ -578,11 +578,19 @@ function isAdmin() {
 
 // SUPABASE 
 async function sb(path, opts) {
-  var r = await fetch(SB_URL + path, Object.assign({
-    headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' }
-  }, opts || {}));
-  if (!r.ok) { console.error('SB error', r.status, path); return null; }
-  return r.json().catch(function(){ return null; });
+  var defaults = { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' };
+  var extraHeaders = (opts && opts.headers) ? opts.headers : {};
+  var merged = Object.assign({}, defaults, extraHeaders);
+  var fetchOpts = Object.assign({}, opts || {}, { headers: merged });
+  var r = await fetch(SB_URL + path, fetchOpts);
+  if (!r.ok) {
+    var errText = await r.text().catch(function(){ return ''; });
+    console.error('SB error', r.status, path, errText);
+    return null;
+  }
+  var text = await r.text();
+  if (!text || text === '') return true; // 204 no content = success
+  try { return JSON.parse(text); } catch(e) { return null; }
 }
 
 // GPS 
@@ -823,22 +831,29 @@ function renderJobs() {
   }).join('') + (filtered.length > 100 ? '<div style="padding:8px 14px;font-size:11px;color:var(--muted);text-align:center;">Showing 100 of '+filtered.length+' — search to narrow down</div>' : '');
 }
 // ACTIONS 
-function selectJob(id, name, market) {
+async function selectJob(id, name, market) {
   TC.selectedJobId = id;
   TC.selectedJobName = name;
- // If clocked in, update the active entry
+
   if (TC.clockedIn && TC.activeEntry) {
-    fetch(SB_URL + '/rest/v1/time_entries?id=eq.' + TC.activeEntry.id, {
+    // Already clocked in — just update the job on current entry
+    await fetch(SB_URL + '/rest/v1/time_entries?id=eq.' + TC.activeEntry.id, {
       method: 'PATCH',
       headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
       body: JSON.stringify({ job_id: id, job_name: name })
     });
     TC.activeEntry.job_id = id;
     TC.activeEntry.job_name = name;
+    renderJobs();
+    renderStatus();
+    toast('✓ Job updated: ' + name);
+  } else {
+    // Not clocked in — select job and clock in immediately
+    renderJobs();
+    renderStatus();
+    toast('Job selected — clocking in...');
+    await clockIn();
   }
-  renderJobs();
-  renderStatus();
-  toast('✓ Job selected: ' + name);
 }
 
 function setJobMarket(market) {
@@ -867,8 +882,9 @@ async function handleMainBtn() {
 async function clockIn() {
   if (!TC.employee || !TC.employee.id) { toast('Employee record not found'); return; }
   var btn = document.getElementById('main-btn');
-  btn.style.opacity = '.6'; btn.style.pointerEvents = 'none';
+  if (btn) { btn.style.opacity = '.6'; btn.style.pointerEvents = 'none'; }
   toast('Getting location...');
+  try {
 
   var loc = await getLocation();
   var now = new Date().toISOString();
@@ -899,10 +915,15 @@ async function clockIn() {
     TC.entries.push(result[0]);
     toast('✓ Clocked in' + (loc ? ' 📍' : ' (no GPS)'));
   } else {
-    toast('Error clocking in — try again');
+    console.error('Clock in result:', result);
+    toast('Error clocking in — check connection and try again');
   }
 
-  btn.style.opacity = '1'; btn.style.pointerEvents = '';
+  } catch(e) {
+    console.error('clockIn error:', e);
+    toast('Clock in failed: ' + e.message);
+  }
+  if (btn) { btn.style.opacity = '1'; btn.style.pointerEvents = ''; }
   renderStatus();
   renderEntries();
   updateStats();
