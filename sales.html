@@ -577,6 +577,8 @@ var ST = {
   followups: [],
   routes: [],
   routeTemplates: [],
+  routeBuilderSearch: '',
+  routeBuilderStops: [],
   loading: false,
   modal: null,   // 'add-partner' | 'log-touch' | 'add-route' | 'add-followup' | 'partner-detail'
   detailEditMode: null,
@@ -1081,11 +1083,26 @@ function render() {
       }
       h += '<button onclick="event.stopPropagation();saveAsTemplate(\'' + route.id + '\')" style="padding:3px 8px;border-radius:5px;border:none;background:rgba(245,166,35,.3);color:var(--gold);font-size:10px;font-weight:600;cursor:pointer;">Save Template</button>';
       // Google Calendar link
-      var calTitle = encodeURIComponent('Sales Route — ' + (route.rep_name||'') + ' (' + stops.length + ' stops)');
+      // Build individual calendar events per stop using actual stop duration
       var calDate = (route.route_date||'').replace(/-/g,'');
-      var calDesc = encodeURIComponent('Stops:\n' + stops.map(function(s,i){ return (i+1)+'. '+(s.partner_name||'')+(s.address?' — '+s.address:''); }).join('\n'));
-      var calUrl = 'https://calendar.google.com/calendar/render?action=TEMPLATE&text=' + calTitle + '&dates=' + calDate + 'T080000/' + calDate + 'T170000&details=' + calDesc;
-      h += '<a href="' + calUrl + '" target="_blank" onclick="event.stopPropagation()" style="display:inline-flex;align-items:center;padding:3px 8px;border-radius:5px;background:rgba(76,219,122,.2);color:#4cdb7a;text-decoration:none;font-size:10px;font-weight:600;">+ Cal</a>';
+      var calLinks = [];
+      var startMins = 8 * 60; // 8:00am
+      stops.forEach(function(s, i) {
+        var endMins = startMins + (s.duration || 45);
+        var fmt = function(m) {
+          var h = Math.floor(m/60), min = m%60;
+          return (h<10?'0':'')+h+(min<10?'0':'')+min+'00';
+        };
+        var title = encodeURIComponent('Stop '+(i+1)+': '+(s.partner_name||'Stop '+(i+1)));
+        var loc   = encodeURIComponent(s.address||'');
+        var desc  = encodeURIComponent('Stop '+(i+1)+' of '+stops.length+' — '+route.rep_name+' route\n'+(s.address||''));
+        calLinks.push('https://calendar.google.com/calendar/render?action=TEMPLATE&text='+title+'&dates='+calDate+'T'+fmt(startMins)+'/'+calDate+'T'+fmt(endMins)+'&details='+desc+'&location='+loc);
+        startMins = endMins + 15; // 15 min drive buffer between stops
+      });
+      // Open all events — use first as main link, others via onclick chain
+      if (!window._calLinkMap) window._calLinkMap = {};
+      window._calLinkMap[route.id] = calLinks;
+      h += '<button onclick="event.stopPropagation();openCalendarEvents(window._calLinkMap[\x27' + route.id + '\x27])" style="display:inline-flex;align-items:center;padding:3px 8px;border-radius:5px;border:none;background:rgba(76,219,122,.2);color:#4cdb7a;font-size:10px;font-weight:600;cursor:pointer;">+ Cal</button>';
       h += '</div>';
       h += '</div><div style="padding:10px;">';
       stops.forEach(function(stop, idx) {
@@ -1355,24 +1372,88 @@ function render() {
     }
 
     if (ST.modal === 'add-route') {
-      h += '<div class="modal-title">🚗 Plan Route</div>';
-      h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">';
-      h += '<div class="form-group"><label class="form-label">Date</label><input class="form-input" type="date" id="rDate" value="' + ST.today + '"></div>';
-      h += '<div class="form-group"><label class="form-label">Rep Name</label><input class="form-input" id="rRep" placeholder="Your name"></div>';
+      var rbSearch = ST.routeBuilderSearch || '';
+      var rbStops  = ST.routeBuilderStops  || [];
+      var rbMatches = ST.partners.filter(function(p) {
+        if (rbStops.some(function(s){ return s.partner_id === p.id; })) return false;
+        if (!rbSearch) return true;
+        var q = rbSearch.toLowerCase();
+        return (p.name||'').toLowerCase().includes(q) || (p.company||'').toLowerCase().includes(q) || (p.city||'').toLowerCase().includes(q);
+      }).slice(0, 30);
+
+      // Calculate total time and end time
+      var startH = 8, startM = 0, driveBuffer = 15;
+      var totalMins = rbStops.reduce(function(sum, s){ return sum + (s.duration||45) + driveBuffer; }, 0);
+      var endTotalMins = startH*60 + startM + totalMins;
+      var endH = Math.floor(endTotalMins/60), endMin = endTotalMins%60;
+      var endStr = endH + ':' + (endMin<10?'0':'') + endMin;
+
+      h += '<div style="font-size:14px;font-weight:700;color:var(--navy);margin-bottom:14px;">Plan Route</div>';
+      h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px;">';
+      h += '<div><label class="form-label">Date</label><input class="form-input" type="date" id="rDate" value="' + ST.today + '"></div>';
+      h += '<div><label class="form-label">Rep Name</label><input class="form-input" id="rRep" placeholder="Your name"></div>';
       h += '</div>';
-      h += '<div class="form-group"><label class="form-label">Select Stops (click to add)</label>';
-      h += '<div style="max-height:240px;overflow-y:auto;border:1.5px solid var(--border);border-radius:6px;">';
-      ST.partners.forEach(function(p,i) {
-        h += '<div style="padding:8px 12px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px;cursor:pointer;background:' + (i%2===0?'var(--surface)':'#fff') + '" onclick="this.classList.toggle(\'selected\');this.style.background=this.classList.contains(\'selected\')?\'rgba(232,93,4,.08)\':null;">';
-        h += '<span>🚗</span>';
-        h += '<span style="font-size:12px;font-weight:600;" data-pid="' + p.id + '" data-pname="' + p.name + '" data-paddr="' + (p.address||p.city||'') + '">' + p.name + '</span>';
-        h += '<span style="font-size:10px;color:var(--muted);">' + (p.company||'') + (p.city?' · '+p.city:'') + '</span>';
-        h += '</div>';
-      });
+
+      h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px;">';
+
+      // LEFT: partner search
+      h += '<div>';
+      h += '<label class="form-label">Add Stops</label>';
+      h += '<input type="text" id="rbSearch" placeholder="Search partners..." value="' + rbSearch.replace(/"/g,'&quot;') + '" oninput="ST.routeBuilderSearch=this.value;renderRouteBuilder()" style="width:100%;padding:7px 10px;border-radius:6px;border:1.5px solid var(--border);font-size:12px;font-family:DM Sans,sans-serif;outline:none;box-sizing:border-box;margin-bottom:6px;">';
+      h += '<div style="max-height:200px;overflow-y:auto;border:1.5px solid var(--border);border-radius:6px;background:#fff;">';
+      if (!rbMatches.length) {
+        h += '<div style="padding:10px;font-size:11px;color:var(--muted);text-align:center;">No partners found</div>';
+      } else {
+        rbMatches.forEach(function(p) {
+          var days = p.last_touch_date ? Math.floor((Date.now()-new Date(p.last_touch_date).getTime())/86400000) : null;
+          var urgency = days === null ? 'Never' : days+'d ago';
+          var urgColor = days === null || days > 30 ? '#c62828' : days > 14 ? '#e65100' : 'var(--muted)';
+          var rbSafeName = (p.name||'').replace(/'/g,'\x27');
+          var rbSafeAddr = (p.address||p.city||'').replace(/'/g,'\x27');
+          h += '<div onclick="addRouteBuilderStop(\x27'+p.id+'\x27,\x27'+rbSafeName+'\x27,\x27'+rbSafeAddr+'\x27)" style="padding:8px 10px;border-bottom:1px solid #f0f0f0;cursor:pointer;display:flex;align-items:center;gap:8px;" onmouseover="this.style.background=\'rgba(232,93,4,.06)\'" onmouseout="this.style.background=\'\'">';
+          h += '<div style="flex:1;min-width:0;"><div style="font-size:12px;font-weight:600;color:var(--navy);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + p.name + '</div>';
+          h += '<div style="font-size:10px;color:var(--muted);">' + (p.type||'') + (p.city?' · '+p.city:'') + '</div></div>';
+          h += '<div style="font-size:10px;color:'+urgColor+';flex-shrink:0;">' + urgency + '</div>';
+          h += '<div style="font-size:18px;color:var(--orange);flex-shrink:0;font-weight:300;">+</div>';
+          h += '</div>';
+        });
+      }
       h += '</div></div>';
-      h += '<div class="form-group"><label class="form-label">Notes</label><input class="form-input" id="rNotes" placeholder="e.g. Focus on south Appleton today"></div>';
-      h += '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">';
-      h += '<button style="padding:8px 16px;border-radius:6px;border:1.5px solid var(--border);background:transparent;cursor:pointer;font-size:12px;" onclick="ST.modal=null;render()">Cancel</button>';
+
+      // RIGHT: selected stops with duration
+      h += '<div>';
+      h += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">';
+      h += '<label class="form-label" style="margin:0;">Stops (' + rbStops.length + ')</label>';
+      if (rbStops.length) h += '<span style="font-size:10px;color:var(--muted);">Done ~' + endStr + '</span>';
+      h += '</div>';
+      if (!rbStops.length) {
+        h += '<div style="height:200px;border:1.5px dashed var(--border);border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:11px;color:var(--muted);text-align:center;padding:12px;">Click partners to add stops</div>';
+      } else {
+        h += '<div style="max-height:200px;overflow-y:auto;border:1.5px solid var(--border);border-radius:6px;background:#fff;">';
+        rbStops.forEach(function(s, i) {
+          var startMins2 = 8*60 + rbStops.slice(0,i).reduce(function(sum,x){ return sum+(x.duration||45)+driveBuffer; },0);
+          var endMins2 = startMins2 + (s.duration||45);
+          var fmt2 = function(m){ var hh=Math.floor(m/60),mm=m%60; return hh+':'+(mm<10?'0':'')+mm; };
+          h += '<div style="padding:6px 8px;border-bottom:1px solid #f0f0f0;display:flex;align-items:center;gap:6px;">';
+          h += '<div style="min-width:18px;height:18px;border-radius:4px;background:var(--navy);color:#fff;font-size:10px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0;">'+(i+1)+'</div>';
+          h += '<div style="flex:1;min-width:0;"><div style="font-size:11px;font-weight:600;color:var(--navy);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'+s.partner_name+'</div>';
+          h += '<div style="font-size:10px;color:var(--muted);">' + fmt2(startMins2) + ' – ' + fmt2(endMins2) + '</div></div>';
+          h += '<select onchange="ST.routeBuilderStops['+i+'].duration=parseInt(this.value);renderRouteBuilder()" style="font-size:10px;padding:2px 4px;border-radius:4px;border:1px solid var(--border);background:#fff;flex-shrink:0;">';
+          [15,30,45,60,90].forEach(function(d){
+            h += '<option value="'+d+'"'+(s.duration===d?' selected':'')+'>'+d+'m</option>';
+          });
+          h += '</select>';
+          h += '<button onclick="removeRouteBuilderStop('+i+')" style="background:none;border:none;color:#aaa;font-size:14px;cursor:pointer;padding:0 2px;flex-shrink:0;">x</button>';
+          h += '</div>';
+        });
+        h += '</div>';
+      }
+      h += '</div>';
+      h += '</div>'; // end grid
+
+      h += '<div class="form-group" style="margin-top:10px;"><label class="form-label">Notes</label><input class="form-input" id="rNotes" placeholder="e.g. Focus on south Appleton today"></div>';
+      h += '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px;">';
+      h += '<button style="padding:8px 16px;border-radius:6px;border:1.5px solid var(--border);background:transparent;cursor:pointer;font-size:12px;" onclick="ST.modal=null;ST.routeBuilderSearch=\'\';ST.routeBuilderStops=[];render()">Cancel</button>';
       h += '<button style="padding:8px 20px;border-radius:6px;border:none;background:var(--orange);color:#fff;font-size:12px;font-weight:600;cursor:pointer;" onclick="submitRoute()">Save Route</button>';
       h += '</div>';
     }
@@ -1513,10 +1594,8 @@ function submitTouch() {
 }
 
 function submitRoute() {
-  var stops = [];
-  document.querySelectorAll('.modal-box .selected [data-pid]').forEach(function(el,i) {
-    stops.push({partner_id:el.dataset.pid, partner_name:el.dataset.pname, address:el.dataset.paddr, order:i, completed:false});
-  });
+  var stops = ST.routeBuilderStops || [];
+  if (!stops.length) { alert('Add at least one stop.'); return; }
   saveRoute({
     route_date: document.getElementById('rDate').value,
     rep_name: document.getElementById('rRep').value,
@@ -1525,6 +1604,8 @@ function submitRoute() {
     status: 'Planned'
   });
   ST.modal = null;
+  ST.routeBuilderSearch = '';
+  ST.routeBuilderStops = [];
 }
 
 function submitFollowup() {
@@ -2170,6 +2251,53 @@ async function deleteRoute(id) {
   if (!confirm('Delete this route? This cannot be undone.')) return;
   await sb('/rest/v1/sales_routes?id=eq.' + id, { method: 'DELETE' });
   await loadAll();
+}
+
+
+// Open each route stop as a separate Google Calendar event
+// Opens them sequentially with a small delay so browser doesn't block popups
+function openCalendarEvents(links) {
+  if (!links || !links.length) return;
+  if (links.length === 1) { window.open(links[0], '_blank'); return; }
+  // Warn user about popups then open each
+  var msg = 'This will open ' + links.length + ' Google Calendar tabs (one per stop).\nMake sure popups are allowed for this site.';
+  if (!confirm(msg)) return;
+  links.forEach(function(url, i) {
+    setTimeout(function() { window.open(url, '_blank'); }, i * 600);
+  });
+}
+
+
+// ── ROUTE BUILDER HELPERS ─────────────────────────────────────────────────
+function addRouteBuilderStop(pid, pname, paddr) {
+  if (!ST.routeBuilderStops) ST.routeBuilderStops = [];
+  if (ST.routeBuilderStops.some(function(s){ return s.partner_id === pid; })) return;
+  ST.routeBuilderStops.push({ partner_id: pid, partner_name: pname, address: paddr, duration: 45, order: ST.routeBuilderStops.length, completed: false });
+  renderRouteBuilder();
+}
+
+function removeRouteBuilderStop(idx) {
+  ST.routeBuilderStops.splice(idx, 1);
+  ST.routeBuilderStops.forEach(function(s,i){ s.order = i; });
+  renderRouteBuilder();
+}
+
+function renderRouteBuilder() {
+  // Re-render just the modal content without a full render() so search input keeps focus
+  var modal = document.querySelector('.modal-box');
+  if (!modal || ST.modal !== 'add-route') { render(); return; }
+  // Save current field values before re-render
+  var dateVal  = (document.getElementById('rDate')  || {}).value || ST.today;
+  var repVal   = (document.getElementById('rRep')   || {}).value || '';
+  var notesVal = (document.getElementById('rNotes') || {}).value || '';
+  render();
+  // Restore values after re-render
+  requestAnimationFrame(function() {
+    var d = document.getElementById('rDate');  if(d) d.value = dateVal;
+    var r = document.getElementById('rRep');   if(r) r.value = repVal;
+    var n = document.getElementById('rNotes'); if(n) n.value = notesVal;
+    var s = document.getElementById('rbSearch'); if(s) { s.focus(); var len=s.value.length; s.setSelectionRange(len,len); }
+  });
 }
 
 // ── PARTNER EDIT MODAL (outside render cycle) ─────────────────────────────
