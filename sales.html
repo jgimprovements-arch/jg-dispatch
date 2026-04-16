@@ -503,7 +503,32 @@ input[type=file]{display:none}
     <div style="font-size:15px;font-weight:700;color:#0d2d5e;margin-bottom:4px;font-family:DM Sans,sans-serif;">Save as Template</div>
     <div style="font-size:12px;color:#6b7a96;margin-bottom:16px;" id="st_stop_count"></div>
     <div style="font-size:10px;font-weight:600;color:#6b7a96;text-transform:uppercase;margin-bottom:4px;">Template Name</div>
-    <input id="st_name" type="text" placeholder="e.g. Appleton Plumbers North Loop" style="width:100%;padding:9px 12px;border-radius:6px;border:1.5px solid #d0d5dd;font-size:13px;font-family:DM Sans,sans-serif;box-sizing:border-box;background:#fff;margin-bottom:16px;">
+    <input id="st_name" type="text" placeholder="e.g. Appleton Plumbers North Loop" style="width:100%;padding:9px 12px;border-radius:6px;border:1.5px solid #d0d5dd;font-size:13px;font-family:DM Sans,sans-serif;box-sizing:border-box;background:#fff;margin-bottom:12px;">
+    <div style="background:#f8fafc;border-radius:8px;padding:12px;margin-bottom:14px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+        <div style="font-size:12px;font-weight:700;color:#0d2d5e;">Recurring Schedule</div>
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12px;color:#6b7a96;">
+          <input type="checkbox" id="st_recurring" onchange="stToggleRecurring()" style="accent-color:#e85d04;">
+          Enable
+        </label>
+      </div>
+      <div id="st_recurring_opts" style="display:none;display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+        <div>
+          <div style="font-size:10px;font-weight:600;color:#6b7a96;margin-bottom:3px;">Interval</div>
+          <select id="st_recurrence" onchange="stUpdateDayOptions()" style="width:100%;padding:7px 10px;border-radius:6px;border:1.5px solid #d0d5dd;font-size:12px;font-family:DM Sans,sans-serif;background:#fff;">
+            <option value="weekly">Weekly</option>
+            <option value="biweekly">Biweekly</option>
+            <option value="monthly">Monthly</option>
+          </select>
+        </div>
+        <div>
+          <div style="font-size:10px;font-weight:600;color:#6b7a96;margin-bottom:3px;" id="st_day_label">Day of Week</div>
+          <select id="st_recurrence_day" style="width:100%;padding:7px 10px;border-radius:6px;border:1.5px solid #d0d5dd;font-size:12px;font-family:DM Sans,sans-serif;background:#fff;">
+            <option value="1">Monday</option><option value="2">Tuesday</option><option value="3">Wednesday</option><option value="4">Thursday</option><option value="5">Friday</option>
+          </select>
+        </div>
+      </div>
+    </div>
     <div style="display:flex;gap:8px;">
       <button onclick="confirmSaveTemplate()" style="flex:1;padding:9px;border-radius:6px;border:none;background:#0d2d5e;color:#fff;font-size:13px;font-weight:600;cursor:pointer;font-family:DM Sans,sans-serif;">Save Template</button>
       <button onclick="closeSaveTemplate()" style="padding:9px 16px;border-radius:6px;border:1.5px solid #d0d5dd;background:transparent;font-size:13px;cursor:pointer;">Cancel</button>
@@ -587,6 +612,7 @@ var ST = {
   followups: [],
   routes: [],
   routeTemplates: [],
+  referralLog: [],
   routeBuilderSearch: '',
   routeBuilderStops: [],
   loading: false,
@@ -607,9 +633,7 @@ var ST = {
 
 async function sb(path, opts) {
   try {
-    var ctrl = new AbortController();
-    var tid = setTimeout(function(){ ctrl.abort(); }, 8000);
-    var r = await fetch(SB_URL+path, Object.assign({signal:ctrl.signal, headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json'}}, opts||{}));
+    var r = await fetch(SB_URL+path, Object.assign({headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json'}}, opts||{}));
     clearTimeout(tid);
     if (!r.ok) {
       var errBody = await r.text();
@@ -670,6 +694,12 @@ async function loadAll() {
     var rt = await sbSafe('/rest/v1/sales_route_templates?market=eq.'+mq+'&order=name.asc&limit=100');
     ST.routeTemplates = rt || [];
   } catch(e) { console.error('route templates fetch:', e); ST.routeTemplates = []; }
+  try {
+    var rl = await sbSafe('/rest/v1/sales_referral_log?order=logged_at.desc&limit=200');
+    ST.referralLog = rl || [];
+    // Auto-match unmatched referrals to partners
+    matchReferrals();
+  } catch(e) { console.error('referral log fetch:', e); ST.referralLog = []; }
   // Always clear loading — guaranteed even if something above threw
   ST.loading = false;
   render();
@@ -686,13 +716,9 @@ function _loadAllSafe() {
 
 async function sbSafe(path) {
   try {
-    var ctrl = new AbortController();
-    var tid = setTimeout(function(){ ctrl.abort(); }, 10000);
     var r = await fetch(SB_URL + path, {
-      signal: ctrl.signal,
       headers: {'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Prefer': 'count=none'}
     });
-    clearTimeout(tid);
     if (!r.ok) { console.error('sbSafe error:', r.status, path); return []; }
     return await r.json();
   } catch(e) {
@@ -945,8 +971,8 @@ function render() {
   h += '<div style="background:var(--surface);border-bottom:1px solid var(--border);padding:8px 16px 0;display:flex;align-items:center;justify-content:space-between;">';
   h += mkMarketToggle();
   h += '<div class="sales-tabs" style="border:none;padding:0;">';
-  var tabs = isAdmin() ? ['partners','touches','routes','followups','import','admin'] : ['partners','touches','routes','followups'];
-  var tabLabels = {partners:'👥 Partners', touches:'📋 Touches', routes:'🚗 Routes', followups:'🔔 Follow-ups', import:'📥 Import', admin:'🔐 Admin'};
+  var tabs = isAdmin() ? ['partners','touches','routes','followups','referrals','import','admin'] : ['partners','touches','routes','followups','referrals'];
+  var tabLabels = {partners:'👥 Partners', touches:'📋 Touches', routes:'🚗 Routes', followups:'🔔 Follow-ups', referrals:'💰 Referrals', import:'📥 Import', admin:'🔐 Admin'};
   var overdueCount = ST.followups.filter(function(f){ return !f.completed && daysUntil(f.due_date) <= 0; }).length;
   tabs.forEach(function(t) {
     var label = tabLabels[t];
@@ -1215,6 +1241,79 @@ function render() {
   }
 
   // ── IMPORT TAB ────────────────────────────────────────────────────────────
+  // ── REFERRALS TAB ──────────────────────────────────────────────────────
+  if (ST.tab === 'referrals') {
+    var totalRefRev = ST.referralLog.reduce(function(s,r){ return s+(r.job_value||0); }, 0);
+    var matched = ST.referralLog.filter(function(r){ return r.partner_id; });
+    var unmatched = ST.referralLog.filter(function(r){ return !r.partner_id; });
+
+    // Stats row
+    h += '<div class="sales-stat-row">';
+    h += '<div class="sales-stat"><div class="sales-stat-val">' + ST.referralLog.length + '</div><div class="sales-stat-lbl">Total Referrals</div></div>';
+    h += '<div class="sales-stat"><div class="sales-stat-val" style="color:var(--ok);">$' + Math.round(totalRefRev).toLocaleString() + '</div><div class="sales-stat-lbl">Referral Revenue</div></div>';
+    h += '<div class="sales-stat"><div class="sales-stat-val" style="color:var(--muted);">' + unmatched.length + '</div><div class="sales-stat-lbl">Unmatched</div></div>';
+    h += '</div>';
+
+    // Sync button
+    h += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">';
+    h += '<div style="font-size:13px;font-weight:700;color:var(--navy);">Referral Log</div>';
+    h += '<button onclick="runReferralMatch()" class="btn btn-gold" style="font-size:12px;padding:6px 14px;">🔄 Re-match Partners</button>';
+    h += '</div>';
+
+    if (!ST.referralLog.length) {
+      h += '<div style="text-align:center;padding:60px 20px;color:var(--muted);">No referrals logged yet.<br><br>Set up the Zapier Zap to auto-log referrals from Albi jobs.</div>';
+    } else {
+      // Group by partner
+      var byPartner = {};
+      ST.referralLog.forEach(function(r) {
+        var key = r.partner_id || ('unmatched:' + (r.referrer_name||r.partner_name||'Unknown'));
+        if (!byPartner[key]) byPartner[key] = { name: r.partner_name||r.referrer_name||'Unknown', partner_id: r.partner_id, jobs: [], revenue: 0 };
+        byPartner[key].jobs.push(r);
+        byPartner[key].revenue += (r.job_value||0);
+      });
+
+      // Sort by revenue desc
+      var groups = Object.values(byPartner).sort(function(a,b){ return b.revenue - a.revenue; });
+
+      groups.forEach(function(g) {
+        var isMatched = !!g.partner_id;
+        var borderColor = isMatched ? 'var(--ok)' : 'var(--danger)';
+        h += '<div style="background:var(--surface);border-radius:10px;border:1px solid var(--border);border-left:3px solid '+borderColor+';margin-bottom:10px;overflow:hidden;">';
+        h += '<div style="display:flex;align-items:center;padding:10px 14px;gap:10px;cursor:pointer;" onclick="toggleRefGroup(this)">';
+        h += '<div style="flex:1;">';
+        h += '<div style="font-size:14px;font-weight:700;color:var(--navy);">' + g.name + '</div>';
+        h += '<div style="font-size:11px;color:var(--muted);">' + g.jobs.length + ' job' + (g.jobs.length!==1?'s':'') + ' · $' + Math.round(g.revenue).toLocaleString() + ' revenue</div>';
+        h += '</div>';
+        if (!isMatched) h += '<span style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:10px;background:rgba(198,40,40,.1);color:var(--danger);">Unmatched</span>';
+        else h += '<span style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:10px;background:rgba(46,125,50,.1);color:var(--ok);">✓ Matched</span>';
+        h += '<span style="color:var(--muted);font-size:12px;">▼</span>';
+        h += '</div>';
+        // Jobs list (collapsed by default)
+        h += '<div style="display:none;border-top:1px solid var(--border);">';
+        g.jobs.forEach(function(j) {
+          h += '<div style="padding:8px 14px;display:flex;align-items:center;gap:10px;border-bottom:1px solid var(--border);">';
+          h += '<div style="flex:1;">';
+          h += '<div style="font-size:12px;font-weight:600;color:var(--navy);">' + (j.job_name||j.job_id||'Unknown Job') + '</div>';
+          h += '<div style="font-size:11px;color:var(--muted);">' + (j.market||'') + ' · ' + fmtDate(j.logged_at||j.created_at) + '</div>';
+          h += '</div>';
+          h += '<div style="font-size:13px;font-weight:700;color:var(--ok);">$' + Math.round(j.job_value||0).toLocaleString() + '</div>';
+          h += '</div>';
+        });
+        if (!isMatched) {
+          h += '<div style="padding:10px 14px;">';
+          h += '<div style="font-size:11px;color:var(--muted);margin-bottom:6px;">Link to a partner:</div>';
+          h += '<select onchange="linkReferralToPartner(\'' + g.jobs.map(function(j){return j.id;}).join(',') + '\',this.value)" style="width:100%;padding:7px 10px;border-radius:6px;border:1.5px solid var(--border);font-size:12px;font-family:DM Sans,sans-serif;">';
+          h += '<option value="">Select partner...</option>';
+          ST.partners.filter(function(p){ return p.type !== 'Customer'; }).forEach(function(p) {
+            h += '<option value="' + p.id + '">' + p.name + (p.company?' — '+p.company:'') + '</option>';
+          });
+          h += '</select></div>';
+        }
+        h += '</div></div>';
+      });
+    }
+  }
+
   if (ST.tab === 'import') {
     h += '<div style="margin-bottom:16px;">';
     h += '<div style="font-size:13px;font-weight:700;color:var(--navy);margin-bottom:4px;">📥 Import Contacts from Spreadsheet</div>';
@@ -2288,6 +2387,24 @@ function saveAsTemplate(routeId) {
   setTimeout(function(){ var el = document.getElementById('st_name'); if(el) el.focus(); }, 50);
 }
 
+function stToggleRecurring() {
+  var opts = document.getElementById('st_recurring_opts');
+  opts.style.display = document.getElementById('st_recurring').checked ? 'grid' : 'none';
+}
+function stUpdateDayOptions() {
+  var rec = document.getElementById('st_recurrence').value;
+  var label = document.getElementById('st_day_label');
+  var sel = document.getElementById('st_recurrence_day');
+  if (rec === 'monthly') {
+    label.textContent = 'Day of Month';
+    var opts = '';
+    for (var d = 1; d <= 28; d++) opts += '<option value="'+d+'">'+d+'</option>';
+    sel.innerHTML = opts;
+  } else {
+    label.textContent = 'Day of Week';
+    sel.innerHTML = '<option value="1">Monday</option><option value="2">Tuesday</option><option value="3">Wednesday</option><option value="4">Thursday</option><option value="5">Friday</option>';
+  }
+}
 function closeSaveTemplate() {
   document.getElementById('save-template-modal').style.display = 'none';
   _saveTemplateRouteId = null;
@@ -2298,14 +2415,19 @@ async function confirmSaveTemplate() {
   if (!name) { alert('Please enter a template name.'); return; }
   var route = ST.routes.find(function(r){ return r.id === _saveTemplateRouteId; });
   if (!route) return;
-  // Strip completed flags from stops for the template
   var stops = (route.stops||[]).map(function(s){
-    return { partner_id: s.partner_id, partner_name: s.partner_name, address: s.address||'', order: s.order };
+    return { partner_id: s.partner_id, partner_name: s.partner_name, address: s.address||'', order: s.order, duration: s.duration||45 };
   });
+  var isRecurring = document.getElementById('st_recurring') && document.getElementById('st_recurring').checked;
+  var payload = { name: name, market: ST.market, stops: stops, created_at: new Date().toISOString(), active: true };
+  if (isRecurring) {
+    payload.recurrence = document.getElementById('st_recurrence').value;
+    payload.recurrence_day = parseInt(document.getElementById('st_recurrence_day').value);
+  }
   await sb('/rest/v1/sales_route_templates', {
     method: 'POST',
     headers: {'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json','Prefer':'return=minimal'},
-    body: JSON.stringify({ name: name, market: ST.market, stops: stops, created_at: new Date().toISOString() })
+    body: JSON.stringify(payload)
   });
   closeSaveTemplate();
   await loadAll();
