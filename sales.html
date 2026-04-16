@@ -663,6 +663,105 @@ function showErr(msg) {
   setTimeout(function(){ el.style.display = 'none'; }, 6000);
 }
 
+
+// ── REFERRAL MATCHING ─────────────────────────────────────────────────────
+function toggleRefGroup(el) {
+  var nx = el.nextElementSibling;
+  nx.style.display = nx.style.display === 'none' ? 'block' : 'none';
+}
+
+function fuzzyMatch(a, b) {
+  if (!a || !b) return false;
+  a = a.toLowerCase().trim();
+  b = b.toLowerCase().trim();
+  if (a === b) return true;
+  if (a.includes(b) || b.includes(a)) return true;
+  var aParts = a.split(' '), bParts = b.split(' ');
+  if (aParts.length > 1 && bParts.length > 1) {
+    if (aParts[aParts.length-1] === bParts[bParts.length-1]) return true;
+  }
+  return false;
+}
+
+function findMatchingPartner(referrerName, referrerCompany) {
+  for (var p of ST.partners) {
+    if (fuzzyMatch(referrerName, p.name)) return p;
+    if (referrerCompany && fuzzyMatch(referrerCompany, p.company)) return p;
+    if (referrerCompany && fuzzyMatch(referrerName, p.company)) return p;
+  }
+  return null;
+}
+
+async function matchReferrals() {
+  var unmatched = ST.referralLog.filter(function(r){ return !r.partner_id; });
+  if (!unmatched.length) return;
+  for (var r of unmatched) {
+    var partner = findMatchingPartner(r.referrer_name||r.partner_name, r.referrer_company);
+    if (partner) {
+      try {
+        await fetch(SB_URL + '/rest/v1/sales_referral_log?id=eq.' + r.id, {
+          method: 'PATCH',
+          headers: {'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json'},
+          body: JSON.stringify({ partner_id: partner.id, partner_name: partner.name, matched_on: 'auto' })
+        });
+        r.partner_id = partner.id;
+        r.partner_name = partner.name;
+        await fetch(SB_URL + '/rest/v1/sales_partners?id=eq.' + partner.id, {
+          method: 'PATCH',
+          headers: {'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json'},
+          body: JSON.stringify({
+            referral_count: (partner.referral_count||0) + 1,
+            referral_revenue: (partner.referral_revenue||0) + (r.job_value||0),
+            updated_at: new Date().toISOString()
+          })
+        });
+        partner.referral_count = (partner.referral_count||0) + 1;
+        partner.referral_revenue = (partner.referral_revenue||0) + (r.job_value||0);
+      } catch(e) { console.error('match error:', e); }
+    }
+  }
+}
+
+async function runReferralMatch() {
+  showToast('Matching referrals...');
+  await matchReferrals();
+  render();
+  showToast('✓ Match complete');
+}
+
+async function linkReferralToPartner(idsCsv, partnerId) {
+  if (!partnerId) return;
+  var partner = ST.partners.find(function(p){ return p.id === partnerId; });
+  if (!partner) return;
+  var ids = idsCsv.split(',');
+  var totalRevenue = 0;
+  for (var id of ids) {
+    var r = ST.referralLog.find(function(x){ return x.id === id; });
+    if (!r) continue;
+    totalRevenue += (r.job_value||0);
+    await fetch(SB_URL + '/rest/v1/sales_referral_log?id=eq.' + id, {
+      method: 'PATCH',
+      headers: {'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json'},
+      body: JSON.stringify({ partner_id: partner.id, partner_name: partner.name, matched_on: 'manual' })
+    });
+    r.partner_id = partner.id;
+    r.partner_name = partner.name;
+  }
+  await fetch(SB_URL + '/rest/v1/sales_partners?id=eq.' + partnerId, {
+    method: 'PATCH',
+    headers: {'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json'},
+    body: JSON.stringify({
+      referral_count: (partner.referral_count||0) + ids.length,
+      referral_revenue: (partner.referral_revenue||0) + totalRevenue,
+      updated_at: new Date().toISOString()
+    })
+  });
+  partner.referral_count = (partner.referral_count||0) + ids.length;
+  partner.referral_revenue = (partner.referral_revenue||0) + totalRevenue;
+  showToast('✓ Linked to ' + partner.name);
+  render();
+}
+
 async function loadAll() {
   ST.loading = true;
   render();
