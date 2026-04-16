@@ -7,6 +7,11 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="JG Sales">
 <meta name="theme-color" content="#0d2d5e">
+<link rel="apple-touch-icon" href="logo.png">
+<link rel="apple-touch-icon" sizes="152x152" href="logo.png">
+<link rel="apple-touch-icon" sizes="180x180" href="logo.png">
+<link rel="apple-touch-icon" sizes="167x167" href="logo.png">
+<link rel="shortcut icon" href="logo.png">
 <title>JG Sales</title>
 <link rel="manifest" href="manifest.json">
 <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=DM+Mono:wght@500&display=swap" rel="stylesheet">
@@ -452,6 +457,7 @@
 
   .empty { text-align: center; padding: 40px 20px; color: var(--muted); font-size: 14px; }
 </style>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
 </head>
 <body>
 
@@ -460,12 +466,11 @@
   <div class="login-logo">JG</div>
   <div class="login-title">JG Sales</div>
   <div class="login-sub">Sign in with your JG Restoration account</div>
-  <button onclick="signInWithGoogle()" style="display:flex;align-items:center;gap:12px;background:#fff;border:none;border-radius:50px;padding:14px 28px;font-size:15px;font-weight:600;color:#3c4043;cursor:pointer;box-shadow:0 2px 12px rgba(0,0,0,.2);font-family:'DM Sans',sans-serif;">
-    <svg width="20" height="20" viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>
-    Sign in with Google
-  </button>
+  <div id="g_id_onload" data-client_id="209231675110-6id8vr3ehcocg4df7tvpc89jsmrvhogk.apps.googleusercontent.com" data-ux_mode="popup" data-callback="appGoogleCb" data-auto_prompt="false"></div>
+  <div class="g_id_signin" data-type="standard" data-theme="filled_blue" data-size="large" data-text="sign_in_with" data-shape="pill" data-logo_alignment="left"></div>
   <div style="margin-top:12px;font-size:11px;color:rgba(255,255,255,.4);text-align:center;">Use your @jg-restoration.com account</div>
   <div class="login-err" id="login-err"></div>
+  <button onclick="switchAccount()" style="margin-top:16px;background:none;border:none;color:rgba(255,255,255,.4);font-size:12px;cursor:pointer;text-decoration:underline;font-family:'DM Sans',sans-serif;">Use a different Google account</button>
 </div>
 
 <!-- HEADER -->
@@ -1045,62 +1050,42 @@ function toast(msg) {
   setTimeout(function(){ el.classList.remove('show'); }, 3000);
 }
 
-// ── SIGN IN ──────────────────────────────────────────────────────────────
-function signInWithGoogle() {
-  var clientId = '209231675110-6id8vr3ehcocg4df7tvpc89jsmrvhogk.apps.googleusercontent.com';
-  var redirectUri = encodeURIComponent(window.location.href.split('?')[0]);
-  var scope = encodeURIComponent('openid email profile');
-  var state = Math.random().toString(36).substring(2);
-  sessionStorage.setItem('oauth_state', state);
-  // prompt=select_account forces Google to show the account picker every time
-  var url = 'https://accounts.google.com/o/oauth2/v2/auth' +
-    '?client_id=' + clientId +
-    '&redirect_uri=' + redirectUri +
-    '&response_type=token+id_token' +
-    '&scope=' + scope +
-    '&prompt=select_account' +
-    '&nonce=' + state;
-  window.location.href = url;
-}
-
-function handleOAuthCallback() {
-  var hash = window.location.hash.substring(1);
-  if (!hash) return false;
-  var params = {};
-  hash.split('&').forEach(function(p){ var kv=p.split('='); params[kv[0]]=decodeURIComponent(kv[1]||''); });
-  if (!params.id_token) return false;
-  try {
-    var payload = JSON.parse(atob(params.id_token.split('.')[1].replace(/-/g,'+').replace(/_/g,'/')));
-    if (!payload.email.endsWith('@jg-restoration.com')) {
-      // Clear hash and show error
-      window.location.hash = '';
-      setTimeout(function(){
-        var el = document.getElementById('login-err');
-        if (el) el.textContent = 'Access restricted to @jg-restoration.com accounts. Please sign in with your work email.';
-      }, 100);
-      return false;
-    }
-    var u = { name: payload.name||payload.given_name, email: payload.email, picture: payload.picture||'' };
-    localStorage.setItem(_JG_KEY, JSON.stringify(u));
-    localStorage.setItem(_JG_EXP, String(Date.now() + 43200000));
-    window.location.hash = '';
-    return u;
-  } catch(e) {
-    console.error('OAuth parse error:', e);
-    return false;
+// ── AUTH CALLBACK ────────────────────────────────────────────────────────
+function switchAccount() {
+  // Sign out of Google One Tap and re-prompt with account chooser
+  if (window.google && google.accounts && google.accounts.id) {
+    google.accounts.id.disableAutoSelect();
+    google.accounts.id.prompt(function(notification) {
+      if (notification.isSkippedMoment()) {
+        // Fallback: open Google account switcher in new tab
+        window.open('https://accounts.google.com/AccountChooser?continue=' + encodeURIComponent(window.location.href), '_blank');
+      }
+    });
+  } else {
+    window.open('https://accounts.google.com/AccountChooser?continue=' + encodeURIComponent(window.location.href), '_blank');
   }
 }
+
+window.appGoogleCb = function(r) {
+  try {
+    var p = JSON.parse(atob(r.credential.split('.')[1]));
+    if (!p.email.endsWith('@jg-restoration.com')) {
+      document.getElementById('login-err').textContent = 'Use your @jg-restoration.com account.';
+      return;
+    }
+    var u = { name: p.name||p.given_name, email: p.email, picture: p.picture||'' };
+    localStorage.setItem(_JG_KEY, JSON.stringify(u));
+    localStorage.setItem(_JG_EXP, String(Date.now() + 43200000));
+    initApp(u);
+  } catch(e) {
+    document.getElementById('login-err').textContent = 'Sign in failed — try again.';
+  }
+};
 
 // ── START ─────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', function() {
-  // Check for OAuth callback in URL hash first
-  if (window.location.hash.includes('id_token')) {
-    var u = handleOAuthCallback();
-    if (u) { initApp(u); return; }
-  }
   var u = checkAuth();
   if (u) { initApp(u); return; }
-  // Show login screen
   document.getElementById('login-screen').style.display = 'flex';
 });
 </script>
