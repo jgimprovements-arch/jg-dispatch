@@ -300,6 +300,18 @@ input[type=file]{display:none}
   </div>
 </nav>
 <div id="app"><div style="padding:40px;text-align:center;color:#6b7a96;">Loading...</div></div>
+
+<!-- Partner Edit Modal - lives outside render() cycle so inputs persist -->
+<div id="partner-edit-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:2000;align-items:center;justify-content:center;" onclick="if(event.target===this)closePartnerEdit()">
+  <div style="background:#fff;border-radius:12px;padding:24px;width:100%;max-width:520px;max-height:90vh;overflow-y:auto;box-shadow:0 20px 60px rgba(0,0,0,.3);">
+    <div style="font-size:14px;font-weight:700;color:#0d2d5e;margin-bottom:16px;font-family:DM Sans,sans-serif;">✏️ Edit Partner</div>
+    <div id="partner-edit-form"></div>
+    <div style="display:flex;gap:8px;margin-top:16px;">
+      <button onclick="submitPartnerEdit()" style="flex:1;padding:10px 16px;border-radius:6px;border:none;background:#0d2d5e;color:#fff;font-size:13px;font-weight:600;cursor:pointer;font-family:DM Sans,sans-serif;">💾 Save Changes</button>
+      <button onclick="closePartnerEdit()" style="padding:10px 16px;border-radius:6px;border:1.5px solid #d0d5dd;background:transparent;font-size:13px;cursor:pointer;font-family:DM Sans,sans-serif;">Cancel</button>
+    </div>
+  </div>
+</div>
 <script>
 function mkMarketToggle() {
   var a = ST.market==="Appleton", s = ST.market==="Stevens Point";
@@ -1124,7 +1136,7 @@ function render() {
         h += '<select class="form-select" style="width:110px;font-size:11px;" onchange="savePartner({id:\'' + p.id + '\',tier:this.value})">';
         ['A','B','C'].forEach(function(t){ h += '<option '+(p.tier===t?'selected':'')+' value="'+t+'">'+t+'-Tier</option>'; });
         h += '</select>';
-        h += '<button style="padding:5px 10px;border-radius:6px;border:1.5px solid var(--border);background:' + (isEditMode?'var(--navy)':'transparent') + ';color:' + (isEditMode?'#fff':'var(--navy)') + ';font-size:11px;font-weight:600;cursor:pointer;" onclick="ST.detailEditMode=(ST.detailEditMode===\'' + p.id + '\'?null:\'' + p.id + '\');render()">✏️ Edit</button>';
+        h += '<button style="padding:5px 10px;border-radius:6px;border:1.5px solid var(--border);background:transparent;color:var(--navy);font-size:11px;font-weight:600;cursor:pointer;" onclick="openPartnerEdit(\'' + p.id + \')">✏️ Edit</button>';
         h += '</div></div>';
 
         // ── CONTACT BUTTONS ──────────────────────────────────────────────────────
@@ -1160,7 +1172,6 @@ function render() {
         }
 
         // ── INTEL CARDS (Treats / Family / Notes) ───────────────────────────────
-        if (!isEditMode) {
           if (p.favorite_treats || p.family_members || p.notes) {
             h += '<div style="display:grid;gap:8px;margin-bottom:14px;">';
             if (p.favorite_treats) h += '<div style="background:rgba(245,166,35,.08);border-radius:8px;padding:10px 12px;font-size:12px;"><span style="font-weight:700;color:#a06000;">🍩 Treats: </span>' + p.favorite_treats + '</div>';
@@ -1175,55 +1186,8 @@ function render() {
             h += '<div style="font-size:12px;color:#333;">' + p.last_convo_note + '</div>';
             h += '</div>';
           }
-        }
 
-        // ── EDIT FORM ────────────────────────────────────────────────────────────
-        if (isEditMode) {
-          h += '<div style="background:rgba(13,45,94,.04);border-radius:10px;padding:14px;margin-bottom:14px;display:grid;gap:10px;">';
-          h += '<div style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;margin-bottom:2px;">Partner Intel</div>';
-
-          // Name + Company editable
-          h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">';
-          h += '<div><div style="font-size:10px;font-weight:600;color:var(--muted);margin-bottom:3px;">👤 Name</div>';
-          h += '<input id="pd_name" type="text" style="width:100%;padding:8px 10px;border-radius:6px;border:1.5px solid #d0d5dd;font-size:12px;font-family:DM Sans,sans-serif;color:#1a1a2e;outline:none;box-sizing:border-box;background:#fff;cursor:text;" value="' + (p.name||'') + '" placeholder="Full name"></div>';
-          h += '<div><div style="font-size:10px;font-weight:600;color:var(--muted);margin-bottom:3px;">🏢 Company</div>';
-          h += '<input id="pd_company" type="text" style="width:100%;padding:8px 10px;border-radius:6px;border:1.5px solid #d0d5dd;font-size:12px;font-family:DM Sans,sans-serif;color:#1a1a2e;outline:none;box-sizing:border-box;background:#fff;cursor:text;" value="' + (p.company||'') + '" placeholder="Company name"></div>';
-          h += '</div>';
-
-          // Phone + Email editable
-          h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">';
-          h += '<div><div style="font-size:10px;font-weight:600;color:var(--muted);margin-bottom:3px;">📞 Phone</div>';
-          h += '<input id="pd_phone" type="text" style="width:100%;padding:8px 10px;border-radius:6px;border:1.5px solid #d0d5dd;font-size:12px;font-family:DM Sans,sans-serif;color:#1a1a2e;outline:none;box-sizing:border-box;background:#fff;cursor:text;" value="' + (p.phone||'') + '" placeholder="(920) 000-0000"></div>';
-          h += '<div><div style="font-size:10px;font-weight:600;color:var(--muted);margin-bottom:3px;">✉️ Email</div>';
-          h += '<input id="pd_email" type="text" style="width:100%;padding:8px 10px;border-radius:6px;border:1.5px solid #d0d5dd;font-size:12px;font-family:DM Sans,sans-serif;color:#1a1a2e;outline:none;box-sizing:border-box;background:#fff;cursor:text;" value="' + (p.email||'') + '" placeholder="name@company.com"></div>';
-          h += '</div>';
-
-          h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">';
-          h += '<div><div style="font-size:10px;font-weight:600;color:var(--muted);margin-bottom:3px;">📲 Best Contact Method</div>';
-          h += '<select id="pd_best_contact" style="width:100%;padding:8px 10px;border-radius:6px;border:1.5px solid #d0d5dd;font-size:12px;font-family:DM Sans,sans-serif;color:#1a1a2e;outline:none;box-sizing:border-box;background:#fff;">';
-          ['','Call','Text','Email','Drop-in','LinkedIn'].forEach(function(v){ h += '<option value="'+v+'"'+(p.best_contact===v?' selected':'')+'>'+( v||'— select —')+'</option>'; });
-          h += '</select></div>';
-
-          h += '<div><div style="font-size:10px;font-weight:600;color:var(--muted);margin-bottom:3px;">🔗 Referral Source Type</div>';
-          h += '<input id="pd_ref_source" type="text" style="width:100%;padding:8px 10px;border-radius:6px;border:1.5px solid #d0d5dd;font-size:12px;font-family:DM Sans,sans-serif;color:#1a1a2e;outline:none;box-sizing:border-box;background:#fff;cursor:text;" value="' + (p.referral_source||'') + '" placeholder="e.g. Plumber, Realtor"></div>';
-          h += '</div>';
-
-          h += '<div><div style="font-size:10px;font-weight:600;color:var(--muted);margin-bottom:3px;">🍩 Favorite Treats / Snacks</div>';
-          h += '<input id="pd_treats" type="text" style="width:100%;padding:8px 10px;border-radius:6px;border:1.5px solid #d0d5dd;font-size:12px;font-family:DM Sans,sans-serif;color:#1a1a2e;outline:none;box-sizing:border-box;background:#fff;cursor:text;" value="' + (p.favorite_treats||'') + '" placeholder="e.g. Coffee, donuts, energy drinks"></div>';
-
-          h += '<div><div style="font-size:10px;font-weight:600;color:var(--muted);margin-bottom:3px;">👨‍👩‍👧 Family / Kids / Pets</div>';
-          h += '<input id="pd_family" type="text" style="width:100%;padding:8px 10px;border-radius:6px;border:1.5px solid #d0d5dd;font-size:12px;font-family:DM Sans,sans-serif;color:#1a1a2e;outline:none;box-sizing:border-box;background:#fff;cursor:text;" value="' + (p.family_members||'') + '" placeholder="e.g. Wife Sarah, 2 kids, dog Max"></div>';
-
-          h += '<div><div style="font-size:10px;font-weight:600;color:var(--muted);margin-bottom:3px;">💬 Last Conversation Note</div>';
-          h += '<textarea id="pd_convo" style="width:100%;padding:8px 10px;border-radius:6px;border:1.5px solid #d0d5dd;font-size:12px;font-family:DM Sans,sans-serif;color:#1a1a2e;outline:none;box-sizing:border-box;background:#fff;height:60px;resize:none;cursor:text;" placeholder="What did you talk about last time?">' + (p.last_convo_note||'') + '</textarea></div>';
-
-          h += '<div><div style="font-size:10px;font-weight:600;color:var(--muted);margin-bottom:3px;">📝 General Notes</div>';
-          h += '<textarea id="pd_notes" style="width:100%;padding:8px 10px;border-radius:6px;border:1.5px solid #d0d5dd;font-size:12px;font-family:DM Sans,sans-serif;color:#1a1a2e;outline:none;box-sizing:border-box;background:#fff;height:54px;resize:none;cursor:text;" placeholder="Anything else worth knowing...">' + (p.notes||'') + '</textarea></div>';
-
-          h += '<button style="padding:8px 16px;border-radius:6px;border:none;background:var(--navy);color:#fff;font-size:12px;font-weight:600;cursor:pointer;" onclick="savePartnerIntel(\'' + p.id + '\')">💾 Save Intel</button>';
-          h += '</div>';
-        }
-
+        // Edit handled by #partner-edit-modal overlay
         // ── RECENT TOUCHES ────────────────────────────────────────────────────────
         h += '<div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;margin-bottom:8px;">Recent Touches</div>';
         if (!ptouches.length) h += '<div style="font-size:12px;color:var(--muted);margin-bottom:12px;">No touches logged yet.</div>';
@@ -1541,6 +1505,64 @@ async function bulkAssign(rep) {
     }
   }
   await loadAll();
+}
+
+// ── PARTNER EDIT MODAL (outside render cycle) ─────────────────────────────
+var _editPartnerId = null;
+
+function openPartnerEdit(pid) {
+  var p = ST.partners.find(function(x){ return x.id === pid; });
+  if (!p) return;
+  _editPartnerId = pid;
+  var INP = 'width:100%;padding:8px 10px;border-radius:6px;border:1.5px solid #d0d5dd;font-size:13px;font-family:DM Sans,sans-serif;color:#1a1a2e;outline:none;box-sizing:border-box;background:#fff;margin-top:3px;';
+  var LBL = 'display:block;font-size:10px;font-weight:600;color:#6b7a96;text-transform:uppercase;letter-spacing:.04em;margin-top:10px;';
+  var form = document.getElementById('partner-edit-form');
+  form.innerHTML =
+    '<label style="'+LBL+'">👤 Name</label><input id="pe_name" type="text" style="'+INP+'" value="'+(p.name||'')+'">' +
+    '<label style="'+LBL+'">🏢 Company</label><input id="pe_company" type="text" style="'+INP+'" value="'+(p.company||'')+'">' +
+    '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">' +
+      '<div><label style="'+LBL+'">📞 Phone</label><input id="pe_phone" type="text" style="'+INP+'" value="'+(p.phone||'')+'"></div>' +
+      '<div><label style="'+LBL+'">✉️ Email</label><input id="pe_email" type="text" style="'+INP+'" value="'+(p.email||'')+'"></div>' +
+    '</div>' +
+    '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">' +
+      '<div><label style="'+LBL+'">📲 Best Contact</label>' +
+        '<select id="pe_best_contact" style="'+INP+'">' +
+          ['','Call','Text','Email','Drop-in','LinkedIn'].map(function(v){ return '<option value="'+v+'"'+(p.best_contact===v?' selected':'')+'>'+( v||'— select —')+'</option>'; }).join('') +
+        '</select></div>' +
+      '<div><label style="'+LBL+'">🔗 Referral Source</label><input id="pe_ref_source" type="text" style="'+INP+'" value="'+(p.referral_source||'')+'" placeholder="Plumber, Realtor..."></div>' +
+    '</div>' +
+    '<label style="'+LBL+'">🍩 Favorite Treats</label><input id="pe_treats" type="text" style="'+INP+'" value="'+(p.favorite_treats||'')+'" placeholder="Coffee, donuts...">' +
+    '<label style="'+LBL+'">👨‍👩‍👧 Family / Kids / Pets</label><input id="pe_family" type="text" style="'+INP+'" value="'+(p.family_members||'')+'" placeholder="Wife Sarah, 2 kids...">' +
+    '<label style="'+LBL+'">💬 Last Conversation</label><textarea id="pe_convo" style="'+INP+'height:60px;resize:none;">'+(p.last_convo_note||'')+'</textarea>' +
+    '<label style="'+LBL+'">📝 General Notes</label><textarea id="pe_notes" style="'+INP+'height:54px;resize:none;">'+(p.notes||'')+'</textarea>';
+
+  var modal = document.getElementById('partner-edit-modal');
+  modal.style.display = 'flex';
+  setTimeout(function(){ document.getElementById('pe_name').focus(); }, 50);
+}
+
+function closePartnerEdit() {
+  document.getElementById('partner-edit-modal').style.display = 'none';
+  _editPartnerId = null;
+}
+
+async function submitPartnerEdit() {
+  if (!_editPartnerId) return;
+  var g = function(id){ var el=document.getElementById(id); return el?el.value:''; };
+  await savePartner({
+    id:            _editPartnerId,
+    name:          g('pe_name'),
+    company:       g('pe_company'),
+    phone:         g('pe_phone'),
+    email:         g('pe_email'),
+    best_contact:  g('pe_best_contact'),
+    referral_source: g('pe_ref_source'),
+    favorite_treats: g('pe_treats'),
+    family_members:  g('pe_family'),
+    last_convo_note: g('pe_convo'),
+    notes:           g('pe_notes')
+  });
+  closePartnerEdit();
 }
 
 document.addEventListener('DOMContentLoaded',function(){
