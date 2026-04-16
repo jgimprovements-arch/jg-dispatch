@@ -447,44 +447,11 @@
 
   .empty { text-align: center; padding: 40px 20px; color: var(--muted); font-size: 14px; }
 </style>
-<script>
-// Pre-declare callback before GSI async script loads
-window.appGoogleCb = function(r) {
-  try {
-    var p = JSON.parse(atob(r.credential.split('.')[1]));
-    if (!p.email.endsWith('@jg-restoration.com')) {
-      var el = document.getElementById('login-err');
-      if (el) el.textContent = 'Use your @jg-restoration.com account.';
-      return;
-    }
-    var u = { name: p.name||p.given_name, email: p.email, picture: p.picture||'' };
-    localStorage.setItem('jg_platform_user', JSON.stringify(u));
-    localStorage.setItem('jg_platform_exp', String(Date.now() + 43200000));
-    var ls = document.getElementById('login-screen');
-    if (ls) ls.style.display = 'none';
-    if (typeof initApp === 'function') initApp(u);
-    else window._pendingAppUser = u;
-  } catch(e) {
-    var el = document.getElementById('login-err');
-    if (el) el.textContent = 'Sign in failed — try again.';
-  }
-};
-</script>
-<script src="https://accounts.google.com/gsi/client" async defer></script>
+<!-- Auth handled via redirect to sales.html -->
 </head>
 <body>
 
-<!-- LOGIN -->
-<div id="login-screen" style="display:none;position:fixed;inset:0;background:var(--navy);align-items:center;justify-content:center;z-index:9999;">
-  <div style="background:#fff;border-radius:20px;padding:36px 28px;width:calc(100% - 48px);max-width:340px;text-align:center;box-shadow:0 24px 64px rgba(0,0,0,.4);">
-    <div style="width:56px;height:56px;background:var(--orange);border-radius:16px;display:flex;align-items:center;justify-content:center;font-family:DM Mono,monospace;font-size:18px;font-weight:700;color:#fff;margin:0 auto 16px;">JG</div>
-    <div style="font-size:20px;font-weight:700;color:var(--navy);margin-bottom:4px;">JG Sales</div>
-    <div style="font-size:13px;color:var(--muted);margin-bottom:24px;">Sign in with your @jg-restoration.com account</div>
-    <div id="g_id_onload" data-client_id="209231675110-6id8vr3ehcocg4df7tvpc89jsmrvhogk.apps.googleusercontent.com" data-ux_mode="popup" data-callback="appGoogleCb" data-auto_prompt="false"></div>
-    <div class="g_id_signin" data-type="standard" data-size="large" data-theme="outline" data-text="sign_in_with" data-shape="rectangular" data-logo_alignment="left" data-width="288"></div>
-    <div id="login-err" style="font-size:12px;color:#c0392b;margin-top:10px;min-height:16px;"></div>
-  </div>
-</div>
+<!-- No login screen - auth handled by redirect to sales.html -->
 
 <!-- HEADER -->
 <div class="hdr">
@@ -670,9 +637,10 @@ function checkAuth() {
 
 // ── INIT ──────────────────────────────────────────────────────────────────
 function initApp(u) {
+  try {
   APP.user = u;
   APP.repName = REPS[u.email.toLowerCase()] || u.name.split(' ')[0];
-  document.getElementById('login-screen').style.display = 'none';
+  var ls = document.getElementById('login-screen'); if (ls) ls.style.display = 'none';
   document.getElementById('hdr-name').textContent = APP.repName;
   document.getElementById('hdr-avatar').textContent = APP.repName[0];
 
@@ -686,6 +654,7 @@ function initApp(u) {
   document.getElementById('greeting-date').textContent = days[now.getDay()] + ', ' + months[now.getMonth()] + ' ' + now.getDate();
 
   loadAll();
+  } catch(e) { document.body.innerHTML = '<div style="padding:40px;font-family:sans-serif;color:#c62828;"><b>App error:</b> ' + e.message + '<br><br><a href="sales.html">Go to Sales Dashboard</a></div>'; }
 }
 
 // ── DATA ──────────────────────────────────────────────────────────────────
@@ -1083,13 +1052,17 @@ window.appGoogleCb = function(r) {
 
 // ── START ─────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', function() {
-  // Handle case where GSI fired before initApp was defined
-  if (window._pendingAppUser) { initApp(window._pendingAppUser); window._pendingAppUser = null; return; }
-  var u = checkAuth();
-  if (u) { initApp(u); return; }
-  // Show login
-  var ls = document.getElementById('login-screen');
-  if (ls) ls.style.display = 'flex';
+  try {
+    if (window._pendingAppUser) { initApp(window._pendingAppUser); window._pendingAppUser = null; return; }
+    var u = checkAuth();
+    if (u) { initApp(u); return; }
+    // Not signed in — redirect to sales.html
+    var base = window.location.href.substring(0, window.location.href.lastIndexOf('/') + 1);
+    var returnUrl = window.location.href;
+    window.location.replace(base + 'sales.html?return=' + encodeURIComponent(returnUrl));
+  } catch(e) {
+    document.body.innerHTML = '<div style="padding:40px;font-family:sans-serif;color:#c62828;"><b>Error:</b> ' + e.message + '<br><br><a href="sales.html">Go to Sales Dashboard</a></div>';
+  }
 });
 </script>
 </body>
