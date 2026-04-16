@@ -447,16 +447,43 @@
 
   .empty { text-align: center; padding: 40px 20px; color: var(--muted); font-size: 14px; }
 </style>
+<script>
+// Pre-declare callback before GSI async script loads
+window.appGoogleCb = function(r) {
+  try {
+    var p = JSON.parse(atob(r.credential.split('.')[1]));
+    if (!p.email.endsWith('@jg-restoration.com')) {
+      var el = document.getElementById('login-err');
+      if (el) el.textContent = 'Use your @jg-restoration.com account.';
+      return;
+    }
+    var u = { name: p.name||p.given_name, email: p.email, picture: p.picture||'' };
+    localStorage.setItem('jg_platform_user', JSON.stringify(u));
+    localStorage.setItem('jg_platform_exp', String(Date.now() + 43200000));
+    var ls = document.getElementById('login-screen');
+    if (ls) ls.style.display = 'none';
+    if (typeof initApp === 'function') initApp(u);
+    else window._pendingAppUser = u;
+  } catch(e) {
+    var el = document.getElementById('login-err');
+    if (el) el.textContent = 'Sign in failed — try again.';
+  }
+};
+</script>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
 </head>
 <body>
 
-<!-- LOGIN — redirects to sales.html which has working auth -->
-<div id="login-screen" style="display:none;position:fixed;inset:0;background:var(--navy);flex-direction:column;align-items:center;justify-content:center;padding:32px;z-index:200;">
-  <div class="login-logo">JG</div>
-  <div class="login-title">JG Sales</div>
-  <div class="login-sub">You need to sign in first</div>
-  <button onclick="goSignIn()" style="margin-top:24px;background:var(--orange);border:none;border-radius:50px;padding:14px 32px;font-size:15px;font-weight:700;color:#fff;cursor:pointer;font-family:'DM Sans',sans-serif;box-shadow:0 4px 20px rgba(232,93,4,.4);">Sign In</button>
-  <div style="margin-top:12px;font-size:11px;color:rgba(255,255,255,.4);text-align:center;">You'll be taken to the JG Platform to sign in,<br>then returned here automatically.</div>
+<!-- LOGIN -->
+<div id="login-screen" style="display:none;position:fixed;inset:0;background:var(--navy);align-items:center;justify-content:center;z-index:9999;">
+  <div style="background:#fff;border-radius:20px;padding:36px 28px;width:calc(100% - 48px);max-width:340px;text-align:center;box-shadow:0 24px 64px rgba(0,0,0,.4);">
+    <div style="width:56px;height:56px;background:var(--orange);border-radius:16px;display:flex;align-items:center;justify-content:center;font-family:DM Mono,monospace;font-size:18px;font-weight:700;color:#fff;margin:0 auto 16px;">JG</div>
+    <div style="font-size:20px;font-weight:700;color:var(--navy);margin-bottom:4px;">JG Sales</div>
+    <div style="font-size:13px;color:var(--muted);margin-bottom:24px;">Sign in with your @jg-restoration.com account</div>
+    <div id="g_id_onload" data-client_id="209231675110-6id8vr3ehcocg4df7tvpc89jsmrvhogk.apps.googleusercontent.com" data-ux_mode="popup" data-callback="appGoogleCb" data-auto_prompt="false"></div>
+    <div class="g_id_signin" data-type="standard" data-size="large" data-theme="outline" data-text="sign_in_with" data-shape="rectangular" data-logo_alignment="left" data-width="288"></div>
+    <div id="login-err" style="font-size:12px;color:#c0392b;margin-top:10px;min-height:16px;"></div>
+  </div>
 </div>
 
 <!-- HEADER -->
@@ -1036,24 +1063,7 @@ function toast(msg) {
   setTimeout(function(){ el.classList.remove('show'); }, 3000);
 }
 
-// ── AUTH CALLBACK ────────────────────────────────────────────────────────
-function goSignIn() {
-  // Build absolute URL so it works whether opened locally or from GitHub Pages
-  var base = window.location.href.replace('sales_app.html', '').replace(/\?.*/, '').replace(/#.*/, '');
-  sessionStorage.setItem('jg_app_return', window.location.href);
-  window.location.href = base + 'sales.html?return=app';
-}
-
-function switchAccount() {
-  if (window.google && google.accounts && google.accounts.id) {
-    google.accounts.id.disableAutoSelect();
-    google.accounts.id.renderButton(
-      document.querySelector('.g_id_signin'),
-      { theme: 'filled_blue', size: 'large', shape: 'pill', text: 'sign_in_with' }
-    );
-    google.accounts.id.prompt();
-  }
-}
+// ── AUTH CALLBACK — handled by pre-declared window.appGoogleCb in <head> ──
 
 window.appGoogleCb = function(r) {
   try {
@@ -1073,11 +1083,13 @@ window.appGoogleCb = function(r) {
 
 // ── START ─────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', function() {
+  // Handle case where GSI fired before initApp was defined
+  if (window._pendingAppUser) { initApp(window._pendingAppUser); window._pendingAppUser = null; return; }
   var u = checkAuth();
   if (u) { initApp(u); return; }
-  // Not signed in — show sign in prompt
+  // Show login
   var ls = document.getElementById('login-screen');
-  if (ls) { ls.style.display = 'flex'; ls.style.flexDirection = 'column'; ls.style.alignItems = 'center'; ls.style.justifyContent = 'center'; }
+  if (ls) ls.style.display = 'flex';
 });
 </script>
 </body>
