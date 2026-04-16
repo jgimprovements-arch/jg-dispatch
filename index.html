@@ -410,6 +410,7 @@ body{padding-left:48px;box-sizing:border-box;}
   <button class="tab active" onclick="switchLoc('appleton',this)">Appleton</button>
   <button class="tab" onclick="switchLoc('stevens',this)">Stevens Point</button>
   <button class="tab" onclick="switchToOnCall(this)" id="oncall-tab">📅 On-Call</button>
+  <button class="tab" onclick="switchToTime(this)" id="time-tab">⏱ Time</button>
 </div>
 
 <div class="legend">
@@ -1712,6 +1713,142 @@ function switchToOnCall(el){
   renderOCMonth();
 }
 
+function switchToTime(el){
+  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+  el.classList.add('active');
+  document.getElementById('dispatch-view').style.display='none';
+  document.getElementById('oncall-panel').style.display='none';
+  document.getElementById('time-panel').style.display='block';
+  loadTimeData();
+}
+
+async function loadTimeData(){
+  const el=document.getElementById('time-content');
+  el.innerHTML='<div style="text-align:center;padding:40px;color:var(--muted);">Loading...</div>';
+  try{
+    const SB='https://nuykvchgecpiuikoerze.supabase.co';
+    const SK='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im51eWt2Y2hnZWNwaXVpa29lcnplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYyNjM3ODYsImV4cCI6MjA5MTgzOTc4Nn0.39hZ8DdjT_0iFJXPeAL2FXUSLw8FZBirDVzxZTO1W9s';
+    const hdr={'apikey':SK,'Authorization':'Bearer '+SK};
+    const today=new Date().toISOString().split('T')[0];
+    const weekAgo=new Date();weekAgo.setDate(weekAgo.getDate()-7);
+
+    // Active entries (clocked in now)
+    const activeR=await fetch(SB+'/rest/v1/time_entries?clock_out=is.null&clock_in=gte.'+today+'T00:00:00&order=clock_in.asc&select=*',{headers:hdr});
+    const active=activeR.ok?await activeR.json():[];
+
+    // Today's completed entries
+    const todayR=await fetch(SB+'/rest/v1/time_entries?clock_in=gte.'+today+'T00:00:00&order=clock_in.asc&select=*',{headers:hdr});
+    const todayAll=todayR.ok?await todayR.json():[];
+
+    // Week entries for hours summary
+    const weekR=await fetch(SB+'/rest/v1/time_entries?clock_in=gte.'+weekAgo.toISOString()+'&order=clock_in.asc&select=*',{headers:hdr});
+    const weekAll=weekR.ok?await weekR.json():[];
+
+    const fmt=m=>{const h=Math.floor(m/60),mn=m%60;return h+'h '+mn+'m';};
+    const fmtTime=d=>{const dt=new Date(d),h=dt.getHours()%12||12,m=dt.getMinutes(),ap=dt.getHours()>=12?'PM':'AM';return h+':'+(m<10?'0':'')+m+' '+ap;};
+    const dur=e=>{const out=e.clock_out?new Date(e.clock_out):new Date();return Math.floor((out-new Date(e.clock_in))/60000);};
+
+    let h='';
+
+    // Clocked in now
+    h+='<div style="margin-bottom:20px;">';
+    h+='<div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px;">Currently Clocked In ('+active.length+')</div>';
+    if(!active.length){
+      h+='<div style="padding:14px;background:var(--surface);border-radius:8px;border:1px solid var(--border);color:var(--muted);font-size:13px;">No one clocked in right now</div>';
+    } else {
+      h+='<div style="display:grid;gap:8px;">';
+      active.forEach(e=>{
+        const mins=dur(e);
+        const alert=mins>600;
+        h+='<div style="display:flex;align-items:center;gap:12px;padding:12px 14px;background:var(--surface);border-radius:8px;border:1px solid '+(alert?'var(--danger)':'var(--border)')+';">';
+        h+='<div style="width:10px;height:10px;border-radius:50%;background:var(--ok);animation:pulse 2s infinite;flex-shrink:0;"></div>';
+        h+='<div style="flex:1;">';
+        h+='<div style="font-size:13px;font-weight:700;color:var(--navy);">'+e.employee_name+'</div>';
+        h+='<div style="font-size:11px;color:var(--muted);">'+(e.job_name||'No job assigned')+' · In at '+fmtTime(e.clock_in)+(e.clock_in_lat?' 📍':'')+'</div>';
+        h+='</div>';
+        h+='<div style="font-size:14px;font-weight:700;color:'+(alert?'var(--danger)':'var(--ok)')+';">'+fmt(mins)+'</div>';
+        if(alert) h+='<div style="font-size:10px;padding:2px 8px;border-radius:10px;background:rgba(192,32,32,.1);color:var(--danger);font-weight:700;">⚠ Long</div>';
+        h+='</div>';
+      });
+      h+='</div>';
+    }
+    h+='</div>';
+
+    // Today's hours by employee
+    const byEmpToday={};
+    todayAll.forEach(e=>{
+      if(!byEmpToday[e.employee_name]) byEmpToday[e.employee_name]={mins:0,entries:0,clocked:false};
+      byEmpToday[e.employee_name].mins+=dur(e);
+      byEmpToday[e.employee_name].entries++;
+      if(!e.clock_out) byEmpToday[e.employee_name].clocked=true;
+    });
+
+    h+='<div style="margin-bottom:20px;">';
+    h+='<div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px;">Today&#39;s Hours</div>';
+    if(!Object.keys(byEmpToday).length){
+      h+='<div style="padding:14px;background:var(--surface);border-radius:8px;border:1px solid var(--border);color:var(--muted);font-size:13px;">No entries today</div>';
+    } else {
+      h+='<div style="background:var(--surface);border-radius:8px;border:1px solid var(--border);overflow:hidden;">';
+      Object.entries(byEmpToday).sort((a,b)=>b[1].mins-a[1].mins).forEach(([name,d])=>{
+        const pct=Math.min(100,Math.round(d.mins/480*100));
+        h+='<div style="padding:10px 14px;border-bottom:1px solid var(--border);">';
+        h+='<div style="display:flex;align-items:center;gap:8px;margin-bottom:5px;">';
+        h+='<div style="font-size:13px;font-weight:600;color:var(--navy);flex:1;">'+name+(d.clocked?' <span style="font-size:9px;padding:1px 6px;border-radius:10px;background:rgba(46,125,50,.1);color:var(--ok);font-weight:700;">IN</span>':'')+'</div>';
+        h+='<div style="font-size:12px;font-weight:700;color:var(--navy);">'+fmt(d.mins)+'</div>';
+        h+='</div>';
+        h+='<div style="height:4px;background:var(--bg);border-radius:2px;overflow:hidden;">';
+        h+='<div style="height:100%;width:'+pct+'%;background:'+(d.clocked?'var(--ok)':'var(--navy)')+';border-radius:2px;transition:width .3s;"></div>';
+        h+='</div></div>';
+      });
+      h+='</div>';
+    }
+    h+='</div>';
+
+    // Week summary
+    const byEmpWeek={};
+    weekAll.forEach(e=>{
+      if(!byEmpWeek[e.employee_name]) byEmpWeek[e.employee_name]=0;
+      byEmpWeek[e.employee_name]+=dur(e);
+    });
+
+    h+='<div>';
+    h+='<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">';
+    h+='<div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;">This Week — Hours Summary</div>';
+    h+='<a href="timeclock.html" target="_blank" style="font-size:11px;font-weight:600;color:var(--orange);text-decoration:none;">Open Time Clock →</a>';
+    h+='</div>';
+    if(!Object.keys(byEmpWeek).length){
+      h+='<div style="padding:14px;background:var(--surface);border-radius:8px;border:1px solid var(--border);color:var(--muted);font-size:13px;">No entries this week</div>';
+    } else {
+      h+='<div style="background:var(--surface);border-radius:8px;border:1px solid var(--border);overflow:hidden;">';
+      h+='<div style="display:grid;grid-template-columns:1fr 1fr 1fr;padding:8px 14px;border-bottom:1px solid var(--border);font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;">';
+      h+='<div>Employee</div><div style="text-align:center;">Hours</div><div style="text-align:right;">vs 40h</div></div>';
+      Object.entries(byEmpWeek).sort((a,b)=>b[1]-a[1]).forEach(([name,mins])=>{
+        const hrs=mins/60;
+        const ot=hrs>40;
+        h+='<div style="display:grid;grid-template-columns:1fr 1fr 1fr;padding:9px 14px;border-bottom:1px solid var(--border);align-items:center;">';
+        h+='<div style="font-size:12px;font-weight:600;color:var(--navy);">'+name+'</div>';
+        h+='<div style="font-size:12px;font-weight:700;color:var(--navy);text-align:center;">'+fmt(mins)+'</div>';
+        var otBg=ot?'rgba(192,32,32,.1)':'rgba(46,125,50,.1)';
+        var otColor=ot?'#c62828':'#2e7d32';
+        var otLabel=ot?'+'+Math.round(hrs-40)+'h OT':Math.round(40-hrs)+'h left';
+        h+='<div style="text-align:right;"><span style="font-size:10px;padding:2px 7px;border-radius:8px;font-weight:700;background:'+otBg+';color:'+otColor+';">'+otLabel+'</span></div>';
+        h+='</div>';
+      });
+      h+='</div>';
+    }
+    h+='</div>';
+
+    el.innerHTML=h;
+  }catch(e){el.innerHTML='<div style="padding:20px;color:var(--danger);">Error loading time data: '+e.message+'</div>';}
+}
+
+// Also update switchLoc to hide time panel
+const _origSwitchLoc=switchLoc;
+function switchLoc(l,el){
+  document.getElementById('time-panel').style.display='none';
+  _origSwitchLoc(l,el);
+}
+
 function prevOCMonth(){ ocMonthOffset--; renderOCMonth(); }
 function nextOCMonth(){ ocMonthOffset++; renderOCMonth(); }
 
@@ -2602,5 +2739,12 @@ window.addEventListener('storage',e=>{if(e.key===_JG_KEY){if(e.newValue){jgHideL
 
 document.addEventListener("DOMContentLoaded",()=>jgCheckAuth());
 </script>
+<div id="time-panel" style="display:none;padding:16px;max-width:900px;margin:0 auto;">
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+    <div style="font-size:16px;font-weight:700;color:var(--navy);">Time Clock — Live Status</div>
+    <button onclick="loadTimeData()" style="padding:6px 14px;border-radius:6px;border:1.5px solid var(--border);background:transparent;font-size:12px;font-weight:600;cursor:pointer;color:var(--navy);">↻ Refresh</button>
+  </div>
+  <div id="time-content">Loading...</div>
+</div>
 </body>
 </html>
