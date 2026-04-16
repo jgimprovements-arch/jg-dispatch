@@ -437,6 +437,10 @@ input[type=file]{display:none}
         <option value="overdue30">Overdue 30+ days</option>
         <option value="never">Never Contacted</option>
       </select>
+      <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:#6b7a96;cursor:pointer;user-select:none;">
+        <input type="checkbox" id="cm_excl_customers" onchange="refreshContactMap()" style="accent-color:#e85d04;width:14px;height:14px;">
+        Hide Customers
+      </label>
       <div style="margin-left:auto;font-size:11px;color:#6b7a96;display:flex;align-items:center;" id="cm_count">0 contacts shown</div>
     </div>
     <!-- Map + sidebar -->
@@ -547,6 +551,7 @@ function mkTierFilters() {
 }
 function setTypeFilter(t){ST.filterType=t;render();}
 function setTierFilter(t){ST.filterTier=t;render();}
+function toggleHideCustomers(){ST.hideCustomers=!ST.hideCustomers;render();}
 
 
 function mkTab(t, label) {
@@ -590,6 +595,7 @@ var ST = {
   selected: null,
   filterType: 'All',
   filterTier: 'All',
+  hideCustomers: false,
   searchQ: '',
   today: new Date().toISOString().split('T')[0],
   apiKey: localStorage.getItem('jg_key')||''
@@ -854,6 +860,7 @@ function fmtDate(d) {
 
 function filteredPartners() {
   return ST.partners.filter(function(p) {
+    if(ST.hideCustomers && (p.type||'').toLowerCase()==='customer') return false;
     if(ST.filterType!=='All' && p.type!==ST.filterType) return false;
     if(ST.filterTier!=='All' && p.tier!==ST.filterTier) return false;
     if(ST.searchQ) {
@@ -960,6 +967,9 @@ function render() {
     h += '<input id="partner-search" style="padding:7px 12px;border-radius:6px;border:1.5px solid var(--border);font-size:12px;font-family:DM Sans,sans-serif;outline:none;width:200px;" placeholder="Search partners..." value="' + ST.searchQ + '" oninput="ST.searchQ=this.value;renderPartnerList()">';
     h += mkTypeFilters();
     h += mkTierFilters();
+    var hcBg = ST.hideCustomers ? 'var(--navy)' : 'var(--surface)';
+    var hcCol = ST.hideCustomers ? '#fff' : 'var(--muted)';
+    h += '<button style="padding:4px 12px;border-radius:20px;border:1.5px solid var(--border);font-size:11px;font-weight:600;cursor:pointer;background:'+hcBg+';color:'+hcCol+';" onclick="toggleHideCustomers()">' + (ST.hideCustomers ? 'Customers Hidden' : 'Hide Customers') + '</button>';
     h += '<button class="btn btn-gold" style="margin-left:auto;" onclick="addPartner()">+ Add Partner</button>';
     h += '</div>';
 
@@ -1960,6 +1970,7 @@ function refreshContactMap() {
   var typeFilter  = document.getElementById('cm_type').value;
   var tierFilter  = document.getElementById('cm_tier').value;
   var touchFilter = document.getElementById('cm_touch').value;
+  var exclCustomers = document.getElementById('cm_excl_customers') && document.getElementById('cm_excl_customers').checked;
   var cache = getGeocodeCache();
   var defaultCenter = ST.market === 'Stevens Point' ? [44.5236, -89.5746] : [44.2619, -88.4154];
 
@@ -2022,6 +2033,7 @@ function refreshContactMap() {
 
   // Filter partners
   var filtered = ST.partners.filter(function(p) {
+    if (exclCustomers && (p.type||'').toLowerCase() === 'customer') return false;
     if (typeFilter && p.type !== typeFilter) return false;
     if (tierFilter && p.tier !== tierFilter) return false;
     var days = p.last_touch_date ? Math.floor((Date.now()-new Date(p.last_touch_date).getTime())/86400000) : null;
