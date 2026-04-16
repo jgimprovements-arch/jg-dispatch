@@ -383,34 +383,46 @@ function showErr(msg) {
 }
 
 async function loadAll() {
-  ST.loading=true; render();
-  try {
+  ST.loading = true;
+  render();
   var m = ST.market;
-  // Supabase default page size is 1000 - fetch all partners in pages
-  var allPartners = [];
-  var page = 0;
-  var pageSize = 1000;
-  for (var _pg = 0; _pg < 5; _pg++) {
-    try {
-      var _c = new AbortController();
-      var _t = setTimeout(function(){ _c.abort(); }, 8000);
-      var _rs = await fetch(SB_URL+'/rest/v1/sales_partners?market=eq.'+encodeURIComponent(m)+'&order=tier.asc,name.asc&limit=1000&offset='+(_pg*1000), {signal:_c.signal, headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Prefer':'count=none'}});
-      clearTimeout(_t);
-      var chunk = _rs.ok ? await _rs.json() : [];
-      if (!chunk || !chunk.length) break;
-      allPartners = allPartners.concat(chunk);
-      if (chunk.length < 1000) break;
-    } catch(e) { console.error('fetch error:', e.message); break; }
+  var mq = encodeURIComponent(m);
+  try {
+    // Partners — single fetch, no pagination for now
+    var p = await sbSafe('/rest/v1/sales_partners?market=eq.'+mq+'&order=tier.asc,name.asc&limit=3000');
+    ST.partners = p || [];
+  } catch(e) { console.error('partners fetch:', e); ST.partners = []; }
+  try {
+    var t = await sbSafe('/rest/v1/sales_touches?market=eq.'+mq+'&order=touch_date.desc&limit=500');
+    ST.touches = t || [];
+  } catch(e) { console.error('touches fetch:', e); ST.touches = []; }
+  try {
+    var f = await sbSafe('/rest/v1/sales_followups?market=eq.'+mq+'&completed=eq.false&order=due_date.asc&limit=500');
+    ST.followups = f || [];
+  } catch(e) { console.error('followups fetch:', e); ST.followups = []; }
+  try {
+    var r = await sbSafe('/rest/v1/sales_routes?market=eq.'+mq+'&order=route_date.desc&limit=30');
+    ST.routes = r || [];
+  } catch(e) { console.error('routes fetch:', e); ST.routes = []; }
+  ST.loading = false;
+  render();
+}
+
+async function sbSafe(path) {
+  try {
+    var ctrl = new AbortController();
+    var tid = setTimeout(function(){ ctrl.abort(); }, 10000);
+    var r = await fetch(SB_URL + path, {
+      signal: ctrl.signal,
+      headers: {'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Prefer': 'count=none'}
+    });
+    clearTimeout(tid);
+    if (!r.ok) { console.error('sbSafe error:', r.status, path); return []; }
+    return await r.json();
+  } catch(e) {
+    console.error('sbSafe:', e.message, path);
+    return [];
   }
-  var [touches, followups, routes] = await Promise.all([
-    sb('/rest/v1/sales_touches?market=eq.'+encodeURIComponent(m)+'&order=touch_date.desc&limit=500'),
-    sb('/rest/v1/sales_followups?market=eq.'+encodeURIComponent(m)+'&completed=eq.false&order=due_date.asc&limit=500'),
-    sb('/rest/v1/sales_routes?market=eq.'+encodeURIComponent(m)+'&order=route_date.desc&limit=30')
-  ]);
-  var partners = allPartners;
-  ST.partners=partners||[]; ST.touches=touches||[]; ST.followups=followups||[]; ST.routes=routes||[];
-  } catch(e) { console.error("loadAll failed:", e); }
-  ST.loading=false; render();
 }
 
 async function savePartner(data) {
