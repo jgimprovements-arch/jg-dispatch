@@ -421,6 +421,10 @@ input[type=file]{display:none}
         <option>Insurance Agent</option>
         <option>Property Manager</option>
         <option>GC</option>
+        <option>Fire Department</option>
+        <option>Firefighter</option>
+        <option>Charity</option>
+        <option>Chamber of Commerce</option>
         <option>Customer</option>
         <option>Other</option>
       </select>
@@ -529,7 +533,7 @@ function mkMarketToggle() {
 function setMarket(m){ST.market=m;loadAll();}
 
 function mkTypeFilters() {
-  var types = ['All','Plumber','Realtor','Insurance Agent','Property Manager','GC','Other'];
+  var types = ['All','Plumber','Realtor','Insurance Agent','Property Manager','GC','Fire Department','Firefighter','Charity','Chamber of Commerce','Customer','Other'];
   return types.map(function(t) {
     var active = ST.filterType===t;
     var bg = active ? 'var(--navy)' : 'var(--surface)';
@@ -835,7 +839,7 @@ function tierColor(tier) {
 }
 
 function typeColor(type) {
-  var m={'Plumber':'#1565c0','Realtor':'#6a1b9a','Insurance Agent':'#c0392b','Property Manager':'#e65100','GC':'#4a148c','General Contractor':'#4a148c'};
+  var m={'Plumber':'#1565c0','Realtor':'#6a1b9a','Insurance Agent':'#c0392b','Property Manager':'#e65100','GC':'#4a148c','General Contractor':'#4a148c','Fire Department':'#b71c1c','Firefighter':'#e53935','Charity':'#2e7d32','Chamber of Commerce':'#f57f17'};
   return m[type]||'#6b7a96';
 }
 
@@ -859,6 +863,9 @@ function fmtDate(d) {
 }
 
 function filteredPartners() {
+  // Type display order — referral sources first, then customer/other
+  var typeOrder = {'Plumber':0,'Realtor':1,'Insurance Agent':2,'Property Manager':3,'GC':4,'Fire Department':5,'Firefighter':6,'Charity':7,'Chamber of Commerce':8,'Customer':9,'Other':10};
+  var tierOrder = {'A':0,'B':1,'C':2};
   return ST.partners.filter(function(p) {
     if(ST.hideCustomers && (p.type||'').toLowerCase()==='customer') return false;
     if(ST.filterType!=='All' && p.type!==ST.filterType) return false;
@@ -868,6 +875,15 @@ function filteredPartners() {
       if(!(p.name||'').toLowerCase().includes(q) && !(p.company||'').toLowerCase().includes(q) && !(p.city||'').toLowerCase().includes(q)) return false;
     }
     return true;
+  }).sort(function(a,b) {
+    // Sort by type order first, then tier, then name
+    var ta = typeOrder[a.type] !== undefined ? typeOrder[a.type] : 99;
+    var tb = typeOrder[b.type] !== undefined ? typeOrder[b.type] : 99;
+    if (ta !== tb) return ta - tb;
+    var ra = tierOrder[a.tier] !== undefined ? tierOrder[a.tier] : 99;
+    var rb = tierOrder[b.tier] !== undefined ? tierOrder[b.tier] : 99;
+    if (ra !== rb) return ra - rb;
+    return (a.name||'').localeCompare(b.name||'');
   });
 }
 
@@ -963,15 +979,38 @@ function render() {
     h += '<div class="sales-stat"><div class="sales-stat-val" style="color:var(--orange);">' + totalRefs + '</div><div class="sales-stat-lbl">Total Referrals</div></div>';
     h += '</div>';
 
-    h += '<div style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;align-items:center;">';
-    h += '<input id="partner-search" style="padding:7px 12px;border-radius:6px;border:1.5px solid var(--border);font-size:12px;font-family:DM Sans,sans-serif;outline:none;width:200px;" placeholder="Search partners..." value="' + ST.searchQ + '" oninput="ST.searchQ=this.value;renderPartnerList()">';
-    h += mkTypeFilters();
-    h += mkTierFilters();
-    var hcBg = ST.hideCustomers ? 'var(--navy)' : 'var(--surface)';
-    var hcCol = ST.hideCustomers ? '#fff' : 'var(--muted)';
-    h += '<button style="padding:4px 12px;border-radius:20px;border:1.5px solid var(--border);font-size:11px;font-weight:600;cursor:pointer;background:'+hcBg+';color:'+hcCol+';" onclick="toggleHideCustomers()">' + (ST.hideCustomers ? 'Customers Hidden' : 'Hide Customers') + '</button>';
-    h += '<button class="btn btn-gold" style="margin-left:auto;" onclick="addPartner()">+ Add Partner</button>';
+    // ── FILTER BAR ──────────────────────────────────────────────────────────
+    h += '<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:10px 14px;margin-bottom:14px;">';
+
+    // Row 1: Search + Add Partner
+    h += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">';
+    h += '<input id="partner-search" style="flex:1;padding:8px 12px;border-radius:6px;border:1.5px solid var(--border);font-size:13px;font-family:DM Sans,sans-serif;outline:none;" placeholder="Search partners..." value="' + ST.searchQ + '" oninput="ST.searchQ=this.value;renderPartnerList()">';
+    h += '<button class="btn btn-gold" onclick="addPartner()">+ Add Partner</button>';
+    if(isAdmin()) h += '<button class="btn" style="background:rgba(13,45,94,.08);color:var(--navy);border:none;" onclick="importAlbi()">Import</button>';
     h += '</div>';
+
+    // Row 2: Type filter as a compact select + tier pills + hide customers
+    h += '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">';
+    h += '<select onchange="setTypeFilter(this.value)" style="padding:5px 10px;border-radius:6px;border:1.5px solid var(--border);font-size:12px;font-family:DM Sans,sans-serif;background:#fff;color:var(--navy);font-weight:600;">';
+    var types = ['All','Plumber','Realtor','Insurance Agent','Property Manager','GC','Fire Department','Firefighter','Charity','Chamber of Commerce','Customer','Other'];
+    types.forEach(function(t){ h += '<option value="'+t+'"'+(ST.filterType===t?' selected':'')+'>'+( t==='All'?'All Types':t)+'</option>'; });
+    h += '</select>';
+
+    // Tier pills - compact
+    h += '<div style="display:flex;gap:4px;">';
+    ['All','A','B','C'].forEach(function(t) {
+      var active = ST.filterTier===t;
+      var tc = t==='All'?'var(--navy)':tierColor(t);
+      var label = t==='All'?'All':t;
+      h += '<button onclick="setTierFilter(\'' + t + '\')" style="padding:4px 12px;border-radius:20px;border:1.5px solid '+(active?tc:'var(--border)')+';font-size:11px;font-weight:600;cursor:pointer;background:'+(active?tc:'transparent')+';color:'+(active?'#fff':'var(--muted)')+';">' + (t==='All'?'All Tiers':'Tier '+label) + '</button>';
+    });
+    h += '</div>';
+
+    // Hide customers toggle
+    var hcActive = ST.hideCustomers;
+    h += '<button onclick="toggleHideCustomers()" style="padding:4px 12px;border-radius:20px;border:1.5px solid var(--border);font-size:11px;font-weight:600;cursor:pointer;background:'+(hcActive?'var(--navy)':'transparent')+';color:'+(hcActive?'#fff':'var(--muted)')+';margin-left:auto;">'+(hcActive?'Customers Hidden':'Hide Customers')+'</button>';
+    h += '</div>';
+    h += '</div>'; // end filter card
 
     var fp = filteredPartners();
     h += '<div id="partner-list">';
@@ -1183,7 +1222,7 @@ function render() {
     h += '</div>';
     h += '<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:20px;margin-bottom:16px;">';
     h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:16px;">';
-    h += '<div class="form-group"><label class="form-label">Default Partner Type</label><select class="form-select" id="imp-type"><option>Customer</option><option>Plumber</option><option>Realtor</option><option>Insurance Agent</option><option>Property Manager</option><option>GC</option><option>Other</option></select></div>';
+    h += '<div class="form-group"><label class="form-label">Default Partner Type</label><select class="form-select" id="imp-type"><option>Customer</option><option>Plumber</option><option>Realtor</option><option>Insurance Agent</option><option>Property Manager</option><option>GC</option><option>Fire Department</option><option>Firefighter</option><option>Charity</option><option>Chamber of Commerce</option><option>Other</option></select></div>';
     h += '<div class="form-group"><label class="form-label">Default Tier</label><select class="form-select" id="imp-tier"><option value="C">C - Cold / Prospect</option><option value="B">B - Active</option><option value="A">A - Top Partner</option></select></div>';
     h += '</div>';
     h += '<div style="border:2px dashed var(--border);border-radius:8px;padding:32px 16px;text-align:center;cursor:pointer;" onclick="document.getElementById(\'imp-file\').click()">';
@@ -1315,7 +1354,7 @@ function render() {
       h += '<div class="form-group"><label class="form-label">Full Name *</label><input class="form-input" id="pName" placeholder="John Smith"></div>';
       h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">';
       h += '<div class="form-group"><label class="form-label">Company</label><input class="form-input" id="pCompany" placeholder="ABC Plumbing"></div>';
-      h += '<div class="form-group"><label class="form-label">Type</label><select class="form-select" id="pType"><option>Plumber</option><option>Realtor</option><option>Insurance Agent</option><option>Property Manager</option><option>GC</option><option>Other</option></select></div>';
+      h += '<div class="form-group"><label class="form-label">Type</label><select class="form-select" id="pType"><option>Plumber</option><option>Realtor</option><option>Insurance Agent</option><option>Property Manager</option><option>GC</option><option>Fire Department</option><option>Firefighter</option><option>Charity</option><option>Chamber of Commerce</option><option>Customer</option><option>Other</option></select></div>';
       h += '</div>';
       h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">';
       h += '<div class="form-group"><label class="form-label">Phone</label><input class="form-input" id="pPhone" placeholder="(920) 555-1234"></div>';
@@ -1889,6 +1928,10 @@ var _cmPartnerColors = {
   'Realtor':          '#2e7d32',
   'Insurance Agent':  '#6a1b9a',
   'Property Manager': '#e65100',
+  'Fire Department':  '#b71c1c',
+  'Firefighter':      '#e53935',
+  'Charity':          '#2e7d32',
+  'Chamber of Commerce': '#f57f17',
   'GC':               '#4e342e',
   'Customer':         '#00838f',
   'Other':            '#546e7a'
@@ -2373,7 +2416,7 @@ function openPartnerEdit(pid) {
         '</select></div>' +
       '<div><label style="'+LBL+'">Contact Type</label>' +
         '<select id="pe_type" style="'+INP+'" onchange="peAutoRefSource()">' +
-          ['Plumber','Realtor','Insurance Agent','Property Manager','GC','Customer','Other'].map(function(v){ return '<option value="'+v+'"'+(p.type===v?' selected':'')+'>'+v+'</option>'; }).join('') +
+          ['Plumber','Realtor','Insurance Agent','Property Manager','GC','Fire Department','Firefighter','Charity','Chamber of Commerce','Customer','Other'].map(function(v){ return '<option value="'+v+'"'+(p.type===v?' selected':'')+'>'+v+'</option>'; }).join('') +
         '</select></div>' +
       '<div><label style="'+LBL+'">Referral Source (detail)</label><input id="pe_ref_source" type="text" style="'+INP+'" value="'+(p.referral_source||'')+'" placeholder="e.g. Roto-Rooter, State Farm..."></div>' +
     '</div>' +
@@ -2397,7 +2440,11 @@ function peAutoRefSource() {
     'Realtor': 'e.g. Coldwell Banker, Shorewest',
     'Insurance Agent': 'e.g. State Farm, Allstate',
     'Property Manager': 'e.g. Property company name',
-    'GC': 'e.g. General contractor name'
+    'GC': 'e.g. General contractor name',
+    'Fire Department': 'e.g. Appleton Fire Dept, Station 1',
+    'Firefighter': 'e.g. Name / station',
+    'Charity': 'e.g. Organization name',
+    'Chamber of Commerce': 'e.g. Fox Cities Chamber'
   };
   refEl.placeholder = hints[typeEl.value] || 'e.g. Company or person name';
 }
