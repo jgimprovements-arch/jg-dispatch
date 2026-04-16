@@ -1,17 +1,15 @@
 // JG Sales PWA Service Worker
 // Increment VERSION on every deploy to force cache refresh
-const VERSION = '2025-04-16-v1';
+const VERSION = '2025-04-16-v2';
 const CACHE = 'jg-sales-' + VERSION;
 
-// Files to cache for offline use
 const PRECACHE = [
   '/jg-dispatch/sales_app.html',
   '/jg-dispatch/logo.png'
 ];
 
-// Install — cache core files
 self.addEventListener('install', function(e) {
-  self.skipWaiting(); // activate immediately
+  self.skipWaiting();
   e.waitUntil(
     caches.open(CACHE).then(function(cache) {
       return cache.addAll(PRECACHE).catch(function(){});
@@ -19,7 +17,6 @@ self.addEventListener('install', function(e) {
   );
 });
 
-// Activate — delete old caches
 self.addEventListener('activate', function(e) {
   e.waitUntil(
     caches.keys().then(function(keys) {
@@ -28,7 +25,6 @@ self.addEventListener('activate', function(e) {
             .map(function(key) { return caches.delete(key); })
       );
     }).then(function() {
-      // Tell all open tabs to reload so they get the fresh version
       return self.clients.matchAll({ type: 'window' }).then(function(clients) {
         clients.forEach(function(client) { client.postMessage('reload'); });
       });
@@ -37,14 +33,25 @@ self.addEventListener('activate', function(e) {
   return self.clients.claim();
 });
 
-// Fetch — network first, fall back to cache
 self.addEventListener('fetch', function(e) {
-  // Only handle same-origin requests
-  if (!e.request.url.startsWith(self.location.origin)) return;
+  var url = e.request.url;
 
+  // Pass through ALL non-GET requests (POST, PATCH, DELETE)
+  if (e.request.method !== 'GET') return;
+
+  // Pass through external API calls (Supabase, Google, etc)
+  if (!url.startsWith(self.location.origin)) return;
+
+  // Pass through non-HTML/asset requests
+  var isAsset = url.endsWith('.html') || url.endsWith('.js') ||
+                url.endsWith('.css') || url.endsWith('.png') ||
+                url.endsWith('.jpg') || url.endsWith('.svg') ||
+                url.endsWith('.json');
+  if (!isAsset) return;
+
+  // For app assets: network first, cache fallback
   e.respondWith(
     fetch(e.request).then(function(response) {
-      // Cache successful responses
       if (response && response.status === 200) {
         var clone = response.clone();
         caches.open(CACHE).then(function(cache) {
@@ -53,7 +60,6 @@ self.addEventListener('fetch', function(e) {
       }
       return response;
     }).catch(function() {
-      // Network failed — serve from cache
       return caches.match(e.request);
     })
   );
