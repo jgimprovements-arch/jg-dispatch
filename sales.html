@@ -445,7 +445,7 @@ input[type=file]{display:none}
         <input type="checkbox" id="cm_excl_customers" onchange="refreshContactMap()" style="accent-color:#e85d04;width:14px;height:14px;">
         Hide Customers
       </label>
-      <div style="margin-left:auto;font-size:11px;color:#6b7a96;display:flex;align-items:center;" id="cm_count">0 contacts shown</div>
+      <div style="display:flex;align-items:center;gap:8px;margin-left:auto;"><div style="font-size:11px;color:#6b7a96;" id="cm_count">0 contacts shown</div><button onclick="clearGeocodeCache()" style="font-size:10px;padding:3px 8px;border-radius:4px;border:1px solid #d0d5dd;background:transparent;color:#6b7a96;cursor:pointer;" title="Clear cached locations and re-geocode">Reset Pins</button></div>
     </div>
     <!-- Map + sidebar -->
     <div style="display:flex;flex:1;min-height:0;overflow:hidden;">
@@ -1974,6 +1974,12 @@ function closeContactMap() {
 // ── GEOCODING ─────────────────────────────────────────────────────────────
 var _geocodeCache = null;
 
+function clearGeocodeCache() {
+  _geocodeCache = {};
+  try { localStorage.removeItem('jg_geocode_cache'); } catch(e) {}
+  refreshContactMap();
+}
+
 function getGeocodeCache() {
   if (_geocodeCache) return _geocodeCache;
   try { _geocodeCache = JSON.parse(localStorage.getItem('jg_geocode_cache') || '{}'); }
@@ -1992,14 +1998,34 @@ async function geocodeAddress(address) {
   var key = address.toLowerCase().trim();
   if (cache[key]) return cache[key];
   try {
-    var url = 'https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=us&q=' + encodeURIComponent(address);
+    // Ensure Wisconsin context so Nominatim doesn't pick wrong state
+    var query = address;
+    var lower = address.toLowerCase();
+    if (lower.indexOf(' wi ') === -1 && lower.indexOf(',wi') === -1 &&
+        lower.indexOf('wisconsin') === -1 && lower.indexOf(' wi') !== lower.length - 3) {
+      // Strip any existing state and append WI
+      query = address.replace(/,?\s*(wi|wisconsin)\s*\d*/gi, '').trim() + ', WI';
+    }
+    // Wisconsin bounding box to bias results
+    var viewbox = '-93.0,42.4,-86.8,47.1';
+    var url = 'https://nominatim.openstreetmap.org/search?format=json&limit=3&countrycodes=us&viewbox=' + viewbox + '&bounded=1&q=' + encodeURIComponent(query);
     var r = await fetch(url, { headers: { 'Accept-Language': 'en', 'User-Agent': 'JGRestoration/1.0' } });
     var data = await r.json();
     if (data && data[0]) {
-      var coords = [parseFloat(data[0].lat), parseFloat(data[0].lon)];
-      cache[key] = coords;
-      saveGeocodeCache();
-      return coords;
+      // Pick the result closest to Wisconsin center if multiple returned
+      var wiCenter = [44.5, -89.5];
+      var best = data.reduce(function(a, b) {
+        var da = Math.abs(parseFloat(a.lat)-wiCenter[0]) + Math.abs(parseFloat(a.lon)-wiCenter[1]);
+        var db = Math.abs(parseFloat(b.lat)-wiCenter[0]) + Math.abs(parseFloat(b.lon)-wiCenter[1]);
+        return da < db ? a : b;
+      });
+      var coords = [parseFloat(best.lat), parseFloat(best.lon)];
+      // Sanity check — must be within Wisconsin bounds
+      if (coords[0] >= 42.4 && coords[0] <= 47.1 && coords[1] >= -93.0 && coords[1] <= -86.8) {
+        cache[key] = coords;
+        saveGeocodeCache();
+        return coords;
+      }
     }
   } catch(e) { console.warn('Geocode failed for:', address, e); }
   return null;
