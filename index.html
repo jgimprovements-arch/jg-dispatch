@@ -281,88 +281,10 @@ body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);min
 /* Body offset — collapsed width only */
 body{padding-left:48px;box-sizing:border-box;}
 * {box-sizing:border-box;}
-
-/* ── MOBILE RESPONSIVE ─────────────────────────────────────────────── */
-@media (max-width: 640px) {
-
-  /* Header compact */
-  .hdr { padding: 0 10px; height: 44px; }
-  .logo-tx { font-size: 12px; }
-  .clk { display: none; }
-  .pill { display: none; }
-  .hdr-r { gap: 4px; }
-  .btn { padding: 4px 8px; font-size: 10px; }
-
-  /* Stats bar scrolls */
-  .stats-bar { overflow-x: auto; -webkit-overflow-scrolling: touch; flex-wrap: nowrap; padding: 0 10px; }
-  .stat { padding: 6px 10px 6px 0; margin-right: 10px; flex-shrink: 0; }
-  .stat-val { font-size: 15px; }
-
-  /* Tabs scroll */
-  .tabs { overflow-x: auto; -webkit-overflow-scrolling: touch; flex-wrap: nowrap; padding: 0 10px; }
-  .tab { flex-shrink: 0; padding: 6px 10px; font-size: 11px; }
-
-  /* Legend collapses */
-  .legend { display: none; }
-
-  /* Main padding */
-  .main { padding: 8px; }
-
-  /* Board: horizontal swipe on mobile — keep kanban feel */
-  .board-wrap {
-    overflow-x: auto;
-    -webkit-overflow-scrolling: touch;
-    scroll-snap-type: x mandatory;
-    padding-bottom: 8px;
-  }
-  .board { gap: 6px; padding: 0 4px; }
-  .lane {
-    width: 88vw;
-    max-width: 320px;
-    flex-shrink: 0;
-    scroll-snap-align: start;
-  }
-
-  /* Job cards */
-  .job-card { padding: 7px 8px; }
-
-  /* AI panel full width */
-  .ai-panel { width: calc(100vw - 16px) !important; left: 8px !important; right: 8px !important; }
-
-  /* Modals full screen bottom sheet */
-  #out-modal, #info-modal, #crossloc-modal, #time-modal {
-    align-items: flex-end !important;
-    padding: 0 !important;
-  }
-  #out-modal > div, #crossloc-modal > div, #time-modal > div {
-    width: 100% !important;
-    max-width: 100% !important;
-    border-radius: 16px 16px 0 0 !important;
-    padding: 20px 16px 32px !important;
-    margin: 0 !important;
-  }
-  #info-modal { padding: 0 !important; }
-  #info-modal > div {
-    width: 100% !important;
-    max-width: 100% !important;
-    border-radius: 16px 16px 0 0 !important;
-    margin: 0 !important;
-    padding: 20px 16px 32px !important;
-    max-height: 92vh;
-    overflow-y: auto;
-  }
-
-  /* On-call grid stacks */
-  #oncall-panel > div[style*="grid-template-columns:1fr 1fr"] {
-    grid-template-columns: 1fr !important;
-  }
-
-  /* Key modal */
-  #key-modal .modal { width: calc(100vw - 32px) !important; }
-}
 </style>
 
 <script src="https://accounts.google.com/gsi/client" async defer></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
 <div id="jg-login">
@@ -2209,8 +2131,80 @@ async function clearBoardState(){
   }catch(e){ showToast('Reset failed'); }
 }
 
-// Poll every 30 seconds for updates from other users
-setInterval(pollSharedState, 30000);
+// ── SUPABASE REALTIME ─────────────────────────────────────────────────────
+// Replace 30s polling with instant WebSocket push
+let _sbClient = null;
+let _realtimeChannel = null;
+
+function initRealtime() {
+  try {
+    _sbClient = supabase.createClient(SB_URL, SB_KEY);
+    _realtimeChannel = _sbClient
+      .channel('board_state_changes')
+      .on('postgres_changes', {
+        event: 'UPDATE',
+        schema: 'public',
+        table: 'board_state',
+        filter: 'id=eq.current'
+      }, function(payload) {
+        // Received a live update from another user
+        var data = payload.new;
+        if (!data || !data.state) return;
+        var state = data.state;
+        if (!state.ts) return;
+        if (state.ts === lastSyncTs) return; // exact duplicate, skip
+        // Only skip if this looks like our own save (within 3s of our last local change)
+        if (state.ts <= lastSyncTs && Date.now() - lastLocalChange < 3000) return;
+        lastSyncTs = state.ts; // track last received ts
+        var today = new Date().toISOString().split('T')[0];
+        if (state.date !== today) return;
+        var changed = false;
+        for (var l of ['appleton','stevens']) {
+          for (var [nm, jids] of Object.entries(state.assignments?.[l]||{})) {
+            if (techQ[l]?.[nm]) {
+              var validJids = jids.filter(function(jid){ return jobs[jid]; });
+              var current  = JSON.stringify(techQ[l][nm].jobs);
+              var incoming = JSON.stringify(validJids);
+              if (current !== incoming) {
+                techQ[l][nm].jobs = validJids;
+                unassigned[l] = (unassigned[l]||[]).filter(function(jid){ return !validJids.includes(jid); });
+                changed = true;
+              }
+            }
+          }
+        }
+        if (state.overrides && Date.now() - lastLocalChange > 5000) Object.assign(jobOverrides, state.overrides);
+        if (state.sick) state.sick.forEach(function(nm){ sick.add(nm); });
+        if (changed) { render(); showToast('🔄 Board updated'); }
+        updateSyncBadge(state.ts);
+      })
+      .subscribe(function(status) {
+        if (status === 'SUBSCRIBED') {
+          console.log('Realtime connected — live sync active');
+          // Update sync badge to show realtime status
+          var badge = document.getElementById('sync-badge');
+          if (badge) badge.title = 'Live sync active';
+        } else if (status === 'CLOSED' || status === 'CHANNEL_ERROR') {
+          console.warn('Realtime disconnected — falling back to polling');
+          // Fall back to polling if realtime fails
+          setTimeout(pollSharedState, 5000);
+          setInterval(pollSharedState, 15000);
+        }
+      });
+  } catch(e) {
+    console.warn('Realtime setup failed, using polling:', e);
+    setInterval(pollSharedState, 15000);
+  }
+}
+
+// Initialize realtime after page loads, and poll immediately for current state
+document.addEventListener('DOMContentLoaded', function() {
+  setTimeout(initRealtime, 2000); // wait for board to load first
+  setTimeout(pollSharedState, 3000); // fetch current state on load
+});
+
+// Keep polling as fallback at longer interval (catches any missed realtime events)
+setInterval(pollSharedState, 60000);
 
 // ── TECH START TIME & CARD REORDER ───────
 function decToTime(dec){
