@@ -390,8 +390,6 @@ async function loadAll() {
   var m = ST.market;
   var mq = encodeURIComponent(m);
   try {
-    // Partners — single fetch, no pagination for now
-    // Paginate partners - Supabase max is 1000 per request
     var allP = [];
     for (var _pg = 0; _pg < 10; _pg++) {
       var _chunk = await sbSafe('/rest/v1/sales_partners?order=tier.asc,name.asc&limit=1000&offset='+(_pg*1000));
@@ -413,8 +411,18 @@ async function loadAll() {
     var r = await sbSafe('/rest/v1/sales_routes?market=eq.'+mq+'&order=route_date.desc&limit=30');
     ST.routes = r || [];
   } catch(e) { console.error('routes fetch:', e); ST.routes = []; }
+  // Always clear loading — guaranteed even if something above threw
   ST.loading = false;
   render();
+}
+
+// Safe wrapper — clears loading if loadAll rejects at the top level
+function _loadAllSafe() {
+  loadAll().catch(function(e){
+    console.error('loadAll unhandled:', e);
+    ST.loading = false;
+    render();
+  });
 }
 
 async function sbSafe(path) {
@@ -1491,7 +1499,11 @@ document.addEventListener('DOMContentLoaded',function(){
   jgCheckAuth();
   var u=JSON.parse(localStorage.getItem('jg_platform_user')||'null');
   if(u) jgShowUser(u);
-  loadAll();
+  _loadAllSafe();
+  // Escape hatch: if still loading after 15s, force-clear
+  setTimeout(function(){
+    if(ST.loading){ ST.loading=false; render(); console.warn('loadAll timeout - forced clear'); }
+  }, 15000);
 });
 
 </script>
