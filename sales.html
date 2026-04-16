@@ -301,6 +301,56 @@ input[type=file]{display:none}
 </nav>
 <div id="app"><div style="padding:40px;text-align:center;color:#6b7a96;">Loading...</div></div>
 
+<!-- Route Suggest Modal - outside render() cycle -->
+<div id="route-suggest-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:2000;align-items:flex-start;justify-content:center;padding-top:40px;overflow-y:auto;" onclick="if(event.target===this)closeRouteSuggest()">
+  <div style="background:#fff;border-radius:14px;width:100%;max-width:580px;box-shadow:0 24px 64px rgba(0,0,0,.3);margin-bottom:40px;">
+    <div style="background:#0d2d5e;border-radius:14px 14px 0 0;padding:18px 24px;display:flex;align-items:center;justify-content:space-between;">
+      <div style="color:#fff;font-size:15px;font-weight:700;font-family:DM Sans,sans-serif;">AI Route Suggestion</div>
+      <button onclick="closeRouteSuggest()" style="background:rgba(255,255,255,.15);border:none;color:#fff;border-radius:6px;padding:4px 10px;cursor:pointer;font-size:12px;">Close</button>
+    </div>
+    <div style="padding:20px 24px;">
+      <!-- Config row -->
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:16px;">
+        <div>
+          <div style="font-size:10px;font-weight:600;color:#6b7a96;text-transform:uppercase;margin-bottom:4px;">Starting Point</div>
+          <select id="rs_start" style="width:100%;padding:8px 10px;border-radius:6px;border:1.5px solid #d0d5dd;font-size:12px;font-family:DM Sans,sans-serif;background:#fff;">
+            <option value="Appleton Office - 1720 N Silverspring Dr, Appleton WI">Appleton Office</option>
+            <option value="Stevens Point Office - 2230 Church St, Stevens Point WI">Stevens Point Office</option>
+            <option value="custom">Custom address...</option>
+          </select>
+        </div>
+        <div>
+          <div style="font-size:10px;font-weight:600;color:#6b7a96;text-transform:uppercase;margin-bottom:4px;">Target Stops</div>
+          <select id="rs_stops" style="width:100%;padding:8px 10px;border-radius:6px;border:1.5px solid #d0d5dd;font-size:12px;font-family:DM Sans,sans-serif;background:#fff;">
+            <option value="8">Up to 8</option>
+            <option value="12" selected>Up to 12</option>
+            <option value="15">Up to 15</option>
+          </select>
+        </div>
+        <div>
+          <div style="font-size:10px;font-weight:600;color:#6b7a96;text-transform:uppercase;margin-bottom:4px;">Route Date</div>
+          <input id="rs_date" type="date" style="width:100%;padding:8px 10px;border-radius:6px;border:1.5px solid #d0d5dd;font-size:12px;font-family:DM Sans,sans-serif;background:#fff;box-sizing:border-box;">
+        </div>
+      </div>
+      <div id="rs_custom_wrap" style="display:none;margin-bottom:12px;">
+        <input id="rs_custom_addr" type="text" placeholder="Enter starting address..." style="width:100%;padding:8px 10px;border-radius:6px;border:1.5px solid #d0d5dd;font-size:12px;font-family:DM Sans,sans-serif;background:#fff;box-sizing:border-box;">
+      </div>
+      <button id="rs_generate_btn" onclick="generateRouteSuggestion()" style="width:100%;padding:11px;border-radius:8px;border:none;background:#e85d04;color:#fff;font-size:13px;font-weight:700;cursor:pointer;font-family:DM Sans,sans-serif;margin-bottom:16px;">Generate Route Suggestion</button>
+      <div id="rs_output" style="display:none;">
+        <div style="border-top:1px solid #e8edf2;padding-top:16px;">
+          <div id="rs_summary" style="background:rgba(13,45,94,.05);border-radius:8px;padding:12px;margin-bottom:14px;font-size:12px;color:#333;font-family:DM Sans,sans-serif;line-height:1.6;"></div>
+          <div style="font-size:11px;font-weight:700;color:#6b7a96;text-transform:uppercase;margin-bottom:8px;">Suggested Stops</div>
+          <div id="rs_stops_list"></div>
+          <div style="display:flex;gap:8px;margin-top:16px;">
+            <input id="rs_rep" type="text" placeholder="Your name (rep)" style="flex:1;padding:8px 10px;border-radius:6px;border:1.5px solid #d0d5dd;font-size:12px;font-family:DM Sans,sans-serif;background:#fff;">
+            <button onclick="saveRouteSuggestion()" style="padding:8px 20px;border-radius:6px;border:none;background:#0d2d5e;color:#fff;font-size:12px;font-weight:700;cursor:pointer;font-family:DM Sans,sans-serif;">Save Route</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- Partner Edit Modal - lives outside render() cycle so inputs persist -->
 <div id="partner-edit-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:2000;align-items:center;justify-content:center;" onclick="if(event.target===this)closePartnerEdit()">
   <div style="background:#fff;border-radius:12px;padding:24px;width:100%;max-width:520px;max-height:90vh;overflow-y:auto;box-shadow:0 20px 60px rgba(0,0,0,.3);">
@@ -824,6 +874,7 @@ function render() {
     h += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">';
     h += '<div style="font-size:13px;font-weight:700;color:var(--navy);">Sales Routes — ' + ST.market + '</div>';
     h += '<button class="btn btn-gold" onclick="ST.modal=\'add-route\';render()">+ Plan Route</button>';
+    h += '<button class="btn" style="background:var(--navy);color:#fff;border:none;" onclick="openRouteSuggest()">AI Suggest Route</button>';
     h += '</div>';
     if (!ST.routes.length) h += '<div style="text-align:center;padding:40px;color:var(--muted);">No routes yet. Plan your first route for today.</div>';
     var visibleRoutes = isAdmin() ? ST.routes : ST.routes.filter(function(r){return r.rep_name===currentRepName();});
@@ -1507,6 +1558,160 @@ async function bulkAssign(rep) {
   await loadAll();
 }
 
+
+// ── AI ROUTE SUGGESTION ───────────────────────────────────────────────────
+var _routeSuggestStops = []; // parsed from AI response
+
+function openRouteSuggest() {
+  var modal = document.getElementById('route-suggest-modal');
+  var dateEl = document.getElementById('rs_date');
+  if (dateEl) dateEl.value = ST.today || new Date().toISOString().split('T')[0];
+  document.getElementById('rs_output').style.display = 'none';
+  _routeSuggestStops = [];
+  modal.style.display = 'flex';
+}
+
+function closeRouteSuggest() {
+  document.getElementById('route-suggest-modal').style.display = 'none';
+}
+
+// rs_start listener added in DOMContentLoaded below
+
+async function generateRouteSuggestion() {
+  var btn = document.getElementById('rs_generate_btn');
+  var maxStops = parseInt(document.getElementById('rs_stops').value) || 12;
+  var startVal = document.getElementById('rs_start').value;
+  var startAddr = startVal === 'custom'
+    ? (document.getElementById('rs_custom_addr').value || 'Appleton, WI')
+    : startVal;
+
+  btn.textContent = 'Thinking...';
+  btn.disabled = true;
+
+  // Build partner data for AI — prioritize overdue touches + open follow-ups
+  var today = new Date();
+  today.setHours(0,0,0,0);
+
+  var partnerData = ST.partners
+    .filter(function(p){ return p.status !== 'Inactive'; })
+    .map(function(p) {
+      var daysSince = p.last_touch_date
+        ? Math.floor((Date.now() - new Date(p.last_touch_date).getTime()) / 86400000)
+        : 999;
+      var openFU = ST.followups.filter(function(f){ return f.partner_id === p.id; }).length;
+      var score = daysSince + (openFU * 14); // weight follow-ups heavily
+      return {
+        id: p.id,
+        name: p.name,
+        company: p.company || '',
+        type: p.type || '',
+        tier: p.tier || 'C',
+        city: p.city || '',
+        address: p.address || p.city || '',
+        daysSinceTouch: daysSince === 999 ? 'never contacted' : daysSince + ' days ago',
+        openFollowUps: openFU,
+        score: score
+      };
+    })
+    .sort(function(a,b){ return b.score - a.score; })
+    .slice(0, 40); // send top 40 candidates to AI
+
+  var intro = 'You are a sales route optimizer for JG Restoration, a water/fire/mold restoration company in Wisconsin. ';
+  var jobDesc = 'Your job is to suggest an efficient driving route for a sales rep doing partner visits.';
+  var context = 'Starting location: ' + startAddr + '. Target stops: up to ' + maxStops + ' (aim for 12 but reduce if partners are spread far apart). Market: ' + ST.market + '.';
+  var instructions = 'Select stops balancing: urgency (days since touch, open follow-ups), tier (A > B > C), and geographic clustering. Order stops for efficient driving. Return ONLY valid JSON: {"summary":"2-3 sentence explanation","stops":[{"id":"partner_id","name":"name","company":"company","address":"address","reason":"why prioritized"}]}. Pick ' + maxStops + ' or fewer stops. If spread 30+ miles, cut stops to keep route under 3 hours total.';
+  var prompt = intro + jobDesc + ' ' + context + ' Partner candidates (sorted by priority): ' + JSON.stringify(partnerData) + ' Instructions: ' + instructions;
+
+  try {
+    var resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 1000,
+        messages: [{ role: 'user', content: prompt }]
+      })
+    });
+    var data = await resp.json();
+    var raw = data.content && data.content[0] && data.content[0].text ? data.content[0].text : '';
+    // Strip any markdown fences
+    raw = raw.replace(/```json|```/g, '').trim();
+    var result = JSON.parse(raw);
+
+    _routeSuggestStops = result.stops || [];
+
+    // Render summary
+    document.getElementById('rs_summary').textContent = result.summary || '';
+
+    // Render stops list with checkboxes to deselect
+    var stopsHtml = '';
+    _routeSuggestStops.forEach(function(s, i) {
+      stopsHtml += '<div id="rs_stop_' + i + '" style="display:flex;align-items:flex-start;gap:10px;padding:10px 12px;border-radius:8px;border:1px solid #e8edf2;margin-bottom:6px;background:#fff;">' +
+        '<div style="min-width:22px;height:22px;border-radius:4px;background:#0d2d5e;color:#fff;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;margin-top:1px;">' + (i+1) + '</div>' +
+        '<div style="flex:1;">' +
+          '<div style="font-size:13px;font-weight:700;color:#0d2d5e;">' + s.name + (s.company ? ' <span style="font-weight:400;color:#6b7a96;font-size:11px;">— ' + s.company + '</span>' : '') + '</div>' +
+          '<div style="font-size:11px;color:#6b7a96;margin-top:1px;">' + (s.address||'') + '</div>' +
+          '<div style="font-size:11px;color:#e85d04;margin-top:3px;">' + (s.reason||'') + '</div>' +
+        '</div>' +
+        '<button onclick="removeRouteSuggestStop(' + i + ')" style="background:none;border:none;color:#aaa;font-size:16px;cursor:pointer;padding:0 4px;line-height:1;" title="Remove stop">x</button>' +
+      '</div>';
+    });
+    document.getElementById('rs_stops_list').innerHTML = stopsHtml;
+    document.getElementById('rs_output').style.display = 'block';
+
+    // Pre-fill rep name
+    var repEl = document.getElementById('rs_rep');
+    if (repEl && !repEl.value) {
+      var u = JSON.parse(localStorage.getItem('jg_platform_user') || 'null');
+      if (u && u.name) repEl.value = u.name.split(' ')[0];
+    }
+
+  } catch(e) {
+    console.error('Route suggest error:', e);
+    alert('Could not generate suggestion. Check console for details.');
+  }
+
+  btn.textContent = 'Generate Route Suggestion';
+  btn.disabled = false;
+}
+
+function removeRouteSuggestStop(idx) {
+  _routeSuggestStops.splice(idx, 1);
+  // Re-render stops with updated numbers
+  var stopsHtml = '';
+  _routeSuggestStops.forEach(function(s, i) {
+    stopsHtml += '<div id="rs_stop_' + i + '" style="display:flex;align-items:flex-start;gap:10px;padding:10px 12px;border-radius:8px;border:1px solid #e8edf2;margin-bottom:6px;background:#fff;">' +
+      '<div style="min-width:22px;height:22px;border-radius:4px;background:#0d2d5e;color:#fff;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;margin-top:1px;">' + (i+1) + '</div>' +
+      '<div style="flex:1;">' +
+        '<div style="font-size:13px;font-weight:700;color:#0d2d5e;">' + s.name + (s.company ? ' <span style="font-weight:400;color:#6b7a96;font-size:11px;">— ' + s.company + '</span>' : '') + '</div>' +
+        '<div style="font-size:11px;color:#6b7a96;margin-top:1px;">' + (s.address||'') + '</div>' +
+        '<div style="font-size:11px;color:#e85d04;margin-top:3px;">' + (s.reason||'') + '</div>' +
+      '</div>' +
+      '<button onclick="removeRouteSuggestStop(' + i + ')" style="background:none;border:none;color:#aaa;font-size:16px;cursor:pointer;padding:0 4px;line-height:1;" title="Remove stop">x</button>' +
+    '</div>';
+  });
+  document.getElementById('rs_stops_list').innerHTML = stopsHtml;
+}
+
+async function saveRouteSuggestion() {
+  if (!_routeSuggestStops.length) { alert('No stops to save.'); return; }
+  var repName = document.getElementById('rs_rep').value || currentRepName() || '';
+  var routeDate = document.getElementById('rs_date').value || ST.today;
+  var stops = _routeSuggestStops.map(function(s, i) {
+    return { partner_id: s.id, partner_name: s.name, address: s.address || s.company || '', order: i, completed: false };
+  });
+  await saveRoute({
+    route_date: routeDate,
+    rep_name: repName,
+    stops: stops,
+    notes: 'AI suggested route',
+    status: 'Planned'
+  });
+  closeRouteSuggest();
+  ST.tab = 'routes';
+  render();
+}
+
 // ── PARTNER EDIT MODAL (outside render cycle) ─────────────────────────────
 var _editPartnerId = null;
 
@@ -1571,6 +1776,8 @@ document.addEventListener('DOMContentLoaded',function(){
   if(u) jgShowUser(u);
   // Handle case where GSI fired before jgShowUser was defined
   if(window._pendingUser){ jgShowUser(window._pendingUser); window._pendingUser=null; }
+  var rsStart = document.getElementById('rs_start');
+  if(rsStart) rsStart.addEventListener('change', function(){ document.getElementById('rs_custom_wrap').style.display = this.value==='custom'?'block':'none'; });
   _loadAllSafe();
   // Escape hatch: if still loading after 15s, force-clear
   setTimeout(function(){
