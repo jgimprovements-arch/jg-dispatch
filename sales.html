@@ -350,7 +350,10 @@ var ST = {
 
 async function sb(path, opts) {
   try {
-    var r = await fetch(SB_URL+path, Object.assign({headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json','Prefer':'return=representation'}}, opts||{}));
+    var ctrl = new AbortController();
+    var tid = setTimeout(function(){ ctrl.abort(); }, 8000);
+    var r = await fetch(SB_URL+path, Object.assign({signal:ctrl.signal, headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json'}}, opts||{}));
+    clearTimeout(tid);
     if (!r.ok) {
       var errBody = await r.text();
       console.error('Supabase error', r.status, path, errBody);
@@ -381,18 +384,23 @@ function showErr(msg) {
 
 async function loadAll() {
   ST.loading=true; render();
+  try {
   var m = ST.market;
   // Supabase default page size is 1000 - fetch all partners in pages
   var allPartners = [];
   var page = 0;
   var pageSize = 1000;
-  while(true) {
-    var chunk = await fetch(SB_URL+'/rest/v1/sales_partners?market=eq.'+encodeURIComponent(m)+'&order=tier.asc,name.asc&limit='+pageSize+'&offset='+(page*pageSize), {
-      headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Prefer':'count=none'}
-    }).then(function(r){ return r.ok ? r.json() : []; });
-    allPartners = allPartners.concat(chunk);
-    if(chunk.length < pageSize) break;
-    page++;
+  for (var _pg = 0; _pg < 5; _pg++) {
+    try {
+      var _c = new AbortController();
+      var _t = setTimeout(function(){ _c.abort(); }, 8000);
+      var _rs = await fetch(SB_URL+'/rest/v1/sales_partners?market=eq.'+encodeURIComponent(m)+'&order=tier.asc,name.asc&limit=1000&offset='+(_pg*1000), {signal:_c.signal, headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Prefer':'count=none'}});
+      clearTimeout(_t);
+      var chunk = _rs.ok ? await _rs.json() : [];
+      if (!chunk || !chunk.length) break;
+      allPartners = allPartners.concat(chunk);
+      if (chunk.length < 1000) break;
+    } catch(e) { console.error('fetch error:', e.message); break; }
   }
   var [touches, followups, routes] = await Promise.all([
     sb('/rest/v1/sales_touches?market=eq.'+encodeURIComponent(m)+'&order=touch_date.desc&limit=500'),
@@ -401,6 +409,7 @@ async function loadAll() {
   ]);
   var partners = allPartners;
   ST.partners=partners||[]; ST.touches=touches||[]; ST.followups=followups||[]; ST.routes=routes||[];
+  } catch(e) { console.error("loadAll failed:", e); }
   ST.loading=false; render();
 }
 
