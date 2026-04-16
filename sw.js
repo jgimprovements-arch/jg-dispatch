@@ -1,10 +1,10 @@
 // JG Sales PWA Service Worker
-// Increment VERSION on every deploy to force cache refresh
-const VERSION = '2025-04-16-v2';
+const VERSION = '2025-04-16-v4';
 const CACHE = 'jg-sales-' + VERSION;
 
 const PRECACHE = [
   '/jg-dispatch/sales_app.html',
+  '/jg-dispatch/timeclock.html',
   '/jg-dispatch/logo.png'
 ];
 
@@ -36,27 +36,22 @@ self.addEventListener('activate', function(e) {
 self.addEventListener('fetch', function(e) {
   var url = e.request.url;
 
-  // Pass through ALL non-GET requests (POST, PATCH, DELETE)
+  // Pass through everything except same-origin static assets
+  // This ensures API calls (Supabase, Google, Albi, etc.) are never intercepted
   if (e.request.method !== 'GET') return;
+  if (url.indexOf(self.location.origin) !== 0) return;
 
-  // Pass through external API calls (Supabase, Google, etc)
-  if (!url.startsWith(self.location.origin)) return;
+  // Only cache html, js, css, png, jpg, svg, json files
+  var ext = url.split('?')[0].split('.').pop().toLowerCase();
+  var cacheable = ['html','js','css','png','jpg','jpeg','svg','json','ico','woff','woff2'];
+  if (cacheable.indexOf(ext) === -1) return;
 
-  // Pass through non-HTML/asset requests
-  var isAsset = url.endsWith('.html') || url.endsWith('.js') ||
-                url.endsWith('.css') || url.endsWith('.png') ||
-                url.endsWith('.jpg') || url.endsWith('.svg') ||
-                url.endsWith('.json');
-  if (!isAsset) return;
-
-  // For app assets: network first, cache fallback
+  // Network first, cache fallback for static assets only
   e.respondWith(
-    fetch(e.request).then(function(response) {
-      if (response && response.status === 200) {
+    fetch(e.request, { credentials: 'same-origin' }).then(function(response) {
+      if (response && response.status === 200 && response.type !== 'opaque') {
         var clone = response.clone();
-        caches.open(CACHE).then(function(cache) {
-          cache.put(e.request, clone);
-        });
+        caches.open(CACHE).then(function(cache) { cache.put(e.request, clone); });
       }
       return response;
     }).catch(function() {
