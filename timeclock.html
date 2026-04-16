@@ -364,8 +364,16 @@ body {
 
     <!-- JOB SELECTOR -->
     <div class="job-select-card" id="job-select-section">
-      <div class="section-title">Select Job</div>
-      <input class="job-search" type="text" placeholder="Search jobs by name or number..." id="job-search-input" oninput="filterJobs()">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
+        <div class="section-title" style="margin:0;">Select Job</div>
+        <div style="display:flex;gap:6px;">
+          <button id="filter-all" onclick="setJobMarket('All')" style="padding:4px 10px;border-radius:20px;border:1.5px solid var(--border);font-size:11px;font-weight:600;cursor:pointer;background:var(--navy);color:#fff;">All</button>
+          <button id="filter-app" onclick="setJobMarket('Appleton')" style="padding:4px 10px;border-radius:20px;border:1.5px solid var(--border);font-size:11px;font-weight:600;cursor:pointer;background:transparent;color:var(--muted);">Appleton</button>
+          <button id="filter-sp" onclick="setJobMarket('Stevens Point')" style="padding:4px 10px;border-radius:20px;border:1.5px solid var(--border);font-size:11px;font-weight:600;cursor:pointer;background:transparent;color:var(--muted);">Stevens Pt</button>
+        </div>
+      </div>
+      <input class="job-search" type="text" placeholder="Search by job name or number..." id="job-search-input" oninput="filterJobs()">
+      <div id="job-count" style="font-size:10px;color:var(--muted);margin:4px 0 6px;"></div>
       <div class="job-list" id="job-list">
         <div class="empty">Loading jobs...</div>
       </div>
@@ -585,26 +593,73 @@ async function loadAll() {
 }
 
 async function loadJobs() {
- // Pull from board_state (dispatch board)
-  var bs = await sb('/rest/v1/board_state?id=eq.current&select=state');
-  if (bs && bs[0] && bs[0].state) {
-    var state = bs[0].state;
-    var jobs = [];
-  // Extract jobs from assignments
-    Object.keys(state.assignments || {}).forEach(function(market) {
-      Object.keys(state.assignments[market] || {}).forEach(function(tech) {
-        (state.assignments[market][tech] || []).forEach(function(jobId) {
-          if (!jobs.find(function(j){ return j.id === jobId; })) {
-            jobs.push({ id: jobId, name: jobId, market: market, tech: tech });
+  var jobs = [];
+
+  // Pull jobs from BOTH Albi locations via proxy
+  var PROXY = 'https://jg-proxy-v2.vercel.app/api/albi';
+  var locations = [
+    { id: 222, name: 'Appleton' },
+    { id: 1477, name: 'Stevens Point' }
+  ];
+
+  for (var loc of locations) {
+    try {
+      var page = 1;
+      while (page <= 20) {
+        var r = await fetch(PROXY, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'get_projects', locationId: loc.id, page: page, limit: 50 })
+        });
+        if (!r.ok) break;
+        var data = await r.json();
+        var items = data.projects || data.data || [];
+        if (!items.length) break;
+        items.forEach(function(p) {
+          var jid = p.uniqueNumber || p.id;
+          if (!jid) return;
+          var name = p.name || p.projectName || String(jid);
+          if (!jobs.find(function(j){ return j.id === String(jid); })) {
+            jobs.push({
+              id: String(jid),
+              name: name,
+              market: loc.name,
+              type: p.projectType || '',
+              status: p.status || ''
+            });
           }
         });
-      });
-    });
-    TC.jobs = jobs;
+        if (items.length < 50) break;
+        page++;
+      }
+    } catch(e) {
+      console.warn('Albi fetch failed for ' + loc.name + ':', e.message);
+    }
   }
+
+  // Fallback: also include jobs from dispatch board_state if Albi returned nothing
+  if (!jobs.length) {
+    var bs = await sb('/rest/v1/board_state?id=eq.current&select=state');
+    if (bs && bs[0] && bs[0].state) {
+      var state = bs[0].state;
+      var jobNames = state.jobNames || {};
+      Object.keys(state.assignments || {}).forEach(function(market) {
+        Object.keys(state.assignments[market] || {}).forEach(function(tech) {
+          (state.assignments[market][tech] || []).forEach(function(jobId) {
+            if (!jobs.find(function(j){ return j.id === jobId; })) {
+              jobs.push({ id: jobId, name: jobNames[jobId] || jobId, market: market, tech: tech });
+            }
+          });
+        });
+      });
+    }
+  }
+
+  // Sort: active/in-progress first, then alphabetical
+  jobs.sort(function(a, b) { return a.name.localeCompare(b.name); });
+  TC.jobs = jobs;
   renderJobs();
 }
-
 // RENDER -
 function renderStatus() {
   var dot = document.getElementById('status-dot');
@@ -644,66 +699,32 @@ function renderStatus() {
 }
 
 function renderJobs() {
-  var q = (document.getElementById('job-search-input').value || '').toLowerCase();
+  var q = (document.getElementById('job-search-input')||{value:''}).value.toLowerCase();
   var filtered = TC.jobs.filter(function(j) {
+    if (TC.jobMarket && TC.jobMarket !== 'All' && j.market !== TC.jobMarket) return false;
     if (!q) return true;
     return (j.name||'').toLowerCase().includes(q) || (j.id||'').toLowerCase().includes(q);
   });
+  var countEl = document.getElementById('job-count');
+  if (countEl) countEl.textContent = filtered.length + ' of ' + TC.jobs.length + ' jobs';
   var el = document.getElementById('job-list');
   if (!filtered.length) {
-    el.innerHTML = '<div class="empty">' + (TC.jobs.length ? 'No matching jobs' : 'No active jobs on dispatch board') + '</div>';
+    el.innerHTML = '<div class="empty">' + (TC.jobs.length ? 'No matching jobs' : 'Loading jobs from Albi...') + '</div>';
     return;
   }
-  el.innerHTML = filtered.map(function(j) {
+  el.innerHTML = filtered.slice(0, 100).map(function(j) {
     var sel = j.id === TC.selectedJobId;
-    var colors = { appleton: '#1565c0', stevens: '#2e7d32' };
-    var color = colors[(j.market||'').toLowerCase()] || '#546e7a';
-    return '<div class="job-row' + (sel?' selected':'') + '" onclick="selectJob(' + JSON.stringify(j.id) + ',' + JSON.stringify(j.name) + ')">' +
+    var colors = { 'Appleton': '#1565c0', 'Stevens Point': '#2e7d32' };
+    var color = colors[j.market] || '#546e7a';
+    return '<div class="job-row' + (sel?' selected':'') + '" onclick="selectJob(' + JSON.stringify(j.id) + ',' + JSON.stringify(j.name) + ',' + JSON.stringify(j.market||'') + ')">' +
       '<div class="job-dot" style="background:' + color + ';"></div>' +
-      '<div class="job-info"><div class="job-name">' + j.name + '</div><div class="job-meta">' + (j.market||'') + (j.tech?' · '+j.tech:'') + '</div></div>' +
-      '<div class="job-check">✓</div>' +
+      '<div class="job-info"><div class="job-name">' + j.name + '</div><div class="job-meta">' + (j.market||'') + (j.type?' · '+j.type:'') + '</div></div>' +
+      '<div class="job-check">&#10003;</div>' +
     '</div>';
-  }).join('');
+  }).join('') + (filtered.length > 100 ? '<div style="padding:8px 14px;font-size:11px;color:var(--muted);text-align:center;">Showing 100 of '+filtered.length+' — search to narrow down</div>' : '');
 }
-
-function renderEntries() {
-  var el = document.getElementById('today-entries');
-  if (!TC.entries.length) { el.innerHTML = '<div class="empty">No entries yet today</div>'; return; }
-  el.innerHTML = TC.entries.map(function(e) {
-    var inTime = new Date(e.clock_in);
-    var outTime = e.clock_out ? new Date(e.clock_out) : null;
-    var dur = outTime ? Math.floor((outTime - inTime) / 60000) : null;
-    var durStr = dur !== null ? (Math.floor(dur/60) + 'h ' + (dur%60) + 'm') : 'Active';
-    var fmt = function(d){ var h=d.getHours()%12||12,m=d.getMinutes(),ap=d.getHours()>=12?'PM':'AM'; return h+':'+(m<10?'0':'')+m+' '+ap; };
-    return '<div class="entry-row">' +
-      '<div class="entry-dot' + (outTime && e.clock_out ? ' done' : '') + '"></div>' +
-      '<div class="entry-info">' +
-        '<div class="entry-times">' + fmt(inTime) + (outTime ? ' – ' + fmt(outTime) : ' →') + '</div>' +
-        '<div class="entry-job">' + (e.job_name||'No job') + (e.notes?' · '+e.notes:'') + '</div>' +
-      '</div>' +
-      '<div class="entry-dur">' + durStr + '</div>' +
-    '</div>';
-  }).join('');
-}
-
-function updateStats() {
-  var todayMins = 0, weekMins = 0;
-  var now = new Date(); now.setHours(0,0,0,0);
-  var weekStart = new Date(now); weekStart.setDate(now.getDate() - now.getDay());
-  TC.entries.forEach(function(e) {
-    var inT = new Date(e.clock_in);
-    var outT = e.clock_out ? new Date(e.clock_out) : new Date();
-    var mins = Math.max(0, Math.floor((outT - inT) / 60000));
-    if (inT >= now) todayMins += mins;
-    if (inT >= weekStart) weekMins += mins;
-  });
-  var fmt = function(m){ return Math.floor(m/60) + 'h ' + (m%60) + 'm'; };
-  document.getElementById('stat-today').textContent = fmt(todayMins);
-  document.getElementById('stat-week').textContent = fmt(weekMins);
-}
-
 // ACTIONS 
-function selectJob(id, name) {
+function selectJob(id, name, market) {
   TC.selectedJobId = id;
   TC.selectedJobName = name;
  // If clocked in, update the active entry
@@ -719,6 +740,19 @@ function selectJob(id, name) {
   renderJobs();
   renderStatus();
   toast('✓ Job selected: ' + name);
+}
+
+function setJobMarket(market) {
+  TC.jobMarket = market;
+  // Update pill styles
+  var btns = { 'All': 'filter-all', 'Appleton': 'filter-app', 'Stevens Point': 'filter-sp' };
+  Object.keys(btns).forEach(function(m) {
+    var el = document.getElementById(btns[m]);
+    if (!el) return;
+    if (m === market) { el.style.background = 'var(--navy)'; el.style.color = '#fff'; el.style.borderColor = 'var(--navy)'; }
+    else { el.style.background = 'transparent'; el.style.color = 'var(--muted)'; el.style.borderColor = 'var(--border)'; }
+  });
+  renderJobs();
 }
 
 function filterJobs() { renderJobs(); }
