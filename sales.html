@@ -246,6 +246,7 @@ input[type=file]{display:none}
 .route-stop.done{opacity:.6;text-decoration:line-through;}
 .modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:1000;display:flex;align-items:center;justify-content:center;}
 .modal-box{background:#fff;border-radius:12px;padding:24px;width:100%;max-width:520px;max-height:90vh;overflow-y:auto;box-shadow:0 20px 60px rgba(0,0,0,.3);}
+.modal-box.wide{max-width:720px;}
 .modal-title{font-size:16px;font-weight:700;color:var(--navy);margin-bottom:16px;font-family:'DM Mono',monospace;}
 .form-group{margin-bottom:14px;}
 .form-label{display:block;font-size:10px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:5px;font-family:'DM Mono',monospace;}
@@ -1297,7 +1298,7 @@ function render() {
   // ── MODALS ────────────────────────────────────────────────────────────────
   if (ST.modal) {
     h += '<div class="modal-overlay" onclick="if(event.target===this){ST.modal=null;render();}">';
-    h += '<div class="modal-box">';
+    h += '<div class="modal-box' + (ST.modal==='add-route'?' wide':'') + '">';
 
     if (ST.modal === 'add-partner') {
       h += '<div class="modal-title">+ New Partner</div>';
@@ -1391,7 +1392,9 @@ function render() {
       h += '<div style="font-size:14px;font-weight:700;color:var(--navy);margin-bottom:14px;">Plan Route</div>';
       h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px;">';
       h += '<div><label class="form-label">Date</label><input class="form-input" type="date" id="rDate" value="' + ST.today + '"></div>';
-      h += '<div><label class="form-label">Rep Name</label><input class="form-input" id="rRep" placeholder="Your name"></div>';
+      var _rbRep = currentRepName() || '';
+      var _rbRepVal = ST.routeBuilderRep !== undefined ? ST.routeBuilderRep : currentRepName();
+      h += '<div><label class="form-label">Rep Name</label><input class="form-input" id="rRep" value="' + (_rbRepVal||'') + '" oninput="ST.routeBuilderRep=this.value" placeholder="Your name"></div>';
       h += '</div>';
 
       h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px;">';
@@ -1400,7 +1403,7 @@ function render() {
       h += '<div>';
       h += '<label class="form-label">Add Stops</label>';
       h += '<input type="text" id="rbSearch" placeholder="Search partners..." value="' + rbSearch.replace(/"/g,'&quot;') + '" oninput="ST.routeBuilderSearch=this.value;renderRouteBuilder()" style="width:100%;padding:7px 10px;border-radius:6px;border:1.5px solid var(--border);font-size:12px;font-family:DM Sans,sans-serif;outline:none;box-sizing:border-box;margin-bottom:6px;">';
-      h += '<div style="max-height:200px;overflow-y:auto;border:1.5px solid var(--border);border-radius:6px;background:#fff;">';
+      h += '<div style="max-height:260px;overflow-y:auto;border:1.5px solid var(--border);border-radius:6px;background:#fff;">';
       if (!rbMatches.length) {
         h += '<div style="padding:10px;font-size:11px;color:var(--muted);text-align:center;">No partners found</div>';
       } else {
@@ -1427,9 +1430,9 @@ function render() {
       if (rbStops.length) h += '<span style="font-size:10px;color:var(--muted);">Done ~' + endStr + '</span>';
       h += '</div>';
       if (!rbStops.length) {
-        h += '<div style="height:200px;border:1.5px dashed var(--border);border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:11px;color:var(--muted);text-align:center;padding:12px;">Click partners to add stops</div>';
+        h += '<div style="height:260px;border:1.5px dashed var(--border);border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:11px;color:var(--muted);text-align:center;padding:12px;">Click partners to add stops</div>';
       } else {
-        h += '<div style="max-height:200px;overflow-y:auto;border:1.5px solid var(--border);border-radius:6px;background:#fff;">';
+        h += '<div style="max-height:260px;overflow-y:auto;border:1.5px solid var(--border);border-radius:6px;background:#fff;">';
         rbStops.forEach(function(s, i) {
           var startMins2 = 8*60 + rbStops.slice(0,i).reduce(function(sum,x){ return sum+(x.duration||45)+driveBuffer; },0);
           var endMins2 = startMins2 + (s.duration||45);
@@ -1453,7 +1456,7 @@ function render() {
 
       h += '<div class="form-group" style="margin-top:10px;"><label class="form-label">Notes</label><input class="form-input" id="rNotes" placeholder="e.g. Focus on south Appleton today"></div>';
       h += '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px;">';
-      h += '<button style="padding:8px 16px;border-radius:6px;border:1.5px solid var(--border);background:transparent;cursor:pointer;font-size:12px;" onclick="ST.modal=null;ST.routeBuilderSearch=\'\';ST.routeBuilderStops=[];render()">Cancel</button>';
+      h += '<button style="padding:8px 16px;border-radius:6px;border:1.5px solid var(--border);background:transparent;cursor:pointer;font-size:12px;" onclick="ST.modal=null;ST.routeBuilderSearch=\'\';ST.routeBuilderStops=[];ST.routeBuilderRep=undefined;render()">Cancel</button>';
       h += '<button style="padding:8px 20px;border-radius:6px;border:none;background:var(--orange);color:#fff;font-size:12px;font-weight:600;cursor:pointer;" onclick="submitRoute()">Save Route</button>';
       h += '</div>';
     }
@@ -1598,7 +1601,7 @@ function submitRoute() {
   if (!stops.length) { alert('Add at least one stop.'); return; }
   saveRoute({
     route_date: document.getElementById('rDate').value,
-    rep_name: document.getElementById('rRep').value,
+    rep_name: document.getElementById('rRep') ? document.getElementById('rRep').value : (ST.routeBuilderRep || currentRepName()),
     stops: stops,
     notes: document.getElementById('rNotes').value,
     status: 'Planned'
@@ -1606,6 +1609,7 @@ function submitRoute() {
   ST.modal = null;
   ST.routeBuilderSearch = '';
   ST.routeBuilderStops = [];
+  ST.routeBuilderRep = undefined;
 }
 
 function submitFollowup() {
@@ -1987,23 +1991,45 @@ function refreshContactMap() {
     if (touchFilter === 'overdue30' && (days === null || days < 30)) return;
     if (touchFilter === 'never'    && days !== null) return;
 
-    // Resolve coords
-    var addrRaw = (p.address || p.city || '').toLowerCase().trim();
-    // Try to match city name
+    // Resolve coords — try city field, then parse city from full address string
+    // Full address format: "123 Main St, Appleton, WI 54911" or "123 Main St, Appleton WI"
+    var cityRaw = (p.city || '').toLowerCase().trim();
+    var addrRaw = (p.address || '').toLowerCase().trim();
+
+    // Extract city from address string if city field is blank or generic
+    // Look for pattern: "street, CITY, STATE" or "street, CITY STATE ZIP"
+    var extractedCity = '';
+    var addrParts = (p.address || '').split(',');
+    if (addrParts.length >= 2) {
+      // Second segment after comma is usually city
+      var cityPart = addrParts[1].trim().toLowerCase();
+      // Strip state and zip: remove trailing " wi 54xxx" or " wi"
+      cityPart = cityPart.replace(/\s+wi\s*\d*/i, '').replace(/\s+wisconsin\s*/i, '').trim();
+      extractedCity = cityPart;
+    }
+
     var coords = null;
     var keys = Object.keys(cityCoords);
-    for (var k = 0; k < keys.length; k++) {
-      if (addrRaw.indexOf(keys[k]) !== -1) {
-        coords = cityCoords[keys[k]];
-        break;
+    var searches = [cityRaw, extractedCity, addrRaw].filter(Boolean);
+
+    for (var si = 0; si < searches.length && !coords; si++) {
+      var searchStr = searches[si];
+      // Exact or contains match
+      for (var k = 0; k < keys.length; k++) {
+        if (searchStr === keys[k] || searchStr.indexOf(keys[k]) !== -1 || keys[k].indexOf(searchStr) !== -1) {
+          coords = cityCoords[keys[k]]; break;
+        }
       }
     }
+
     if (!coords) {
-      // Jitter around market default so they don't all stack
-      coords = [defaultCenter[0] + (Math.random()-0.5)*0.05, defaultCenter[1] + (Math.random()-0.5)*0.05];
+      // Unknown — scatter in wide ring so they're visible but not on top of known clusters
+      var angle = Math.random() * 2 * Math.PI;
+      var radius = 0.06 + Math.random() * 0.08;
+      coords = [defaultCenter[0] + Math.sin(angle)*radius, defaultCenter[1] + Math.cos(angle)*radius];
     } else {
-      // Small jitter to separate overlapping pins
-      coords = [coords[0] + (Math.random()-0.5)*0.008, coords[1] + (Math.random()-0.5)*0.008];
+      // Jitter so overlapping pins spread into a visible cluster
+      coords = [coords[0] + (Math.random()-0.5)*0.018, coords[1] + (Math.random()-0.5)*0.022];
     }
 
     var color = cmTypeColor(p.type);
@@ -2052,7 +2078,7 @@ function toggleMapStop(partnerId) {
     _cmSelectedStops.splice(existing, 1);
   } else {
     var p = ST.partners.find(function(x){ return x.id === partnerId; });
-    if (p) _cmSelectedStops.push({ id: p.id, name: p.name, company: p.company||'', address: p.address||p.city||'' });
+    if (p) _cmSelectedStops.push({ id: p.id, name: p.name, company: p.company||'', address: p.address||p.city||'', duration: 45 });
   }
   renderMapStopsList();
   // Close popup and refresh markers to update colors
@@ -2071,17 +2097,32 @@ function renderMapStopsList() {
     el.innerHTML = '<div style="font-size:11px;color:#aaa;text-align:center;padding:20px 8px;">Click pins on the map to add stops</div>';
     return;
   }
+  var driveBuffer = 15;
   var html = '';
   _cmSelectedStops.forEach(function(s, i) {
-    html += '<div style="display:flex;align-items:center;gap:6px;padding:6px 4px;border-bottom:1px solid #f0f0f0;">' +
-      '<div style="min-width:18px;height:18px;border-radius:4px;background:#0d2d5e;color:#fff;font-size:10px;font-weight:700;display:flex;align-items:center;justify-content:center;">' + (i+1) + '</div>' +
-      '<div style="flex:1;min-width:0;">' +
-        '<div style="font-size:11px;font-weight:600;color:#0d2d5e;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + s.name + '</div>' +
-        '<div style="font-size:10px;color:#aaa;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + (s.address||s.company||'') + '</div>' +
+    var startMins = 8*60 + _cmSelectedStops.slice(0,i).reduce(function(sum,x){ return sum+(x.duration||45)+driveBuffer; }, 0);
+    var endMins   = startMins + (s.duration||45);
+    var fmt = function(m){ var h=Math.floor(m/60),mn=m%60; return h+':'+(mn<10?'0':'')+mn; };
+    var durOpts = [15,30,45,60,90].map(function(d){
+      return '<option value="'+d+'"'+(s.duration===d?' selected':'')+'>'+d+'m</option>';
+    }).join('');
+    html += '<div style="padding:5px 4px;border-bottom:1px solid #f0f0f0;">' +
+      '<div style="display:flex;align-items:center;gap:5px;">' +
+        '<div style="min-width:18px;height:18px;border-radius:4px;background:#0d2d5e;color:#fff;font-size:10px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0;">' + (i+1) + '</div>' +
+        '<div style="flex:1;min-width:0;">' +
+          '<div style="font-size:11px;font-weight:600;color:#0d2d5e;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + s.name + '</div>' +
+          '<div style="font-size:10px;color:#e85d04;">' + fmt(startMins) + ' – ' + fmt(endMins) + '</div>' +
+        '</div>' +
+        '<select onchange="_cmSelectedStops['+i+'].duration=parseInt(this.value);renderMapStopsList()" style="font-size:10px;padding:2px 3px;border-radius:4px;border:1px solid #d0d5dd;background:#fff;flex-shrink:0;">' + durOpts + '</select>' +
+        '<button onclick="toggleMapStop(\'' + s.id + '\')" style="background:none;border:none;color:#aaa;font-size:14px;cursor:pointer;padding:0 2px;line-height:1;flex-shrink:0;">x</button>' +
       '</div>' +
-      '<button onclick="toggleMapStop(\'' + s.id + '\')" style="background:none;border:none;color:#aaa;font-size:14px;cursor:pointer;padding:0;line-height:1;flex-shrink:0;">x</button>' +
     '</div>';
   });
+  // Show estimated finish time
+  var totalMins = _cmSelectedStops.reduce(function(sum,s){ return sum+(s.duration||45)+driveBuffer; }, 0);
+  var finishMins = 8*60 + totalMins;
+  var fh = Math.floor(finishMins/60), fm = finishMins%60;
+  html += '<div style="padding:6px 4px;font-size:10px;color:#6b7a96;text-align:right;">Est. finish ~' + fh + ':' + (fm<10?'0':'')+fm + '</div>';
   el.innerHTML = html;
 }
 
@@ -2096,7 +2137,7 @@ async function saveMapRoute() {
   var repName  = document.getElementById('cm_rep').value || currentRepName() || '';
   var routeDate = document.getElementById('cm_date').value || ST.today;
   var stops = _cmSelectedStops.map(function(s, i) {
-    return { partner_id: s.id, partner_name: s.name, address: s.address, order: i, completed: false };
+    return { partner_id: s.id, partner_name: s.name, address: s.address, duration: s.duration||45, order: i, completed: false };
   });
   await saveRoute({ route_date: routeDate, rep_name: repName, stops: stops, notes: 'Built from contact map', status: 'Planned' });
   closeContactMap();
