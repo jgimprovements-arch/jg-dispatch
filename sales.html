@@ -441,6 +441,10 @@ var ST = {
   loading: false,
   modal: null,   // 'add-partner' | 'log-touch' | 'add-route' | 'add-followup' | 'partner-detail'
   detailEditMode: null,
+  ltSearch: '',
+  ltSelected: null,
+  ltSelectedName: '',
+  ltSelectedType: '',
   selected: null,
   filterType: 'All',
   filterTier: 'All',
@@ -1132,9 +1136,32 @@ function render() {
       var selP = ST.selected ? ST.partners.find(function(p){ return p.id === ST.selected; }) : null;
       h += '<div class="modal-title">📋 Log Touch</div>';
       if (!selP) {
-        h += '<div class="form-group"><label class="form-label">Partner</label><select class="form-select" id="tPartner"><option value="">Select partner...</option>';
-        ST.partners.forEach(function(p){ h += '<option value="' + p.id + '|' + p.name + '|' + (p.type||'') + '">' + p.name + (p.company ? ' — ' + p.company : '') + '</option>'; });
-        h += '</select></div>';
+        var ltQ = ST.ltSearch || '';
+        var ltMatches = ST.partners.filter(function(p){
+          if (!ltQ) return true;
+          var q = ltQ.toLowerCase();
+          return (p.name||'').toLowerCase().includes(q) || (p.company||'').toLowerCase().includes(q);
+        }).slice(0, 20);
+        h += '<div class="form-group"><label class="form-label">Partner</label>';
+        h += '<input type="text" id="tPartnerSearch" placeholder="Search by name or company..." value="' + ltQ.replace(/"/g,'&quot;') + '" oninput="ST.ltSearch=this.value;ST.ltSelected=null;renderLogTouchPartner()" style="width:100%;padding:9px 12px;border-radius:6px;border:1.5px solid var(--border);font-size:13px;font-family:DM Sans,sans-serif;color:var(--text);outline:none;box-sizing:border-box;margin-bottom:6px;">';
+        h += '<div id="lt-partner-results" style="max-height:160px;overflow-y:auto;border:1.5px solid var(--border);border-radius:6px;background:#fff;">';
+        if (!ltQ) {
+          h += '<div style="padding:10px 12px;font-size:12px;color:var(--muted);">Start typing to search partners...</div>';
+        } else if (!ltMatches.length) {
+          h += '<div style="padding:10px 12px;font-size:12px;color:var(--muted);">No matches found</div>';
+        } else {
+          ltMatches.forEach(function(p) {
+            var isSelected = ST.ltSelected === p.id;
+            var safeName = (p.name||'').replace(/'/g, '\x27');
+            var safeType = (p.type||'').replace(/'/g, '\x27');
+            h += '<div onclick="ST.ltSelected=\x27' + p.id + '\x27;ST.ltSelectedName=\x27' + safeName + '\x27;ST.ltSelectedType=\x27' + safeType + '\x27;renderLogTouchPartner()" style="padding:8px 12px;border-bottom:1px solid #e8edf2;cursor:pointer;background:' + (isSelected?'rgba(232,93,4,.08)':'transparent') + ';display:flex;align-items:center;gap:8px;">';
+            h += '<div style="flex:1;"><div style="font-size:12px;font-weight:600;color:var(--navy);">' + (p.name||'') + '</div>';
+            h += '<div style="font-size:10px;color:var(--muted);">' + (p.company||'') + (p.type?' &bull; '+p.type:'') + '</div></div>';
+            if (isSelected) h += '<span style="color:var(--orange);font-size:14px;font-weight:700;">&#10003;</span>';
+            h += '</div>';
+          });
+        }
+        h += '</div></div>';
       } else {
         h += '<div style="background:rgba(13,45,94,.06);border-radius:8px;padding:10px 14px;margin-bottom:14px;font-weight:600;color:var(--navy);">' + selP.name + (selP.company ? ' — ' + selP.company : '') + '</div>';
       }
@@ -1150,7 +1177,7 @@ function render() {
       h += '<input class="form-input" type="date" id="tFollowupDate" style="width:160px;margin-left:auto;" value="' + new Date(Date.now()+7*86400000).toISOString().split('T')[0] + '">';
       h += '</div>';
       h += '<div style="display:flex;gap:8px;justify-content:flex-end;">';
-      h += '<button style="padding:8px 16px;border-radius:6px;border:1.5px solid var(--border);background:transparent;cursor:pointer;font-size:12px;" onclick="ST.modal=null;ST.selected=null;render()">Cancel</button>';
+      h += '<button style="padding:8px 16px;border-radius:6px;border:1.5px solid var(--border);background:transparent;cursor:pointer;font-size:12px;" onclick="ST.modal=null;ST.selected=null;ST.ltSearch=\x27\x27;ST.ltSelected=null;render()">Cancel</button>';
       h += '<button style="padding:8px 20px;border-radius:6px;border:none;background:var(--orange);color:#fff;font-size:12px;font-weight:600;cursor:pointer;" onclick="submitTouch()">Log Touch</button>';
       h += '</div>';
     }
@@ -1295,8 +1322,10 @@ function submitTouch() {
   if (selP) {
     pid = selP.id; pname = selP.name; ptype = selP.type||'';
   } else {
-    var sel = document.getElementById('tPartner').value.split('|');
-    pid = sel[0]; pname = sel[1]||''; ptype = sel[2]||'';
+    // Use new search selection
+    pid = ST.ltSelected || '';
+    pname = ST.ltSelectedName || '';
+    ptype = ST.ltSelectedType || '';
   }
   logTouch({
     partner_id: pid, partner_name: pname, partner_type: ptype,
@@ -1307,7 +1336,7 @@ function submitTouch() {
     follow_up_needed: document.getElementById('tFollowup').checked,
     follow_up_date: document.getElementById('tFollowupDate').value
   });
-  ST.modal = null; ST.selected = null;
+  ST.modal = null; ST.selected = null; ST.ltSearch = ''; ST.ltSelected = null;
 }
 
 function submitRoute() {
@@ -1820,6 +1849,42 @@ async function saveMapRoute() {
   _cmSelectedStops = [];
   ST.tab = 'routes';
   render();
+}
+
+
+function renderLogTouchPartner() {
+  // Re-render just the partner search results without a full render()
+  var searchEl = document.getElementById('tPartnerSearch');
+  var resultsEl = document.getElementById('lt-partner-results');
+  if (!resultsEl) { render(); return; } // fallback
+  
+  var ltQ = ST.ltSearch || '';
+  var ltMatches = ST.partners.filter(function(p){
+    if (!ltQ) return true;
+    var q = ltQ.toLowerCase();
+    return (p.name||'').toLowerCase().includes(q) || (p.company||'').toLowerCase().includes(q);
+  }).slice(0, 20);
+
+  var html = '';
+  if (!ltQ) {
+    html = '<div style="padding:10px 12px;font-size:12px;color:var(--muted);">Start typing to search partners...</div>';
+  } else if (!ltMatches.length) {
+    html = '<div style="padding:10px 12px;font-size:12px;color:var(--muted);">No matches found</div>';
+  } else {
+    ltMatches.forEach(function(p) {
+      var isSelected = ST.ltSelected === p.id;
+      var safeName = (p.name||'').replace(/'/g, '\x27');
+      var safeType = (p.type||'').replace(/'/g, '\x27');
+      html += '<div onclick="ST.ltSelected=\'' + p.id + '\';ST.ltSelectedName=\'' + safeName + '\';ST.ltSelectedType=\'' + safeType + '\';renderLogTouchPartner()" style="padding:8px 12px;border-bottom:1px solid #e8edf2;cursor:pointer;background:' + (isSelected?'rgba(232,93,4,.08)':'transparent') + ';display:flex;align-items:center;gap:8px;">' +
+        '<div style="flex:1;"><div style="font-size:12px;font-weight:600;color:#0d2d5e;">' + (p.name||'') + '</div>' +
+        '<div style="font-size:10px;color:#6b7a96;">' + (p.company||'') + (p.type?' · '+p.type:'') + '</div></div>' +
+        (isSelected ? '<span style="color:#e85d04;font-size:14px;font-weight:700;">&#10003;</span>' : '') +
+      '</div>';
+    });
+  }
+  resultsEl.innerHTML = html;
+  // Keep focus on the search input
+  if (searchEl) searchEl.focus();
 }
 
 // ── PARTNER EDIT MODAL (outside render cycle) ─────────────────────────────
