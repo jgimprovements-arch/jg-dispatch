@@ -627,6 +627,7 @@ var ST = {
   filterTier: 'All',
   hideCustomers: false,
   searchQ: '',
+  filterRep: 'All',
   bulkMode: false,
   selectedPartners: new Set(),
   today: new Date().toISOString().split('T')[0],
@@ -921,6 +922,8 @@ async function savePartnerIntel(id) {
   if (email)       data.email           = email.value;
   if (bestContact) data.best_contact    = bestContact.value;
   if (refSource)   data.referral_source = refSource.value;
+  var assignedEl = document.getElementById('add_assigned_to');
+  if (assignedEl)  data.assigned_to = assignedEl.value || null;
   if (treats)      data.favorite_treats = treats.value;
   if (family)      data.family_members  = family.value;
   if (convo)       data.last_convo_note = convo.value;
@@ -1108,7 +1111,11 @@ function renderPartnerList() {
     h += '<div style="font-size:11px;font-weight:600;color:'+(stale?'var(--danger)':'var(--muted)')+';">'+lastTouch+'</div>';
     h += '<div style="font-size:10px;color:var(--muted);">'+(p.touch_count||0)+' touches · '+(p.referral_count||0)+' refs</div>';
     h += '</div>';
-    if(p.assigned_to) h += '<span style="font-size:9px;padding:1px 7px;border-radius:4px;background:rgba(13,45,94,.08);color:var(--navy);font-weight:600;margin-right:4px;">👤 '+p.assigned_to+'</span>';
+    if(p.assigned_to) {
+      h += '<span style="font-size:9px;padding:2px 8px;border-radius:10px;background:rgba(13,45,94,.1);color:var(--navy);font-weight:700;margin-right:4px;white-space:nowrap;">👤 '+p.assigned_to+'</span>';
+    } else {
+      h += '<span style="font-size:9px;padding:2px 8px;border-radius:10px;background:rgba(192,32,32,.07);color:var(--danger);font-weight:600;margin-right:4px;">Unassigned</span>';
+    }
     h += '<button style="padding:5px 12px;border-radius:6px;border:none;background:var(--orange);color:#fff;font-size:11px;font-weight:600;cursor:pointer;" onclick="event.stopPropagation();ST.modal=\'log-touch\';ST.selected=\''+pid+'\';render()">Log Touch</button>';
     h += '</div>';
   });
@@ -1171,36 +1178,53 @@ function render() {
     h += '</div>';
 
     // ── FILTER BAR ──────────────────────────────────────────────────────────
-    h += '<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:10px 14px;margin-bottom:14px;">';
+    h += '<div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:12px 14px;margin-bottom:14px;box-shadow:0 1px 4px rgba(13,45,94,.06);">';
 
-    // Row 1: Search + Add Partner
+    // Row 1: Search + actions
     h += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">';
-    h += '<input id="partner-search" style="flex:1;padding:8px 12px;border-radius:6px;border:1.5px solid var(--border);font-size:13px;font-family:DM Sans,sans-serif;outline:none;" placeholder="Search partners..." value="' + ST.searchQ + '" oninput="ST.searchQ=this.value;renderPartnerList()">';
-    h += '<button class="btn btn-gold" onclick="addPartner()">+ Add Partner</button>';
-    h += '<button onclick="toggleBulkMode()" style="padding:8px 14px;border-radius:6px;border:1.5px solid var(--border);font-size:12px;font-weight:600;cursor:pointer;background:' + (ST.bulkMode?'var(--danger)':'transparent') + ';color:' + (ST.bulkMode?'#fff':'var(--muted)') + ';font-family:DM Sans,sans-serif;">' + (ST.bulkMode ? '✕ Cancel' : '☑ Select') + '</button>';
-    if(isAdmin()) h += '<button class="btn" style="background:rgba(13,45,94,.08);color:var(--navy);border:none;" onclick="importAlbi()">Import</button>';
+    h += '<div style="flex:1;position:relative;display:flex;align-items:center;">';
+    h += '<svg style="position:absolute;left:10px;pointer-events:none;" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#6b7a96" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>';
+    h += '<input id="partner-search" style="width:100%;padding:8px 12px 8px 32px;border-radius:8px;border:1.5px solid var(--border);font-size:13px;font-family:DM Sans,sans-serif;outline:none;background:var(--bg);" placeholder="Search partners..." value="' + ST.searchQ + '" oninput="ST.searchQ=this.value;renderPartnerList()">';
+    h += '</div>';
+    h += '<button class="btn btn-gold" style="white-space:nowrap;" onclick="addPartner()">+ Add Partner</button>';
+    h += '<button onclick="toggleBulkMode()" style="padding:8px 12px;border-radius:8px;border:1.5px solid ' + (ST.bulkMode?'var(--danger)':'var(--border)') + ';font-size:12px;font-weight:600;cursor:pointer;background:' + (ST.bulkMode?'rgba(198,40,40,.08)':'transparent') + ';color:' + (ST.bulkMode?'var(--danger)':'var(--muted)') + ';font-family:DM Sans,sans-serif;white-space:nowrap;">' + (ST.bulkMode ? '✕ Cancel' : '☑ Select') + '</button>';
+    if(isAdmin()) h += '<button class="btn" style="background:rgba(13,45,94,.06);color:var(--navy);border:1.5px solid var(--border);white-space:nowrap;" onclick="importAlbi()">↓ Import</button>';
     h += '</div>';
 
-    // Row 2: Type filter as a compact select + tier pills + hide customers
+    // Row 2: Type dropdown + Tier pills (colored) + Hide customers
     h += '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">';
-    h += '<select onchange="setTypeFilter(this.value)" style="padding:5px 10px;border-radius:6px;border:1.5px solid var(--border);font-size:12px;font-family:DM Sans,sans-serif;background:#fff;color:var(--navy);font-weight:600;">';
+
+    // Type dropdown
+    h += '<select onchange="setTypeFilter(this.value)" style="padding:6px 10px;border-radius:8px;border:1.5px solid var(--border);font-size:12px;font-family:DM Sans,sans-serif;background:var(--bg);color:var(--navy);font-weight:600;cursor:pointer;">';
     var types = ['All','Plumber','Realtor','Insurance Agent','Property Manager','GC','Fire Department','Firefighter','Charity','Chamber of Commerce','Customer','Other'];
-    types.forEach(function(t){ h += '<option value="'+t+'"'+(ST.filterType===t?' selected':'')+'>'+( t==='All'?'All Types':t)+'</option>'; });
+    types.forEach(function(t){ h += '<option value="'+t+'"'+(ST.filterType===t?' selected':'')+'>'+(t==='All'?'All Types':t)+'</option>'; });
     h += '</select>';
 
-    // Tier pills - compact
-    h += '<div style="display:flex;gap:4px;">';
-    ['All','A','B','C'].forEach(function(t) {
-      var active = ST.filterTier===t;
-      var tc = t==='All'?'var(--navy)':tierColor(t);
-      var label = t==='All'?'All':t;
-      h += '<button onclick="setTierFilter(\'' + t + '\')" style="padding:4px 12px;border-radius:20px;border:1.5px solid '+(active?tc:'var(--border)')+';font-size:11px;font-weight:600;cursor:pointer;background:'+(active?tc:'transparent')+';color:'+(active?'#fff':'var(--muted)')+';">' + (t==='All'?'All Tiers':'Tier '+label) + '</button>';
-    });
-    h += '</div>';
+    // Separator
+    h += '<div style="width:1px;height:20px;background:var(--border);flex-shrink:0;"></div>';
 
-    // Hide customers toggle
+    // Tier pills with distinct colors
+    var tierDefs = [
+      { val:'All',  label:'All',    bg:'var(--navy)',    inactive:'rgba(13,45,94,.08)',  inactiveText:'var(--navy)' },
+      { val:'A',    label:'A-Tier', bg:'#2e7d32',        inactive:'rgba(46,125,50,.1)',   inactiveText:'#2e7d32' },
+      { val:'B',    label:'B-Tier', bg:'#1565c0',        inactive:'rgba(21,101,192,.1)',  inactiveText:'#1565c0' },
+      { val:'C',    label:'C-Tier', bg:'#6b7a96',        inactive:'rgba(107,122,150,.1)', inactiveText:'#6b7a96' }
+    ];
+    tierDefs.forEach(function(td) {
+      var active = ST.filterTier === td.val;
+      h += '<button onclick="setTierFilter(\'' + td.val + '\')" style="padding:5px 12px;border-radius:20px;border:none;font-size:11px;font-weight:700;cursor:pointer;font-family:DM Sans,sans-serif;transition:all .15s;background:' + (active ? td.bg : td.inactive) + ';color:' + (active ? '#fff' : td.inactiveText) + ';">' + td.label + '</button>';
+    });
+
+    // Hide customers
     var hcActive = ST.hideCustomers;
-    h += '<button onclick="toggleHideCustomers()" style="padding:4px 12px;border-radius:20px;border:1.5px solid var(--border);font-size:11px;font-weight:600;cursor:pointer;background:'+(hcActive?'var(--navy)':'transparent')+';color:'+(hcActive?'#fff':'var(--muted)')+';margin-left:auto;">'+(hcActive?'Customers Hidden':'Hide Customers')+'</button>';
+    // Rep filter (admin only)
+    if (isAdmin()) {
+      var reps = ['All','Kristina','Rylan','David','Brent','Josh'];
+      h += '<select onchange="ST.filterRep=this.value;render()" style="padding:6px 10px;border-radius:8px;border:1.5px solid var(--border);font-size:12px;font-family:DM Sans,sans-serif;background:var(--bg);color:var(--navy);font-weight:600;cursor:pointer;">';
+      reps.forEach(function(r){ h += '<option value="'+r+'"'+(ST.filterRep===r?' selected':'')+'>'+(r==='All'?'All Reps':'👤 '+r)+'</option>'; });
+      h += '</select>';
+    }
+    h += '<button onclick="toggleHideCustomers()" style="margin-left:auto;padding:5px 12px;border-radius:20px;border:1.5px solid ' + (hcActive?'var(--navy)':'var(--border)') + ';font-size:11px;font-weight:600;cursor:pointer;background:' + (hcActive?'var(--navy)':'transparent') + ';color:' + (hcActive?'#fff':'var(--muted)') + ';white-space:nowrap;">' + (hcActive ? '👁 Showing Referrers' : 'Hide Customers') + '</button>';
     h += '</div>';
     h += '</div>'; // end filter card
 
@@ -2753,7 +2777,12 @@ function openPartnerEdit(pid) {
     '<label style="'+LBL+'">Favorite Treats</label><input id="pe_treats" type="text" style="'+INP+'" value="'+(p.favorite_treats||'')+'" placeholder="Coffee, donuts...">' +
     '<label style="'+LBL+'">Family / Kids / Pets</label><input id="pe_family" type="text" style="'+INP+'" value="'+(p.family_members||'')+'" placeholder="Wife Sarah, 2 kids...">' +
     '<label style="'+LBL+'">Last Conversation</label><textarea id="pe_convo" style="'+INP+'height:60px;resize:none;">'+(p.last_convo_note||'')+'</textarea>' +
-    '<label style="'+LBL+'">General Notes</label><textarea id="pe_notes" style="'+INP+'height:54px;resize:none;">'+(p.notes||'')+'</textarea>';
+    '<label style="'+LBL+'">General Notes</label><textarea id="pe_notes" style="'+INP+'height:54px;resize:none;">'+(p.notes||'')+'</textarea>' +
+    '<label style="'+LBL+'">Assigned Sales Rep</label>' +
+    '<select id="pe_assigned_to" style="'+INP+'">' +
+      '<option value="">— Unassigned —</option>' +
+      ['Kristina','Rylan','David','Brent','Josh'].map(function(r){ return '<option value="'+r+'"'+(p.assigned_to===r?' selected':'')+'>'+r+'</option>'; }).join('') +
+    '</select>';
 
   var modal = document.getElementById('partner-edit-modal');
   modal.style.display = 'flex';
@@ -2799,7 +2828,8 @@ async function submitPartnerEdit() {
     favorite_treats: g('pe_treats'),
     family_members:  g('pe_family'),
     last_convo_note: g('pe_convo'),
-    notes:           g('pe_notes')
+    notes:           g('pe_notes'),
+    assigned_to:     g('pe_assigned_to') || null
   });
   closePartnerEdit();
 }
