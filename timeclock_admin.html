@@ -1,0 +1,632 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>JG Restoration — Time Clock</title>
+<link rel="icon" type="image/png" href="https://jgimprovements-arch.github.io/jg-dispatch/logo.png">
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script>
+window.jgGoogleCb = function(r){
+  try {
+    var p = JSON.parse(atob(r.credential.split('.')[1]));
+    if (!p.email.endsWith('@jg-restoration.com')) {
+      var el = document.getElementById('jg-login-err');
+      if (el) el.textContent = 'Access restricted to @jg-restoration.com accounts.';
+      return;
+    }
+    var u = {name:p.name||p.given_name, email:p.email, picture:p.picture||''};
+    localStorage.setItem('jg_platform_user', JSON.stringify(u));
+    localStorage.setItem('jg_platform_exp', String(Date.now()+43200000));
+    var loginEl = document.getElementById('jg-login');
+    if (loginEl) loginEl.style.display = 'none';
+    if (typeof jgShowUser === 'function') jgShowUser(u);
+    else window._pendingUser = u;
+  } catch(e) {
+    var el = document.getElementById('jg-login-err');
+    if (el) el.textContent = 'Sign in failed.';
+  }
+};
+</script>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<style>
+:root {
+  --navy:#0d2d5e; --orange:#e85d04; --gold:#f5a623;
+  --bg:#f0ede8; --surface:#faf9f7; --s2:#f0ede8;
+  --border:rgba(13,45,94,.12); --borderH:rgba(13,45,94,.3);
+  --text:#0d1f3c; --muted:#6b7a96;
+  --green:#2e7d32; --red:#c02020; --blue:#1565c0;
+  --ok-bg:rgba(46,125,50,.08); --danger-bg:rgba(192,32,32,.08);
+  --warn:#e65100; --warn-bg:rgba(230,81,0,.08);
+  --sidebar-w:52px;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;min-height:100vh;padding-left:var(--sidebar-w);}
+.mono{font-family:'DM Mono',monospace;}
+
+/* ── SIDEBAR (same pattern as sales.html) ── */
+#jg-sidebar{position:fixed;left:0;top:0;bottom:0;width:var(--sidebar-w);background:#0d2d5e;display:flex;flex-direction:column;align-items:center;padding:12px 0;z-index:100;transition:width .2s;overflow:hidden;}
+#jg-sidebar:hover,#jg-sidebar.expanded{width:200px;}
+#jg-sidebar .sb-logo{width:34px;height:34px;margin-bottom:20px;flex-shrink:0;}
+#jg-sidebar .sb-logo img{width:34px;height:34px;object-fit:contain;border-radius:6px;}
+#jg-sidebar .sb-sec{font-size:8px;font-weight:700;color:rgba(255,255,255,.3);letter-spacing:.08em;text-transform:uppercase;padding:8px 0 4px 14px;width:100%;white-space:nowrap;opacity:0;transition:opacity .2s;}
+#jg-sidebar:hover .sb-sec,#jg-sidebar.expanded .sb-sec{opacity:1;}
+#jg-sidebar a.sb-lnk{display:flex;align-items:center;gap:10px;padding:8px 9px;border-radius:8px;margin:1px 6px;color:rgba(255,255,255,.6);text-decoration:none;font-size:12px;font-weight:600;white-space:nowrap;transition:background .15s,color .15s;width:calc(100% - 12px);}
+#jg-sidebar a.sb-lnk:hover{background:rgba(255,255,255,.1);color:#fff;}
+#jg-sidebar a.sb-lnk.active{background:rgba(232,93,4,.2);color:#fff;}
+#jg-sidebar .sb-icon{font-size:16px;flex-shrink:0;width:24px;text-align:center;}
+#jg-sidebar .sb-label{opacity:0;transition:opacity .15s;font-size:12px;}
+#jg-sidebar:hover .sb-label,#jg-sidebar.expanded .sb-label{opacity:1;}
+#jg-sidebar .sb-btm{margin-top:auto;width:100%;}
+#jg-sidebar .sb-user{display:flex;align-items:center;gap:8px;padding:10px 9px;cursor:pointer;border-radius:8px;margin:4px 6px;color:rgba(255,255,255,.5);font-size:11px;transition:background .15s;}
+#jg-sidebar .sb-user:hover{background:rgba(255,255,255,.1);color:#fff;}
+#jg-sidebar .sb-user-label{opacity:0;transition:opacity .15s;white-space:nowrap;overflow:hidden;}
+#jg-sidebar:hover .sb-user-label,#jg-sidebar.expanded .sb-user-label{opacity:1;}
+
+/* ── LOGIN ── */
+#jg-login{position:fixed;inset:0;background:rgba(13,29,60,.96);align-items:center;justify-content:center;z-index:9999;display:none;}
+#jg-login-err{font-size:12px;color:#c0392b;margin-top:12px;min-height:16px;}
+
+/* ── MAIN LAYOUT ── */
+.tc-header{background:var(--navy);padding:14px 20px;display:flex;align-items:center;justify-content:space-between;}
+.tc-header-title{font-size:16px;font-weight:700;color:#fff;display:flex;align-items:center;gap:10px;}
+.tc-header-title span{font-size:20px;}
+.tc-tabs{background:var(--surface);border-bottom:1px solid var(--border);padding:0 20px;display:flex;gap:2px;}
+.tc-tab{padding:11px 16px;font-size:13px;font-weight:600;color:var(--muted);border:none;background:transparent;cursor:pointer;border-bottom:2px solid transparent;font-family:'DM Sans',sans-serif;transition:color .15s;}
+.tc-tab:hover{color:var(--text);}
+.tc-tab.active{color:var(--navy);border-bottom-color:var(--orange);}
+.tc-body{padding:20px;max-width:1100px;}
+
+/* ── CARDS ── */
+.card{background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden;margin-bottom:16px;box-shadow:0 1px 4px rgba(13,45,94,.06);}
+.card-hdr{padding:12px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;}
+.card-title{font-size:13px;font-weight:700;color:var(--navy);}
+.card-body{padding:16px;}
+
+/* ── STAT GRID ── */
+.stat-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px;}
+@media(max-width:700px){.stat-grid{grid-template-columns:1fr 1fr;}}
+.stat-card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px 16px;box-shadow:0 1px 4px rgba(13,45,94,.05);}
+.stat-val{font-family:'DM Mono',monospace;font-size:26px;font-weight:600;color:var(--navy);line-height:1;}
+.stat-lbl{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-top:4px;}
+
+/* ── TABLE ── */
+.tc-table{width:100%;border-collapse:collapse;font-size:12px;}
+.tc-table th{padding:8px 12px;text-align:left;font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;border-bottom:1.5px solid var(--border);background:var(--s2);}
+.tc-table td{padding:9px 12px;border-bottom:1px solid var(--border);color:var(--text);}
+.tc-table tr:last-child td{border-bottom:none;}
+.tc-table tr:hover td{background:rgba(13,45,94,.02);}
+.badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:700;letter-spacing:.04em;}
+.badge-green{background:var(--ok-bg);color:var(--green);}
+.badge-red{background:var(--danger-bg);color:var(--red);}
+.badge-warn{background:var(--warn-bg);color:var(--warn);}
+.badge-blue{background:rgba(21,101,192,.1);color:var(--blue);}
+.badge-gray{background:rgba(107,122,150,.1);color:var(--muted);}
+
+/* ── LIVE DOT ── */
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+.live-dot{width:8px;height:8px;border-radius:50%;background:var(--green);display:inline-block;animation:pulse 2s infinite;margin-right:6px;}
+
+/* ── FORM ── */
+.form-row{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px;}
+.form-label{font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px;display:block;}
+.form-input{width:100%;padding:9px 12px;border:1.5px solid var(--border);border-radius:8px;font-size:13px;font-family:'DM Sans',sans-serif;outline:none;background:#fff;}
+.form-input:focus{border-color:var(--orange);}
+.form-select{width:100%;padding:9px 12px;border:1.5px solid var(--border);border-radius:8px;font-size:13px;font-family:'DM Sans',sans-serif;outline:none;background:#fff;appearance:none;}
+
+/* ── BUTTONS ── */
+.btn{padding:8px 16px;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;font-family:'DM Sans',sans-serif;border:1.5px solid var(--border);background:transparent;color:var(--navy);}
+.btn:hover{background:rgba(13,45,94,.05);}
+.btn-primary{background:var(--navy);color:#fff;border-color:var(--navy);}
+.btn-primary:hover{background:#0a2248;}
+.btn-orange{background:var(--orange);color:#fff;border-color:var(--orange);}
+.btn-danger{background:var(--danger-bg);color:var(--red);border-color:rgba(192,32,32,.3);}
+.btn-sm{padding:4px 10px;font-size:11px;}
+
+/* ── PROGRESS BAR ── */
+.prog-bar{height:5px;background:rgba(13,45,94,.08);border-radius:3px;overflow:hidden;margin-top:4px;}
+.prog-fill{height:100%;border-radius:3px;transition:width .4s;}
+
+/* ── FILTERS ── */
+.filter-bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:16px;}
+.filter-bar input,.filter-bar select{padding:7px 12px;border:1.5px solid var(--border);border-radius:8px;font-size:12px;font-family:'DM Sans',sans-serif;outline:none;background:#fff;}
+.filter-bar input:focus,.filter-bar select:focus{border-color:var(--orange);}
+
+.empty{text-align:center;padding:40px;color:var(--muted);font-size:13px;}
+.toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%) translateY(20px);background:#0d1f3c;color:#fff;padding:10px 22px;border-radius:20px;font-size:13px;font-weight:600;opacity:0;transition:all .3s;pointer-events:none;white-space:nowrap;z-index:300;}
+.toast.show{opacity:1;transform:translateX(-50%) translateY(0);}
+</style>
+</head>
+<body>
+
+<!-- LOGIN -->
+<div id="jg-login">
+  <div id="jg-login-box" style="background:#fff;border-radius:16px;padding:40px 36px;width:100%;max-width:360px;text-align:center;box-shadow:0 24px 64px rgba(0,0,0,.4);">
+    <img src="https://jgimprovements-arch.github.io/jg-dispatch/logo.png" style="height:72px;width:auto;margin-bottom:14px;">
+    <div style="font-size:19px;font-weight:700;color:#0d2d5e;margin-bottom:4px;">JG Restoration</div>
+    <div style="font-size:13px;color:#6b82a0;margin-bottom:24px;">Sign in with your @jg-restoration.com account</div>
+    <div id="g_id_onload" data-client_id="209231675110-6id8vr3ehcocg4df7tvpc89jsmrvhogk.apps.googleusercontent.com" data-ux_mode="popup" data-callback="jgGoogleCb" data-auto_prompt="false"></div>
+    <div class="g_id_signin" data-type="standard" data-size="large" data-theme="outline" data-text="sign_in_with" data-shape="rectangular" data-logo_alignment="left" data-width="288"></div>
+    <div id="jg-login-err"></div>
+  </div>
+</div>
+
+<!-- SIDEBAR -->
+<nav id="jg-sidebar">
+  <div class="sb-logo"><img src="https://jgimprovements-arch.github.io/jg-dispatch/logo.png" alt="JG"></div>
+  <div class="sb-sec">PLATFORM</div>
+  <a href="hub.html" class="sb-lnk"><span class="sb-icon">🏠</span><span class="sb-label">Hub</span></a>
+  <a href="index.html" class="sb-lnk"><span class="sb-icon">📋</span><span class="sb-label">Dispatch</span></a>
+  <div class="sb-sec">TIME</div>
+  <a href="timeclock_admin.html" class="sb-lnk active"><span class="sb-icon">⏱</span><span class="sb-label">Time Admin</span></a>
+  <a href="timeclock.html" class="sb-lnk" target="_blank"><span class="sb-icon">🕐</span><span class="sb-label">Clock In/Out</span></a>
+  <div class="sb-sec">SALES</div>
+  <a href="sales.html" class="sb-lnk"><span class="sb-icon">📈</span><span class="sb-label">Sales Dashboard</span></a>
+  <a href="sales_admin.html" class="sb-lnk"><span class="sb-icon">🔐</span><span class="sb-label">Sales Admin</span></a>
+  <div class="sb-sec">AI TOOLS</div>
+  <a href="qa.html" class="sb-lnk"><span class="sb-icon">🔍</span><span class="sb-label">QA Review</span></a>
+  <a href="adjuster.html" class="sb-lnk"><span class="sb-icon">⚖️</span><span class="sb-label">Adjuster Rebuttal</span></a>
+  <a href="intelligence.html" class="sb-lnk"><span class="sb-icon">🧠</span><span class="sb-label">Adjuster Intel</span></a>
+  <div class="sb-btm">
+    <div class="sb-user" onclick="jgSignOut()" title="Sign out">
+      <span id="sb-av">👤</span>
+      <span class="sb-user-label"><span id="sb-nm">...</span></span>
+    </div>
+  </div>
+</nav>
+
+<!-- MAIN -->
+<div class="tc-header">
+  <div class="tc-header-title"><span>⏱</span> Time Clock Admin</div>
+  <button onclick="loadAll()" class="btn" style="border-color:rgba(255,255,255,.2);color:rgba(255,255,255,.8);background:rgba(255,255,255,.1);font-size:12px;">↻ Refresh</button>
+</div>
+
+<div class="tc-tabs">
+  <button class="tc-tab active" id="tab-live" onclick="showTab('live',this)">🟢 Live</button>
+  <button class="tc-tab" id="tab-timesheets" onclick="showTab('timesheets',this)">📋 Timesheets</button>
+  <button class="tc-tab" id="tab-employees" onclick="showTab('employees',this)">👥 Employees</button>
+  <button class="tc-tab" id="tab-reports" onclick="showTab('reports',this)">📊 Reports</button>
+</div>
+
+<div class="tc-body" id="tc-body">
+  <div class="empty">Loading...</div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+var SB_URL = 'https://nuykvchgecpiuikoerze.supabase.co';
+var SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im51eWt2Y2hnZWNwaXVpa29lcnplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYyNjM3ODYsImV4cCI6MjA5MTgzOTc4Nn0.39hZ8DdjT_0iFJXPeAL2FXUSLw8FZBirDVzxZTO1W9s';
+
+var ST = {
+  tab: 'live',
+  employees: [],
+  entries: [],
+  breaks: [],
+  filterEmp: 'All',
+  filterDate: '',
+  filterDateEnd: '',
+  editEmp: null
+};
+
+// ── AUTH ──────────────────────────────────────────────────────────────────
+function jgShowUser(u) {
+  document.getElementById('sb-nm').textContent = u.name.split(' ')[0];
+  document.getElementById('sb-av').textContent = u.name[0];
+  loadAll();
+}
+function jgSignOut() {
+  if (confirm('Sign out?')) { localStorage.removeItem('jg_platform_user'); localStorage.removeItem('jg_platform_exp'); window.location.href='hub.html'; }
+}
+function jgCheckAuth() {
+  var r=localStorage.getItem('jg_platform_user'), e=localStorage.getItem('jg_platform_exp');
+  if (r&&e&&Date.now()<parseInt(e)) { jgShowUser(JSON.parse(r)); return true; }
+  document.getElementById('jg-login').style.display='flex'; return false;
+}
+
+// ── SUPABASE ──────────────────────────────────────────────────────────────
+async function sb(path, opts) {
+  var r = await fetch(SB_URL+path, Object.assign({
+    headers: {'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json'}
+  }, opts||{}));
+  if (!r.ok) return null;
+  return r.json().catch(function(){return null;});
+}
+
+// ── LOAD ──────────────────────────────────────────────────────────────────
+async function loadAll() {
+  var emps = await sb('/rest/v1/employees?order=name.asc&select=*');
+  ST.employees = emps || [];
+
+  var since = ST.filterDate || new Date(Date.now()-14*86400000).toISOString().split('T')[0];
+  var until = ST.filterDateEnd ? ST.filterDateEnd+'T23:59:59' : new Date().toISOString();
+  var entries = await sb('/rest/v1/time_entries?clock_in=gte.'+since+'T00:00:00&clock_in=lte.'+until+'&order=clock_in.desc&limit=500&select=*');
+  ST.entries = entries || [];
+
+  var brks = await sb('/rest/v1/time_breaks?select=*');
+  ST.breaks = brks || [];
+
+  render();
+}
+
+// ── RENDER ────────────────────────────────────────────────────────────────
+function render() { renderTab(ST.tab); }
+
+function showTab(tab, el) {
+  ST.tab = tab;
+  document.querySelectorAll('.tc-tab').forEach(function(t){ t.classList.remove('active'); });
+  el.classList.add('active');
+  renderTab(tab);
+}
+
+function renderTab(tab) {
+  if (tab === 'live') renderLive();
+  else if (tab === 'timesheets') renderTimesheets();
+  else if (tab === 'employees') renderEmployees();
+  else if (tab === 'reports') renderReports();
+}
+
+// ── LIVE TAB ──────────────────────────────────────────────────────────────
+function renderLive() {
+  var today = new Date().toISOString().split('T')[0];
+  var active = ST.entries.filter(function(e){ return !e.clock_out && e.clock_in.startsWith(today); });
+  var todayAll = ST.entries.filter(function(e){ return e.clock_in.startsWith(today); });
+
+  var fmt = function(d){ var dt=new Date(d),h=dt.getHours()%12||12,m=dt.getMinutes(),ap=dt.getHours()>=12?'PM':'AM'; return h+':'+(m<10?'0':'')+m+' '+ap; };
+  var fmtDur = function(mins){ return Math.floor(mins/60)+'h '+(mins%60)+'m'; };
+  var durMins = function(e){ var out=e.clock_out?new Date(e.clock_out):new Date(); return Math.floor((out-new Date(e.clock_in))/60000); };
+
+  var h = '';
+
+  // Stats
+  var todayMins = 0;
+  todayAll.forEach(function(e){ todayMins += durMins(e); });
+  h += '<div class="stat-grid">';
+  h += '<div class="stat-card"><div class="stat-val" style="color:var(--green);">'+active.length+'</div><div class="stat-lbl">Clocked In Now</div></div>';
+  h += '<div class="stat-card"><div class="stat-val">'+todayAll.length+'</div><div class="stat-lbl">Entries Today</div></div>';
+  h += '<div class="stat-card"><div class="stat-val">'+fmtDur(todayMins)+'</div><div class="stat-lbl">Total Hours Today</div></div>';
+  h += '<div class="stat-card"><div class="stat-val">'+ST.employees.filter(function(e){return e.active;}).length+'</div><div class="stat-lbl">Active Employees</div></div>';
+  h += '</div>';
+
+  // Currently clocked in
+  h += '<div class="card"><div class="card-hdr"><div class="card-title"><span class="live-dot"></span>Currently Clocked In</div><span style="font-size:11px;color:var(--muted);">'+active.length+' of '+ST.employees.filter(function(e){return e.active;}).length+' active employees</span></div>';
+  if (!active.length) {
+    h += '<div class="empty">No one clocked in right now</div>';
+  } else {
+    h += '<table class="tc-table"><thead><tr><th>Employee</th><th>Job</th><th>Clocked In</th><th>Duration</th><th>GPS</th><th>Status</th></tr></thead><tbody>';
+    active.forEach(function(e) {
+      var mins = durMins(e);
+      var alert = mins > 600;
+      var hasBreak = ST.breaks.some(function(b){ return b.entry_id === e.id && !b.break_end; });
+      h += '<tr>';
+      h += '<td><strong>'+e.employee_name+'</strong><div style="font-size:10px;color:var(--muted);">'+e.employee_email+'</div></td>';
+      h += '<td>'+(e.job_name||'<span style="color:var(--muted);">No job</span>')+'</td>';
+      h += '<td>'+fmt(e.clock_in)+'</td>';
+      h += '<td><strong style="color:'+(alert?'var(--red)':'var(--green)')+';">'+fmtDur(mins)+'</strong></td>';
+      h += '<td>'+(e.clock_in_lat?'<span class="badge badge-green">'+e.clock_in_lat.toFixed(3)+','+e.clock_in_lng.toFixed(3)+'</span>':'<span class="badge badge-gray">None</span>')+'</td>';
+      h += '<td>'+(hasBreak?'<span class="badge badge-warn">On Break</span>':alert?'<span class="badge badge-red">Long Shift</span>':'<span class="badge badge-green">Active</span>')+'</td>';
+      h += '</tr>';
+    });
+    h += '</tbody></table>';
+  }
+  h += '</div>';
+
+  // Today's entries
+  h += '<div class="card"><div class="card-hdr"><div class="card-title">Today by Employee</div></div>';
+  if (!todayAll.length) {
+    h += '<div class="empty">No entries today</div>';
+  } else {
+    var byEmp = {};
+    todayAll.forEach(function(e) {
+      if (!byEmp[e.employee_name]) byEmp[e.employee_name] = { mins: 0, entries: [], clocked: false };
+      byEmp[e.employee_name].mins += durMins(e);
+      byEmp[e.employee_name].entries.push(e);
+      if (!e.clock_out) byEmp[e.employee_name].clocked = true;
+    });
+    h += '<table class="tc-table"><thead><tr><th>Employee</th><th>Hours</th><th>Entries</th><th>Status</th></tr></thead><tbody>';
+    Object.entries(byEmp).sort(function(a,b){return b[1].mins-a[1].mins;}).forEach(function(kv) {
+      var name=kv[0], d=kv[1];
+      var pct=Math.min(100,Math.round(d.mins/480*100));
+      h += '<tr>';
+      h += '<td><strong>'+name+'</strong></td>';
+      h += '<td><strong>'+fmtDur(d.mins)+'</strong><div class="prog-bar"><div class="prog-fill" style="width:'+pct+'%;background:'+(d.clocked?'var(--green)':'var(--navy)');+'"></div></div></td>';
+      h += '<td>'+d.entries.length+'</td>';
+      h += '<td>'+(d.clocked?'<span class="badge badge-green">Clocked In</span>':'<span class="badge badge-gray">Clocked Out</span>')+'</td>';
+      h += '</tr>';
+    });
+    h += '</tbody></table>';
+  }
+  h += '</div>';
+
+  document.getElementById('tc-body').innerHTML = h;
+}
+
+// ── TIMESHEETS TAB ────────────────────────────────────────────────────────
+function renderTimesheets() {
+  var today = new Date().toISOString().split('T')[0];
+  var fmt = function(d){ if(!d)return ''; var dt=new Date(d),h=dt.getHours()%12||12,m=dt.getMinutes(),ap=dt.getHours()>=12?'PM':'AM'; return h+':'+(m<10?'0':'')+m+' '+ap; };
+  var fmtDate = function(d){ if(!d)return ''; var dt=new Date(d); return (dt.getMonth()+1)+'/'+dt.getDate()+'/'+dt.getFullYear(); };
+  var fmtDur = function(mins){ if(!mins&&mins!==0)return ''; return Math.floor(mins/60)+'h '+(mins%60)+'m'; };
+  var durMins = function(e){ var out=e.clock_out?new Date(e.clock_out):new Date(); return Math.floor((out-new Date(e.clock_in))/60000); };
+
+  var filtered = ST.entries.filter(function(e) {
+    if (ST.filterEmp !== 'All' && e.employee_name !== ST.filterEmp) return false;
+    return true;
+  });
+
+  var h = '';
+  h += '<div class="filter-bar">';
+  h += '<select onchange="ST.filterEmp=this.value;renderTimesheets()" style="min-width:160px;">';
+  h += '<option value="All">All Employees</option>';
+  var empNames = [...new Set(ST.entries.map(function(e){return e.employee_name;}))].sort();
+  empNames.forEach(function(n){ h += '<option value="'+n+'"'+(ST.filterEmp===n?' selected':'')+'>'+n+'</option>'; });
+  h += '</select>';
+  h += '<input type="date" value="'+(ST.filterDate||'')+'" onchange="ST.filterDate=this.value;loadAll()" style="min-width:140px;">';
+  h += '<span style="color:var(--muted);font-size:12px;">to</span>';
+  h += '<input type="date" value="'+(ST.filterDateEnd||'')+'" onchange="ST.filterDateEnd=this.value;loadAll()" style="min-width:140px;">';
+  h += '<button class="btn" onclick="ST.filterDate=\'\';ST.filterDateEnd=\'\';ST.filterEmp=\'All\';loadAll()">Clear</button>';
+  h += '<button class="btn btn-primary" onclick="exportCSV()" style="margin-left:auto;">↓ Export CSV</button>';
+  h += '</div>';
+
+  h += '<div class="card"><div class="card-hdr"><div class="card-title">Time Entries ('+filtered.length+')</div></div>';
+  if (!filtered.length) {
+    h += '<div class="empty">No entries found</div>';
+  } else {
+    h += '<table class="tc-table"><thead><tr><th>Employee</th><th>Date</th><th>In</th><th>Out</th><th>Duration</th><th>Break</th><th>Job</th><th>Notes</th><th>GPS</th><th></th></tr></thead><tbody>';
+    filtered.forEach(function(e) {
+      var mins = e.duration_minutes || durMins(e);
+      var empBreaks = ST.breaks.filter(function(b){ return b.entry_id === e.id; });
+      var breakMins = empBreaks.reduce(function(s,b){return s+(b.duration_minutes||0);},0);
+      var active = !e.clock_out;
+      h += '<tr>';
+      h += '<td><strong>'+e.employee_name+'</strong></td>';
+      h += '<td>'+fmtDate(e.clock_in)+'</td>';
+      h += '<td class="mono">'+fmt(e.clock_in)+'</td>';
+      h += '<td class="mono">'+(active?'<span class="badge badge-green">Active</span>':fmt(e.clock_out))+'</td>';
+      h += '<td><strong>'+fmtDur(mins)+'</strong></td>';
+      h += '<td>'+(breakMins?fmtDur(breakMins):'-')+'</td>';
+      h += '<td style="max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+(e.job_name||'-')+'</td>';
+      h += '<td style="max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;color:var(--muted);">'+(e.notes||'')+'</td>';
+      h += '<td>'+(e.clock_in_lat?'<a href="https://maps.google.com/?q='+e.clock_in_lat+','+e.clock_in_lng+'" target="_blank" style="font-size:11px;color:var(--orange);">📍</a>':'-')+'</td>';
+      h += '<td><button class="btn btn-sm" onclick="editEntry(\''+e.id+'\')">Edit</button></td>';
+      h += '</tr>';
+    });
+    h += '</tbody></table>';
+  }
+  h += '</div>';
+
+  document.getElementById('tc-body').innerHTML = h;
+}
+
+// ── EMPLOYEES TAB ─────────────────────────────────────────────────────────
+function renderEmployees() {
+  var h = '';
+  h += '<div style="display:flex;justify-content:flex-end;margin-bottom:12px;">';
+  h += '<button class="btn btn-primary" onclick="openAddEmployee()">+ Add Employee</button>';
+  h += '</div>';
+
+  h += '<div class="card"><div class="card-hdr"><div class="card-title">Employees ('+ST.employees.length+')</div></div>';
+  h += '<table class="tc-table"><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Market</th><th>Rate</th><th>Status</th><th>Since</th><th></th></tr></thead><tbody>';
+  ST.employees.forEach(function(emp) {
+    h += '<tr>';
+    h += '<td><strong>'+emp.name+'</strong></td>';
+    h += '<td style="font-size:11px;">'+emp.email+'</td>';
+    h += '<td>'+(emp.role||'Technician')+'</td>';
+    h += '<td>'+(emp.market||'Appleton')+'</td>';
+    h += '<td class="mono">'+(emp.hourly_rate?'$'+emp.hourly_rate+'/hr':'-')+'</td>';
+    h += '<td>'+(emp.active?'<span class="badge badge-green">Active</span>':'<span class="badge badge-gray">Inactive</span>')+'</td>';
+    h += '<td style="font-size:11px;color:var(--muted);">'+new Date(emp.created_at).toLocaleDateString()+'</td>';
+    h += '<td style="display:flex;gap:4px;">';
+    h += '<button class="btn btn-sm" onclick="openEditEmployee(\''+emp.id+'\')">Edit</button>';
+    h += '<button class="btn btn-sm '+(emp.active?'btn-danger':'')+'" onclick="toggleEmployee(\''+emp.id+'\','+emp.active+')">'+(emp.active?'Deactivate':'Activate')+'</button>';
+    h += '</td></tr>';
+  });
+  h += '</tbody></table></div>';
+
+  document.getElementById('tc-body').innerHTML = h;
+}
+
+// ── REPORTS TAB ───────────────────────────────────────────────────────────
+function renderReports() {
+  var fmtDur = function(mins){ return Math.floor(mins/60)+'h '+(mins%60)+'m'; };
+  var durMins = function(e){ var out=e.clock_out?new Date(e.clock_out):new Date(); return Math.floor((out-new Date(e.clock_in))/60000); };
+
+  var byEmp = {};
+  ST.entries.forEach(function(e) {
+    if (!byEmp[e.employee_name]) byEmp[e.employee_name] = { mins: 0, days: new Set(), ot: 0 };
+    var m = e.duration_minutes || durMins(e);
+    byEmp[e.employee_name].mins += m;
+    byEmp[e.employee_name].days.add(e.clock_in.split('T')[0]);
+  });
+
+  // Compute OT (over 40h/week is simplified here)
+  Object.values(byEmp).forEach(function(d){
+    var hrs = d.mins / 60;
+    d.ot = Math.max(0, hrs - 40);
+  });
+
+  var totalMins = Object.values(byEmp).reduce(function(s,d){return s+d.mins;},0);
+  var totalOT = Object.values(byEmp).reduce(function(s,d){return s+d.ot;},0);
+
+  var h = '';
+
+  // Stats
+  h += '<div class="stat-grid">';
+  h += '<div class="stat-card"><div class="stat-val">'+fmtDur(totalMins)+'</div><div class="stat-lbl">Total Hours</div></div>';
+  h += '<div class="stat-card"><div class="stat-val" style="color:var(--red);">'+totalOT.toFixed(1)+'h</div><div class="stat-lbl">Overtime Hours</div></div>';
+  h += '<div class="stat-card"><div class="stat-val">'+Object.keys(byEmp).length+'</div><div class="stat-lbl">Employees</div></div>';
+  h += '<div class="stat-card"><div class="stat-val">'+ST.entries.length+'</div><div class="stat-lbl">Total Entries</div></div>';
+  h += '</div>';
+
+  h += '<div style="display:flex;gap:8px;margin-bottom:16px;">';
+  h += '<button class="btn btn-primary" onclick="exportCSV(7)">↓ CSV — Last 7 Days</button>';
+  h += '<button class="btn btn-primary" onclick="exportCSV(14)">↓ CSV — Last 14 Days</button>';
+  h += '<button class="btn btn-primary" onclick="exportCSV(30)">↓ CSV — Last 30 Days</button>';
+  h += '<button class="btn" onclick="exportCSV()" style="margin-left:auto;">↓ CSV — Current Filter</button>';
+  h += '</div>';
+
+  h += '<div class="card"><div class="card-hdr"><div class="card-title">Hours by Employee</div></div>';
+  h += '<table class="tc-table"><thead><tr><th>Employee</th><th>Total Hours</th><th>Days Worked</th><th>Avg/Day</th><th>OT Hours</th><th>vs 40h Week</th></tr></thead><tbody>';
+  Object.entries(byEmp).sort(function(a,b){return b[1].mins-a[1].mins;}).forEach(function(kv) {
+    var name=kv[0], d=kv[1];
+    var hrs = d.mins/60;
+    var days = d.days.size;
+    var avgDay = days ? (hrs/days).toFixed(1) : 0;
+    var vs40 = hrs - 40;
+    h += '<tr>';
+    h += '<td><strong>'+name+'</strong></td>';
+    h += '<td><strong class="mono">'+fmtDur(d.mins)+'</strong></td>';
+    h += '<td>'+days+'</td>';
+    h += '<td class="mono">'+avgDay+'h</td>';
+    h += '<td>'+(d.ot>0?'<strong style="color:var(--red);">'+d.ot.toFixed(1)+'h</strong>':'-')+'</td>';
+    h += '<td>'+(vs40>0?'<span class="badge badge-red">+'+vs40.toFixed(1)+'h OT</span>':'<span class="badge badge-green">'+Math.abs(vs40).toFixed(1)+'h left</span>')+'</td>';
+    h += '</tr>';
+  });
+  h += '</tbody></table></div>';
+
+  document.getElementById('tc-body').innerHTML = h;
+}
+
+// ── EMPLOYEE EDIT ─────────────────────────────────────────────────────────
+function openAddEmployee() {
+  var html = buildEmpForm({});
+  showModal('Add Employee', html, 'saveEmployee()');
+}
+
+function openEditEmployee(id) {
+  var emp = ST.employees.find(function(e){ return e.id===id; });
+  if (!emp) return;
+  ST.editEmp = id;
+  var html = buildEmpForm(emp);
+  showModal('Edit Employee', html, 'saveEmployee()');
+}
+
+function buildEmpForm(emp) {
+  var roles = ['Technician','Project Manager','Estimator','Office','Admin'];
+  return '<div class="form-row">' +
+    '<div><label class="form-label">Full Name</label><input class="form-input" id="emp-name" type="text" value="'+(emp.name||'')+'"></div>' +
+    '<div><label class="form-label">Email</label><input class="form-input" id="emp-email" type="text" value="'+(emp.email||'')+'"></div>' +
+    '</div>' +
+    '<div class="form-row">' +
+    '<div><label class="form-label">Role</label><select class="form-select" id="emp-role">'+roles.map(function(r){return '<option value="'+r+'"'+(emp.role===r?' selected':'')+'>'+r+'</option>';}).join('')+'</select></div>' +
+    '<div><label class="form-label">Market</label><select class="form-select" id="emp-market"><option value="Appleton"'+(emp.market==='Appleton'?' selected':'')+'>Appleton</option><option value="Stevens Point"'+(emp.market==='Stevens Point'?' selected':'')+'>Stevens Point</option></select></div>' +
+    '</div>' +
+    '<div class="form-row">' +
+    '<div><label class="form-label">Hourly Rate ($)</label><input class="form-input" id="emp-rate" type="number" step="0.01" value="'+(emp.hourly_rate||'')+'"></div>' +
+    '<div style="display:flex;align-items:flex-end;"><label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;font-weight:600;color:var(--text);"><input type="checkbox" id="emp-active" '+(emp.active!==false?'checked':'')+' style="width:16px;height:16px;accent-color:var(--orange);"> Active</label></div>' +
+    '</div>';
+}
+
+async function saveEmployee() {
+  var data = {
+    name: document.getElementById('emp-name').value.trim(),
+    email: document.getElementById('emp-email').value.trim().toLowerCase(),
+    role: document.getElementById('emp-role').value,
+    market: document.getElementById('emp-market').value,
+    hourly_rate: parseFloat(document.getElementById('emp-rate').value) || 0,
+    active: document.getElementById('emp-active').checked
+  };
+  if (!data.name || !data.email) { toast('Name and email are required'); return; }
+  if (ST.editEmp) {
+    await fetch(SB_URL+'/rest/v1/employees?id=eq.'+ST.editEmp, {method:'PATCH', headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json'}, body:JSON.stringify(data)});
+    toast('✓ Employee updated');
+  } else {
+    await fetch(SB_URL+'/rest/v1/employees', {method:'POST', headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json','Prefer':'return=minimal'}, body:JSON.stringify(data)});
+    toast('✓ Employee added');
+  }
+  ST.editEmp = null;
+  closeModal();
+  await loadAll();
+}
+
+async function toggleEmployee(id, isActive) {
+  await fetch(SB_URL+'/rest/v1/employees?id=eq.'+id, {method:'PATCH', headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json'}, body:JSON.stringify({active:!isActive})});
+  toast(isActive ? 'Employee deactivated' : 'Employee activated');
+  await loadAll();
+}
+
+// ── ENTRY EDIT ────────────────────────────────────────────────────────────
+function editEntry(id) {
+  var e = ST.entries.find(function(x){ return x.id===id; });
+  if (!e) return;
+  var toLocal = function(iso){ if(!iso)return ''; var d=new Date(iso); var pad=function(n){return String(n).padStart(2,'0');}; return d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate())+'T'+pad(d.getHours())+':'+pad(d.getMinutes()); };
+  var html = '<div class="form-row">' +
+    '<div><label class="form-label">Clock In</label><input class="form-input" id="entry-in" type="datetime-local" value="'+toLocal(e.clock_in)+'"></div>' +
+    '<div><label class="form-label">Clock Out</label><input class="form-input" id="entry-out" type="datetime-local" value="'+toLocal(e.clock_out)+'"></div>' +
+    '</div>' +
+    '<div><label class="form-label">Job</label><input class="form-input" id="entry-job" type="text" value="'+(e.job_name||'')+'"></div>' +
+    '<div style="margin-top:12px;"><label class="form-label">Notes</label><input class="form-input" id="entry-notes" type="text" value="'+(e.notes||'')+'"></div>';
+  showModal('Edit Time Entry', html, 'saveEntry(\''+id+'\')');
+}
+
+async function saveEntry(id) {
+  var inVal = document.getElementById('entry-in').value;
+  var outVal = document.getElementById('entry-out').value;
+  var jobVal = document.getElementById('entry-job').value;
+  var notesVal = document.getElementById('entry-notes').value;
+  var inISO = inVal ? new Date(inVal).toISOString() : null;
+  var outISO = outVal ? new Date(outVal).toISOString() : null;
+  var dur = (inISO && outISO) ? Math.floor((new Date(outISO)-new Date(inISO))/60000) : null;
+  await fetch(SB_URL+'/rest/v1/time_entries?id=eq.'+id, {method:'PATCH', headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json'}, body:JSON.stringify({clock_in:inISO,clock_out:outISO,duration_minutes:dur,job_name:jobVal,notes:notesVal})});
+  toast('✓ Entry updated');
+  closeModal();
+  await loadAll();
+}
+
+// ── EXPORT CSV ────────────────────────────────────────────────────────────
+async function exportCSV(days) {
+  var entries = ST.entries;
+  if (days) {
+    var since = new Date(Date.now()-days*86400000).toISOString();
+    entries = entries.filter(function(e){ return e.clock_in >= since; });
+  }
+  var rows = ['Employee,Email,Date,Clock In,Clock Out,Duration (mins),Break (mins),Job,Notes,GPS In,GPS Out'];
+  var fmt = function(d){ return d?new Date(d).toLocaleString():''; };
+  entries.forEach(function(e) {
+    var empBreaks = ST.breaks.filter(function(b){ return b.entry_id===e.id; });
+    var breakMins = empBreaks.reduce(function(s,b){return s+(b.duration_minutes||0);},0);
+    var dur = e.duration_minutes || (e.clock_out?Math.floor((new Date(e.clock_out)-new Date(e.clock_in))/60000):'');
+    var gpsIn = (e.clock_in_lat&&e.clock_in_lng)?e.clock_in_lat.toFixed(4)+','+e.clock_in_lng.toFixed(4):'';
+    var gpsOut = (e.clock_out_lat&&e.clock_out_lng)?e.clock_out_lat.toFixed(4)+','+e.clock_out_lng.toFixed(4):'';
+    rows.push(['"'+(e.employee_name||'')+'"','"'+(e.employee_email||'')+'"','"'+new Date(e.clock_in).toLocaleDateString()+'"','"'+fmt(e.clock_in)+'"','"'+fmt(e.clock_out)+'"',dur,breakMins,'"'+(e.job_name||'')+'"','"'+(e.notes||'')+'"','"'+gpsIn+'"','"'+gpsOut+'"'].join(','));
+  });
+  var blob = new Blob([rows.join('\n')],{type:'text/csv'});
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement('a'); a.href=url; a.download='jg-timeclock-export.csv'; a.click();
+  toast('✓ CSV downloaded');
+}
+
+// ── MODAL ─────────────────────────────────────────────────────────────────
+function showModal(title, bodyHtml, saveCall) {
+  var existing = document.getElementById('tc-modal');
+  if (existing) existing.remove();
+  var m = document.createElement('div');
+  m.id = 'tc-modal';
+  m.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:2000;display:flex;align-items:center;justify-content:center;padding:20px;';
+  m.innerHTML = '<div style="background:#fff;border-radius:12px;padding:24px;width:100%;max-width:520px;max-height:90vh;overflow-y:auto;box-shadow:0 20px 60px rgba(0,0,0,.3);" onclick="event.stopPropagation()">' +
+    '<div style="font-size:15px;font-weight:700;color:var(--navy);margin-bottom:16px;">'+title+'</div>' +
+    bodyHtml +
+    '<div style="display:flex;gap:8px;margin-top:16px;">' +
+    '<button class="btn btn-primary" onclick="'+saveCall+'" style="flex:1;">Save</button>' +
+    '<button class="btn" onclick="closeModal()">Cancel</button>' +
+    '</div></div>';
+  m.addEventListener('click', function(e){ if(e.target===m) closeModal(); });
+  document.body.appendChild(m);
+}
+function closeModal() { var m=document.getElementById('tc-modal'); if(m)m.remove(); ST.editEmp=null; }
+
+// ── TOAST ─────────────────────────────────────────────────────────────────
+function toast(msg) {
+  var el=document.getElementById('toast');
+  el.textContent=msg; el.classList.add('show');
+  setTimeout(function(){el.classList.remove('show');},3000);
+}
+
+// ── INIT ──────────────────────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', function() {
+  if (window._pendingUser) { jgShowUser(window._pendingUser); window._pendingUser=null; return; }
+  jgCheckAuth();
+});
+</script>
+</body>
+</html>
