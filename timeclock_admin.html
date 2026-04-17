@@ -395,6 +395,11 @@ function renderLive() {
   h += '<div class="stat-card"><div class="stat-val">' + active.length + '</div><div class="stat-lbl">Clocked In Now</div></div>';
   h += '<div class="stat-card"><div class="stat-val">' + todayAll.length + '</div><div class="stat-lbl">Entries Today</div></div>';
   h += '<div class="stat-card"><div class="stat-val">' + ST.employees.filter(function(e) { return e.active; }).length + '</div><div class="stat-lbl">Active Employees</div></div>';
+  // Pending employee approvals badge
+  if ((ST.pendingEmployees||[]).length) {
+    h += '<div class="stat-card" style="border:2px solid #2e7d32;cursor:pointer;" onclick="showTab(\'employees\',document.getElementById(\'tab-employees\'))">';
+    h += '<div class="stat-val" style="color:#2e7d32;">'+(ST.pendingEmployees||[]).length+'</div><div class="stat-lbl">Pending Approval</div></div>';
+  }
   var pendingCorr = (ST.corrections||[]).filter(function(c){ return c.status==='pending'; });
   if (pendingCorr.length) {
     h += '<div class="stat-card" style="border:2px solid var(--orange);cursor:pointer;" onclick="showTab(\'timesheets\',document.getElementById(\'tab-timesheets\'))">';
@@ -1339,6 +1344,28 @@ function openEditEmployee(id) {
   ST.editEmp = id;
   var html = buildEmpForm(emp);
   showModal('Edit Employee', html, 'saveEmployee()');
+}
+
+async function approveEmployee(id, name) {
+  await fetch(SB_URL + '/rest/v1/employees?id=eq.' + id, {
+    method: 'PATCH',
+    headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ active: true, pending_approval: false })
+  });
+  toast('✓ ' + name + ' approved — they now have access');
+  await loadAll();
+  renderEmployees();
+}
+
+async function denyEmployee(id, name) {
+  if (!confirm('Deny access for ' + name + '? This will delete their pending request.')) return;
+  await fetch(SB_URL + '/rest/v1/employees?id=eq.' + id, {
+    method: 'DELETE',
+    headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+  });
+  toast(name + ' denied and removed');
+  await loadAll();
+  renderEmployees();
 }
 
 function calcPtoRemaining() {
