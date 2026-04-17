@@ -800,7 +800,7 @@ function getBoardStatePayload(){
     sick: [...sick],
     overrides: jobOverrides,
     startTimes: {...techStartTimes},
-    savedBy: 'dispatch-board'
+    savedBy: 'dispatch-board-' + (window._myBoardId||'')
   };
 }
 
@@ -2212,6 +2212,8 @@ async function pushOneCrossLoc(nm, otherLoc){
 // ── TIME OVERRIDES ───────────────────────
 let jobOverrides = {}; // key: "techName|jobId" → {start:"HH:MM", end:"HH:MM"}
 let lastLocalChange = 0; // timestamp of last local drag/edit
+// Unique ID for this browser session — used to identify remote vs local saves
+window._myBoardId = Math.random().toString(36).slice(2,8);
 let timeModalTech = null;
 let timeModalJob = null;
 
@@ -2287,8 +2289,37 @@ async function pollSharedState(){
     // Only update if server state is newer than what we have
     if(data.state.ts > lastSyncTs + 5000){
       lastSyncTs = data.state.ts;
-      // Board assignments are 100% manual — NEVER overwrite from remote sync
-      // Only update the sync badge so we know Supabase is connected
+      const today = new Date().toISOString().split('T')[0];
+      if(data.state.date !== today){ updateSyncBadge(data.state.ts); return; }
+      // Only apply if from another user AND no local change in last 5 seconds
+      const fromOther = data.state.savedBy && data.state.savedBy !== 'dispatch-board-' + (window._myBoardId||'');
+      if(fromOther && Date.now() - lastLocalChange > 5000){
+        let changed = false;
+        for(const l of ['appleton','stevens']){
+          for(const [nm, jids] of Object.entries(data.state.assignments?.[l]||{})){
+            if(techQ[l]?.[nm]){
+              const validJids = jids.filter(jid=>jobs[jid]);
+              const current = JSON.stringify(techQ[l][nm].jobs);
+              const incoming = JSON.stringify(validJids);
+              if(current !== incoming){
+                techQ[l][nm].jobs = validJids;
+                unassigned[l] = (unassigned[l]||[]).filter(jid=>!validJids.includes(jid));
+                changed = true;
+              }
+            }
+          }
+          // Clear assignments for techs not in remote state (job was removed)
+          for(const nm of Object.keys(techQ[l]||{})){
+            if(!data.state.assignments?.[l]?.[nm] && techQ[l][nm].jobs.length){
+              unassigned[l] = [...(unassigned[l]||[]), ...techQ[l][nm].jobs.filter(jid=>!(unassigned[l]||[]).includes(jid))];
+              techQ[l][nm].jobs = [];
+              changed = true;
+            }
+          }
+        }
+        if(data.state.sick) data.state.sick.forEach(nm=>sick.add(nm));
+        if(changed){ render(); showToast('🔄 Board updated by ' + (data.state.savedBy||'another user')); }
+      }
       updateSyncBadge(data.state.ts);
     }
   }catch(e){}
@@ -2349,8 +2380,37 @@ function initRealtime() {
         if (!state.ts) return;
         if (state.ts === lastSyncTs) return;
         lastSyncTs = state.ts;
-        // Board assignments are 100% manual — NEVER overwrite from realtime sync
-        // Only update sync badge
+        var today = new Date().toISOString().split('T')[0];
+        if (state.date !== today) { updateSyncBadge(state.ts); return; }
+        // Only apply if from another user AND no local drag in last 5 seconds
+        var fromOther = state.savedBy && state.savedBy !== 'dispatch-board-' + (window._myBoardId||'');
+        if (fromOther && Date.now() - lastLocalChange > 5000) {
+          var changed = false;
+          for (var l of ['appleton','stevens']) {
+            for (var [nm, jids] of Object.entries(state.assignments?.[l]||{})) {
+              if (techQ[l]?.[nm]) {
+                var validJids = jids.filter(function(jid){ return jobs[jid]; });
+                var current  = JSON.stringify(techQ[l][nm].jobs);
+                var incoming = JSON.stringify(validJids);
+                if (current !== incoming) {
+                  techQ[l][nm].jobs = validJids;
+                  unassigned[l] = (unassigned[l]||[]).filter(function(jid){ return !validJids.includes(jid); });
+                  changed = true;
+                }
+              }
+            }
+            // Clear techs that no longer have assignments in remote state
+            for (var rnm of Object.keys(techQ[l]||{})) {
+              if (!state.assignments?.[l]?.[rnm] && techQ[l][rnm].jobs.length) {
+                unassigned[l] = [...(unassigned[l]||[]), ...techQ[l][rnm].jobs.filter(function(jid){ return !(unassigned[l]||[]).includes(jid); })];
+                techQ[l][rnm].jobs = [];
+                changed = true;
+              }
+            }
+          }
+          if (state.sick) state.sick.forEach(function(nm){ sick.add(nm); });
+          if (changed) { render(); showToast('🔄 Board updated by ' + (state.savedBy||'another user')); }
+        }
         updateSyncBadge(state.ts);
       })
       .subscribe(function(status) {
