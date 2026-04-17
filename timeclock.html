@@ -552,6 +552,29 @@ body {
   </div>
 </div>
 
+<!-- CORRECTION REQUEST SHEET -->
+<div class="sheet-overlay" id="correction-sheet" onclick="if(event.target===this)closeCorrectionSheet()">
+  <div class="sheet" onclick="event.stopPropagation()">
+    <div class="sheet-handle"></div>
+    <div class="sheet-title">✏️ Request Time Correction</div>
+    <p style="font-size:12px;color:var(--muted);margin-bottom:14px;line-height:1.5;">Describe what needs to be corrected. Your manager will review and approve.</p>
+    <div id="corr-entry-info" style="background:rgba(13,45,94,.04);border-radius:10px;padding:12px;margin-bottom:14px;font-size:12px;color:var(--navy);"></div>
+    <div style="margin-bottom:12px;">
+      <label style="display:block;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:5px;">What needs fixing?</label>
+      <select id="corr-type" style="width:100%;padding:10px 12px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;font-family:DM Sans,sans-serif;outline:none;background:#fff;margin-bottom:8px;">
+        <option value="wrong_time">Wrong clock-in or clock-out time</option>
+        <option value="missed_punch">Forgot to clock in/out</option>
+        <option value="wrong_job">Wrong job number</option>
+        <option value="break">Break time issue</option>
+        <option value="other">Other</option>
+      </select>
+      <textarea id="corr-note" rows="3" placeholder="Describe the correct time, job, or situation..." style="width:100%;padding:10px 12px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;font-family:DM Sans,sans-serif;outline:none;resize:none;box-sizing:border-box;"></textarea>
+    </div>
+    <button onclick="submitCorrectionRequest()" style="width:100%;padding:15px;background:var(--orange);border:none;border-radius:12px;color:#fff;font-size:15px;font-weight:700;cursor:pointer;font-family:DM Sans,sans-serif;margin-bottom:8px;">Submit Correction Request</button>
+    <button onclick="closeCorrectionSheet()" style="width:100%;padding:12px;background:transparent;border:1.5px solid var(--border);border-radius:12px;font-size:14px;font-weight:600;color:var(--muted);cursor:pointer;font-family:DM Sans,sans-serif;">Cancel</button>
+  </div>
+</div>
+
 <!-- NOTES SHEET -->
 <div class="sheet-overlay" id="notes-overlay" onclick="if(event.target===this)closeNotes()">
   <div class="sheet" onclick="event.stopPropagation()">
@@ -1393,6 +1416,56 @@ async function handleBreak() {
   renderStatus();
 }
 
+// ── CORRECTION REQUESTS ──────────────────────────────────────────────────
+var _corrEntryId = null;
+
+function openCorrectionRequest(entryId, clockIn, clockOut, jobName) {
+  _corrEntryId = entryId;
+  var info = document.getElementById('corr-entry-info');
+  var note = document.getElementById('corr-note');
+  if (info) info.innerHTML = '<strong>Entry:</strong> ' + clockIn + ' → ' + clockOut + '<br><strong>Job:</strong> ' + (jobName || 'No job');
+  if (note) note.value = '';
+  var sheet = document.getElementById('correction-sheet');
+  if (sheet) sheet.classList.add('open');
+}
+
+function closeCorrectionSheet() {
+  var sheet = document.getElementById('correction-sheet');
+  if (sheet) sheet.classList.remove('open');
+  _corrEntryId = null;
+}
+
+async function submitCorrectionRequest() {
+  if (!_corrEntryId || !TC.employee) return;
+  var type = (document.getElementById('corr-type') || {}).value || 'other';
+  var note = ((document.getElementById('corr-note') || {}).value || '').trim();
+  if (!note) { toast('Please describe what needs to be corrected'); return; }
+
+  var btn = document.querySelector('#correction-sheet button');
+  if (btn) { btn.textContent = 'Submitting...'; btn.disabled = true; }
+
+  try {
+    await fetch(SB_URL + '/rest/v1/time_corrections', {
+      method: 'POST',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
+      body: JSON.stringify({
+        entry_id: _corrEntryId,
+        employee_name: TC.employee.name,
+        employee_email: TC.user ? TC.user.email : '',
+        correction_type: type,
+        notes: note,
+        status: 'pending'
+      })
+    });
+    closeCorrectionSheet();
+    toast('✓ Correction request submitted — your manager will review it');
+  } catch(err) {
+    toast('Error submitting request — try again');
+  }
+
+  if (btn) { btn.textContent = 'Submit Correction Request'; btn.disabled = false; }
+}
+
 // ── LOCATION PINGS ───────────────────────────────────────────────────────
 var _pingInterval = null;
 
@@ -1775,13 +1848,16 @@ async function loadMyHours() {
   el.innerHTML = entries.map(function(e){
     var mins = e.duration_minutes || Math.floor(((e.clock_out?new Date(e.clock_out):new Date())-new Date(e.clock_in))/60000);
     var active = !e.clock_out;
-    return '<div class="team-member">'+
+    return '<div class="team-member" style="flex-wrap:wrap;gap:6px;">'+
       '<div style="font-size:10px;font-weight:700;color:var(--muted);min-width:44px;text-align:center;">'+fmtDate(e.clock_in)+'</div>'+
       '<div class="team-info">'+
         '<div class="team-name">'+(e.job_name||'No job')+'</div>'+
         '<div class="team-job">'+fmtTime(e.clock_in)+(e.clock_out?' - '+fmtTime(e.clock_out):' Active')+'</div>'+
       '</div>'+
-      '<div class="team-dur" style="color:'+(active?'var(--green)':'var(--navy)')+';">'+fmtDur(mins)+'</div>'+
+      '<div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px;">'+
+        '<div class="team-dur" style="color:'+(active?'var(--green)':'var(--navy)')+';">'+fmtDur(mins)+'</div>'+
+        (!active?'<button onclick="openCorrectionRequest(\''+e.id+'\',\''+fmtDate(e.clock_in)+' '+fmtTime(e.clock_in)+'\',\''+fmtTime(e.clock_out)+'\',\''+e.job_name+'\')" style="font-size:10px;padding:2px 8px;border-radius:6px;border:1px solid var(--border);background:transparent;cursor:pointer;color:var(--muted);font-family:DM Sans,sans-serif;">✏️ Fix</button>':'')+
+      '</div>'+
     '</div>';
   }).join('');
 }
