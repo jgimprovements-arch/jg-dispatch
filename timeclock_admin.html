@@ -293,13 +293,16 @@ async function loadAll() {
   var emps = await sb('/rest/v1/employees?order=name.asc&select=*');
   ST.employees = emps || [];
 
-  var since = ST.filterDate || new Date(Date.now()-14*86400000).toISOString().split('T')[0];
+  var since = ST.filterDate || new Date(Date.now()-60*86400000).toISOString().split('T')[0];
   var until = ST.filterDateEnd ? ST.filterDateEnd+'T23:59:59' : new Date().toISOString();
   var entries = await sb('/rest/v1/time_entries?clock_in=gte.'+since+'T00:00:00&clock_in=lte.'+until+'&order=clock_in.desc&limit=500&select=*');
   ST.entries = entries || [];
 
   var brks = await sb('/rest/v1/time_breaks?select=*');
   ST.breaks = brks || [];
+
+  var abs = await sb('/rest/v1/absence_records?date=gte.'+since+'&order=date.desc&limit=200&select=*');
+  ST.absences = abs || [];
 
   render();
 }
@@ -521,6 +524,37 @@ function renderTimesheets() {
       h += '</tr>';
     });
     h += '</tbody></table></div>';
+
+    // Absence records for this period
+    var periodAbsences = ST.absences.filter(function(a){
+      if (!curPer) return false;
+      var d = new Date(a.date + 'T00:00:00'); d.setHours(0,0,0,0);
+      return d >= curPer.start && d <= curPer.end;
+    }).filter(function(a){
+      return ST.filterEmp === 'All' || a.employee_name === ST.filterEmp;
+    });
+
+    if (periodAbsences.length) {
+      h += '<div class="card" style="margin-top:12px;"><div class="card-hdr"><div class="card-title">Absences / Out of Office</div></div>';
+      h += '<table class="tc-table"><thead><tr><th>Employee</th><th>Date</th><th>Reason</th><th>Market</th><th>Logged By</th><th>Notes</th><th></th></tr></thead><tbody>';
+      periodAbsences.forEach(function(a){
+        var badge = {
+          'Sick': 'badge-red', 'PTO': 'badge-green', 'No Call No Show': 'badge-red',
+          'Personal': 'badge-warn', 'Injured': 'badge-red', 'Training': 'badge-green',
+          'Shop Time': 'badge-warn', 'Jury Duty': 'badge-gray', 'Bereavement': 'badge-gray'
+        }[a.reason] || 'badge-gray';
+        h += '<tr>';
+        h += '<td><strong>'+a.employee_name+'</strong></td>';
+        h += '<td>'+fmtD(new Date(a.date+'T00:00:00'))+'</td>';
+        h += '<td><span class="badge '+badge+'">'+a.reason+'</span></td>';
+        h += '<td>'+(a.market||'-')+'</td>';
+        h += '<td style="font-size:11px;color:var(--muted);">'+(a.logged_by||'admin')+'</td>';
+        h += '<td style="font-size:11px;color:var(--muted);">'+(a.notes||'')+'</td>';
+        h += '<td><button class="btn btn-sm btn-danger" onclick="deleteAbsence(\''+a.id+'\')">Remove</button></td>';
+        h += '</tr>';
+      });
+      h += '</tbody></table></div>';
+    }
   }
 
   document.getElementById('tc-body').innerHTML = h;
@@ -535,6 +569,34 @@ async function approveEarly(entryId) {
   toast('Early start approved');
   await loadAll();
   renderTimesheets();
+}
+
+async function deleteAbsence(id) {
+  if (!confirm('Remove this absence record?')) return;
+  await fetch(SB_URL + '/rest/v1/absence_records?id=eq.' + id, {
+    method: 'DELETE',
+    headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+  });
+  toast('Absence removed');
+  await loadAll();
+  renderTimesheets();
+}
+
+async function addAbsence() {
+  var name   = (document.getElementById('abs-name')   || {}).value || '';
+  var date   = (document.getElementById('abs-date')   || {}).value || '';
+  var reason = (document.getElementById('abs-reason') || {}).value || 'Sick';
+  var notes  = (document.getElementById('abs-notes')  || {}).value || '';
+  var market = (document.getElementById('abs-market') || {}).value || 'Appleton';
+  if (!name || !date) { toast('Name and date required'); return; }
+  await fetch(SB_URL + '/rest/v1/absence_records', {
+    method: 'POST',
+    headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
+    body: JSON.stringify({ employee_name: name, date: date, reason: reason, notes: notes, market: market, logged_by: 'admin' })
+  });
+  toast('Absence recorded for ' + name);
+  await loadAll();
+  showTab('timesheets', document.getElementById('tab-timesheets'));
 }
 
 function exportPayPeriodCSV() {
@@ -648,6 +710,26 @@ function renderReports() {
     h += '</tr>';
   });
   h += '</tbody></table></div>';
+
+
+  // Absence / Out of Office log section
+  h += '<div class="card" style="margin-top:20px;">';
+  h += '<div class="card-hdr"><div class="card-title">Log Absence / Out of Office</div></div>';
+  h += '<div class="card-body">';
+  h += '<p style="font-size:12px;color:var(--muted);margin-bottom:14px;line-height:1.5;">Manually log an employee absence. This will appear in timesheets for the pay period.</p>';
+  h += '<div class="form-row">';
+  h += '<div><label class="form-label">Employee *</label><select class="form-select" id="abs-name"><option value="">-- Select --</option>';
+  ST.employees.filter(function(e){return e.active;}).forEach(function(e){ h += '<option>'+e.name+'</option>'; });
+  h += '</select></div>';
+  h += '<div><label class="form-label">Date *</label><input type="date" class="form-input" id="abs-date" value="'+new Date().toISOString().split('T')[0]+'"></div>';
+  h += '</div>';
+  h += '<div class="form-row">';
+  h += '<div><label class="form-label">Reason</label><select class="form-select" id="abs-reason"><option>Sick</option><option>PTO</option><option>Personal Day</option><option>No Call No Show</option><option>Injured</option><option>Training</option><option>Shop Time</option><option>Jury Duty</option><option>Bereavement</option><option>Other</option></select></div>';
+  h += '<div><label class="form-label">Market</label><select class="form-select" id="abs-market"><option>Appleton</option><option>Stevens Point</option></select></div>';
+  h += '</div>';
+  h += '<div><label class="form-label">Notes (optional)</label><input type="text" class="form-input" id="abs-notes" placeholder="e.g. Called in sick at 6am..."></div>';
+  h += '<button class="btn btn-primary" onclick="addAbsence()" style="margin-top:12px;width:100%;padding:11px;">+ Log Absence</button>';
+  h += '</div></div>';
 
   document.getElementById('tc-body').innerHTML = h;
 }
