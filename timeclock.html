@@ -826,68 +826,63 @@ async function loadAll() {
 
 async function loadJobs() {
   var jobs = [];
+  var jobMap = {};
 
-  // Pull jobs from BOTH Albi locations via proxy
-  var PROXY = 'https://jg-proxy-v2.vercel.app/api/albi';
-  var locations = [
-    { id: 222, name: 'Appleton' },
-    { id: 1477, name: 'Stevens Point' }
-  ];
-
-  for (var loc of locations) {
-    try {
-      var page = 1;
-      while (page <= 20) {
-        var r = await fetch(PROXY, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'get_projects', locationId: loc.id, page: page, limit: 50 })
-        });
-        if (!r.ok) break;
-        var data = await r.json();
-        var items = data.projects || data.data || [];
-        if (!items.length) break;
-        items.forEach(function(p) {
-          var jid = p.uniqueNumber || p.id;
-          if (!jid) return;
-          var name = p.name || p.projectName || String(jid);
-          if (!jobs.find(function(j){ return j.id === String(jid); })) {
-            jobs.push({
-              id: String(jid),
-              name: name,
-              market: loc.name,
-              type: p.projectType || '',
-              status: p.status || ''
-            });
-          }
-        });
-        if (items.length < 50) break;
-        page++;
-      }
-    } catch(e) {
-      console.warn('Albi fetch failed for ' + loc.name + ':', e.message);
-    }
-  }
-
-  // Fallback: also include jobs from dispatch board_state if Albi returned nothing
-  if (!jobs.length) {
+  // PRIMARY: board_state covers both markets reliably
+  try {
     var bs = await sb('/rest/v1/board_state?id=eq.current&select=state');
     if (bs && bs[0] && bs[0].state) {
       var state = bs[0].state;
       var jobNames = state.jobNames || {};
-      Object.keys(state.assignments || {}).forEach(function(market) {
-        Object.keys(state.assignments[market] || {}).forEach(function(tech) {
-          (state.assignments[market][tech] || []).forEach(function(jobId) {
-            if (!jobs.find(function(j){ return j.id === jobId; })) {
-              jobs.push({ id: jobId, name: jobNames[jobId] || jobId, market: market, tech: tech });
+      var assignments = state.assignments || {};
+      ['appleton','stevens'].forEach(function(mkt) {
+        var mktLabel = mkt === 'appleton' ? 'Appleton' : 'Stevens Point';
+        Object.keys(assignments[mkt] || {}).forEach(function(tech) {
+          (assignments[mkt][tech] || []).forEach(function(jobId) {
+            if (!jobMap[jobId]) {
+              var name = jobNames[jobId] || jobId;
+              jobMap[jobId] = { id: jobId, name: name, market: mktLabel };
+              jobs.push(jobMap[jobId]);
             }
           });
         });
       });
+      // Also unassigned pool
+      ['appleton','stevens'].forEach(function(mkt) {
+        var mktLabel = mkt === 'appleton' ? 'Appleton' : 'Stevens Point';
+        ((state.unassigned || {})[mkt] || []).forEach(function(jobId) {
+          if (!jobMap[jobId]) {
+            var name = jobNames[jobId] || jobId;
+            jobMap[jobId] = { id: jobId, name: name, market: mktLabel };
+            jobs.push(jobMap[jobId]);
+          }
+        });
+      });
     }
-  }
+  } catch(e) { console.warn('board_state failed:', e.message); }
 
-  // Sort: active/in-progress first, then alphabetical
+  // SECONDARY: Albi proxy for any extra active jobs
+  try {
+    var PROXY = 'https://jg-proxy-v2.vercel.app/api/albi';
+    for (var loc of [{ id: 222, name: 'Appleton' }, { id: 1477, name: 'Stevens Point' }]) {
+      var r = await fetch(PROXY, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'get_projects', locationId: loc.id, page: 1, limit: 50 })
+      });
+      if (r.ok) {
+        var data = await r.json();
+        (data.projects || data.data || []).forEach(function(p) {
+          var jid = String(p.uniqueNumber || p.id || '');
+          if (!jid || jobMap[jid]) return;
+          var name = p.name || p.projectName || jid;
+          jobMap[jid] = { id: jid, name: name, market: loc.name };
+          jobs.push(jobMap[jid]);
+        });
+      }
+    }
+  } catch(e) { /* proxy may be blocked */ }
+
   jobs.sort(function(a, b) { return a.name.localeCompare(b.name); });
   TC.jobs = jobs;
   renderJobs();
