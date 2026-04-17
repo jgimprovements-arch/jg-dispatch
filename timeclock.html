@@ -495,8 +495,12 @@ body {
       <div style="font-size:13px;color:var(--muted);margin-bottom:6px;">Job</div>
       <div id="job-sheet-name" style="font-size:17px;font-weight:700;color:var(--navy);"></div>
     </div>
-    <div id="job-sheet-sub" style="font-size:13px;color:var(--muted);margin-bottom:20px;text-align:center;line-height:1.5;"></div>
-    <button id="job-sheet-btn" class="submit-btn" style="font-size:16px;font-weight:700;padding:18px;border-radius:14px;border:none;color:#fff;cursor:pointer;width:100%;font-family:'DM Sans',sans-serif;"></button>
+    <div id="job-sheet-sub" style="font-size:13px;color:var(--muted);margin-bottom:16px;text-align:center;line-height:1.5;"></div>
+    <div id="job-sheet-note-wrap" style="margin-bottom:14px;">
+      <label style="display:block;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:5px;">Note (optional)</label>
+      <textarea id="job-sheet-note" rows="2" placeholder="e.g. Started demo in kitchen, travel from shop..." style="width:100%;padding:10px 12px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;font-family:'DM Sans',sans-serif;outline:none;resize:none;box-sizing:border-box;"></textarea>
+    </div>
+    <button id="job-sheet-btn" style="font-size:16px;font-weight:700;padding:18px;border-radius:14px;border:none;color:#fff;cursor:pointer;width:100%;font-family:'DM Sans',sans-serif;"></button>
     <button onclick="closeJobSheet()" style="width:100%;margin-top:10px;padding:13px;background:transparent;border:1.5px solid var(--border);border-radius:12px;font-size:14px;font-weight:600;color:var(--muted);cursor:pointer;font-family:'DM Sans',sans-serif;">Cancel</button>
   </div>
 </div>
@@ -1011,7 +1015,10 @@ function renderJobs() {
     var sel = j.id === TC.selectedJobId;
     var colors = { 'Appleton': '#1565c0', 'Stevens Point': '#2e7d32' };
     var color = colors[j.market] || '#546e7a';
-    return '<div class="job-row' + (sel?' selected':'') + '" onclick="selectJob(' + JSON.stringify(j.id) + ',' + JSON.stringify(j.name) + ',' + JSON.stringify(j.market||'') + ')">' +
+    var safeId   = (j.id||'').replace(/'/g,'&#39;');
+    var safeName = (j.name||'').replace(/'/g,'&#39;');
+    var safeMkt  = (j.market||'').replace(/'/g,'&#39;');
+    return '<div class="job-row' + (sel?' selected':'') + '" onclick="selectJob(this)" data-id="' + safeId + '" data-name="' + safeName + '" data-market="' + safeMkt + '">' +
       '<div class="job-dot" style="background:' + color + ';"></div>' +
       '<div class="job-info"><div class="job-name">' + j.name + '</div><div class="job-meta">' + (j.market||'') + (j.type?' · '+j.type:'') + '</div></div>' +
       '<div class="job-check">&#10003;</div>' +
@@ -1019,16 +1026,24 @@ function renderJobs() {
   }).join('') + (filtered.length > 100 ? '<div style="padding:8px 14px;font-size:11px;color:var(--muted);text-align:center;">Showing 100 of '+filtered.length+' — search to narrow down</div>' : '');
 }
 // ACTIONS 
-function selectJob(id, name, market) {
-  TC.selectedJobId = id;
-  TC.selectedJobName = name;
+function selectJob(elOrId, name, market) {
+  var id, nm, mkt;
+  if (elOrId && typeof elOrId === 'object' && elOrId.dataset) {
+    id  = elOrId.dataset.id;
+    nm  = elOrId.dataset.name;
+    mkt = elOrId.dataset.market;
+  } else {
+    id  = elOrId;
+    nm  = name;
+    mkt = market;
+  }
+  TC.selectedJobId   = id;
+  TC.selectedJobName = nm;
 
   if (TC.clockedIn && TC.activeEntry) {
-    // Already clocked in — show switch job sheet
-    openJobSheet(id, name, true);
+    openJobSheet(id, nm, true);
   } else {
-    // Not clocked in — show clock in confirmation sheet
-    openJobSheet(id, name, false);
+    openJobSheet(id, nm, false);
   }
 }
 
@@ -1113,6 +1128,8 @@ async function clockIn() {
   var loc = await getLocation();
   var now = new Date().toISOString();
 
+  var pendingNote = TC._pendingNote || null;
+  TC._pendingNote = null;
   var payload = {
     employee_id: TC.employee.id,
     employee_name: TC.employee.name,
@@ -1123,6 +1140,7 @@ async function clockIn() {
     clock_in: now,
     clock_in_lat: loc ? loc.lat : null,
     clock_in_lng: loc ? loc.lng : null,
+    notes: pendingNote,
     status: 'active'
   };
 
