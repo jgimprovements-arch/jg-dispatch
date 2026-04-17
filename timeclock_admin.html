@@ -279,6 +279,20 @@ function jgCheckAuth() {
   document.getElementById('jg-login').style.display='flex'; return false;
 }
 
+var ADMIN_EMAILS = ['josh@jg-restoration.com','jgimprovements@gmail.com'];
+
+function isAdmin() {
+  try {
+    var u = JSON.parse(localStorage.getItem('jg_platform_user') || 'null');
+    if (!u) return false;
+    var email = (u.email || '').toLowerCase();
+    if (ADMIN_EMAILS.includes(email)) return true;
+    // Also check if employee role is Admin
+    var emp = ST.employees.find(function(e){ return e.email === email; });
+    return emp && emp.role === 'Admin';
+  } catch(e) { return false; }
+}
+
 // ── SUPABASE ──────────────────────────────────────────────────────────────
 async function sb(path, opts) {
   var r = await fetch(SB_URL+path, Object.assign({
@@ -613,7 +627,7 @@ function renderTimesheets() {
       h += '<td>'+(bkMins?fmtDur(bkMins):'-')+'</td>';
       h += '<td style="max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+(e.job_name||'-')+'</td>';
       h += '<td>'+flagCell+'</td>';
-      h += '<td><button class="btn btn-sm" onclick="editEntry(\''+e.id+'\')">Edit</button></td>';
+      h += '<td>'+(isAdmin() ? '<button class="btn btn-sm" onclick="editEntry(\''+e.id+'\')">Edit</button>' : '<button class="btn btn-sm" onclick="viewEntry(\''+e.id+'\')">View</button>')+'</td>';
       h += '</tr>';
     });
     h += '</tbody></table></div>';
@@ -971,6 +985,43 @@ async function toggleEmployee(id, isActive) {
 }
 
 // ── ENTRY EDIT ────────────────────────────────────────────────────────────
+function viewEntry(id) {
+  var e = ST.entries.find(function(x){ return x.id===id; });
+  if (!e) return;
+  var fmt = function(iso){ if(!iso)return '--'; var d=new Date(iso),h=d.getHours()%12||12,m=d.getMinutes(),ap=d.getHours()>=12?'PM':'AM'; return h+':'+(m<10?'0':'')+m+' '+ap; };
+  var breaks = ST.breaks.filter(function(b){ return b.entry_id === e.id; });
+  var bkMins = breaks.reduce(function(s,b){ return s+(b.duration_minutes||0); }, 0);
+  var billMins = billableMins(e, breaks);
+  var fmtDur = function(m){ return Math.floor(m/60)+'h '+(m%60)+'m'; };
+  var early = isEarlyClockIn(e.clock_in);
+
+  var rows = [
+    ['Employee', e.employee_name],
+    ['Date', fmtD(new Date(e.clock_in))],
+    ['Clock In', fmt(e.clock_in) + (early && !e.approved_early ? ' ⚠ Early (billable from 7:30)' : '')],
+    ['Clock Out', e.clock_out ? fmt(e.clock_out) : 'Still active'],
+    ['Billable Hours', fmtDur(billMins)],
+    ['Break Time', bkMins ? fmtDur(bkMins) : 'None'],
+    ['Job', e.job_name || 'No job'],
+    ['Notes', e.notes || '—'],
+    ['GPS', e.clock_in_lat ? e.clock_in_lat.toFixed(4)+', '+e.clock_in_lng.toFixed(4) : 'Not recorded']
+  ];
+
+  var html = '<div style="background:rgba(13,45,94,.03);border-radius:10px;overflow:hidden;">';
+  rows.forEach(function(row){
+    html += '<div style="display:flex;padding:10px 14px;border-bottom:1px solid var(--border);">';
+    html += '<div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;width:120px;flex-shrink:0;">'+row[0]+'</div>';
+    html += '<div style="font-size:13px;color:var(--text);">'+row[1]+'</div>';
+    html += '</div>';
+  });
+  html += '</div>';
+  if (e.clock_in_lat) {
+    html += '<a href="https://maps.google.com/?q='+e.clock_in_lat+','+e.clock_in_lng+'" target="_blank" style="display:block;text-align:center;margin-top:12px;font-size:12px;color:var(--orange);font-weight:600;">View Clock-In Location on Map</a>';
+  }
+
+  showModal('Time Card — '+e.employee_name, html, null);
+}
+
 function editEntry(id) {
   var e = ST.entries.find(function(x){ return x.id===id; });
   if (!e) return;
