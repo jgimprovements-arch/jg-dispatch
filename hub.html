@@ -705,5 +705,197 @@ document.addEventListener('DOMContentLoaded',()=>{
   setInterval(loadStats,60000);
 });
 </script>
+<!-- ══ JG TIMECLOCK FLOATING WIDGET ══ -->
+<!-- Add this block just before </body> on every page -->
+<style>
+.tc-fab {
+  position: fixed; bottom: 70px; left: 8px;
+  width: 36px; height: 36px; border-radius: 50%;
+  background: var(--orange, #e85d04);
+  border: none; cursor: pointer; z-index: 500;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 16px; box-shadow: 0 2px 8px rgba(0,0,0,.3);
+  transition: transform .15s, box-shadow .15s;
+}
+.tc-fab:hover { transform: scale(1.1); box-shadow: 0 4px 16px rgba(0,0,0,.4); }
+.tc-fab.clocked-in { background: #2e7d32; }
+
+.tc-widget {
+  position: fixed; bottom: 115px; left: 58px;
+  width: 280px; background: #fff;
+  border-radius: 14px; box-shadow: 0 8px 32px rgba(13,45,94,.25);
+  z-index: 500; overflow: hidden;
+  display: none; animation: tcFadeIn .2s ease;
+  font-family: 'DM Sans', sans-serif;
+}
+@keyframes tcFadeIn { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
+.tc-widget.open { display: block; }
+.tc-widget-hdr {
+  background: #0d2d5e; padding: 10px 14px;
+  display: flex; align-items: center; justify-content: space-between;
+}
+.tc-widget-title { font-size: 13px; font-weight: 700; color: #fff; }
+.tc-widget-close { background: none; border: none; color: rgba(255,255,255,.6); font-size: 18px; cursor: pointer; line-height: 1; padding: 0; }
+.tc-widget-body { padding: 14px; }
+.tc-widget-status { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: #6b7a96; margin-bottom: 4px; display: flex; align-items: center; gap: 6px; }
+.tc-widget-dot { width: 8px; height: 8px; border-radius: 50%; background: #6b7a96; }
+.tc-widget-dot.in { background: #2e7d32; animation: tcPulse 2s infinite; }
+@keyframes tcPulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+.tc-widget-time { font-family: 'DM Mono', monospace; font-size: 28px; font-weight: 600; color: #0d2d5e; line-height: 1; margin: 6px 0 2px; }
+.tc-widget-dur { font-size: 12px; font-weight: 600; color: #2e7d32; min-height: 16px; }
+.tc-widget-job { font-size: 11px; color: #6b7a96; margin: 4px 0 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tc-widget-btn {
+  width: 100%; padding: 11px; border: none; border-radius: 10px;
+  font-size: 13px; font-weight: 700; cursor: pointer;
+  font-family: 'DM Sans', sans-serif; margin-bottom: 6px;
+}
+.tc-widget-btn.in { background: #2e7d32; color: #fff; }
+.tc-widget-btn.out { background: #c62828; color: #fff; }
+.tc-widget-link { display: block; text-align: center; font-size: 11px; color: #e85d04; text-decoration: none; font-weight: 600; margin-top: 4px; }
+</style>
+
+<!-- FAB button in sidebar -->
+<button class="tc-fab" id="tc-fab" onclick="tcToggleWidget()" title="Time Clock">&#9201;</button>
+
+<!-- Floating widget -->
+<div class="tc-widget" id="tc-widget">
+  <div class="tc-widget-hdr">
+    <div class="tc-widget-title">&#9201; Time Clock</div>
+    <button class="tc-widget-close" onclick="tcToggleWidget()">&#215;</button>
+  </div>
+  <div class="tc-widget-body">
+    <div class="tc-widget-status"><div class="tc-widget-dot" id="tc-w-dot"></div><span id="tc-w-status">Clocked Out</span></div>
+    <div class="tc-widget-time" id="tc-w-time">--:--</div>
+    <div class="tc-widget-dur" id="tc-w-dur"></div>
+    <div class="tc-widget-job" id="tc-w-job"></div>
+    <button class="tc-widget-btn in" id="tc-w-btn" onclick="tcMainAction()">&#128296; Clock In</button>
+    <a href="timeclock.html" class="tc-widget-link" target="_blank">Open Full Time Clock &#8599;</a>
+  </div>
+</div>
+
+<script>
+(function() {
+  var SB_URL = 'https://nuykvchgecpiuikoerze.supabase.co';
+  var SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im51eWt2Y2hnZWNwaXVpa29lcnplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYyNjM3ODYsImV4cCI6MjA5MTgzOTc4Nn0.39hZ8DdjT_0iFJXPeAL2FXUSLw8FZBirDVzxZTO1W9s';
+  var TC_W = { clockedIn: false, entry: null, employee: null, clockInTime: null, user: null };
+
+  // Load user from platform session
+  function tcGetUser() {
+    try { return JSON.parse(localStorage.getItem('jg_platform_user') || 'null'); } catch(e) { return null; }
+  }
+
+  async function tcSb(path, opts) {
+    var r = await fetch(SB_URL + path, Object.assign({ headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' } }, opts || {}));
+    if (!r.ok) return null;
+    var t = await r.text();
+    return t ? JSON.parse(t) : true;
+  }
+
+  async function tcLoadState() {
+    var u = tcGetUser();
+    if (!u) return;
+    TC_W.user = u;
+
+    // Find employee record
+    var emps = await tcSb('/rest/v1/employees?email=eq.' + encodeURIComponent(u.email) + '&select=*');
+    if (emps && emps[0]) TC_W.employee = emps[0];
+
+    // Check if clocked in today
+    if (TC_W.employee && TC_W.employee.id) {
+      var today = new Date().toISOString().split('T')[0];
+      var entries = await tcSb('/rest/v1/time_entries?employee_id=eq.' + TC_W.employee.id + '&clock_out=is.null&clock_in=gte.' + today + 'T00:00:00&select=*');
+      if (entries && entries[0]) {
+        TC_W.entry = entries[0];
+        TC_W.clockedIn = true;
+        TC_W.clockInTime = new Date(entries[0].clock_in).getTime();
+      }
+    }
+    tcRender();
+  }
+
+  function tcRender() {
+    var fab = document.getElementById('tc-fab');
+    var dot = document.getElementById('tc-w-dot');
+    var status = document.getElementById('tc-w-status');
+    var dur = document.getElementById('tc-w-dur');
+    var job = document.getElementById('tc-w-job');
+    var btn = document.getElementById('tc-w-btn');
+    if (!fab) return;
+
+    if (TC_W.clockedIn) {
+      fab.classList.add('clocked-in');
+      fab.textContent = '';
+      fab.innerHTML = '&#9646;&#9646;';
+      if (dot) { dot.className = 'tc-widget-dot in'; }
+      if (status) status.textContent = 'Clocked In';
+      if (TC_W.entry && TC_W.entry.job_name && job) job.textContent = '&#128203; ' + TC_W.entry.job_name;
+      if (btn) { btn.textContent = '&#9632; Clock Out'; btn.className = 'tc-widget-btn out'; }
+    } else {
+      fab.classList.remove('clocked-in');
+      fab.innerHTML = '&#9201;';
+      if (dot) dot.className = 'tc-widget-dot';
+      if (status) status.textContent = 'Clocked Out';
+      if (dur) dur.textContent = '';
+      if (job) job.textContent = '';
+      if (btn) { btn.innerHTML = '&#128296; Clock In'; btn.className = 'tc-widget-btn in'; }
+    }
+  }
+
+  // Live clock tick
+  setInterval(function() {
+    var el = document.getElementById('tc-w-time');
+    if (!el) return;
+    var now = new Date();
+    var h = now.getHours() % 12 || 12, m = now.getMinutes(), ap = now.getHours() >= 12 ? 'PM' : 'AM';
+    el.textContent = h + ':' + (m < 10 ? '0' : '') + m + ' ' + ap;
+    // Update duration
+    var dur = document.getElementById('tc-w-dur');
+    if (TC_W.clockedIn && TC_W.clockInTime && dur) {
+      var mins = Math.floor((Date.now() - TC_W.clockInTime) / 60000);
+      dur.textContent = 'On clock: ' + Math.floor(mins/60) + 'h ' + (mins%60) + 'm';
+    }
+  }, 1000);
+
+  window.tcToggleWidget = function() {
+    var w = document.getElementById('tc-widget');
+    if (!w) return;
+    w.classList.toggle('open');
+    if (w.classList.contains('open') && !TC_W.user) tcLoadState();
+  };
+
+  window.tcMainAction = async function() {
+    if (!TC_W.employee) {
+      window.open('timeclock.html', '_blank'); return;
+    }
+    var btn = document.getElementById('tc-w-btn');
+    if (btn) { btn.disabled = true; btn.textContent = '...'; }
+
+    if (TC_W.clockedIn && TC_W.entry) {
+      // Clock out
+      var now = new Date().toISOString();
+      var dur = Math.floor((Date.now() - TC_W.clockInTime) / 60000);
+      await fetch(SB_URL + '/rest/v1/time_entries?id=eq.' + TC_W.entry.id, {
+        method: 'PATCH',
+        headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ clock_out: now, duration_minutes: dur, status: 'complete' })
+      });
+      TC_W.clockedIn = false; TC_W.entry = null; TC_W.clockInTime = null;
+    } else {
+      // Clock in — open timeclock to select job first
+      window.open('timeclock.html', '_blank');
+      return;
+    }
+    tcRender();
+    if (btn) btn.disabled = false;
+  };
+
+  // Init on load
+  document.addEventListener('DOMContentLoaded', function() {
+    setTimeout(tcLoadState, 1500);
+  });
+})();
+</script>
+<!-- ══ END TIMECLOCK WIDGET ══ -->
+
 </body>
 </html>
