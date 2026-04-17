@@ -993,10 +993,11 @@ function renderEmployees() {
       : (emp.hourly_rate ? '$'+emp.hourly_rate+'/hr' : '-');
     var payType = emp.pay_type === 'salary' ? '<span class="badge badge-warn" style="margin-left:4px;">Salary</span>' : '';
     h += '<td class="mono">'+payDisplay+payType+'</td>';
-    var ptoAvail = parseFloat(emp.pto_hours_available||0);
-    var ptoUsed  = parseFloat(emp.pto_hours_used||0);
-    var ptoColor = ptoAvail <= 8 ? '#c62828' : ptoAvail <= 24 ? '#e65100' : '#2e7d32';
-    h += '<td><span style="font-weight:700;color:'+ptoColor+';">'+ptoAvail+'h</span></td>';
+    var ptoAvail  = parseFloat(emp.pto_hours_available||0);
+    var ptoUsed   = parseFloat(emp.pto_hours_used||0);
+    var ptoTotal  = ptoAvail + ptoUsed;
+    var ptoColor  = ptoAvail <= 8 ? '#c62828' : ptoAvail <= 24 ? '#e65100' : '#2e7d32';
+    h += '<td><div style="font-size:11px;color:var(--muted);">'+ptoTotal+'h earned</div><div style="font-weight:700;color:'+ptoColor+';">'+ptoAvail+'h left</div></td>';
     h += '<td style="color:var(--muted);">'+ptoUsed+'h</td>';
     var onDispatch = emp.show_on_dispatch !== false;
     h += '<td>'+(onDispatch?'<span class="badge badge-green">Yes</span>':'<span class="badge badge-gray">No</span>')+'</td>';
@@ -1328,6 +1329,19 @@ function openEditEmployee(id) {
   showModal('Edit Employee', html, 'saveEmployee()');
 }
 
+function calcPtoRemaining() {
+  var total = parseFloat((document.getElementById('emp-pto-total') || {}).value) || 0;
+  var used  = parseFloat((document.getElementById('emp-pto-used')  || {}).value) || 0;
+  var remaining = Math.max(0, total - used);
+  var dispEl = document.getElementById('emp-pto-remaining-display');
+  var hiddenEl = document.getElementById('emp-pto-available');
+  if (dispEl) {
+    dispEl.textContent = remaining.toFixed(1) + ' hrs';
+    dispEl.style.color = remaining <= 8 ? '#c62828' : remaining <= 24 ? '#e65100' : '#2e7d32';
+  }
+  if (hiddenEl) hiddenEl.value = remaining;
+}
+
 function togglePayFields() {
   var type = (document.getElementById('emp-pay-type') || {}).value;
   var hourlyDiv = document.getElementById('emp-hourly-fields');
@@ -1382,12 +1396,18 @@ function buildEmpForm(emp) {
     '</label>' +
     '</div></div>' +
     '<div style="border-top:1px solid var(--border);margin:12px 0;padding-top:12px;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;">PTO / Vacation</div>' +
+    '<div style="font-size:11px;color:var(--muted);margin-bottom:10px;line-height:1.5;">Total Earned = hours employee has earned. Used = hours taken. Remaining is calculated automatically.</div>' +
     '<div class="form-row">' +
-    '<div><label class="form-label">Available Hours</label><input class="form-input" id="emp-pto-available" type="number" step="0.5" value="'+(emp.pto_hours_available||0)+'"></div>' +
-    '<div><label class="form-label">Used Hours</label><input class="form-input" id="emp-pto-used" type="number" step="0.5" value="'+(emp.pto_hours_used||0)+'"></div>' +
+    '<div><label class="form-label">Total Earned (hrs)</label><input class="form-input" id="emp-pto-total" type="number" step="0.5" value="'+((parseFloat(emp.pto_hours_available||0)+parseFloat(emp.pto_hours_used||0))||0)+'" oninput="calcPtoRemaining()" placeholder="e.g. 80"></div>' +
+    '<div><label class="form-label">Used (hrs)</label><input class="form-input" id="emp-pto-used" type="number" step="0.5" value="'+(emp.pto_hours_used||0)+'" oninput="calcPtoRemaining()" placeholder="0"></div>' +
     '</div>' +
+    '<div style="background:rgba(13,45,94,.04);border-radius:10px;padding:10px 14px;margin-bottom:12px;display:flex;justify-content:space-between;align-items:center;">' +
+    '<span style="font-size:12px;font-weight:700;color:var(--muted);">REMAINING (auto)</span>' +
+    '<span id="emp-pto-remaining-display" style="font-size:18px;font-weight:700;color:var(--green);">'+(parseFloat(emp.pto_hours_available||0))+' hrs</span>' +
+    '</div>' +
+    '<input type="hidden" id="emp-pto-available" value="'+(emp.pto_hours_available||0)+'">' +
     '<div class="form-row">' +
-    '<div><label class="form-label">Accrual Rate (hrs/pay period)</label><input class="form-input" id="emp-pto-accrual" type="number" step="0.5" value="'+(emp.pto_accrual_rate||0)+'" placeholder="e.g. 3.08 = 2 wks/yr"></div>' +
+    '<div><label class="form-label">Accrual Rate (hrs/pay period)</label><input class="form-input" id="emp-pto-accrual" type="number" step="0.5" value="'+(emp.pto_accrual_rate||0)+'" placeholder="e.g. 3.08"></div>' +
     '<div><label class="form-label">Notes</label><input class="form-input" id="emp-pto-notes" type="text" value="'+(emp.pto_notes||'')+'" placeholder="e.g. 2 weeks/yr after 1 year"></div>' +
     '</div>';
 }
@@ -1404,8 +1424,8 @@ async function saveEmployee() {
     pay_type: (document.getElementById('emp-pay-type') || {}).value || 'hourly',
     annual_salary: parseFloat((document.getElementById('emp-salary') || {}).value) || null,
     daily_rate: parseFloat((document.getElementById('emp-daily-rate') || {}).value) || null,
-    pto_hours_available: parseFloat(document.getElementById('emp-pto-available').value) || 0,
-    pto_hours_used: parseFloat(document.getElementById('emp-pto-used').value) || 0,
+    pto_hours_used: parseFloat((document.getElementById('emp-pto-used')||{}).value) || 0,
+    pto_hours_available: Math.max(0, (parseFloat((document.getElementById('emp-pto-total')||{}).value)||0) - (parseFloat((document.getElementById('emp-pto-used')||{}).value)||0)),
     pto_accrual_rate: parseFloat(document.getElementById('emp-pto-accrual').value) || 0,
     pto_notes: (document.getElementById('emp-pto-notes').value || '').trim()
   };
