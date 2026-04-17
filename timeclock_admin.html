@@ -475,21 +475,114 @@ function renderTimesheets() {
   } else if (!filtered.length) {
     h += '<div class="card"><div class="empty" style="padding:24px;">No entries for this pay period</div></div>';
   } else {
+    // Group entries by week for OT calc
+    function getWeekKey(iso) {
+      var d = new Date(iso);
+      // Get Monday of that week
+      var day = d.getDay();
+      var diff = d.getDate() - day + (day === 0 ? -6 : 1);
+      var mon = new Date(d); mon.setDate(diff); mon.setHours(0,0,0,0);
+      return mon.toISOString().split('T')[0];
+    }
+
+    function calcOT(entries, breaks) {
+      // Group by week
+      var weeks = {};
+      entries.forEach(function(e){
+        var wk = getWeekKey(e.clock_in);
+        if (!weeks[wk]) weeks[wk] = [];
+        weeks[wk].push(e);
+      });
+      var regMins = 0, otMins = 0;
+      Object.values(weeks).forEach(function(wkEntries){
+        var wkMins = 0;
+        wkEntries.forEach(function(e){
+          var eb = ST.breaks.filter(function(b){ return b.entry_id === e.id; });
+          wkMins += billableMins(e, eb);
+        });
+        var reg40 = 40 * 60;
+        if (wkMins > reg40) {
+          regMins += reg40;
+          otMins  += (wkMins - reg40);
+        } else {
+          regMins += wkMins;
+        }
+      });
+      return { regMins: regMins, otMins: otMins };
+    }
+
     // Summary cards per employee
-    h += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px;margin-bottom:16px;">';
+    h += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px;margin-bottom:16px;">';
     Object.entries(byEmp).forEach(function(kv){
       var nm = kv[0], d = kv[1];
       var emp = ST.employees.find(function(e){ return e.name === nm; });
-      var rate = emp ? emp.hourly_rate : 0;
-      var pay = rate ? '$' + ((d.totalBillable / 60) * rate).toFixed(2) : '';
-      h += '<div class="card" style="padding:14px;margin:0;">';
-      h += '<div style="font-size:13px;font-weight:700;color:var(--navy);margin-bottom:8px;">'+nm+'</div>';
-      h += '<div style="font-size:11px;color:var(--muted);">Billable: <strong style="color:var(--navy);">'+fmtDur(d.totalBillable)+'</strong></div>';
-      h += '<div style="font-size:11px;color:var(--muted);">Actual: '+fmtDur(d.totalActual)+'</div>';
-      if (pay) h += '<div style="font-size:12px;font-weight:700;color:#2e7d32;margin-top:4px;">Est. Pay: '+pay+'</div>';
-      if (d.earlyFlags) h += '<div style="font-size:11px;color:#c62828;margin-top:4px;">&#9888; '+d.earlyFlags+' early clock-in(s)</div>';
+      var rate = emp ? parseFloat(emp.hourly_rate) : 0;
+      var ot = calcOT(d.entries, ST.breaks);
+      var regHrs  = ot.regMins / 60;
+      var otHrs   = ot.otMins  / 60;
+      var regPay  = rate * regHrs;
+      var otPay   = rate * 1.5 * otHrs;
+      var totalPay = regPay + otPay;
+
+      h += '<div class="card" style="padding:16px;margin:0;">';
+      h += '<div style="font-size:13px;font-weight:700;color:var(--navy);margin-bottom:10px;">'+nm+'</div>';
+
+      // Hours breakdown
+      h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:10px;">';
+      h += '<div style="background:rgba(13,45,94,.04);border-radius:8px;padding:8px;text-align:center;">';
+      h += '<div style="font-size:18px;font-weight:700;color:var(--navy);">'+regHrs.toFixed(1)+'</div>';
+      h += '<div style="font-size:10px;color:var(--muted);font-weight:600;">REG HRS</div></div>';
+      h += '<div style="background:'+(otHrs>0?'rgba(198,40,40,.06)':'rgba(13,45,94,.04)')+'";border-radius:8px;padding:8px;text-align:center;">';
+      h += '<div style="font-size:18px;font-weight:700;color:'+(otHrs>0?'#c62828':'var(--muted)')+';">'+otHrs.toFixed(1)+'</div>';
+      h += '<div style="font-size:10px;color:var(--muted);font-weight:600;">OT HRS</div></div>';
+      h += '</div>';
+
+      if (rate) {
+        // Pay breakdown
+        h += '<div style="border-top:1px solid var(--border);padding-top:10px;">';
+        h += '<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;">';
+        h += '<span style="color:var(--muted);">Regular ('+regHrs.toFixed(1)+'h @ $'+rate.toFixed(2)+'/hr)</span>';
+        h += '<span style="font-weight:600;">$'+regPay.toFixed(2)+'</span></div>';
+        if (otHrs > 0) {
+          h += '<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;">';
+          h += '<span style="color:#c62828;">Overtime ('+otHrs.toFixed(1)+'h @ $'+(rate*1.5).toFixed(2)+'/hr)</span>';
+          h += '<span style="font-weight:600;color:#c62828;">$'+otPay.toFixed(2)+'</span></div>';
+        }
+        h += '<div style="display:flex;justify-content:space-between;font-size:14px;font-weight:700;border-top:1px solid var(--border);padding-top:6px;margin-top:6px;">';
+        h += '<span>Est. Gross Pay</span>';
+        h += '<span style="color:#2e7d32;">$'+totalPay.toFixed(2)+'</span></div>';
+        h += '</div>';
+      } else {
+        h += '<div style="font-size:11px;color:var(--muted);font-style:italic;">No hourly rate set — edit employee to add rate</div>';
+      }
+
+      if (d.earlyFlags) h += '<div style="font-size:11px;color:#c62828;margin-top:8px;">&#9888; '+d.earlyFlags+' early clock-in(s) pending approval</div>';
       h += '</div>';
     });
+
+    // Period totals
+    var periodRegMins = 0, periodOtMins = 0, periodTotalPay = 0;
+    Object.entries(byEmp).forEach(function(kv){
+      var d = kv[1], nm = kv[0];
+      var emp = ST.employees.find(function(e){ return e.name === nm; });
+      var rate = emp ? parseFloat(emp.hourly_rate||0) : 0;
+      var ot = calcOT(d.entries);
+      periodRegMins += ot.regMins;
+      periodOtMins  += ot.otMins;
+      periodTotalPay += rate*(ot.regMins/60) + rate*1.5*(ot.otMins/60);
+    });
+    h += '</div>';
+    h += '<div style="background:rgba(13,45,94,.04);border-radius:10px;padding:14px;margin-bottom:16px;display:flex;gap:24px;flex-wrap:wrap;">';
+    h += '<div><div style="font-size:11px;color:var(--muted);font-weight:700;text-transform:uppercase;letter-spacing:.04em;">Period Total</div>';
+    h += '<div style="font-size:18px;font-weight:700;color:var(--navy);">'+((periodRegMins+periodOtMins)/60).toFixed(1)+'h</div></div>';
+    h += '<div><div style="font-size:11px;color:var(--muted);font-weight:700;text-transform:uppercase;letter-spacing:.04em;">Regular</div>';
+    h += '<div style="font-size:18px;font-weight:700;color:var(--navy);">'+(periodRegMins/60).toFixed(1)+'h</div></div>';
+    h += '<div><div style="font-size:11px;color:#c62828;font-weight:700;text-transform:uppercase;letter-spacing:.04em;">Overtime</div>';
+    h += '<div style="font-size:18px;font-weight:700;color:'+(periodOtMins>0?'#c62828':'var(--muted)');+';">'+(periodOtMins/60).toFixed(1)+'h</div></div>';
+    if (periodTotalPay > 0) {
+      h += '<div style="margin-left:auto;"><div style="font-size:11px;color:var(--muted);font-weight:700;text-transform:uppercase;letter-spacing:.04em;">Est. Total Payroll</div>';
+      h += '<div style="font-size:22px;font-weight:700;color:#2e7d32;">$'+periodTotalPay.toFixed(2)+'</div></div>';
+    }
     h += '</div>';
 
     // Detail table
@@ -600,15 +693,39 @@ async function addAbsence() {
 }
 
 function exportPayPeriodCSV() {
-  var rows = [['Employee','Date','Clock In','Clock Out','Actual Hrs','Billable Hrs','Break Mins','Job','Early Approved']];
+  var rows = [['Employee','Date','Clock In','Clock Out','Actual Hrs','Billable Hrs','Reg Hrs','OT Hrs','Hourly Rate','Reg Pay','OT Pay','Total Pay','Break Mins','Job','Early Approved']];
   var fmt = function(iso){ if(!iso)return ''; var d=new Date(iso),h=d.getHours()%12||12,m=d.getMinutes(),ap=d.getHours()>=12?'PM':'AM'; return h+':'+(m<10?'0':'')+m+' '+ap; };
   var durMins = function(e){ var out=e.clock_out?new Date(e.clock_out):new Date(); return Math.floor((out-new Date(e.clock_in))/60000); };
+
+  // Group by employee for OT calc
+  var empGroups = {};
   ST.entries.forEach(function(e){
+    if (!empGroups[e.employee_name]) empGroups[e.employee_name] = [];
+    empGroups[e.employee_name].push(e);
+  });
+
+  ST.entries.forEach(function(e){
+    var emp = ST.employees.find(function(x){ return x.name === e.employee_name; });
+    var rate = emp ? parseFloat(emp.hourly_rate||0) : 0;
     var breaks = ST.breaks.filter(function(b){ return b.entry_id === e.id; });
     var actual = (e.duration_minutes || durMins(e)) / 60;
     var bill = billableMins(e, breaks) / 60;
     var bkMins = breaks.reduce(function(s,b){ return s+(b.duration_minutes||0); }, 0);
-    rows.push([e.employee_name, fmtD(new Date(e.clock_in)), fmt(e.clock_in), fmt(e.clock_out), actual.toFixed(2), bill.toFixed(2), bkMins, e.job_name||'', e.approved_early?'Yes':'']);
+    // Per-entry OT: rough calc based on week position
+    var wkKey = getWeekKey(e.clock_in);
+    var wkEntries = (empGroups[e.employee_name]||[]).filter(function(x){ return getWeekKey(x.clock_in) === wkKey; });
+    var wkMins = wkEntries.reduce(function(s,x){ var xb=ST.breaks.filter(function(b){return b.entry_id===x.id;}); return s+billableMins(x,xb); }, 0);
+    var entryBill = billableMins(e, breaks);
+    var wkReg = Math.min(wkMins, 2400); // 40hrs
+    var entryFrac = wkMins > 0 ? entryBill / wkMins : 0;
+    var regMins = Math.min(entryBill, Math.round(wkReg * entryFrac));
+    var otMins = Math.max(0, entryBill - regMins);
+    var regPay = rate * regMins / 60;
+    var otPay = rate * 1.5 * otMins / 60;
+    rows.push([e.employee_name, fmtD(new Date(e.clock_in)), fmt(e.clock_in), fmt(e.clock_out),
+      actual.toFixed(2), bill.toFixed(2), (regMins/60).toFixed(2), (otMins/60).toFixed(2),
+      rate?'$'+rate.toFixed(2):'', rate?'$'+regPay.toFixed(2):'', rate?'$'+otPay.toFixed(2):'', rate?'$'+(regPay+otPay).toFixed(2):'',
+      bkMins, e.job_name||'', e.approved_early?'Yes':'']);
   });
   var csv = rows.map(function(r){ return r.map(function(c){ var s=String(c).split('"').join('""'); return '"'+s+'"'; }).join(','); }).join('\n');
   var a = document.createElement('a'); a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
