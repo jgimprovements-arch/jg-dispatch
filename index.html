@@ -1095,8 +1095,23 @@ async function lookupTSIds(){
       const ur=await fetch(TS_PROXY+'?path=users&qs=group_ids='+gid+'%26active=yes');
       if(!ur.ok)continue;
       const ud=await ur.json();
+      // Load employee dispatch flags from Supabase
+      let dispatchFlags = {};
+      try {
+        const SB_URL = 'https://nuykvchgecpiuikoerze.supabase.co';
+        const SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im51eWt2Y2hnZWNwaXVpa29lcnplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYyNjM3ODYsImV4cCI6MjA5MTgzOTc4Nn0.39hZ8DdjT_0iFJXPeAL2FXUSLw8FZBirDVzxZTO1W9s';
+        const er = await fetch(SB_URL + '/rest/v1/employees?select=name,show_on_dispatch', { headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY } });
+        if (er.ok) {
+          const emps = await er.json();
+          (emps || []).forEach(function(e) { dispatchFlags[e.name.toLowerCase()] = e.show_on_dispatch; });
+        }
+      } catch(e2) { /* non-fatal */ }
+
       Object.values(ud.results?.users||{}).forEach(u=>{
         const nm=u.first_name+' '+u.last_name;
+        // Skip if explicitly excluded from dispatch
+        const flag = dispatchFlags[nm.toLowerCase()];
+        if (flag === false) return;
         tsIdMap[nm.toLowerCase()]=u.id;
         // Preserve existing job assignments if this tech was already loaded
         const existingJobs = prevTechQ?.[l]?.[nm]?.jobs || [];
