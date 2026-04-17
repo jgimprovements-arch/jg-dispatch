@@ -959,11 +959,25 @@ async function saveEmployee() {
     pto_notes: (document.getElementById('emp-pto-notes').value || '').trim()
   };
   if (!data.name || !data.email) { toast('Name and email are required'); return; }
+  var saveHeaders = {'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json'};
+  var saveResult;
   if (ST.editEmp) {
-    await fetch(SB_URL+'/rest/v1/employees?id=eq.'+ST.editEmp, {method:'PATCH', headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json'}, body:JSON.stringify(data)});
-    toast('✓ Employee updated');
+    saveResult = await fetch(SB_URL+'/rest/v1/employees?id=eq.'+ST.editEmp, {method:'PATCH', headers:saveHeaders, body:JSON.stringify(data)});
+    if (!saveResult.ok) {
+      // Fallback: try with only core columns in case new columns not yet in DB
+      var coreData = { name: data.name, email: data.email, role: data.role, market: data.market, hourly_rate: data.hourly_rate, active: data.active };
+      saveResult = await fetch(SB_URL+'/rest/v1/employees?id=eq.'+ST.editEmp, {method:'PATCH', headers:saveHeaders, body:JSON.stringify(coreData)});
+      toast('⚠ Saved basic info — run SQL migration to enable all fields');
+    } else {
+      toast('✓ Employee updated');
+    }
   } else {
-    await fetch(SB_URL+'/rest/v1/employees', {method:'POST', headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json','Prefer':'return=minimal'}, body:JSON.stringify(data)});
+    saveResult = await fetch(SB_URL+'/rest/v1/employees', {method:'POST', headers:{...saveHeaders,'Prefer':'return=minimal'}, body:JSON.stringify(data)});
+    if (!saveResult.ok) {
+      var coreData2 = { name: data.name, email: data.email, role: data.role, market: data.market, hourly_rate: data.hourly_rate, active: data.active };
+      await fetch(SB_URL+'/rest/v1/employees', {method:'POST', headers:{...saveHeaders,'Prefer':'return=minimal'}, body:JSON.stringify(coreData2)});
+      toast('⚠ Saved basic info — run SQL migration to enable all fields');
+    }
     ST.editEmp = null;
     await loadAll();
     closeModal();
