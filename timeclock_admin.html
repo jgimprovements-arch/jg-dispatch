@@ -292,6 +292,124 @@ function isAdmin() {
   } catch(e) { return false; }
 }
 
+// ── SUPABASE ──────────────────────────────────────────────────────────────
+var SB_URL = 'https://nuykvchgecpiuikoerze.supabase.co';
+var SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im51eWt2Y2hnZWNwaXVpa29lcnplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYyNjM3ODYsImV4cCI6MjA5MTgzOTc4Nn0.39hZ8DdjT_0iFJXPeAL2FXUSLw8FZBirDVzxZTO1W9s';
+
+async function sb(path, opts) {
+  var r = await fetch(SB_URL + path, Object.assign({
+    headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' }
+  }, opts || {}));
+  if (!r.ok) return null;
+  return r.json().catch(function() { return null; });
+}
+
+// ── LOAD ──────────────────────────────────────────────────────────────────
+async function loadAll() {
+  var emps = await sb('/rest/v1/employees?order=name.asc&select=*');
+  ST.employees = emps || [];
+
+  var since = ST.filterDate || new Date(Date.now() - 60 * 86400000).toISOString().split('T')[0];
+  var until = ST.filterDateEnd ? ST.filterDateEnd + 'T23:59:59' : new Date().toISOString();
+  var entries = await sb('/rest/v1/time_entries?clock_in=gte.' + since + 'T00:00:00&clock_in=lte.' + until + '&order=clock_in.desc&limit=500&select=*');
+  ST.entries = entries || [];
+
+  var brks = await sb('/rest/v1/time_breaks?select=*');
+  ST.breaks = brks || [];
+
+  var abs = await sb('/rest/v1/absence_records?date=gte.' + since + '&order=date.desc&limit=200&select=*');
+  ST.absences = abs || [];
+
+  render();
+}
+
+// ── TABS ──────────────────────────────────────────────────────────────────
+function showTab(tab, el) {
+  var adminOnly = ['employees', 'reports'];
+  if (adminOnly.includes(tab) && !isAdmin()) {
+    toast('Admin access required');
+    return;
+  }
+  ST.tab = tab;
+  document.querySelectorAll('.tc-tab').forEach(function(t) { t.classList.remove('active'); });
+  if (el) el.classList.add('active');
+  render();
+}
+
+function render() {
+  var empTab = document.getElementById('tab-employees');
+  var rptTab = document.getElementById('tab-reports');
+  if (empTab) empTab.style.display = isAdmin() ? '' : 'none';
+  if (rptTab) rptTab.style.display = isAdmin() ? '' : 'none';
+
+  if (ST.tab === 'live') renderLive();
+  else if (ST.tab === 'timesheets') renderTimesheets();
+  else if (ST.tab === 'employees') { if (isAdmin()) renderEmployees(); }
+  else if (ST.tab === 'reports')   { if (isAdmin()) renderReports(); }
+}
+
+// ── LIVE TAB ──────────────────────────────────────────────────────────────
+function renderLive() {
+  var today = new Date().toISOString().split('T')[0];
+  var fmt = function(iso) { if (!iso) return ''; var d = new Date(iso), h = d.getHours() % 12 || 12, m = d.getMinutes(), ap = d.getHours() >= 12 ? 'PM' : 'AM'; return h + ':' + (m < 10 ? '0' : '') + m + ' ' + ap; };
+  var fmtDur = function(mins) { return Math.floor(mins / 60) + 'h ' + (mins % 60) + 'm'; };
+  var durMins = function(e) { var out = e.clock_out ? new Date(e.clock_out) : new Date(); return Math.floor((out - new Date(e.clock_in)) / 60000); };
+
+  var active = ST.entries.filter(function(e) { return !e.clock_out && e.clock_in.startsWith(today); });
+  var todayAll = ST.entries.filter(function(e) { return e.clock_in.startsWith(today); });
+
+  var h = '';
+  h += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:20px;">';
+  h += '<div class="stat-card"><div class="stat-val">' + active.length + '</div><div class="stat-lbl">Clocked In Now</div></div>';
+  h += '<div class="stat-card"><div class="stat-val">' + todayAll.length + '</div><div class="stat-lbl">Entries Today</div></div>';
+  h += '<div class="stat-card"><div class="stat-val">' + ST.employees.filter(function(e) { return e.active; }).length + '</div><div class="stat-lbl">Active Employees</div></div>';
+  h += '</div>';
+
+  h += '<div class="card"><div class="card-hdr"><div class="card-title"><span class="live-dot"></span>Currently Clocked In</div></div>';
+  if (!active.length) {
+    h += '<div class="empty">No one clocked in right now</div>';
+  } else {
+    h += '<table class="tc-table"><thead><tr><th>Employee</th><th>Job</th><th>Clocked In</th><th>Duration</th><th>Break</th><th>GPS</th></tr></thead><tbody>';
+    active.forEach(function(e) {
+      var mins = durMins(e);
+      var alert = mins > 600;
+      var hasBreak = ST.breaks.some(function(b) { return b.entry_id === e.id && !b.break_end; });
+      h += '<tr>';
+      h += '<td><strong>' + e.employee_name + '</strong></td>';
+      h += '<td>' + (e.job_name || '<span style="color:var(--muted);">No job</span>') + '</td>';
+      h += '<td>' + fmt(e.clock_in) + '</td>';
+      h += '<td><strong style="color:' + (alert ? 'var(--red)' : 'var(--green)') + ';">' + fmtDur(mins) + '</strong></td>';
+      h += '<td>' + (e.clock_in_lat ? '<span class="badge badge-green">' + e.clock_in_lat.toFixed(3) + ',' + e.clock_in_lng.toFixed(3) + '</span>' : '<span class="badge badge-gray">None</span>') + '</td>';
+      h += '<td>' + (hasBreak ? '<span class="badge badge-warn">On Break</span>' : alert ? '<span class="badge badge-red">Long Shift</span>' : '<span class="badge badge-green">Active</span>') + '</td>';
+      h += '</tr>';
+    });
+    h += '</tbody></table>';
+  }
+  h += '</div>';
+
+  h += '<div class="card" style="margin-top:16px;"><div class="card-hdr"><div class="card-title">Today\'s Entries</div></div>';
+  if (!todayAll.length) {
+    h += '<div class="empty">No entries today</div>';
+  } else {
+    h += '<table class="tc-table"><thead><tr><th>Employee</th><th>Job</th><th>In</th><th>Out</th><th>Duration</th></tr></thead><tbody>';
+    todayAll.forEach(function(e) {
+      var mins = e.duration_minutes || durMins(e);
+      h += '<tr>';
+      h += '<td><strong>' + e.employee_name + '</strong></td>';
+      h += '<td>' + (e.job_name || '-') + '</td>';
+      h += '<td class="mono">' + fmt(e.clock_in) + '</td>';
+      h += '<td class="mono">' + (e.clock_out ? fmt(e.clock_out) : '<span class="badge badge-green">Active</span>') + '</td>';
+      h += '<td>' + fmtDur(mins) + '</td>';
+      h += '</tr>';
+    });
+    h += '</tbody></table>';
+  }
+  h += '</div>';
+
+  document.getElementById('tc-body').innerHTML = h;
+  setTimeout(function() { if (ST.tab === 'live') loadAll(); }, 30000);
+}
+
 async function approveEarly(entryId) {
   await fetch(SB_URL + '/rest/v1/time_entries?id=eq.' + entryId, {
     method: 'PATCH',
