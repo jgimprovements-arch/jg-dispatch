@@ -189,7 +189,6 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;min
   <button class="tc-tab" id="tab-timesheets" onclick="showTab('timesheets',this)">📋 Timesheets</button>
   <button class="tc-tab" id="tab-employees" onclick="showTab('employees',this)">👥 Employees</button>
   <button class="tc-tab" id="tab-reports" onclick="showTab('reports',this)">📊 Reports</button>
-  <button class="tc-tab" id="tab-invite" onclick="showTab('invite',this)">✉️ Invite</button>
 </div>
 
 <div class="tc-body" id="tc-body">
@@ -405,8 +404,30 @@ function renderTimesheets() {
 // ── EMPLOYEES TAB ─────────────────────────────────────────────────────────
 function renderEmployees() {
   var h = '';
-  h += '<div style="display:flex;justify-content:flex-end;margin-bottom:12px;">';
-  h += '<button class="btn btn-primary" onclick="openAddEmployee()">+ Add Employee</button>';
+
+  // Invite card at top
+  h += '<div class="card" style="margin-bottom:20px;">';
+  h += '<div class="card-hdr"><div class="card-title">✉️ Invite Employee to JG Time Clock</div></div>';
+  h += '<div class="card-body">';
+  h += '<p style="font-size:12px;color:var(--muted);margin-bottom:14px;line-height:1.5;">Enter the employee name and personal email. They will receive an invite to set their own password and access the clock app from their phone.</p>';
+  h += '<div id="invite-status" style="min-height:16px;margin-bottom:10px;"></div>';
+  h += '<div class="form-row">';
+  h += '<div><label class="form-label">Full Name *</label><input class="form-input" id="inv-name" type="text" placeholder="Jane Smith"></div>';
+  h += '<div><label class="form-label">Personal Email *</label><input class="form-input" id="inv-email" type="email" placeholder="jane@gmail.com"></div>';
+  h += '</div>';
+  h += '<div class="form-row">';
+  h += '<div><label class="form-label">Role</label><select class="form-select" id="inv-role"><option>Technician</option><option>Project Manager</option><option>Estimator</option><option>Office</option><option>Admin</option></select></div>';
+  h += '<div><label class="form-label">Market</label><select class="form-select" id="inv-market"><option>Appleton</option><option>Stevens Point</option></select></div>';
+  h += '</div>';
+  h += '<div style="display:flex;gap:10px;align-items:center;">';
+  h += '<button class="btn btn-orange" onclick="sendInvite()" style="flex:1;padding:12px;font-size:14px;">✉️ Send Invite Email</button>';
+  h += '<button class="btn btn-primary" onclick="openAddEmployee()" style="padding:12px 20px;">+ Add Without Invite</button>';
+  h += '</div>';
+  h += '</div></div>';
+
+  // Employee list
+  h += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">';
+  h += '<div style="font-size:13px;font-weight:700;color:var(--navy);">Employees ('+ST.employees.length+')</div>';
   h += '</div>';
 
   h += '<div class="card"><div class="card-hdr"><div class="card-title">Employees ('+ST.employees.length+')</div></div>';
@@ -494,7 +515,45 @@ function renderReports() {
 // ── EMPLOYEE EDIT ─────────────────────────────────────────────────────────
 function openAddEmployee() {
   var html = buildEmpForm({});
+  // Add invite section to the modal
+  html += '<div style="margin-top:16px;padding-top:16px;border-top:1.5px solid var(--border);">';
+  html += '<div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:8px;">Or Send Email Invite</div>';
+  html += '<p style="font-size:12px;color:var(--muted);margin-bottom:10px;line-height:1.5;">Send the employee an invite email so they can set their own password and log in from their personal phone.</p>';
+  html += '<button class="btn btn-orange" onclick="sendInviteFromModal()" style="width:100%;padding:11px;">✉️ Save &amp; Send Invite Email</button>';
+  html += '</div>';
   showModal('Add Employee', html, 'saveEmployee()');
+}
+
+async function sendInviteFromModal() {
+  // Pull values from the open modal form
+  var name   = (document.getElementById('emp-name')   || {}).value || '';
+  var email  = (document.getElementById('emp-email')  || {}).value || '';
+  var role   = (document.getElementById('emp-role')   || {}).value || 'Technician';
+  var market = (document.getElementById('emp-market') || {}).value || 'Appleton';
+  var rate   = (document.getElementById('emp-rate')   || {}).value || '0';
+  if (!name.trim() || !email.trim()) { toast('Name and email are required'); return; }
+
+  var btn = document.querySelector('#tc-modal .btn-orange');
+  if (btn) { btn.textContent = 'Sending...'; btn.disabled = true; }
+
+  try {
+    var r = await fetch('https://jg-proxy-v2.vercel.app/api/invite', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: email.trim().toLowerCase(), name: name.trim(), role, market, hourly_rate: parseFloat(rate)||0 })
+    });
+    var data = await r.json();
+    if (r.ok && data.success) {
+      toast('✓ Invite sent to ' + email);
+      closeModal();
+      await loadAll();
+    } else {
+      throw new Error(data.error || 'Invite failed');
+    }
+  } catch(e) {
+    toast('Error: ' + e.message);
+    if (btn) { btn.textContent = '✉️ Save & Send Invite Email'; btn.disabled = false; }
+  }
 }
 
 function openEditEmployee(id) {
@@ -578,56 +637,87 @@ async function saveEntry(id) {
 }
 
 // ── INVITE ──────────────────────────────────────────────────────────────────
-function renderInvite() {
-  var h = '';
+async function renderInvite() {
+  var el = document.getElementById('tc-body');
+  el.innerHTML = '<div class="empty">Loading...</div>';
 
-  h += '<div style="max-width:520px;">';
+  // Load pending invites from Supabase auth users
+  var pendingInvites = [];
+  try {
+    // We can check auth users via the proxy service role
+    var r = await fetch('https://jg-proxy-v2.vercel.app/api/invite?action=list', {
+      method: 'GET',
+      headers: { 'Content-Type': 'application/json' }
+    });
+    if (r.ok) {
+      var data = await r.json();
+      pendingInvites = data.users || [];
+    }
+  } catch(e) { /* silently fail */ }
 
-  // Status message
+  var h = '<div style="max-width:560px;">';
+
+  // Status message area
   h += '<div id="invite-status" style="min-height:20px;margin-bottom:12px;"></div>';
 
-  // Invite form card
+  // Invite form
   h += '<div class="card" style="margin-bottom:20px;">';
-  h += '<div class="card-hdr"><div class="card-title">✉️ Invite New Employee</div></div>';
+  h += '<div class="card-hdr"><div class="card-title">✉️ Send Invite</div></div>';
   h += '<div class="card-body">';
-  h += '<p style="font-size:13px;color:var(--muted);margin-bottom:16px;line-height:1.5;">The employee will receive an email with a link to set their own password and access the time clock app from their personal device.</p>';
+  h += '<p style="font-size:13px;color:var(--muted);margin-bottom:16px;line-height:1.5;">Employee receives an email with a secure link to set their password and access the time clock.</p>';
 
   var roles = ['Technician','Project Manager','Estimator','Office','Admin'];
   h += '<div class="form-row">';
   h += '<div><label class="form-label">Full Name *</label><input class="form-input" id="inv-name" type="text" placeholder="Jane Smith"></div>';
-  h += '<div><label class="form-label">Email Address *</label><input class="form-input" id="inv-email" type="email" placeholder="jane@gmail.com"></div>';
+  h += '<div><label class="form-label">Personal Email *</label><input class="form-input" id="inv-email" type="email" placeholder="jane@gmail.com"></div>';
   h += '</div>';
   h += '<div class="form-row">';
   h += '<div><label class="form-label">Role</label><select class="form-select" id="inv-role">'+roles.map(function(r){return '<option>'+r+'</option>';}).join('')+'</select></div>';
   h += '<div><label class="form-label">Market</label><select class="form-select" id="inv-market"><option>Appleton</option><option>Stevens Point</option></select></div>';
   h += '</div>';
-  h += '<div class="form-row">';
-  h += '<div><label class="form-label">Hourly Rate ($)</label><input class="form-input" id="inv-rate" type="number" step="0.01" placeholder="0.00"></div>';
-  h += '<div style="display:flex;align-items:flex-end;"><p style="font-size:11px;color:var(--muted);line-height:1.5;">Rate is optional and only visible to admins. Employee will not see this.</p></div>';
-  h += '</div>';
-  h += '<button class="btn btn-orange" onclick="sendInvite()" style="width:100%;padding:14px;font-size:14px;margin-top:4px;">✉️ Send Invite Email</button>';
+  h += '<div style="margin-bottom:14px;"><label class="form-label">Hourly Rate ($) — optional</label><input class="form-input" id="inv-rate" type="number" step="0.01" placeholder="0.00" style="max-width:160px;"></div>';
+  h += '<button onclick="sendInvite()" style="width:100%;padding:14px;border-radius:8px;background:var(--orange);color:#fff;border:none;font-size:14px;font-weight:700;cursor:pointer;font-family:DM Sans,sans-serif;">✉️ Send Invite Email</button>';
   h += '</div></div>';
 
-  // Instructions
+  // Pending / sent invites table
   h += '<div class="card">';
-  h += '<div class="card-hdr"><div class="card-title">How It Works</div></div>';
-  h += '<div class="card-body">';
-  h += '<ol style="font-size:13px;color:var(--muted);line-height:2;padding-left:18px;">';
-  h += '<li>Enter the employee name, personal email, role and market</li>';
-  h += '<li>Click <strong>Send Invite Email</strong></li>';
-  h += '<li>They receive an email with a secure setup link</li>';
-  h += '<li>They click the link and create their own password</li>';
-  h += '<li>They open <strong>timeclock.html</strong> on their phone and sign in with email + password</li>';
-  h += '<li>Their employee record is created automatically</li>';
-  h += '</ol>';
-  h += '<div style="margin-top:12px;padding:10px 14px;background:rgba(232,93,4,.06);border-radius:8px;border:1px solid rgba(232,93,4,.2);font-size:12px;color:var(--text);">';
-  h += '<strong>Share this link with employees:</strong><br>';
-  h += '<a href="https://jgimprovements-arch.github.io/jg-dispatch/timeclock.html" target="_blank" style="color:var(--orange);font-weight:600;">https://jgimprovements-arch.github.io/jg-dispatch/timeclock.html</a>';
-  h += '</div>';
-  h += '</div></div>';
+  h += '<div class="card-hdr"><div class="card-title">Invite Status</div><button onclick="renderInvite()" class="btn btn-sm">↻ Refresh</button></div>';
+
+  if (!ST.employees.length && !pendingInvites.length) {
+    h += '<div class="empty">No invites sent yet</div>';
+  } else {
+    h += '<table class="tc-table"><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Market</th><th>Status</th><th>Sent</th></tr></thead><tbody>';
+
+    // Show all employees with their invite status
+    ST.employees.forEach(function(emp) {
+      // Find matching auth user to check if invite was accepted
+      var authUser = pendingInvites.find(function(u){ return u.email === emp.email; });
+      var confirmed = authUser ? !!authUser.email_confirmed_at : true; // if no auth record, assume they used Google
+      var invitedAt = authUser ? authUser.created_at : null;
+      var status = !authUser ? '<span class="badge badge-blue">Google Auth</span>' :
+                   confirmed ? '<span class="badge badge-green">Accepted ✓</span>' :
+                               '<span class="badge badge-warn">Pending ⏳</span>';
+      h += '<tr>';
+      h += '<td><strong>'+emp.name+'</strong></td>';
+      h += '<td style="font-size:11px;">'+emp.email+'</td>';
+      h += '<td>'+(emp.role||'Tech')+'</td>';
+      h += '<td>'+(emp.market||'Appleton')+'</td>';
+      h += '<td>'+status+'</td>';
+      h += '<td style="font-size:11px;color:var(--muted);">'+(invitedAt?new Date(invitedAt).toLocaleDateString():'-')+'</td>';
+      h += '</tr>';
+    });
+    h += '</tbody></table>';
+  }
   h += '</div>';
 
-  document.getElementById('tc-body').innerHTML = h;
+  // Share link
+  h += '<div style="padding:12px 16px;background:rgba(232,93,4,.06);border-radius:8px;border:1px solid rgba(232,93,4,.2);font-size:12px;color:var(--text);margin-top:12px;">';
+  h += '<strong>Share this link with employees:</strong><br>';
+  h += '<a href="https://jgimprovements-arch.github.io/jg-dispatch/timeclock.html" target="_blank" style="color:var(--orange);font-weight:600;word-break:break-all;">https://jgimprovements-arch.github.io/jg-dispatch/timeclock.html</a>';
+  h += '</div>';
+
+  h += '</div>';
+  el.innerHTML = h;
 }
 
 async function sendInvite() {
