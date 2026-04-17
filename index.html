@@ -744,7 +744,7 @@ async function boot(){
 
 // Silent background refresh (when serving from cache)
 async function silentAlbiRefresh(){
-  // Save current assignments before Albi wipes unassigned pool
+  // Snapshot current manual assignments — these must never be touched
   const snapshot = {};
   for(const l of ['appleton','stevens']){
     snapshot[l] = {};
@@ -752,20 +752,24 @@ async function silentAlbiRefresh(){
       if(tech.jobs.length) snapshot[l][nm] = [...tech.jobs];
     }
   }
+  // Reload Albi job data (updates job info, statuses, new jobs)
   await loadAlbiViaClaudeZapier();
   saveCache();
-  // Restore snapshot assignments (Albi reload wipes unassigned, so re-apply)
+  // Re-apply manual assignments on top of fresh Albi data
+  // Only keep assigned jobs that still exist in Albi
   for(const l of ['appleton','stevens']){
     for(const [nm,jids] of Object.entries(snapshot[l]||{})){
       if(techQ[l]?.[nm]){
-        techQ[l][nm].jobs = jids;
-        unassigned[l] = (unassigned[l]||[]).filter(jid=>!jids.includes(jid));
+        const validJids = jids.filter(jid=>jobs[jid]);
+        techQ[l][nm].jobs = validJids;
+        // Remove assigned jobs from the unassigned pool
+        unassigned[l] = (unassigned[l]||[]).filter(jid=>!validJids.includes(jid));
       }
     }
   }
   render();
   hideCacheBanner();
-  showToast('✓ Albi data refreshed — board assignments preserved');
+  showToast('✓ Jobs updated from Albi');
 }
 
 function forceRefresh(){
@@ -2283,28 +2287,8 @@ async function pollSharedState(){
     // Only update if server state is newer than what we have
     if(data.state.ts > lastSyncTs + 5000){
       lastSyncTs = data.state.ts;
-      // Apply remote state without wiping current if we made changes just now
-      const today = new Date().toISOString().split('T')[0];
-      if(data.state.date !== today) return;
-      let changed = false;
-      for(const l of ['appleton','stevens']){
-        for(const [nm, jids] of Object.entries(data.state.assignments?.[l]||{})){
-          if(techQ[l]?.[nm]){
-            const validJids = jids.filter(jid=>jobs[jid]);
-            const current = JSON.stringify(techQ[l][nm].jobs);
-            const incoming = JSON.stringify(validJids);
-            if(current !== incoming){
-              techQ[l][nm].jobs = validJids;
-              unassigned[l] = (unassigned[l]||[]).filter(jid=>!validJids.includes(jid));
-              changed = true;
-
-            }
-          }
-        }
-      }
-      if(data.state.overrides && Date.now() - lastLocalChange > 10000) Object.assign(jobOverrides, data.state.overrides);
-      if(data.state.sick) data.state.sick.forEach(nm=>sick.add(nm));
-      if(changed){ render(); showToast('🔄 Board updated from another user'); }
+      // Board assignments are 100% manual — NEVER overwrite from remote sync
+      // Only update the sync badge so we know Supabase is connected
       updateSyncBadge(data.state.ts);
     }
   }catch(e){}
@@ -2364,28 +2348,9 @@ function initRealtime() {
         var state = data.state;
         if (!state.ts) return;
         if (state.ts === lastSyncTs) return;
-        if (state.ts <= lastSyncTs && Date.now() - lastLocalChange < 3000) return;
         lastSyncTs = state.ts;
-        var today = new Date().toISOString().split('T')[0];
-        if (state.date !== today) return;
-        var changed = false;
-        for (var l of ['appleton','stevens']) {
-          for (var [nm, jids] of Object.entries(state.assignments?.[l]||{})) {
-            if (techQ[l]?.[nm]) {
-              var validJids = jids.filter(function(jid){ return jobs[jid]; });
-              var current  = JSON.stringify(techQ[l][nm].jobs);
-              var incoming = JSON.stringify(validJids);
-              if (current !== incoming) {
-                techQ[l][nm].jobs = validJids;
-                unassigned[l] = (unassigned[l]||[]).filter(function(jid){ return !validJids.includes(jid); });
-                changed = true;
-              }
-            }
-          }
-        }
-        if (state.overrides && Date.now() - lastLocalChange > 5000) Object.assign(jobOverrides, state.overrides);
-        if (state.sick) state.sick.forEach(function(nm){ sick.add(nm); });
-        if (changed) { render(); showToast('🔄 Board updated'); }
+        // Board assignments are 100% manual — NEVER overwrite from realtime sync
+        // Only update sync badge
         updateSyncBadge(state.ts);
       })
       .subscribe(function(status) {
