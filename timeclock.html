@@ -319,6 +319,25 @@ body {
 
 /* -- STATS ROW -- */
 .stats-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 16px; }
+
+/* Schedule card */
+.schedule-card { background: var(--surface); border-radius: 16px; padding: 16px; margin-bottom: 16px; box-shadow: 0 2px 12px rgba(13,45,94,.07); }
+.schedule-job {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 12px; border-radius: 10px;
+  background: rgba(13,45,94,.04); margin-bottom: 8px;
+  cursor: pointer; transition: background .15s;
+}
+.schedule-job:last-child { margin-bottom: 0; }
+.schedule-job:active { background: rgba(232,93,4,.08); }
+.schedule-job.active-job { background: rgba(46,125,50,.08); border: 1.5px solid rgba(46,125,50,.3); }
+.schedule-job-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; background: var(--navy); }
+.schedule-job-dot.done { background: var(--muted); }
+.schedule-job-dot.active { background: var(--green); animation: pulse 2s infinite; }
+.schedule-job-info { flex: 1; min-width: 0; }
+.schedule-job-name { font-size: 13px; font-weight: 700; color: var(--navy); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.schedule-job-meta { font-size: 11px; color: var(--muted); margin-top: 1px; }
+.schedule-job-action { font-size: 11px; font-weight: 700; color: var(--orange); flex-shrink: 0; }
 .stat-card { background: var(--surface); border-radius: 14px; padding: 14px 16px; box-shadow: 0 2px 8px rgba(13,45,94,.06); }
 .stat-val { font-family: 'DM Mono', monospace; font-size: 24px; font-weight: 600; color: var(--navy); line-height: 1; }
 .stat-lbl { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin-top: 4px; }
@@ -385,6 +404,15 @@ body {
         <button class="break-btn" id="break-btn" onclick="handleBreak()">☕ Start Break</button>
         <button class="break-btn" onclick="openNotes()">📝 Note</button>
       </div>
+    </div>
+
+    <!-- TODAY'S SCHEDULE -->
+    <div class="schedule-card" id="schedule-card">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
+        <div class="section-title">Today's Schedule</div>
+        <div id="schedule-market" style="font-size:10px;color:var(--muted);font-weight:600;"></div>
+      </div>
+      <div id="schedule-list"><div class="empty" style="padding:16px 0;">Loading schedule...</div></div>
     </div>
 
     <!-- JOB SELECTOR -->
@@ -691,6 +719,7 @@ async function loadAll() {
 
  // Load active jobs from dispatch board state
   await loadJobs();
+  await loadSchedule();
   // Show install banner if not yet installed
   setTimeout(function() { showInstallBanner(); }, 3000);
 
@@ -767,6 +796,73 @@ async function loadJobs() {
   TC.jobs = jobs;
   renderJobs();
 }
+// SCHEDULE
+async function loadSchedule() {
+  var el = document.getElementById('schedule-list');
+  var marketEl = document.getElementById('schedule-market');
+  if (!el) return;
+
+  try {
+    // Pull board_state to find this tech's assigned jobs
+    var bs = await sb('/rest/v1/board_state?id=eq.current&select=state');
+    if (!bs || !bs[0] || !bs[0].state) {
+      el.innerHTML = '<div class="empty" style="padding:16px 0;">No schedule data</div>';
+      return;
+    }
+    var state = bs[0].state;
+    var jobNames = state.jobNames || {};
+    var assignments = state.assignments || {};
+    var techName = TC.employee ? TC.employee.name : '';
+    var firstName = techName.split(' ')[0].toLowerCase();
+
+    // Find this employee's jobs across both markets
+    var myJobs = [];
+    var myMarket = '';
+    Object.keys(assignments).forEach(function(market) {
+      Object.keys(assignments[market] || {}).forEach(function(tech) {
+        var techFirst = tech.split(' ')[0].toLowerCase();
+        if (techFirst === firstName || tech.toLowerCase().includes(firstName)) {
+          myMarket = market === 'appleton' ? 'Appleton' : 'Stevens Point';
+          (assignments[market][tech] || []).forEach(function(jobId) {
+            var name = jobNames[jobId] || jobId;
+            myJobs.push({ id: jobId, name: name });
+          });
+        }
+      });
+    });
+
+    if (marketEl) marketEl.textContent = myMarket || '';
+
+    if (!myJobs.length) {
+      el.innerHTML = '<div class="empty" style="padding:16px 0;">No jobs assigned today</div>';
+      return;
+    }
+
+    // Mark which job is currently active
+    var activeJobId = TC.activeEntry ? TC.activeEntry.job_id : null;
+
+    el.innerHTML = myJobs.map(function(j) {
+      var isActive = j.id === activeJobId;
+      var isCurrent = j.id === TC.selectedJobId;
+      var dotClass = isActive ? 'active' : '';
+      var cardClass = isActive ? 'active-job' : '';
+      var action = isActive ? '● Active' : (isCurrent ? '✓ Selected' : 'Tap to clock in');
+      var esc = function(s){ return s.replace(/'/g,"&#39;"); };
+      return '<div class="schedule-job ' + cardClass + '" onclick="selectJob(\'' + j.id + '\',\'' + esc(j.name) + '\',\'\')">' +
+        '<div class="schedule-job-dot ' + dotClass + '"></div>' +
+        '<div class="schedule-job-info">' +
+          '<div class="schedule-job-name">' + j.name + '</div>' +
+        '</div>' +
+        '<div class="schedule-job-action">' + action + '</div>' +
+      '</div>';
+    }).join('');
+
+  } catch(e) {
+    console.warn('Schedule load failed:', e);
+    el.innerHTML = '<div class="empty" style="padding:16px 0;">Could not load schedule</div>';
+  }
+}
+
 // RENDER -
 function renderStatus() {
   var dot = document.getElementById('status-dot');
