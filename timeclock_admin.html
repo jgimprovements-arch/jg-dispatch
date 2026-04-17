@@ -287,414 +287,9 @@ function isAdmin() {
     if (!u) return false;
     var email = (u.email || '').toLowerCase();
     if (ADMIN_EMAILS.includes(email)) return true;
-    // Also check if employee role is Admin
     var emp = ST.employees.find(function(e){ return e.email === email; });
     return emp && emp.role === 'Admin';
   } catch(e) { return false; }
-}
-
-// ── SUPABASE ──────────────────────────────────────────────────────────────
-async function sb(path, opts) {
-  var r = await fetch(SB_URL+path, Object.assign({
-    headers: {'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json'}
-  }, opts||{}));
-  if (!r.ok) return null;
-  return r.json().catch(function(){return null;});
-}
-
-// ── LOAD ──────────────────────────────────────────────────────────────────
-async function loadAll() {
-  var emps = await sb('/rest/v1/employees?order=name.asc&select=*');
-  ST.employees = emps || [];
-
-  var since = ST.filterDate || new Date(Date.now()-60*86400000).toISOString().split('T')[0];
-  var until = ST.filterDateEnd ? ST.filterDateEnd+'T23:59:59' : new Date().toISOString();
-  var entries = await sb('/rest/v1/time_entries?clock_in=gte.'+since+'T00:00:00&clock_in=lte.'+until+'&order=clock_in.desc&limit=500&select=*');
-  ST.entries = entries || [];
-
-  var brks = await sb('/rest/v1/time_breaks?select=*');
-  ST.breaks = brks || [];
-
-  var abs = await sb('/rest/v1/absence_records?date=gte.'+since+'&order=date.desc&limit=200&select=*');
-  ST.absences = abs || [];
-
-  render();
-}
-
-// ── RENDER ────────────────────────────────────────────────────────────────
-function render() { renderTab(ST.tab); }
-
-function showTab(tab, el) {
-  ST.tab = tab;
-  document.querySelectorAll('.tc-tab').forEach(function(t){ t.classList.remove('active'); });
-  el.classList.add('active');
-  renderTab(tab);
-}
-
-function renderTab(tab) {
-  if (tab === 'live') renderLive();
-  else if (tab === 'timesheets') renderTimesheets();
-  else if (tab === 'employees') renderEmployees();
-  else if (tab === 'reports') renderReports();
-}
-
-// ── LIVE TAB ──────────────────────────────────────────────────────────────
-function renderLive() {
-  var today = new Date().toISOString().split('T')[0];
-  var active = ST.entries.filter(function(e){ return !e.clock_out && e.clock_in.startsWith(today); });
-  var todayAll = ST.entries.filter(function(e){ return e.clock_in.startsWith(today); });
-
-  var fmt = function(d){ var dt=new Date(d),h=dt.getHours()%12||12,m=dt.getMinutes(),ap=dt.getHours()>=12?'PM':'AM'; return h+':'+(m<10?'0':'')+m+' '+ap; };
-  var fmtDur = function(mins){ return Math.floor(mins/60)+'h '+(mins%60)+'m'; };
-  var durMins = function(e){ var out=e.clock_out?new Date(e.clock_out):new Date(); return Math.floor((out-new Date(e.clock_in))/60000); };
-
-  var h = '';
-
-  // Stats
-  var todayMins = 0;
-  todayAll.forEach(function(e){ todayMins += durMins(e); });
-  h += '<div class="stat-grid">';
-  h += '<div class="stat-card"><div class="stat-val" style="color:var(--green);">'+active.length+'</div><div class="stat-lbl">Clocked In Now</div></div>';
-  h += '<div class="stat-card"><div class="stat-val">'+todayAll.length+'</div><div class="stat-lbl">Entries Today</div></div>';
-  h += '<div class="stat-card"><div class="stat-val">'+fmtDur(todayMins)+'</div><div class="stat-lbl">Total Hours Today</div></div>';
-  h += '<div class="stat-card"><div class="stat-val">'+ST.employees.filter(function(e){return e.active;}).length+'</div><div class="stat-lbl">Active Employees</div></div>';
-  h += '</div>';
-
-  // Currently clocked in
-  h += '<div class="card"><div class="card-hdr"><div class="card-title"><span class="live-dot"></span>Currently Clocked In</div><span style="font-size:11px;color:var(--muted);">'+active.length+' of '+ST.employees.filter(function(e){return e.active;}).length+' active employees</span></div>';
-  if (!active.length) {
-    h += '<div class="empty">No one clocked in right now</div>';
-  } else {
-    h += '<table class="tc-table"><thead><tr><th>Employee</th><th>Job</th><th>Clocked In</th><th>Duration</th><th>GPS</th><th>Status</th></tr></thead><tbody>';
-    active.forEach(function(e) {
-      var mins = durMins(e);
-      var alert = mins > 600;
-      var hasBreak = ST.breaks.some(function(b){ return b.entry_id === e.id && !b.break_end; });
-      h += '<tr>';
-      h += '<td><strong>'+e.employee_name+'</strong><div style="font-size:10px;color:var(--muted);">'+e.employee_email+'</div></td>';
-      h += '<td>'+(e.job_name||'<span style="color:var(--muted);">No job</span>')+'</td>';
-      h += '<td>'+fmt(e.clock_in)+'</td>';
-      h += '<td><strong style="color:'+(alert?'var(--red)':'var(--green)')+';">'+fmtDur(mins)+'</strong></td>';
-      h += '<td>'+(e.clock_in_lat?'<span class="badge badge-green">'+e.clock_in_lat.toFixed(3)+','+e.clock_in_lng.toFixed(3)+'</span>':'<span class="badge badge-gray">None</span>')+'</td>';
-      h += '<td>'+(hasBreak?'<span class="badge badge-warn">On Break</span>':alert?'<span class="badge badge-red">Long Shift</span>':'<span class="badge badge-green">Active</span>')+'</td>';
-      h += '</tr>';
-    });
-    h += '</tbody></table>';
-  }
-  h += '</div>';
-
-  // Today's entries
-  h += '<div class="card"><div class="card-hdr"><div class="card-title">Today by Employee</div></div>';
-  if (!todayAll.length) {
-    h += '<div class="empty">No entries today</div>';
-  } else {
-    var byEmp = {};
-    todayAll.forEach(function(e) {
-      if (!byEmp[e.employee_name]) byEmp[e.employee_name] = { mins: 0, entries: [], clocked: false };
-      byEmp[e.employee_name].mins += durMins(e);
-      byEmp[e.employee_name].entries.push(e);
-      if (!e.clock_out) byEmp[e.employee_name].clocked = true;
-    });
-    h += '<table class="tc-table"><thead><tr><th>Employee</th><th>Hours</th><th>Entries</th><th>Status</th></tr></thead><tbody>';
-    Object.entries(byEmp).sort(function(a,b){return b[1].mins-a[1].mins;}).forEach(function(kv) {
-      var name=kv[0], d=kv[1];
-      var pct=Math.min(100,Math.round(d.mins/480*100));
-      h += '<tr>';
-      h += '<td><strong>'+name+'</strong></td>';
-      h += '<td><strong>'+fmtDur(d.mins)+'</strong><div class="prog-bar"><div class="prog-fill" style="width:'+pct+'%;background:'+(d.clocked?'var(--green)':'var(--navy)');+'"></div></div></td>';
-      h += '<td>'+d.entries.length+'</td>';
-      h += '<td>'+(d.clocked?'<span class="badge badge-green">Clocked In</span>':'<span class="badge badge-gray">Clocked Out</span>')+'</td>';
-      h += '</tr>';
-    });
-    h += '</tbody></table>';
-  }
-  h += '</div>';
-
-  document.getElementById('tc-body').innerHTML = h;
-}
-
-// ── TIMESHEETS TAB ────────────────────────────────────────────────────────
-function renderTimesheets() {
-  var fmt = function(iso){ if(!iso)return ''; var d=new Date(iso),h=d.getHours()%12||12,m=d.getMinutes(),ap=d.getHours()>=12?'PM':'AM'; return h+':'+(m<10?'0':'')+m+' '+ap; };
-  var fmtDur = function(mins){ if(!mins&&mins!==0)return '-'; return Math.floor(mins/60)+'h '+(mins%60)+'m'; };
-  var durMins = function(e){ var out=e.clock_out?new Date(e.clock_out):new Date(); return Math.floor((out-new Date(e.clock_in))/60000); };
-
-  var periods = getPayPeriods(ST.payPeriod.type, ST.payPeriod.start, 40);
-  var selPeriod = ST.selPeriod || (periods[0] ? periods[0].label : null);
-
-  var h = '';
-
-  // Pay period settings bar
-  h += '<div class="card" style="margin-bottom:16px;">';
-  h += '<div class="card-hdr" style="cursor:pointer;" onclick="var b=document.getElementById(\'pp-settings\');b.style.display=b.style.display===\'none\'?\'block\':\'none\'">';
-  h += '<div class="card-title">Pay Period Settings</div>';
-  h += '<div style="font-size:11px;color:var(--muted);">Click to configure</div>';
-  h += '</div>';
-  h += '<div id="pp-settings" style="display:none;padding:14px;border-top:1px solid var(--border);">';
-  h += '<div class="form-row">';
-  h += '<div><label class="form-label">Period Type</label>';
-  h += '<select class="form-select" id="pp-type" onchange="ST.payPeriod.type=this.value;localStorage.setItem(\'jg_pay_period\',JSON.stringify(ST.payPeriod));renderTimesheets();">';
-  ['weekly','biweekly','semimonthly'].forEach(function(t){
-    h += '<option value="'+t+'"'+(ST.payPeriod.type===t?' selected':'')+'>'+({weekly:'Weekly',biweekly:'Bi-Weekly',semimonthly:'Semi-Monthly'}[t])+'</option>';
-  });
-  h += '</select></div>';
-  h += '<div><label class="form-label">First Period Start Date</label>';
-  h += '<input type="date" class="form-input" id="pp-start" value="'+ST.payPeriod.start+'" onchange="ST.payPeriod.start=this.value;localStorage.setItem(\'jg_pay_period\',JSON.stringify(ST.payPeriod));renderTimesheets();">';
-  h += '</div></div>';
-  h += '<div style="font-size:11px;color:var(--muted);margin-top:8px;">7:30 AM rule: Clock-ins before 7:30am are adjusted to 7:30am for billable hours unless admin approves early start.</div>';
-  h += '</div></div>';
-
-  // Period selector
-  h += '<div class="filter-bar">';
-  h += '<select onchange="ST.selPeriod=this.value;ST.filterEmp=\'All\';renderTimesheets();" style="min-width:220px;">';
-  h += '<option value="">-- Select Pay Period --</option>';
-  periods.forEach(function(p){
-    var isCur = p.label === selPeriod;
-    h += '<option value="'+p.label+'"'+(isCur?' selected':'')+'>'+p.label+'</option>';
-  });
-  h += '</select>';
-  h += '<select onchange="ST.filterEmp=this.value;renderTimesheets()" style="min-width:160px;">';
-  h += '<option value="All">All Employees</option>';
-  var empNames = [...new Set(ST.entries.map(function(e){return e.employee_name;}))].sort();
-  empNames.forEach(function(n){ h += '<option value="'+n+'"'+(ST.filterEmp===n?' selected':'')+'>'+n+'</option>'; });
-  h += '</select>';
-  h += '<button class="btn btn-primary" onclick="exportPayPeriodCSV()" style="margin-left:auto;">Export CSV</button>';
-  h += '</div>';
-
-  // Find entries in selected period
-  var curPer = periods.find(function(p){ return p.label === selPeriod; });
-  var filtered = ST.entries.filter(function(e){
-    if (!curPer) return false;
-    var d = new Date(e.clock_in); d.setHours(0,0,0,0);
-    return d >= curPer.start && d <= curPer.end;
-  }).filter(function(e){
-    return ST.filterEmp === 'All' || e.employee_name === ST.filterEmp;
-  });
-
-  // Group by employee for summary
-  var byEmp = {};
-  filtered.forEach(function(e){
-    if (!byEmp[e.employee_name]) byEmp[e.employee_name] = { entries: [], totalBillable: 0, totalActual: 0, earlyFlags: 0 };
-    var breaks = ST.breaks.filter(function(b){ return b.entry_id === e.id; });
-    var bill = billableMins(e, breaks);
-    var actual = e.duration_minutes || durMins(e);
-    byEmp[e.employee_name].entries.push(e);
-    byEmp[e.employee_name].totalBillable += bill;
-    byEmp[e.employee_name].totalActual += actual;
-    if (isEarlyClockIn(e.clock_in) && !e.approved_early) byEmp[e.employee_name].earlyFlags++;
-  });
-
-  if (!curPer) {
-    h += '<div class="card"><div class="empty" style="padding:24px;">Select a pay period above</div></div>';
-  } else if (!filtered.length) {
-    h += '<div class="card"><div class="empty" style="padding:24px;">No entries for this pay period</div></div>';
-  } else {
-    // Group entries by week for OT calc
-    function getWeekKey(iso) {
-      var d = new Date(iso);
-      // Get Monday of that week
-      var day = d.getDay();
-      var diff = d.getDate() - day + (day === 0 ? -6 : 1);
-      var mon = new Date(d); mon.setDate(diff); mon.setHours(0,0,0,0);
-      return mon.toISOString().split('T')[0];
-    }
-
-    function calcOT(entries, breaks) {
-      // Group by week
-      var weeks = {};
-      entries.forEach(function(e){
-        var wk = getWeekKey(e.clock_in);
-        if (!weeks[wk]) weeks[wk] = [];
-        weeks[wk].push(e);
-      });
-      var regMins = 0, otMins = 0;
-      Object.values(weeks).forEach(function(wkEntries){
-        var wkMins = 0;
-        wkEntries.forEach(function(e){
-          var eb = ST.breaks.filter(function(b){ return b.entry_id === e.id; });
-          wkMins += billableMins(e, eb);
-        });
-        var reg40 = 40 * 60;
-        if (wkMins > reg40) {
-          regMins += reg40;
-          otMins  += (wkMins - reg40);
-        } else {
-          regMins += wkMins;
-        }
-      });
-      return { regMins: regMins, otMins: otMins };
-    }
-
-    // Summary cards per employee
-    h += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px;margin-bottom:16px;">';
-    Object.entries(byEmp).forEach(function(kv){
-      var nm = kv[0], d = kv[1];
-      var emp = ST.employees.find(function(e){ return e.name === nm; });
-      var rate = emp ? parseFloat(emp.hourly_rate) : 0;
-      var ot = calcOT(d.entries, ST.breaks);
-      var regHrs  = ot.regMins / 60;
-      var otHrs   = ot.otMins  / 60;
-      var regPay  = rate * regHrs;
-      var otPay   = rate * 1.5 * otHrs;
-      var totalPay = regPay + otPay;
-
-      h += '<div class="card" style="padding:16px;margin:0;">';
-      h += '<div style="font-size:13px;font-weight:700;color:var(--navy);margin-bottom:10px;">'+nm+'</div>';
-
-      // Hours breakdown
-      h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:10px;">';
-      h += '<div style="background:rgba(13,45,94,.04);border-radius:8px;padding:8px;text-align:center;">';
-      h += '<div style="font-size:18px;font-weight:700;color:var(--navy);">'+regHrs.toFixed(1)+'</div>';
-      h += '<div style="font-size:10px;color:var(--muted);font-weight:600;">REG HRS</div></div>';
-      h += '<div style="background:'+(otHrs>0?'rgba(198,40,40,.06)':'rgba(13,45,94,.04)')+'";border-radius:8px;padding:8px;text-align:center;">';
-      h += '<div style="font-size:18px;font-weight:700;color:'+(otHrs>0?'#c62828':'var(--muted)')+';">'+otHrs.toFixed(1)+'</div>';
-      h += '<div style="font-size:10px;color:var(--muted);font-weight:600;">OT HRS</div></div>';
-      h += '</div>';
-
-      if (rate) {
-        // Pay breakdown
-        h += '<div style="border-top:1px solid var(--border);padding-top:10px;">';
-        h += '<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;">';
-        h += '<span style="color:var(--muted);">Regular ('+regHrs.toFixed(1)+'h @ $'+rate.toFixed(2)+'/hr)</span>';
-        h += '<span style="font-weight:600;">$'+regPay.toFixed(2)+'</span></div>';
-        if (otHrs > 0) {
-          h += '<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;">';
-          h += '<span style="color:#c62828;">Overtime ('+otHrs.toFixed(1)+'h @ $'+(rate*1.5).toFixed(2)+'/hr)</span>';
-          h += '<span style="font-weight:600;color:#c62828;">$'+otPay.toFixed(2)+'</span></div>';
-        }
-        h += '<div style="display:flex;justify-content:space-between;font-size:14px;font-weight:700;border-top:1px solid var(--border);padding-top:6px;margin-top:6px;">';
-        h += '<span>Est. Gross Pay</span>';
-        h += '<span style="color:#2e7d32;">$'+totalPay.toFixed(2)+'</span></div>';
-        h += '</div>';
-      } else {
-        h += '<div style="font-size:11px;color:var(--muted);font-style:italic;">No hourly rate set — edit employee to add rate</div>';
-      }
-
-      if (d.earlyFlags) h += '<div style="font-size:11px;color:#c62828;margin-top:8px;">&#9888; '+d.earlyFlags+' early clock-in(s) pending approval</div>';
-      h += '</div>';
-    });
-
-    // Period totals
-    var periodRegMins = 0, periodOtMins = 0, periodTotalPay = 0;
-    Object.entries(byEmp).forEach(function(kv){
-      var d = kv[1], nm = kv[0];
-      var emp = ST.employees.find(function(e){ return e.name === nm; });
-      var rate = emp ? parseFloat(emp.hourly_rate||0) : 0;
-      var ot = calcOT(d.entries);
-      periodRegMins += ot.regMins;
-      periodOtMins  += ot.otMins;
-      periodTotalPay += rate*(ot.regMins/60) + rate*1.5*(ot.otMins/60);
-    });
-    h += '</div>';
-    var totalHrs = ((periodRegMins+periodOtMins)/60).toFixed(1);
-    var regHrsStr = (periodRegMins/60).toFixed(1);
-    var otHrsStr  = (periodOtMins/60).toFixed(1);
-    var otColor   = periodOtMins > 0 ? '#c62828' : 'var(--muted)';
-
-    h += '<div class="card" style="margin-bottom:16px;padding:0;overflow:hidden;">';
-    h += '<div style="background:var(--navy);padding:10px 18px;">';
-    h += '<div style="font-size:11px;font-weight:700;color:rgba(255,255,255,.6);text-transform:uppercase;letter-spacing:.06em;">Pay Period Summary</div>';
-    h += '</div>';
-    h += '<div style="display:grid;grid-template-columns:1fr 1fr 1fr'+(periodTotalPay>0?' 1fr':'')+';">';
-
-    // Total hours
-    h += '<div style="padding:16px 18px;border-right:1px solid var(--border);">';
-    h += '<div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">Total Hours</div>';
-    h += '<div style="font-size:28px;font-weight:700;color:var(--navy);line-height:1;">'+totalHrs+'</div>';
-    h += '<div style="font-size:11px;color:var(--muted);margin-top:2px;">hours worked</div>';
-    h += '</div>';
-
-    // Regular
-    h += '<div style="padding:16px 18px;border-right:1px solid var(--border);">';
-    h += '<div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">Regular</div>';
-    h += '<div style="font-size:28px;font-weight:700;color:var(--navy);line-height:1;">'+regHrsStr+'</div>';
-    h += '<div style="font-size:11px;color:var(--muted);margin-top:2px;">@ straight time</div>';
-    h += '</div>';
-
-    // Overtime
-    h += '<div style="padding:16px 18px;'+(periodTotalPay>0?'border-right:1px solid var(--border);':'')+'">';
-    h += '<div style="font-size:10px;font-weight:700;color:'+(periodOtMins>0?'#c62828':'var(--muted)')+';text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">Overtime</div>';
-    h += '<div style="font-size:28px;font-weight:700;color:'+otColor+';line-height:1;">'+otHrsStr+'</div>';
-    h += '<div style="font-size:11px;color:var(--muted);margin-top:2px;">@ 1.5x rate</div>';
-    h += '</div>';
-
-    // Est payroll
-    if (periodTotalPay > 0) {
-      h += '<div style="padding:16px 18px;background:rgba(46,125,50,.04);">';
-      h += '<div style="font-size:10px;font-weight:700;color:#2e7d32;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">Est. Gross Payroll</div>';
-      h += '<div style="font-size:28px;font-weight:700;color:#2e7d32;line-height:1;">$'+periodTotalPay.toFixed(2)+'</div>';
-      h += '<div style="font-size:11px;color:var(--muted);margin-top:2px;">all employees</div>';
-      h += '</div>';
-    }
-
-    h += '</div></div>';
-
-    // Detail table
-    h += '<div class="card"><div class="card-hdr"><div class="card-title">Time Entries — '+selPeriod+'</div></div>';
-    h += '<table class="tc-table"><thead><tr>';
-    h += '<th>Employee</th><th>Date</th><th>Clock In</th><th>Clock Out</th>';
-    h += '<th>Actual</th><th>Billable</th><th>Break</th><th>Job</th><th>Flags</th><th></th>';
-    h += '</tr></thead><tbody>';
-
-    filtered.sort(function(a,b){ return new Date(a.clock_in)-new Date(b.clock_in); });
-    filtered.forEach(function(e){
-      var breaks = ST.breaks.filter(function(b){ return b.entry_id === e.id; });
-      var actual = e.duration_minutes || durMins(e);
-      var bill = billableMins(e, breaks);
-      var bkMins = breaks.reduce(function(s,b){ return s+(b.duration_minutes||0); }, 0);
-      var early = isEarlyClockIn(e.clock_in);
-      var active = !e.clock_out;
-      var flagCell = '';
-      if (early && !e.approved_early) flagCell = '<span style="color:#c62828;font-size:11px;font-weight:700;">Early<br><button class="btn btn-sm" onclick="approveEarly(\''+e.id+'\')">Approve</button></span>';
-      else if (early && e.approved_early) flagCell = '<span style="color:#2e7d32;font-size:11px;">Approved</span>';
-      h += '<tr'+(early&&!e.approved_early?' style="background:rgba(198,40,40,.04);"':'')+'>';
-      h += '<td><strong>'+e.employee_name+'</strong></td>';
-      h += '<td>'+fmtD(new Date(e.clock_in))+'</td>';
-      h += '<td class="mono"'+(early&&!e.approved_early?' style="color:#c62828;font-weight:700;"':'')+'>'+fmt(e.clock_in)+'</td>';
-      h += '<td class="mono">'+(active?'<span class="badge badge-green">Active</span>':fmt(e.clock_out))+'</td>';
-      h += '<td>'+fmtDur(actual)+'</td>';
-      h += '<td><strong>'+fmtDur(bill)+'</strong></td>';
-      h += '<td>'+(bkMins?fmtDur(bkMins):'-')+'</td>';
-      h += '<td style="max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+(e.job_name||'-')+'</td>';
-      h += '<td>'+flagCell+'</td>';
-      h += '<td>'+(isAdmin() ? '<button class="btn btn-sm" onclick="editEntry(\''+e.id+'\')">Edit</button>' : '<button class="btn btn-sm" onclick="viewEntry(\''+e.id+'\')">View</button>')+'</td>';
-      h += '</tr>';
-    });
-    h += '</tbody></table></div>';
-
-    // Absence records for this period
-    var periodAbsences = ST.absences.filter(function(a){
-      if (!curPer) return false;
-      var d = new Date(a.date + 'T00:00:00'); d.setHours(0,0,0,0);
-      return d >= curPer.start && d <= curPer.end;
-    }).filter(function(a){
-      return ST.filterEmp === 'All' || a.employee_name === ST.filterEmp;
-    });
-
-    if (periodAbsences.length) {
-      h += '<div class="card" style="margin-top:12px;"><div class="card-hdr"><div class="card-title">Absences / Out of Office</div></div>';
-      h += '<table class="tc-table"><thead><tr><th>Employee</th><th>Date</th><th>Reason</th><th>Market</th><th>Logged By</th><th>Notes</th><th></th></tr></thead><tbody>';
-      periodAbsences.forEach(function(a){
-        var badge = {
-          'Sick': 'badge-red', 'PTO': 'badge-green', 'No Call No Show': 'badge-red',
-          'Personal': 'badge-warn', 'Injured': 'badge-red', 'Training': 'badge-green',
-          'Shop Time': 'badge-warn', 'Jury Duty': 'badge-gray', 'Bereavement': 'badge-gray'
-        }[a.reason] || 'badge-gray';
-        h += '<tr>';
-        h += '<td><strong>'+a.employee_name+'</strong></td>';
-        h += '<td>'+fmtD(new Date(a.date+'T00:00:00'))+'</td>';
-        h += '<td><span class="badge '+badge+'">'+a.reason+'</span></td>';
-        h += '<td>'+(a.market||'-')+'</td>';
-        h += '<td style="font-size:11px;color:var(--muted);">'+(a.logged_by||'admin')+'</td>';
-        h += '<td style="font-size:11px;color:var(--muted);">'+(a.notes||'')+'</td>';
-        h += '<td><button class="btn btn-sm btn-danger" onclick="deleteAbsence(\''+a.id+'\')">Remove</button></td>';
-        h += '</tr>';
-      });
-      h += '</tbody></table></div>';
-    }
-  }
-
-  document.getElementById('tc-body').innerHTML = h;
 }
 
 async function approveEarly(entryId) {
@@ -801,7 +396,11 @@ function renderEmployees() {
     h += '<td style="font-size:11px;">'+emp.email+'</td>';
     h += '<td>'+(emp.role||'Technician')+'</td>';
     h += '<td>'+(emp.market||'Appleton')+'</td>';
-    h += '<td class="mono">'+(emp.hourly_rate?'$'+emp.hourly_rate+'/hr':'-')+'</td>';
+    var payDisplay = emp.pay_type === 'salary'
+      ? (emp.annual_salary ? '$'+Number(emp.annual_salary).toLocaleString()+'/yr' : '-')
+      : (emp.hourly_rate ? '$'+emp.hourly_rate+'/hr' : '-');
+    var payType = emp.pay_type === 'salary' ? '<span class="badge badge-warn" style="margin-left:4px;">Salary</span>' : '';
+    h += '<td class="mono">'+payDisplay+payType+'</td>';
     var ptoAvail = parseFloat(emp.pto_hours_available||0);
     var ptoUsed  = parseFloat(emp.pto_hours_used||0);
     var ptoColor = ptoAvail <= 8 ? '#c62828' : ptoAvail <= 24 ? '#e65100' : '#2e7d32';
@@ -965,9 +564,22 @@ function buildEmpForm(emp) {
     '<div><label class="form-label">Market</label><select class="form-select" id="emp-market"><option value="Appleton"'+(emp.market==='Appleton'?' selected':'')+'>Appleton</option><option value="Stevens Point"'+(emp.market==='Stevens Point'?' selected':'')+'>Stevens Point</option></select></div>' +
     '</div>' +
     '<div class="form-row">' +
-    '<div><label class="form-label">Hourly Rate ($)</label><input class="form-input" id="emp-rate" type="number" step="0.01" value="'+(emp.hourly_rate||'')+'"></div>' +
+    '<div><label class="form-label">Pay Type</label><select class="form-select" id="emp-pay-type" onchange="togglePayFields()">' +
+    '<option value="hourly"'+(!emp.pay_type||emp.pay_type==="hourly"?' selected':'')+'>Hourly</option>' +
+    '<option value="salary"'+(emp.pay_type==="salary"?' selected':'')+'>Salary</option>' +
+    '</select></div>' +
     '<div style="display:flex;align-items:flex-end;"><label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;font-weight:600;color:var(--text);"><input type="checkbox" id="emp-active" '+(emp.active!==false?'checked':'')+' style="width:16px;height:16px;accent-color:var(--orange);"> Active</label></div>' +
     '</div>' +
+    '<div id="emp-hourly-fields" style="'+(emp.pay_type==="salary"?"display:none":"")+'">' +
+    '<div class="form-row">' +
+    '<div><label class="form-label">Hourly Rate ($)</label><input class="form-input" id="emp-rate" type="number" step="0.01" value="'+(emp.hourly_rate||'')+'"></div>' +
+    '<div></div>' +
+    '</div></div>' +
+    '<div id="emp-salary-fields" style="'+(emp.pay_type==="salary"?"":"display:none")+'">' +
+    '<div class="form-row">' +
+    '<div><label class="form-label">Annual Salary ($)</label><input class="form-input" id="emp-salary" type="number" step="100" value="'+(emp.annual_salary||'')+'" placeholder="e.g. 52000"></div>' +
+    '<div><label class="form-label">Daily Rate (auto)</label><input class="form-input" id="emp-daily-rate" type="number" step="0.01" value="'+(emp.daily_rate||'')+'" placeholder="Auto-calculated" readonly style="background:rgba(13,45,94,.03);"></div>' +
+    '</div></div>' +
     '<div style="border-top:1px solid var(--border);margin:12px 0;padding-top:12px;">' +
     '<div style="display:flex;align-items:center;justify-content:space-between;">' +
     '<div>' +
@@ -1000,6 +612,9 @@ async function saveEmployee() {
     hourly_rate: parseFloat(document.getElementById('emp-rate').value) || 0,
     active: document.getElementById('emp-active').checked,
     show_on_dispatch: document.getElementById('emp-dispatch') ? document.getElementById('emp-dispatch').checked : true,
+    pay_type: (document.getElementById('emp-pay-type') || {}).value || 'hourly',
+    annual_salary: parseFloat((document.getElementById('emp-salary') || {}).value) || null,
+    daily_rate: parseFloat((document.getElementById('emp-daily-rate') || {}).value) || null,
     pto_hours_available: parseFloat(document.getElementById('emp-pto-available').value) || 0,
     pto_hours_used: parseFloat(document.getElementById('emp-pto-used').value) || 0,
     pto_accrual_rate: parseFloat(document.getElementById('emp-pto-accrual').value) || 0,
