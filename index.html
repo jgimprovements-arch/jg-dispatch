@@ -871,8 +871,10 @@ function restoreBoardStateLocal(){
 }
 
 async function loadBoardState(){
+  // Only run on initial load — never overwrite after user has made changes
+  if(lastLocalChange > 0) return false;
+
   const now = new Date();
-  // Dispatch day resets at 5AM — before 5AM use yesterday's date key
   const dispatchDay = new Date(now);
   if(now.getHours() < 5) dispatchDay.setDate(dispatchDay.getDate() - 1);
   const today = dispatchDay.toISOString().split('T')[0];
@@ -905,33 +907,17 @@ async function loadBoardState(){
   for(const l of ['appleton','stevens']){
     for(const [nm, jids] of Object.entries(state.assignments?.[l]||{})){
       if(techQ[l]?.[nm]){
-        // Restore ALL saved job IDs — don't filter by jobs[jid] yet
-        // Jobs may not be loaded from Albi yet, but we still want to show assignments
-        // Invalid jobs will naturally disappear when Albi loads if job no longer exists
         const allJids = Array.isArray(jids) ? jids : [];
         techQ[l][nm].jobs = allJids;
-        // Remove from unassigned pool
         unassigned[l] = (unassigned[l]||[]).filter(jid=>!allJids.includes(jid));
         restored += allJids.length;
-
       }
     }
   }
 
-  // Restore sick list
-  if(state.sick?.length){
-    state.sick.forEach(nm=>sick.add(nm));
-  }
-
-  // Restore time overrides
-  if(state.overrides){
-    Object.assign(jobOverrides, state.overrides);
-  }
-
-  // Restore per-tech start times
-  if(state.startTimes){
-    Object.assign(techStartTimes, state.startTimes);
-  }
+  if(state.sick?.length) state.sick.forEach(nm=>sick.add(nm));
+  if(state.overrides) Object.assign(jobOverrides, state.overrides);
+  if(state.startTimes) Object.assign(techStartTimes, state.startTimes);
 
   if(restored>0){
     updateSyncBadge(state.ts||Date.now());
