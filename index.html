@@ -1098,14 +1098,17 @@ async function lookupTSIds(){
       // Load employee dispatch flags from Supabase
       let dispatchFlags = {};
       try {
-        const SB_URL = 'https://nuykvchgecpiuikoerze.supabase.co';
-        const SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im51eWt2Y2hnZWNwaXVpa29lcnplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYyNjM3ODYsImV4cCI6MjA5MTgzOTc4Nn0.39hZ8DdjT_0iFJXPeAL2FXUSLw8FZBirDVzxZTO1W9s';
-        const er = await fetch(SB_URL + '/rest/v1/employees?select=name,show_on_dispatch', { headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY } });
+        const SB_URL2 = 'https://nuykvchgecpiuikoerze.supabase.co';
+        const SB_KEY2 = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im51eWt2Y2hnZWNwaXVpa29lcnplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYyNjM3ODYsImV4cCI6MjA5MTgzOTc4Nn0.39hZ8DdjT_0iFJXPeAL2FXUSLw8FZBirDVzxZTO1W9s';
+        const er = await fetch(SB_URL2 + '/rest/v1/employees?select=name,show_on_dispatch', { headers: { 'apikey': SB_KEY2, 'Authorization': 'Bearer ' + SB_KEY2 } });
         if (er.ok) {
           const emps = await er.json();
-          (emps || []).forEach(function(e) { dispatchFlags[e.name.toLowerCase()] = e.show_on_dispatch; });
+          (emps || []).forEach(function(e) {
+            // Only store explicit false — don't store null/undefined which would exclude by default
+            if (e.show_on_dispatch === false) dispatchFlags[e.name.toLowerCase()] = false;
+          });
         }
-      } catch(e2) { /* non-fatal */ }
+      } catch(e2) { console.warn('dispatch flags fetch failed, showing all techs'); }
 
       Object.values(ud.results?.users||{}).forEach(u=>{
         const nm=u.first_name+' '+u.last_name;
@@ -1126,6 +1129,18 @@ async function lookupTSIds(){
   }catch(e){
     console.warn('T-Sheets error:',e.message);
     showToast('⚠ T-Sheets unavailable — techs will load from Albi data');
+  }
+
+  // Always ensure owner (Josh Greil) appears on Appleton board
+  const OWNER_NAME = 'Josh Greil';
+  if (!techQ.appleton[OWNER_NAME]) {
+    const existingJobs = techQ.appleton[OWNER_NAME]?.jobs || [];
+    techQ.appleton[OWNER_NAME] = {
+      tsId: null,
+      initials: 'JG',
+      color: AV_COLORS[0],
+      jobs: existingJobs
+    };
   }
 }
 
@@ -1707,7 +1722,7 @@ function updateStats(){
   document.getElementById('s5').textContent=sick.size;
   document.getElementById('s6').textContent=waste;
 }
-function switchLoc(l,el){loc=l;document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));el.classList.add('active');document.getElementById('oncall-panel').style.display='none';document.getElementById('dispatch-view').style.display='';render();}
+function switchLoc(l,el){loc=l;document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));el.classList.add('active');document.getElementById('oncall-panel').style.display='none';document.getElementById('dispatch-view').style.display='';var tp=document.getElementById('time-panel');if(tp)tp.style.display='none';render();}
 function showLoader(m){const l=document.getElementById('loader');l.style.pointerEvents='auto';l.style.display='flex';setMsg(m);}
 function hideLoader(){const l=document.getElementById('loader');l.style.pointerEvents='none';l.classList.add('hide');setTimeout(()=>{l.style.display='none';l.classList.remove('hide');},450);}
 function setMsg(m){
@@ -1876,12 +1891,7 @@ async function loadTimeData(){
   }catch(e){el.innerHTML='<div style="padding:20px;color:var(--danger);">Error loading time data: '+e.message+'</div>';}
 }
 
-// Also update switchLoc to hide time panel
-const _origSwitchLoc=switchLoc;
-function switchLoc(l,el){
-  document.getElementById('time-panel').style.display='none';
-  _origSwitchLoc(l,el);
-}
+// switchLoc override removed — time-panel hide added to original
 
 function prevOCMonth(){ ocMonthOffset--; renderOCMonth(); }
 function nextOCMonth(){ ocMonthOffset++; renderOCMonth(); }
