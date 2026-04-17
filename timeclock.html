@@ -1312,6 +1312,7 @@ async function clockIn() {
     TC.clockedIn = true;
     TC.clockInTime = Date.now();
     TC.entries.push(result[0]);
+    startPinging(); // begin location tracking
     // 7:30 rule check
     var nowDt = new Date();
     var isEarly = nowDt.getHours() < 7 || (nowDt.getHours() === 7 && nowDt.getMinutes() < 30);
@@ -1367,6 +1368,7 @@ async function clockOut() {
   if (idx !== -1) { TC.entries[idx].clock_out = now; TC.entries[idx].duration_minutes = duration; }
 
   TC.clockedIn = false; TC.onBreak = false;
+  stopPinging(); // stop location tracking
   var banner = document.getElementById('early-banner');
   if (banner) banner.style.display = 'none';
   TC.activeEntry = null; TC.clockInTime = null;
@@ -1390,6 +1392,40 @@ async function handleBreak() {
     toast('☕ Break started');
   }
   renderStatus();
+}
+
+// ── LOCATION PINGS ───────────────────────────────────────────────────────
+var _pingInterval = null;
+
+async function pingLocation() {
+  if (!TC.clockedIn || !TC.activeEntry) return;
+  try {
+    var pos = await new Promise(function(resolve, reject) {
+      navigator.geolocation.getCurrentPosition(resolve, reject, { timeout: 8000, maximumAge: 30000 });
+    });
+    await fetch(SB_URL + '/rest/v1/location_pings', {
+      method: 'POST',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
+      body: JSON.stringify({
+        entry_id: TC.activeEntry.id,
+        employee_name: TC.employee ? TC.employee.name : (TC.user ? TC.user.name : 'Unknown'),
+        lat: pos.coords.latitude,
+        lng: pos.coords.longitude
+      })
+    });
+  } catch(e) {
+    // Silent fail — GPS unavailable or denied
+  }
+}
+
+function startPinging() {
+  if (_pingInterval) return;
+  pingLocation(); // immediate first ping
+  _pingInterval = setInterval(pingLocation, 5 * 60 * 1000); // every 5 minutes
+}
+
+function stopPinging() {
+  if (_pingInterval) { clearInterval(_pingInterval); _pingInterval = null; }
 }
 
 async function startBreak() {
