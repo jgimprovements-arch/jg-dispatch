@@ -168,6 +168,27 @@ body {
 .break-btn:active { background: rgba(13,45,94,.06); }
 .break-btn.active { background: rgba(245,166,35,.1); border-color: var(--gold); color: #a06000; }
 
+/* Break timer banner */
+.break-banner {
+  background: rgba(245,166,35,.12);
+  border: 1.5px solid var(--gold);
+  border-radius: 10px;
+  padding: 10px 14px;
+  margin-top: 10px;
+  display: none;
+  align-items: center;
+  justify-content: space-between;
+}
+.break-banner.overdue {
+  background: rgba(198,40,40,.1);
+  border-color: var(--red);
+  animation: pulse 1.5s infinite;
+}
+.break-timer-label { font-size: 12px; font-weight: 700; color: #a06000; }
+.break-banner.overdue .break-timer-label { color: var(--red); }
+.break-timer-val { font-family: 'DM Mono', monospace; font-size: 16px; font-weight: 700; color: #a06000; }
+.break-banner.overdue .break-timer-val { color: var(--red); }
+
 /* -- JOB SELECTOR -- */
 .job-select-card {
   background: var(--surface);
@@ -436,6 +457,10 @@ body {
       <div class="break-row" id="break-row" style="display:none;">
         <button class="break-btn" id="break-btn" onclick="handleBreak()">☕ Start Break</button>
         <button class="break-btn" onclick="openNotes()">📝 Note</button>
+      </div>
+      <div class="break-banner" id="break-banner">
+        <span class="break-timer-label" id="break-banner-label">☕ On Break</span>
+        <span class="break-timer-val" id="break-timer-val">0:00</span>
       </div>
     </div>
 
@@ -790,6 +815,22 @@ function startClock() {
       var mins = totalMins % 60;
       document.getElementById('duration-display').textContent = 'On clock: ' + hrs + 'h ' + mins + 'm';
     }
+    // Break timer
+    var banner = document.getElementById('break-banner');
+    var timerEl = document.getElementById('break-timer-val');
+    var labelEl = document.getElementById('break-banner-label');
+    if (TC.onBreak && TC.activeBreak && banner && timerEl) {
+      var breakSecs = Math.floor((Date.now() - new Date(TC.activeBreak.break_start).getTime()) / 1000);
+      var bm = Math.floor(breakSecs / 60);
+      var bs2 = breakSecs % 60;
+      timerEl.textContent = bm + ':' + String(bs2).padStart(2,'0');
+      banner.style.display = 'flex';
+      var overdue = bm >= 30;
+      banner.classList.toggle('overdue', overdue);
+      if (labelEl) labelEl.textContent = overdue ? '⚠ Break Overdue! Return Now' : '☕ On Break — 30 min limit';
+    } else if (banner) {
+      banner.style.display = 'none';
+    }
   }
   tick();
   setInterval(tick, 1000);
@@ -816,6 +857,10 @@ async function loadAll() {
  // Load active jobs from dispatch board state
   await loadJobs();
   await loadSchedule();
+  // Request notification permission for break alerts
+  if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
+    Notification.requestPermission();
+  }
   // Show install banner if not yet installed
   setTimeout(function() { showInstallBanner(); }, 3000);
 
@@ -1227,7 +1272,31 @@ async function startBreak() {
     headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=representation' },
     body: JSON.stringify({ entry_id: TC.activeEntry.id, break_start: now })
   });
-  if (result && result[0]) { TC.activeBreak = result[0]; TC.onBreak = true; }
+  if (result && result[0]) {
+    TC.activeBreak = result[0];
+    TC.onBreak = true;
+    // Alert at 30 minutes
+    TC._breakAlertTimer = setTimeout(function() {
+      if (TC.onBreak) {
+        toast('⚠ 30 min break limit reached — please return!');
+        // Vibrate if supported
+        if (navigator.vibrate) navigator.vibrate([400,200,400,200,400]);
+        // Push notification if permission granted
+        if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+          new Notification('JG Time Clock', { body: 'Your 30-minute lunch break is up. Please return to work.', icon: 'logo.png' });
+        }
+        // Keep toasting every 2 min if still on break
+        TC._breakNagTimer = setInterval(function() {
+          if (TC.onBreak) {
+            toast('⚠ Still on break — return to work!');
+            if (navigator.vibrate) navigator.vibrate([200,100,200]);
+          } else {
+            clearInterval(TC._breakNagTimer);
+          }
+        }, 120000);
+      }
+    }, 30 * 60 * 1000);
+  }
 }
 
 async function endBreak() {
@@ -1239,6 +1308,11 @@ async function endBreak() {
     headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
     body: JSON.stringify({ break_end: now, duration_minutes: duration })
   });
+  // Clear any pending alerts
+  if (TC._breakAlertTimer) { clearTimeout(TC._breakAlertTimer); TC._breakAlertTimer = null; }
+  if (TC._breakNagTimer)   { clearInterval(TC._breakNagTimer);  TC._breakNagTimer   = null; }
+  var overdueMsg = duration > 30 ? '⚠ Break was ' + duration + ' min (limit: 30 min)' : '✓ Break ended — ' + duration + ' min';
+  toast(overdueMsg);
   TC.activeBreak = null; TC.onBreak = false;
 }
 
