@@ -981,7 +981,7 @@ function renderEmployees() {
   h += '</div>';
 
   h += '<div class="card"><div class="card-hdr"><div class="card-title">Employees ('+ST.employees.length+')</div></div>';
-  h += '<table class="tc-table"><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Market</th><th>Rate</th><th>PTO Available</th><th>PTO Used</th><th>Dispatch</th><th>Status</th><th></th></tr></thead><tbody>';
+  h += '<table class="tc-table"><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Market</th><th>Rate</th><th>PTO Remaining</th><th>Sick Days YTD</th><th>Dispatch</th><th>Status</th><th></th></tr></thead><tbody>';
   ST.employees.forEach(function(emp) {
     h += '<tr>';
     h += '<td><strong>'+emp.name+'</strong></td>';
@@ -997,8 +997,16 @@ function renderEmployees() {
     var ptoUsed   = parseFloat(emp.pto_hours_used||0);
     var ptoTotal  = ptoAvail + ptoUsed;
     var ptoColor  = ptoAvail <= 8 ? '#c62828' : ptoAvail <= 24 ? '#e65100' : '#2e7d32';
-    h += '<td><div style="font-size:11px;color:var(--muted);">'+ptoTotal+'h earned</div><div style="font-weight:700;color:'+ptoColor+';">'+ptoAvail+'h left</div></td>';
-    h += '<td style="color:var(--muted);">'+ptoUsed+'h</td>';
+    h += '<td><div style="font-size:11px;color:var(--muted);">'+ptoTotal.toFixed(1)+'h earned</div><div style="font-weight:700;color:'+ptoColor+';">'+ptoAvail.toFixed(1)+'h left</div></td>';
+    // Count sick absences from absence_records this year
+    var thisYear = new Date().getFullYear();
+    var sickCount = (ST.absences||[]).filter(function(a){
+      return a.employee_name === emp.name && a.reason === 'Sick' && new Date(a.date).getFullYear() === thisYear;
+    }).length;
+    var sickLimit = parseInt(emp.sick_day_limit || 3);
+    var sickColor = sickCount >= sickLimit ? '#c62828' : sickCount >= sickLimit - 1 ? '#e65100' : 'var(--text)';
+    var sickWarn  = sickCount >= sickLimit ? ' ⚠' : '';
+    h += '<td><span style="font-weight:700;color:'+sickColor+';">'+sickCount+sickWarn+'</span><span style="font-size:10px;color:var(--muted);"> / '+sickLimit+' limit</span></td>';
     var onDispatch = emp.show_on_dispatch !== false;
     h += '<td>'+(onDispatch?'<span class="badge badge-green">Yes</span>':'<span class="badge badge-gray">No</span>')+'</td>';
     h += '<td>'+(emp.active?'<span class="badge badge-green">Active</span>':'<span class="badge badge-gray">Inactive</span>')+'</td>';
@@ -1409,6 +1417,14 @@ function buildEmpForm(emp) {
     '<div class="form-row">' +
     '<div><label class="form-label">Accrual Rate (hrs/pay period)</label><input class="form-input" id="emp-pto-accrual" type="number" step="0.5" value="'+(emp.pto_accrual_rate||0)+'" placeholder="e.g. 3.08"></div>' +
     '<div><label class="form-label">Notes</label><input class="form-input" id="emp-pto-notes" type="text" value="'+(emp.pto_notes||'')+'" placeholder="e.g. 2 weeks/yr after 1 year"></div>' +
+    '</div>' +
+    '<div style="border-top:1px solid var(--border);margin:12px 0;padding-top:12px;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;">Sick Day Policy</div>' +
+    '<div class="form-row">' +
+    '<div><label class="form-label">Sick Day Warning Threshold</label><input class="form-input" id="emp-sick-limit" type="number" step="1" value="'+(emp.sick_day_limit||3)+'" placeholder="e.g. 3"></div>' +
+    '<div><label class="form-label">Sick Days This Year</label><input class="form-input" id="emp-sick-count" type="number" step="1" value="'+(emp.sick_days_ytd||0)+'" placeholder="0" readonly style="background:rgba(13,45,94,.03);"></div>' +
+    '</div>' +
+    '<div style="font-size:11px;color:var(--muted);margin-top:4px;">Employee gets a warning when sick days reach the threshold. Auto-counted from absence records.</div>' +
+    '<div class="form-row">' +
     '</div>';
 }
 

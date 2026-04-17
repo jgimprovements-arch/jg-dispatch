@@ -1481,6 +1481,15 @@ async function submitCorrectionRequest() {
   if (btn) { btn.textContent = 'Submit Correction Request'; btn.disabled = false; }
 }
 
+// Supabase query helper for My Hours tab
+async function sbQ(path) {
+  try {
+    var r = await fetch(SB_URL + path, { headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY } });
+    if (!r.ok) return null;
+    return r.json();
+  } catch(e) { return null; }
+}
+
 // ── LOCATION PINGS ───────────────────────────────────────────────────────
 var _pingInterval = null;
 
@@ -1846,6 +1855,33 @@ async function loadMyHours() {
   if (bar)   { bar.style.width = (ptoTotal > 0 ? Math.min(100, Math.round((ptoAvail/ptoTotal)*100)) : 100) + '%'; bar.style.background = ptoColor; }
   if (usedEl) usedEl.textContent = ptoAccrual ? 'Accruing ' + ptoAccrual + 'h/period' : '';
   if (accrEl) accrEl.textContent = TC.employee.pto_notes || '';
+
+  // Load and show sick day count
+  try {
+    var today2 = new Date(); var yrStart = today2.getFullYear() + '-01-01';
+    var sickRecs = await sbQ('/rest/v1/absence_records?employee_name=eq.'+encodeURIComponent(TC.employee.name)+'&reason=eq.Sick&date=gte.'+yrStart+'&select=id') || [];
+    var sickCount = sickRecs.length;
+    var sickLimit = parseInt(TC.employee.sick_day_limit || 3);
+    var sickEl = document.getElementById('sick-day-card');
+    if (!sickEl) {
+      var sickDiv = document.createElement('div');
+      sickDiv.id = 'sick-day-card';
+      sickDiv.style.cssText = 'border-radius:16px;padding:14px 16px;margin-bottom:16px;box-shadow:0 2px 12px rgba(13,45,94,.07);';
+      if (card && card.parentNode) card.parentNode.insertBefore(sickDiv, card.nextSibling);
+      sickEl = sickDiv;
+    }
+    var atLimit = sickCount >= sickLimit;
+    var nearLimit = sickCount >= sickLimit - 1 && !atLimit;
+    sickEl.style.background = atLimit ? 'rgba(198,40,40,.08)' : nearLimit ? 'rgba(230,81,0,.08)' : 'var(--surface)';
+    sickEl.style.border = atLimit ? '1.5px solid #c62828' : nearLimit ? '1.5px solid #e65100' : 'none';
+    sickEl.innerHTML =
+      '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">' +
+        '<div style="font-size:12px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;">Sick Days This Year</div>' +
+        '<div style="font-size:20px;font-weight:700;color:'+(atLimit?'#c62828':nearLimit?'#e65100':'var(--navy)')+';">' + sickCount + '<span style="font-size:12px;color:var(--muted);"> / ' + sickLimit + '</span></div>' +
+      '</div>' +
+      (atLimit ? '<div style="font-size:12px;color:#c62828;font-weight:600;padding:8px 10px;background:rgba(198,40,40,.06);border-radius:8px;">⚠️ You have reached your sick day limit. Please speak with your manager.</div>' : '') +
+      (nearLimit ? '<div style="font-size:12px;color:#e65100;font-weight:600;padding:8px 10px;background:rgba(230,81,0,.06);border-radius:8px;">⚠️ You are approaching your sick day limit (' + sickCount + ' of ' + sickLimit + ').</div>' : '');
+  } catch(e2) { /* non-fatal */ }
   var fmtTime = function(iso){ var d=new Date(iso),h=d.getHours()%12||12,m=d.getMinutes(),ap=d.getHours()>=12?'PM':'AM'; return h+':'+(m<10?'0':'')+m+' '+ap; };
   var fmtDur  = function(mins){ return Math.floor(mins/60)+'h '+(mins%60)+'m'; };
   var fmtDate = function(iso){ var d=new Date(iso); var days=['Sun','Mon','Tue','Wed','Thu','Fri','Sat']; return days[d.getDay()]+' '+(d.getMonth()+1)+'/'+d.getDate(); };
