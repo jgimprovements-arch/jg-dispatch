@@ -308,6 +308,9 @@ body{padding-left:48px;box-sizing:border-box;}
   <a href="sales.html" class="sb-lnk"><span class="sb-icon">📈</span><span class="sb-label">Sales Dashboard</span></a>
   <a href="sales_admin.html" class="sb-lnk"><span class="sb-icon">🔐</span><span class="sb-label">Sales Admin</span></a>
   
+  <div class="sb-sec">TIME</div>
+  <a href="timeclock_admin.html" class="sb-lnk"><span class="sb-icon">⏱</span><span class="sb-label">Time Admin</span></a>
+  <a href="timeclock.html" class="sb-lnk"><span class="sb-icon">🕐</span><span class="sb-label">Clock In/Out</span></a>
   <div class="sb-sec">AI TOOLS</div>
   <a href="qa.html" class="sb-lnk "><span class="sb-icon">🔍</span><span class="sb-label">QA Review</span></a>
   <a href="adjuster.html" class="sb-lnk "><span class="sb-icon">⚖️</span><span class="sb-label">Adjuster Rebuttal</span></a>
@@ -2277,9 +2280,19 @@ async function clearBoardState(){
 let _sbClient = null;
 let _realtimeChannel = null;
 
+var _rtRetryDelay = 5000;
+var _rtRetryTimer = null;
+var _rtPollingFallback = false;
+
 function initRealtime() {
   try {
-    _sbClient = supabase.createClient(SB_URL, SB_KEY);
+    // Clean up any existing channel
+    if (_realtimeChannel) {
+      try { _sbClient.removeChannel(_realtimeChannel); } catch(e) {}
+      _realtimeChannel = null;
+    }
+    if (!_sbClient) _sbClient = supabase.createClient(SB_URL, SB_KEY);
+
     _realtimeChannel = _sbClient
       .channel('board_state_changes')
       .on('postgres_changes', {
@@ -2288,15 +2301,13 @@ function initRealtime() {
         table: 'board_state',
         filter: 'id=eq.current'
       }, function(payload) {
-        // Received a live update from another user
         var data = payload.new;
         if (!data || !data.state) return;
         var state = data.state;
         if (!state.ts) return;
-        if (state.ts === lastSyncTs) return; // exact duplicate, skip
-        // Only skip if this looks like our own save (within 3s of our last local change)
+        if (state.ts === lastSyncTs) return;
         if (state.ts <= lastSyncTs && Date.now() - lastLocalChange < 3000) return;
-        lastSyncTs = state.ts; // track last received ts
+        lastSyncTs = state.ts;
         var today = new Date().toISOString().split('T')[0];
         if (state.date !== today) return;
         var changed = false;
@@ -2321,20 +2332,29 @@ function initRealtime() {
       })
       .subscribe(function(status) {
         if (status === 'SUBSCRIBED') {
-          console.log('Realtime connected — live sync active');
-          // Update sync badge to show realtime status
+          console.log('Realtime connected');
+          _rtRetryDelay = 5000; // reset backoff on success
+          _rtPollingFallback = false;
           var badge = document.getElementById('sync-badge');
           if (badge) badge.title = 'Live sync active';
         } else if (status === 'CLOSED' || status === 'CHANNEL_ERROR') {
-          console.warn('Realtime disconnected — falling back to polling');
-          // Fall back to polling if realtime fails
-          setTimeout(pollSharedState, 5000);
-          setInterval(pollSharedState, 15000);
+          console.warn('Realtime disconnected — retrying in ' + (_rtRetryDelay/1000) + 's');
+          // Poll immediately to catch any missed updates
+          pollSharedState();
+          // Schedule reconnect with exponential backoff (max 60s)
+          if (_rtRetryTimer) clearTimeout(_rtRetryTimer);
+          _rtRetryTimer = setTimeout(function() {
+            console.log('Attempting realtime reconnect...');
+            initRealtime();
+          }, _rtRetryDelay);
+          _rtRetryDelay = Math.min(_rtRetryDelay * 2, 60000);
         }
       });
   } catch(e) {
-    console.warn('Realtime setup failed, using polling:', e);
-    setInterval(pollSharedState, 15000);
+    console.warn('Realtime setup failed, retrying:', e);
+    if (_rtRetryTimer) clearTimeout(_rtRetryTimer);
+    _rtRetryTimer = setTimeout(initRealtime, _rtRetryDelay);
+    _rtRetryDelay = Math.min(_rtRetryDelay * 2, 60000);
   }
 }
 

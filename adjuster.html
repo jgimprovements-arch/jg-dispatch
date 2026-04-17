@@ -231,6 +231,9 @@ input[type=file]{display:none}
   <a href="sales.html" class="sb-lnk"><span class="sb-icon">📈</span><span class="sb-label">Sales Dashboard</span></a>
   <a href="sales_admin.html" class="sb-lnk"><span class="sb-icon">🔐</span><span class="sb-label">Sales Admin</span></a>
   
+  <div class="sb-sec">TIME</div>
+  <a href="timeclock_admin.html" class="sb-lnk"><span class="sb-icon">⏱</span><span class="sb-label">Time Admin</span></a>
+  <a href="timeclock.html" class="sb-lnk"><span class="sb-icon">🕐</span><span class="sb-label">Clock In/Out</span></a>
   <div class="sb-sec">AI TOOLS</div>
   <a href="qa.html" class="sb-lnk"><span class="sb-icon">🔍</span><span class="sb-label">QA Review</span></a>
   <a href="adjuster.html" class="sb-lnk "><span class="sb-icon">⚖️</span><span class="sb-label">Adjuster Rebuttal</span></a>
@@ -1115,17 +1118,10 @@ async function runAdjusterAnalysis(){
       msgContent.push({type:'text',text:'ADJUSTER EMAIL/COMMUNICATION:\\n'+S.adjEmail+'\\n\\nDefend every objection raised in this communication with OSHA/IICRC standards and Encircle evidence.'});
     }
     
-    // Extract adjuster/carrier hints from email text for intel lookup
-    const adjMatch=(S.adjEmail||'').match(/(?:from|adjuster)[:\s]+([A-Z][a-z]+ [A-Z][a-z]+)/i);
-    const adjHint=adjMatch?adjMatch[1]:'';
-    const carrMatch=(S.adjEmail||'').match(/(allstate|state farm|farmers|liberty mutual|travelers|nationwide|usaa|progressive|erie|american family|cincinnati|west bend|acuity|society|secura|grinnell|pekin|germantown|intact|hanover)/i);
-    const carrHint=carrMatch?carrMatch[0]:'';
-    S.prog='Loading historical intel...';draw();
-    const historicalIntel=await fetchHistoricalIntel(adjHint,carrHint);
     S.prog='AI analyzing disputes (30-60 sec)...';draw();
     const r=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',
       headers:{'Content-Type':'application/json','x-api-key':S.apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-      body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:8000,system:ADJUSTER_PROMPT+historicalIntel,
+      body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:8000,system:ADJUSTER_PROMPT,
         messages:[{role:'user',content:msgContent}]})});
     if(!r.ok){const er=await r.json().catch(()=>null);throw new Error(er?.error?.message||'API error '+r.status)}
     S.prog='Parsing...';draw();
@@ -1262,115 +1258,6 @@ async function regenerateAdjusterResponse(){
     S.prog='';
   }catch(e){S.err='Regeneration failed: '+e.message;S.prog=''}
   S.busy=false;draw()
-}
-
-// ══ API KEY LOADER ══
-async function loadApiKey(){
-  // Already set from localStorage on init — nothing extra needed
-  // Key is stored as 'jg_key' in localStorage
-  if(!S.apiKey){
-    var k=localStorage.getItem('jg_key');
-    if(k)S.apiKey=k;
-  }
-}
-
-// ══ SUPABASE + INTEL ══
-const SB_URL='https://nuykvchgecpiuikoerze.supabase.co';
-const SB_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im51eWt2Y2hnZWNwaXVpa29lcnplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYyNjM3ODYsImV4cCI6MjA5MTgzOTc4Nn0.39hZ8DdjT_0iFJXPeAL2FXUSLw8FZBirDVzxZTO1W9s';
-
-async function saveRebuttalToSupabase(){
-  try{
-    const ar=S.adjResult;
-    if(!ar)return;
-    const defended=(ar.disputed_items||[]).filter(d=>S.adjResp[d.id]!=='concede');
-    const conceded=(ar.disputed_items||[]).filter(d=>S.adjResp[d.id]==='concede');
-    const payload={
-      project_name:S.proj||'',
-      adjuster_name:ar.adjuster_info?.name||'',
-      carrier:ar.adjuster_info?.company||'',
-      claim_number:ar.adjuster_info?.claim_number||'',
-      adjuster_email:ar.adjuster_info?.email||'',
-      jg_total:ar.summary?.jg_total||'',
-      adjuster_total:ar.summary?.adjuster_total||'',
-      total_disputed:ar.summary?.total_disputed||'',
-      items_defended:defended.length,
-      items_conceded:conceded.length,
-      defended_items:defended.map(d=>({code:d.jg_code,description:d.description,amount:d.difference,standard:d.standard_reference})),
-      conceded_items:conceded.map(d=>({code:d.jg_code,description:d.description,amount:d.difference})),
-      response_letter:S.adjLetterEdited||ar.response_letter||'',
-      created_at:new Date().toISOString()
-    };
-    const r=await fetch(SB_URL+'/rest/v1/adjuster_rebuttals',{
-      method:'POST',
-      headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json','Prefer':'return=minimal'},
-      body:JSON.stringify(payload)
-    });
-    if(r.ok){console.log('Rebuttal saved to intel database');}
-    else{const err=await r.text();console.error('Save failed:',err);}
-  }catch(e){console.error('saveRebuttalToSupabase:',e);}
-}
-
-async function fetchHistoricalIntel(adjusterName,carrier){
-  try{
-    const r=await fetch(SB_URL+'/rest/v1/adjuster_rebuttals?order=created_at.desc&limit=100&select=*',{
-      headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY}
-    });
-    if(!r.ok)return '';
-    const rows=await r.json();
-    if(!rows.length)return '';
-    const intel=[];
-    const adjLower=(adjusterName||'').toLowerCase().trim();
-    const carrLower=(carrier||'').toLowerCase().trim();
-    const adjRows=adjLower?rows.filter(r=>(r.adjuster_name||'').toLowerCase().includes(adjLower)):[];
-    const carrRows=carrLower?rows.filter(r=>(r.carrier||'').toLowerCase().includes(carrLower)):[];
-
-    if(adjRows.length){
-      const def=adjRows.reduce((s,r)=>s+(r.items_defended||0),0);
-      const con=adjRows.reduce((s,r)=>s+(r.items_conceded||0),0);
-      const tot=def+con;
-      intel.push('ADJUSTER HISTORY — '+adjusterName+' ('+adjRows.length+' past disputes):');
-      intel.push('  Win rate: '+(tot?Math.round(def/tot*100):0)+'% ('+def+' defended, '+con+' conceded)');
-      const winCodes={};
-      adjRows.forEach(r=>(r.defended_items||[]).forEach(item=>{if(item.code)winCodes[item.code]=(winCodes[item.code]||0)+1;}));
-      const topWins=Object.entries(winCodes).sort((a,b)=>b[1]-a[1]).slice(0,5);
-      if(topWins.length)intel.push('  Previously won: '+topWins.map(c=>c[0]+' ('+c[1]+'x)').join(', '));
-      intel.push('');
-    }
-    if(carrRows.length&&carrLower){
-      const def=carrRows.reduce((s,r)=>s+(r.items_defended||0),0);
-      const con=carrRows.reduce((s,r)=>s+(r.items_conceded||0),0);
-      const tot=def+con;
-      intel.push('CARRIER HISTORY — '+carrier+' ('+carrRows.length+' disputes):');
-      intel.push('  Win rate: '+(tot?Math.round(def/tot*100):0)+'%');
-      const codes={};
-      carrRows.forEach(r=>[...(r.defended_items||[]),...(r.conceded_items||[])].forEach(i=>{if(i.code)codes[i.code]=(codes[i.code]||0)+1;}));
-      const top=Object.entries(codes).sort((a,b)=>b[1]-a[1]).slice(0,5);
-      if(top.length)intel.push('  Most challenged: '+top.map(c=>c[0]).join(', '));
-      intel.push('');
-    }
-    const allWins={};
-    rows.forEach(r=>(r.defended_items||[]).forEach(i=>{if(i.code)allWins[i.code]=(allWins[i.code]||0)+1;}));
-    const topAll=Object.entries(allWins).sort((a,b)=>b[1]-a[1]).slice(0,8);
-    if(topAll.length)intel.push('JG OVERALL BEST DEFENSES: '+topAll.map(c=>c[0]+' ('+c[1]+'x won)').join(', '));
-
-    return intel.length ? '\n\nHISTORICAL INTELLIGENCE FROM PAST REBUTTALS:\n'+intel.join('\n')+'\n\nUse this to strengthen defenses. Be extra firm on codes previously won against this adjuster/carrier.' : '';
-  }catch(e){console.warn('Intel fetch failed:',e);return '';}
-}
-
-// ══ ADJUSTER FINISHED ══
-function adjusterFinished(){
-  // Reset only adjuster-specific state, keep API key and mode
-  S.proj='';
-  S.enc=null;S.est=null;
-  S.adjEst=null;S.adjEmail='';
-  S.adjResult=null;S.adjResp={};
-  S.adjDone=false;S.adjLetterEdited=null;S.adjNotes={};
-  S.busy=false;S.prog='';S.err=null;
-  S.phase='upload';
-  S.mode='adjuster';
-  // Scroll to top
-  window.scrollTo({top:0,behavior:'smooth'});
-  draw();
 }
 
 // ══ ADJUSTER SIGN-OFF ══
@@ -1560,8 +1447,7 @@ function draw(){
       h+=`<div style="margin-top:20px;text-align:center"><button style="background:linear-gradient(135deg,#E53935,#C62828);border:none;color:#fff;padding:12px 28px;border-radius:8px;cursor:pointer;font-size:13px;font-weight:700;font-family:'JetBrains Mono',monospace" onclick="adjusterSignOff()">Finalize & Post to Albi</button></div>`;
     } else {
       h+=`<div style="background:var(--grnD);border:2px solid var(--grn);border-radius:12px;padding:20px;margin:20px 0;text-align:center"><div style="font-size:32px;margin-bottom:8px">✓</div><div class="mono" style="font-size:16px;font-weight:700;color:var(--grn)">Rebuttal Complete — Posted to Albi</div><div style="font-size:12px;color:var(--dim);margin-top:4px">Defending ${defended.length} items${conceded.length>0?' | Conceded '+conceded.length+' items':''}</div></div>`;
-      h+=`<div style="display:flex;gap:10px;justify-content:center;margin-top:20px;flex-wrap:wrap"><button style="background:linear-gradient(135deg,#E53935,#C62828);border:none;color:#fff;padding:10px 20px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600;font-family:'JetBrains Mono',monospace" onclick="generateAdjusterPDF()">Download Rebuttal PDF</button><button style="background:linear-gradient(135deg,#B71C1C,#880E0E);border:none;color:#fff;padding:10px 20px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600;font-family:'JetBrains Mono',monospace" onclick="generateAdjusterPDF();setTimeout(()=>window.open('https://drive.google.com/drive/folders/1ccxK-5ILFKCU2sw1YAf0-APhTLtKYjGT','_blank'),500)">PDF + Save to Drive</button><button style="background:var(--s2);border:1px solid var(--brdH);color:var(--txt);padding:10px 20px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600;font-family:'JetBrains Mono',monospace" onclick="navigator.clipboard.writeText(S.adjLetterEdited||S.adjResult?.response_letter||'')">Copy Email Draft</button></div>`;
-      h+=`<div style="margin-top:16px;text-align:center"><button style="background:linear-gradient(135deg,#1B5E20,#2E7D32);border:none;color:#fff;padding:14px 36px;border-radius:8px;cursor:pointer;font-size:14px;font-weight:700;font-family:'JetBrains Mono',monospace;letter-spacing:.02em" onclick="adjusterFinished()">&#10003; Finished — Start New Rebuttal</button></div>`;
+      h+=`<div style="display:flex;gap:10px;justify-content:center;margin-top:20px;flex-wrap:wrap"><button style="background:linear-gradient(135deg,#E53935,#C62828);border:none;color:#fff;padding:10px 20px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600;font-family:'JetBrains Mono',monospace" onclick="generateAdjusterPDF()">Download Rebuttal PDF</button><button style="background:linear-gradient(135deg,#B71C1C,#880E0E);border:none;color:#fff;padding:10px 20px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600;font-family:'JetBrains Mono',monospace" onclick="generateAdjusterPDF();setTimeout(()=>window.open('https://drive.google.com/drive/folders/1ccxK-5ILFKCU2sw1YAf0-APhTLtKYjGT','_blank'),500)">PDF + Save to Drive</button><button style="background:var(--s2);border:1px solid var(--brdH);color:var(--txt);padding:10px 20px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600;font-family:'JetBrains Mono',monospace" onclick="navigator.clipboard.writeText(S.adjLetterEdited||S.adjResult?.response_letter||'')">Copy Email Draft</button><button style="background:transparent;border:1px solid var(--brd);color:var(--dim);padding:10px 20px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600;font-family:'JetBrains Mono',monospace" onclick="S.mode='landing';draw()">← Menu</button></div>`;
     }
     a.innerHTML=h;return;
   }
