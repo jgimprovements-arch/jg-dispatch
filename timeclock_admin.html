@@ -490,6 +490,226 @@ function exportPayPeriodCSV() {
 }
 
 
+// ── TIMESHEETS TAB ───────────────────────────────────────────────────────
+function renderTimesheets() {
+  var fmt = function(iso){ if(!iso)return ''; var d=new Date(iso),h=d.getHours()%12||12,m=d.getMinutes(),ap=d.getHours()>=12?'PM':'AM'; return h+':'+(m<10?'0':'')+m+' '+ap; };
+  var fmtDur = function(mins){ if(!mins&&mins!==0)return '-'; return Math.floor(mins/60)+'h '+(mins%60)+'m'; };
+  var durMins = function(e){ var out=e.clock_out?new Date(e.clock_out):new Date(); return Math.floor((out-new Date(e.clock_in))/60000); };
+
+  var periods = getPayPeriods(ST.payPeriod.type, ST.payPeriod.start, 40);
+  var selPeriod = ST.selPeriod || (periods[0] ? periods[0].label : null);
+
+  var h = '';
+
+  // Pay period settings card
+  h += '<div class="card" style="margin-bottom:16px;">';
+  h += '<div class="card-hdr" style="cursor:pointer;" onclick="var b=document.getElementById(\'pp-settings\');b.style.display=b.style.display===\'none\'?\'block\':\'none\'">';
+  h += '<div class="card-title">Pay Period Settings</div><div style="font-size:11px;color:var(--muted);">Click to configure</div>';
+  h += '</div>';
+  h += '<div id="pp-settings" style="display:none;padding:14px;border-top:1px solid var(--border);">';
+  h += '<div class="form-row">';
+  h += '<div><label class="form-label">Period Type</label><select class="form-select" id="pp-type" onchange="ST.payPeriod.type=this.value;localStorage.setItem(\'jg_pay_period\',JSON.stringify(ST.payPeriod));renderTimesheets();">';
+  ['weekly','biweekly','semimonthly'].forEach(function(t){ h += '<option value="'+t+'"'+(ST.payPeriod.type===t?' selected':'')+'>'+({weekly:'Weekly',biweekly:'Bi-Weekly',semimonthly:'Semi-Monthly'}[t])+'</option>'; });
+  h += '</select></div>';
+  h += '<div><label class="form-label">First Period Start Date</label><input type="date" class="form-input" id="pp-start" value="'+ST.payPeriod.start+'" onchange="ST.payPeriod.start=this.value;localStorage.setItem(\'jg_pay_period\',JSON.stringify(ST.payPeriod));renderTimesheets();"></div>';
+  h += '</div>';
+  h += '<div style="font-size:11px;color:var(--muted);margin-top:8px;">7:30 AM rule: Clock-ins before 7:30am are adjusted to 7:30am for billable hours unless admin approves early start.</div>';
+  h += '</div></div>';
+
+  // Period + employee filters
+  h += '<div class="filter-bar">';
+  h += '<select onchange="ST.selPeriod=this.value;ST.filterEmp=\'All\';renderTimesheets();" style="min-width:220px;">';
+  h += '<option value="">-- Select Pay Period --</option>';
+  periods.forEach(function(p){ h += '<option value="'+p.label+'"'+(p.label===selPeriod?' selected':'')+'>'+p.label+'</option>'; });
+  h += '</select>';
+  h += '<select onchange="ST.filterEmp=this.value;renderTimesheets();" style="min-width:160px;">';
+  h += '<option value="All">All Employees</option>';
+  var empNames = [...new Set(ST.entries.map(function(e){return e.employee_name;}))].sort();
+  empNames.forEach(function(n){ h += '<option value="'+n+'"'+(ST.filterEmp===n?' selected':'')+'>'+n+'</option>'; });
+  h += '</select>';
+  h += '<button class="btn btn-primary" onclick="exportPayPeriodCSV()" style="margin-left:auto;">Export CSV</button>';
+  h += '</div>';
+
+  var curPer = periods.find(function(p){ return p.label === selPeriod; });
+  var filtered = ST.entries.filter(function(e){
+    if (!curPer) return false;
+    var d = new Date(e.clock_in); d.setHours(0,0,0,0);
+    return d >= curPer.start && d <= curPer.end;
+  }).filter(function(e){ return ST.filterEmp === 'All' || e.employee_name === ST.filterEmp; });
+
+  // Group by employee
+  var byEmp = {};
+  filtered.forEach(function(e){
+    if (!byEmp[e.employee_name]) byEmp[e.employee_name] = { entries: [], totalBillable: 0, totalActual: 0, earlyFlags: 0 };
+    var breaks = ST.breaks.filter(function(b){ return b.entry_id === e.id; });
+    byEmp[e.employee_name].entries.push(e);
+    byEmp[e.employee_name].totalBillable += billableMins(e, breaks);
+    byEmp[e.employee_name].totalActual += e.duration_minutes || durMins(e);
+    if (isEarlyClockIn(e.clock_in) && !e.approved_early) byEmp[e.employee_name].earlyFlags++;
+  });
+
+  if (!curPer) {
+    h += '<div class="card"><div class="empty" style="padding:24px;">Select a pay period above</div></div>';
+  } else if (!filtered.length) {
+    h += '<div class="card"><div class="empty" style="padding:24px;">No entries for this pay period</div></div>';
+  } else {
+    // OT helpers
+    function getWeekKey(iso) {
+      var d = new Date(iso); var day = d.getDay();
+      var diff = d.getDate() - day + (day === 0 ? -6 : 1);
+      var mon = new Date(d); mon.setDate(diff); mon.setHours(0,0,0,0);
+      return mon.toISOString().split('T')[0];
+    }
+    function calcOT(entries) {
+      var weeks = {};
+      entries.forEach(function(e){ var wk=getWeekKey(e.clock_in); if(!weeks[wk])weeks[wk]=[]; weeks[wk].push(e); });
+      var regMins=0, otMins=0;
+      Object.values(weeks).forEach(function(wkE){
+        var wkMins=0;
+        wkE.forEach(function(e){ var eb=ST.breaks.filter(function(b){return b.entry_id===e.id;}); wkMins+=billableMins(e,eb); });
+        if(wkMins>2400){regMins+=2400;otMins+=(wkMins-2400);}else{regMins+=wkMins;}
+      });
+      return {regMins:regMins,otMins:otMins};
+    }
+    function fmtHM(mins){ var h2=Math.floor(mins/60),m2=Math.round(mins%60); return h2+'h '+(m2<10?'0':'')+m2+'m'; }
+
+    // Employee summary cards
+    h += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px;margin-bottom:16px;">';
+    Object.entries(byEmp).forEach(function(kv){
+      var nm=kv[0], d=kv[1];
+      var emp=ST.employees.find(function(e){return e.name===nm;});
+      var isSalary = emp && emp.pay_type==='salary';
+      var rate=emp?parseFloat(emp.hourly_rate||0):0;
+      var ot=calcOT(d.entries);
+      var regPay=0, otPay=0, totalPay=0;
+      if(isSalary&&emp.annual_salary){
+        var annSal=parseFloat(emp.annual_salary);
+        var perPeriodDays=ST.payPeriod.type==='weekly'?5:10;
+        var periodPay=annSal/(ST.payPeriod.type==='weekly'?52:ST.payPeriod.type==='biweekly'?26:24);
+        var workedDays=new Set(d.entries.map(function(e){return e.clock_in.split('T')[0];})).size;
+        var missedDays=Math.max(0,perPeriodDays-workedDays);
+        regPay=periodPay-missedDays*(periodPay/perPeriodDays); totalPay=regPay;
+      } else {
+        regPay=rate*(ot.regMins/60); otPay=rate*1.5*(ot.otMins/60); totalPay=regPay+otPay;
+      }
+      h += '<div class="card" style="padding:16px;margin:0;">';
+      h += '<div style="font-size:13px;font-weight:700;color:var(--navy);margin-bottom:10px;">'+nm+'</div>';
+      h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:10px;">';
+      h += '<div style="background:rgba(13,45,94,.04);border-radius:8px;padding:8px;text-align:center;"><div style="font-size:16px;font-weight:700;color:var(--navy);">'+fmtHM(ot.regMins)+'</div><div style="font-size:10px;color:var(--muted);font-weight:600;">REG HRS</div></div>';
+      h += '<div style="background:'+(ot.otMins>0?'rgba(198,40,40,.06)':'rgba(13,45,94,.04)')+'";border-radius:8px;padding:8px;text-align:center;"><div style="font-size:16px;font-weight:700;color:'+(ot.otMins>0?'#c62828':'var(--muted)')+';">'+fmtHM(ot.otMins)+'</div><div style="font-size:10px;color:var(--muted);font-weight:600;">OT HRS</div></div>';
+      h += '</div>';
+      if(isSalary&&emp.annual_salary){
+        var pp3=parseFloat(emp.annual_salary)/(ST.payPeriod.type==='weekly'?52:ST.payPeriod.type==='biweekly'?26:24);
+        var wd3=new Set(d.entries.map(function(e){return e.clock_in.split('T')[0];})).size;
+        var pd3=ST.payPeriod.type==='weekly'?5:10;
+        var md3=Math.max(0,pd3-wd3);
+        h += '<div style="border-top:1px solid var(--border);padding-top:10px;">';
+        h += '<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;"><span style="color:var(--muted);">Salary — $'+Number(emp.annual_salary).toLocaleString()+'/yr</span><span style="font-weight:600;">$'+pp3.toFixed(2)+'/period</span></div>';
+        h += '<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;"><span style="color:var(--muted);">Days worked: '+wd3+' / '+pd3+'</span>'+(md3>0?'<span style="color:#c62828;">-$'+(md3*(pp3/pd3)).toFixed(2)+' deducted</span>':'<span style="color:#2e7d32;">Full period</span>')+'</div>';
+        h += '<div style="display:flex;justify-content:space-between;font-size:14px;font-weight:700;border-top:1px solid var(--border);padding-top:6px;margin-top:6px;"><span>Est. Gross Pay</span><span style="color:#2e7d32;">$'+totalPay.toFixed(2)+'</span></div>';
+        h += '</div>';
+      } else if(rate){
+        h += '<div style="border-top:1px solid var(--border);padding-top:10px;">';
+        h += '<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;"><span style="color:var(--muted);">Regular ('+fmtHM(ot.regMins)+' @ $'+rate.toFixed(2)+'/hr)</span><span style="font-weight:600;">$'+regPay.toFixed(2)+'</span></div>';
+        if(ot.otMins>0){h += '<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;"><span style="color:#c62828;">Overtime ('+fmtHM(ot.otMins)+' @ $'+(rate*1.5).toFixed(2)+'/hr)</span><span style="font-weight:600;color:#c62828;">$'+otPay.toFixed(2)+'</span></div>';}
+        h += '<div style="display:flex;justify-content:space-between;font-size:14px;font-weight:700;border-top:1px solid var(--border);padding-top:6px;margin-top:6px;"><span>Est. Gross Pay</span><span style="color:#2e7d32;">$'+totalPay.toFixed(2)+'</span></div>';
+        h += '</div>';
+      } else {
+        h += '<div style="font-size:11px;color:var(--muted);font-style:italic;">No rate set</div>';
+      }
+      if(d.earlyFlags) h += '<div style="font-size:11px;color:#c62828;margin-top:8px;">&#9888; '+d.earlyFlags+' early clock-in(s)</div>';
+      h += '</div>';
+    });
+    h += '</div>';
+
+    // Period summary bar
+    var periodRegMins=0, periodOtMins=0, periodTotalPay=0;
+    Object.entries(byEmp).forEach(function(kv){
+      var nm2=kv[0], d2=kv[1];
+      var emp2=ST.employees.find(function(e){return e.name===nm2;});
+      var rate2=emp2?parseFloat(emp2.hourly_rate||0):0;
+      var ot3=calcOT(d2.entries);
+      periodRegMins+=ot3.regMins; periodOtMins+=ot3.otMins;
+      if(emp2&&emp2.pay_type==='salary'&&emp2.annual_salary){
+        var pp4=parseFloat(emp2.annual_salary)/(ST.payPeriod.type==='weekly'?52:ST.payPeriod.type==='biweekly'?26:24);
+        var pd4=ST.payPeriod.type==='weekly'?5:10;
+        var wd4=new Set(d2.entries.map(function(e){return e.clock_in.split('T')[0];})).size;
+        var md4=Math.max(0,pd4-wd4);
+        periodTotalPay+=pp4-md4*(pp4/pd4);
+      } else if(rate2){ periodTotalPay+=rate2*(ot3.regMins/60)+rate2*1.5*(ot3.otMins/60); }
+    });
+
+    var totalHrs2=Math.floor((periodRegMins+periodOtMins)/60)+'h '+Math.round((periodRegMins+periodOtMins)%60)+'m';
+    var regHrsStr2=Math.floor(periodRegMins/60)+'h '+Math.round(periodRegMins%60)+'m';
+    var otHrsStr2=Math.floor(periodOtMins/60)+'h '+Math.round(periodOtMins%60)+'m';
+    h += '<div class="card" style="margin-bottom:16px;padding:0;overflow:hidden;">';
+    h += '<div style="background:var(--navy);padding:10px 18px;"><div style="font-size:11px;font-weight:700;color:rgba(255,255,255,.6);text-transform:uppercase;letter-spacing:.06em;">Pay Period Summary</div></div>';
+    h += '<div style="display:grid;grid-template-columns:1fr 1fr 1fr'+(periodTotalPay>0?' 1fr':'')+';">';
+    h += '<div style="padding:16px 18px;border-right:1px solid var(--border);"><div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">Total Hours</div><div style="font-size:24px;font-weight:700;color:var(--navy);line-height:1;">'+totalHrs2+'</div></div>';
+    h += '<div style="padding:16px 18px;border-right:1px solid var(--border);"><div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">Regular</div><div style="font-size:24px;font-weight:700;color:var(--navy);line-height:1;">'+regHrsStr2+'</div></div>';
+    h += '<div style="padding:16px 18px;'+(periodTotalPay>0?'border-right:1px solid var(--border);':'')+'">';
+    h += '<div style="font-size:10px;font-weight:700;color:'+(periodOtMins>0?'#c62828':'var(--muted)')+';text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">Overtime</div>';
+    h += '<div style="font-size:24px;font-weight:700;color:'+(periodOtMins>0?'#c62828':'var(--muted)')+';line-height:1;">'+otHrsStr2+'</div></div>';
+    if(periodTotalPay>0){
+      h += '<div style="padding:16px 18px;background:rgba(46,125,50,.04);">';
+      h += '<div style="font-size:10px;font-weight:700;color:#2e7d32;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">Est. Gross Payroll</div>';
+      h += '<div style="font-size:24px;font-weight:700;color:#2e7d32;line-height:1;">$'+periodTotalPay.toFixed(2)+'</div></div>';
+    }
+    h += '</div></div>';
+
+    // Detail table
+    h += '<div class="card"><div class="card-hdr"><div class="card-title">Time Entries — '+selPeriod+'</div></div>';
+    h += '<table class="tc-table"><thead><tr><th>Employee</th><th>Date</th><th>Clock In</th><th>Clock Out</th><th>Actual</th><th>Billable</th><th>Break</th><th>Job</th><th>Flags</th><th></th></tr></thead><tbody>';
+    filtered.sort(function(a,b){return new Date(a.clock_in)-new Date(b.clock_in);});
+    filtered.forEach(function(e){
+      var breaks=ST.breaks.filter(function(b){return b.entry_id===e.id;});
+      var actual=e.duration_minutes||durMins(e);
+      var bill=billableMins(e,breaks);
+      var bkMins=breaks.reduce(function(s,b){return s+(b.duration_minutes||0);},0);
+      var early=isEarlyClockIn(e.clock_in);
+      var active=!e.clock_out;
+      var flagCell='';
+      if(early&&!e.approved_early) flagCell='<span style="color:#c62828;font-size:11px;font-weight:700;">Early<br><button class="btn btn-sm" onclick="approveEarly(\''+e.id+'\')">Approve</button></span>';
+      else if(early&&e.approved_early) flagCell='<span style="color:#2e7d32;font-size:11px;">Approved</span>';
+      h += '<tr'+(early&&!e.approved_early?' style="background:rgba(198,40,40,.04);"':'')+'>'; 
+      h += '<td><strong>'+e.employee_name+'</strong></td>';
+      h += '<td>'+fmtD(new Date(e.clock_in))+'</td>';
+      h += '<td class="mono"'+(early&&!e.approved_early?' style="color:#c62828;font-weight:700;"':'')+'>'+fmt(e.clock_in)+'</td>';
+      h += '<td class="mono">'+(active?'<span class="badge badge-green">Active</span>':fmt(e.clock_out))+'</td>';
+      h += '<td>'+fmtDur(actual)+'</td>';
+      h += '<td><strong>'+fmtDur(bill)+'</strong></td>';
+      h += '<td>'+(bkMins?fmtDur(bkMins):'-')+'</td>';
+      h += '<td style="max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+(e.job_name||'-')+'</td>';
+      h += '<td>'+flagCell+'</td>';
+      h += '<td>'+(isAdmin()?'<button class="btn btn-sm" onclick="editEntry(\''+e.id+'\')">Edit</button>':'<button class="btn btn-sm" onclick="viewEntry(\''+e.id+'\')">View</button>')+'</td>';
+      h += '</tr>';
+    });
+    h += '</tbody></table>';
+
+    // Absence records
+    var periodAbsences=ST.absences.filter(function(a){
+      if(!curPer)return false;
+      var d3=new Date(a.date+'T00:00:00'); d3.setHours(0,0,0,0);
+      return d3>=curPer.start&&d3<=curPer.end;
+    }).filter(function(a){return ST.filterEmp==='All'||a.employee_name===ST.filterEmp;});
+    if(periodAbsences.length){
+      h += '<div class="card" style="margin-top:12px;"><div class="card-hdr"><div class="card-title">Absences / Out of Office</div></div>';
+      h += '<table class="tc-table"><thead><tr><th>Employee</th><th>Date</th><th>Reason</th><th>Market</th><th>Notes</th><th></th></tr></thead><tbody>';
+      periodAbsences.forEach(function(a){
+        var badge=({'Sick':'badge-red','PTO':'badge-green','No Call No Show':'badge-red','Personal Day':'badge-warn','Injured':'badge-red','Training':'badge-green','Shop Time':'badge-warn','Jury Duty':'badge-gray','Bereavement':'badge-gray'}[a.reason])||'badge-gray';
+        h += '<tr><td><strong>'+a.employee_name+'</strong></td><td>'+fmtD(new Date(a.date+'T00:00:00'))+'</td>';
+        h += '<td><span class="badge '+badge+'">'+a.reason+'</span></td>';
+        h += '<td>'+(a.market||'-')+'</td><td style="font-size:11px;color:var(--muted);">'+(a.notes||'')+'</td>';
+        h += '<td><button class="btn btn-sm btn-danger" onclick="deleteAbsence(\''+a.id+'\')">Remove</button></td></tr>';
+      });
+      h += '</tbody></table></div>';
+    }
+    h += '</div>';
+  }
+
+  document.getElementById('tc-body').innerHTML = h;
+}
+
 // ── EMPLOYEES TAB ─────────────────────────────────────────────────────────
 function renderEmployees() {
   var h = '';
