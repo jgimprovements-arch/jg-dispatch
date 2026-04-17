@@ -405,11 +405,26 @@ body {
 <div id="login-screen">
   <div class="login-mark">JG</div>
   <div class="login-title">JG Time Clock</div>
-  <div class="login-sub">Sign in with your Google account<br>to clock in and out</div>
-  <div id="g_id_onload" data-client_id="209231675110-6id8vr3ehcocg4df7tvpc89jsmrvhogk.apps.googleusercontent.com" data-ux_mode="popup" data-callback="tcGoogleCb" data-auto_prompt="false"></div>
-  <div class="g_id_signin" data-type="standard" data-size="large" data-theme="outline" data-text="sign_in_with" data-shape="pill" data-logo_alignment="left" data-width="280"></div>
+
+  <!-- Email/password form (default) -->
+  <div id="login-email-form" style="width:100%;max-width:280px;">
+    <input id="login-email-input" type="email" placeholder="Your email address"
+      style="width:100%;padding:13px 16px;border-radius:12px;border:1.5px solid rgba(255,255,255,.2);background:rgba(255,255,255,.1);color:#fff;font-size:15px;font-family:'DM Sans',sans-serif;outline:none;margin-bottom:10px;box-sizing:border-box;"
+      oninput="document.getElementById('login-err').textContent=''">
+    <input id="login-pass-input" type="password" placeholder="Password"
+      style="width:100%;padding:13px 16px;border-radius:12px;border:1.5px solid rgba(255,255,255,.2);background:rgba(255,255,255,.1);color:#fff;font-size:15px;font-family:'DM Sans',sans-serif;outline:none;margin-bottom:14px;box-sizing:border-box;"
+      onkeydown="if(event.key==='Enter')emailSignIn()">
+    <button onclick="emailSignIn()"
+      style="width:100%;padding:14px;border-radius:12px;border:none;background:var(--orange);color:#fff;font-size:15px;font-weight:700;cursor:pointer;font-family:'DM Sans',sans-serif;margin-bottom:14px;">
+      Sign In
+    </button>
+    <div style="text-align:center;font-size:12px;color:rgba(255,255,255,.5);margin-bottom:12px;">— or —</div>
+    <div id="g_id_onload" data-client_id="209231675110-6id8vr3ehcocg4df7tvpc89jsmrvhogk.apps.googleusercontent.com" data-ux_mode="popup" data-callback="tcGoogleCb" data-auto_prompt="false"></div>
+    <div class="g_id_signin" data-type="standard" data-size="large" data-theme="outline" data-text="sign_in_with" data-shape="pill" data-logo_alignment="left" data-width="280"></div>
+  </div>
+
   <div class="login-err" id="login-err"></div>
-  <div class="login-note">Access restricted to invited employees only</div>
+  <div class="login-note">Sign in with your invite email or Google account</div>
 </div>
 
 <!-- APP -->
@@ -635,6 +650,41 @@ var TC = {
 };
 
 // AUTH -
+// Email + password sign-in via Supabase Auth
+async function emailSignIn() {
+  var email = (document.getElementById('login-email-input') || {}).value || '';
+  var pass  = (document.getElementById('login-pass-input')  || {}).value || '';
+  var errEl = document.getElementById('login-err');
+  if (!email || !pass) { if(errEl) errEl.textContent = 'Enter your email and password.'; return; }
+
+  var btn = document.querySelector('#login-email-form button');
+  if (btn) { btn.textContent = 'Signing in...'; btn.disabled = true; }
+
+  try {
+    var r = await fetch('https://nuykvchgecpiuikoerze.supabase.co/auth/v1/token?grant_type=password', {
+      method: 'POST',
+      headers: { 'apikey': 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im51eWt2Y2hnZWNwaXVpa29lcnplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYyNjM3ODYsImV4cCI6MjA5MTgzOTc4Nn0.39hZ8DdjT_0iFJXPeAL2FXUSLw8FZBirDVzxZTO1W9s', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: email.trim().toLowerCase(), password: pass })
+    });
+    var data = await r.json();
+    if (!r.ok || !data.user) throw new Error(data.error_description || data.msg || 'Invalid email or password');
+
+    var u = {
+      name: data.user.user_metadata?.name || email.split('@')[0],
+      email: data.user.email,
+      picture: '',
+      access_token: data.access_token
+    };
+    localStorage.setItem(TC_KEY, JSON.stringify(u));
+    localStorage.setItem(TC_EXP, String(Date.now() + 43200000));
+    initApp(u);
+  } catch(e) {
+    if (errEl) errEl.textContent = e.message;
+  }
+
+  if (btn) { btn.textContent = 'Sign In'; btn.disabled = false; }
+}
+
 window.tcGoogleCb = function(r) {
   try {
     var p = JSON.parse(atob(r.credential.split('.')[1]));

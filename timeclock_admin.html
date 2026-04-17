@@ -163,6 +163,9 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;min
   <div class="sb-sec">SALES</div>
   <a href="sales.html" class="sb-lnk"><span class="sb-icon">📈</span><span class="sb-label">Sales Dashboard</span></a>
   <a href="sales_admin.html" class="sb-lnk"><span class="sb-icon">🔐</span><span class="sb-label">Sales Admin</span></a>
+  <div class="sb-sec">TIME</div>
+  <a href="timeclock_admin.html" class="sb-lnk"><span class="sb-icon">⏱</span><span class="sb-label">Time Admin</span></a>
+  <a href="timeclock.html" class="sb-lnk"><span class="sb-icon">🕐</span><span class="sb-label">Clock In/Out</span></a>
   <div class="sb-sec">AI TOOLS</div>
   <a href="qa.html" class="sb-lnk"><span class="sb-icon">🔍</span><span class="sb-label">QA Review</span></a>
   <a href="adjuster.html" class="sb-lnk"><span class="sb-icon">⚖️</span><span class="sb-label">Adjuster Rebuttal</span></a>
@@ -186,6 +189,7 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;min
   <button class="tc-tab" id="tab-timesheets" onclick="showTab('timesheets',this)">📋 Timesheets</button>
   <button class="tc-tab" id="tab-employees" onclick="showTab('employees',this)">👥 Employees</button>
   <button class="tc-tab" id="tab-reports" onclick="showTab('reports',this)">📊 Reports</button>
+  <button class="tc-tab" id="tab-invite" onclick="showTab('invite',this)">✉️ Invite</button>
 </div>
 
 <div class="tc-body" id="tc-body">
@@ -571,6 +575,101 @@ async function saveEntry(id) {
   toast('✓ Entry updated');
   closeModal();
   await loadAll();
+}
+
+// ── INVITE ──────────────────────────────────────────────────────────────────
+function renderInvite() {
+  var h = '';
+
+  h += '<div style="max-width:520px;">';
+
+  // Status message
+  h += '<div id="invite-status" style="min-height:20px;margin-bottom:12px;"></div>';
+
+  // Invite form card
+  h += '<div class="card" style="margin-bottom:20px;">';
+  h += '<div class="card-hdr"><div class="card-title">✉️ Invite New Employee</div></div>';
+  h += '<div class="card-body">';
+  h += '<p style="font-size:13px;color:var(--muted);margin-bottom:16px;line-height:1.5;">The employee will receive an email with a link to set their own password and access the time clock app from their personal device.</p>';
+
+  var roles = ['Technician','Project Manager','Estimator','Office','Admin'];
+  h += '<div class="form-row">';
+  h += '<div><label class="form-label">Full Name *</label><input class="form-input" id="inv-name" type="text" placeholder="Jane Smith"></div>';
+  h += '<div><label class="form-label">Email Address *</label><input class="form-input" id="inv-email" type="email" placeholder="jane@gmail.com"></div>';
+  h += '</div>';
+  h += '<div class="form-row">';
+  h += '<div><label class="form-label">Role</label><select class="form-select" id="inv-role">'+roles.map(function(r){return '<option>'+r+'</option>';}).join('')+'</select></div>';
+  h += '<div><label class="form-label">Market</label><select class="form-select" id="inv-market"><option>Appleton</option><option>Stevens Point</option></select></div>';
+  h += '</div>';
+  h += '<div class="form-row">';
+  h += '<div><label class="form-label">Hourly Rate ($)</label><input class="form-input" id="inv-rate" type="number" step="0.01" placeholder="0.00"></div>';
+  h += '<div style="display:flex;align-items:flex-end;"><p style="font-size:11px;color:var(--muted);line-height:1.5;">Rate is optional and only visible to admins. Employee will not see this.</p></div>';
+  h += '</div>';
+  h += '<button class="btn btn-orange" onclick="sendInvite()" style="width:100%;padding:14px;font-size:14px;margin-top:4px;">✉️ Send Invite Email</button>';
+  h += '</div></div>';
+
+  // Instructions
+  h += '<div class="card">';
+  h += '<div class="card-hdr"><div class="card-title">How It Works</div></div>';
+  h += '<div class="card-body">';
+  h += '<ol style="font-size:13px;color:var(--muted);line-height:2;padding-left:18px;">';
+  h += '<li>Enter the employee name, personal email, role and market</li>';
+  h += '<li>Click <strong>Send Invite Email</strong></li>';
+  h += '<li>They receive an email with a secure setup link</li>';
+  h += '<li>They click the link and create their own password</li>';
+  h += '<li>They open <strong>timeclock.html</strong> on their phone and sign in with email + password</li>';
+  h += '<li>Their employee record is created automatically</li>';
+  h += '</ol>';
+  h += '<div style="margin-top:12px;padding:10px 14px;background:rgba(232,93,4,.06);border-radius:8px;border:1px solid rgba(232,93,4,.2);font-size:12px;color:var(--text);">';
+  h += '<strong>Share this link with employees:</strong><br>';
+  h += '<a href="https://jgimprovements-arch.github.io/jg-dispatch/timeclock.html" target="_blank" style="color:var(--orange);font-weight:600;">https://jgimprovements-arch.github.io/jg-dispatch/timeclock.html</a>';
+  h += '</div>';
+  h += '</div></div>';
+  h += '</div>';
+
+  document.getElementById('tc-body').innerHTML = h;
+}
+
+async function sendInvite() {
+  var name  = (document.getElementById('inv-name')  || {}).value || '';
+  var email = (document.getElementById('inv-email') || {}).value || '';
+  var role  = (document.getElementById('inv-role')  || {}).value || 'Technician';
+  var market = (document.getElementById('inv-market')|| {}).value || 'Appleton';
+  var rate  = (document.getElementById('inv-rate')  || {}).value || '0';
+  var statusEl = document.getElementById('invite-status');
+
+  if (!name.trim() || !email.trim()) {
+    if (statusEl) statusEl.innerHTML = '<div style="padding:10px 14px;border-radius:8px;background:var(--danger-bg);color:var(--red);font-size:13px;font-weight:600;">Name and email are required.</div>';
+    return;
+  }
+
+  var btn = document.querySelector('#tc-body .btn-orange');
+  if (btn) { btn.textContent = 'Sending...'; btn.disabled = true; }
+  if (statusEl) statusEl.innerHTML = '';
+
+  try {
+    var r = await fetch('https://jg-proxy-v2.vercel.app/api/invite', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: email.trim().toLowerCase(), name: name.trim(), role, market, hourly_rate: parseFloat(rate) || 0 })
+    });
+    var data = await r.json();
+
+    if (r.ok && data.success) {
+      if (statusEl) statusEl.innerHTML = '<div style="padding:10px 14px;border-radius:8px;background:var(--ok-bg);color:var(--green);font-size:13px;font-weight:600;">✓ Invite sent to '+email+'</div>';
+      // Clear form
+      ['inv-name','inv-email','inv-rate'].forEach(function(id){ var el=document.getElementById(id); if(el) el.value=''; });
+      toast('✓ Invite sent to ' + email);
+      // Reload employee list
+      await loadAll();
+    } else {
+      throw new Error(data.error || 'Invite failed');
+    }
+  } catch(e) {
+    if (statusEl) statusEl.innerHTML = '<div style="padding:10px 14px;border-radius:8px;background:var(--danger-bg);color:var(--red);font-size:13px;font-weight:600;">Error: '+e.message+'</div>';
+  }
+
+  if (btn) { btn.textContent = '✉️ Send Invite Email'; btn.disabled = false; }
 }
 
 // ── EXPORT CSV ────────────────────────────────────────────────────────────
