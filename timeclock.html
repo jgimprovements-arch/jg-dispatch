@@ -1395,7 +1395,131 @@ function toast(msg) {
   setTimeout(function(){ el.classList.remove('show'); }, 3000);
 }
 
-// START 
+
+// TABS
+var _currentTab = 'clock';
+
+function switchTab(tab) {
+  _currentTab = tab;
+  ['clock','team','hours'].forEach(function(t) {
+    var btn = document.getElementById('tabbtn-' + t);
+    if (btn) btn.classList.toggle('active', t === tab);
+  });
+  var clockEl  = document.getElementById('app');
+  var teamEl   = document.getElementById('team-panel');
+  var hoursEl  = document.getElementById('hours-panel');
+  if (clockEl)  clockEl.style.display  = tab === 'clock'  ? 'block' : 'none';
+  if (teamEl)   teamEl.style.display   = tab === 'team'   ? 'block' : 'none';
+  if (hoursEl)  hoursEl.style.display  = tab === 'hours'  ? 'block' : 'none';
+  if (tab === 'team')  loadTeamData();
+  if (tab === 'hours') loadMyHours();
+}
+
+async function loadTeamData() {
+  var fmtTime = function(iso){ var d=new Date(iso),h=d.getHours()%12||12,m=d.getMinutes(),ap=d.getHours()>=12?'PM':'AM'; return h+':'+(m<10?'0':'')+m+' '+ap; };
+  var fmtDur  = function(mins){ return Math.floor(mins/60)+'h '+(mins%60)+'m'; };
+  var colors  = ['#1565c0','#2e7d32','#e65100','#6a1b9a','#00838f','#c62828','#4527a0'];
+  var colorFor = function(n){ var h=0; for(var i=0;i<(n||'').length;i++) h+=n.charCodeAt(i); return colors[h%colors.length]; };
+  var today   = new Date().toISOString().split('T')[0];
+  var activeEl = document.getElementById('team-active-list');
+  var todayEl  = document.getElementById('team-today-list');
+  if (activeEl) activeEl.innerHTML = '<div class="empty">Loading...</div>';
+  if (todayEl)  todayEl.innerHTML  = '<div class="empty">Loading...</div>';
+  try {
+    var entries = await sb('/rest/v1/time_entries?clock_in=gte.'+today+'T00:00:00&order=clock_in.asc&select=*') || [];
+    var active  = entries.filter(function(e){ return !e.clock_out; });
+    // Clocked in now
+    if (!active.length) {
+      if (activeEl) activeEl.innerHTML = '<div class="empty" style="padding:12px 0;">No one clocked in right now</div>';
+    } else {
+      if (activeEl) activeEl.innerHTML = active.map(function(e){
+        var mins  = Math.floor((Date.now()-new Date(e.clock_in).getTime())/60000);
+        var isMe  = TC.user && e.employee_email === TC.user.email;
+        var col   = colorFor(e.employee_name);
+        return '<div class="team-member">'+
+          '<div class="team-avatar" style="background:'+col+';">'+(e.employee_name||'?')[0].toUpperCase()+'</div>'+
+          '<div class="team-info">'+
+            '<div class="team-name">'+e.employee_name+(isMe?' (You)':'')+'</div>'+
+            '<div class="team-job">'+(e.job_name||'No job assigned')+'</div>'+
+          '</div>'+
+          '<div style="text-align:right;">'+
+            '<div class="team-dur" style="color:var(--green);">'+fmtDur(mins)+'</div>'+
+            '<div style="font-size:10px;color:var(--muted);">since '+fmtTime(e.clock_in)+'</div>'+
+          '</div>'+
+          '<div class="team-dot" style="background:var(--green);animation:pulse 2s infinite;margin-left:6px;"></div>'+
+        '</div>';
+      }).join('');
+    }
+    // Today all entries grouped
+    var byEmp = {};
+    entries.forEach(function(e){
+      if (!byEmp[e.employee_name]) byEmp[e.employee_name]={entries:[],email:e.employee_email};
+      byEmp[e.employee_name].entries.push(e);
+    });
+    if (!Object.keys(byEmp).length) {
+      if (todayEl) todayEl.innerHTML = '<div class="empty" style="padding:12px 0;">No entries today</div>';
+    } else {
+      if (todayEl) todayEl.innerHTML = Object.entries(byEmp).map(function(kv){
+        var name=kv[0], d=kv[1];
+        var mins = d.entries.reduce(function(s,e){ return s+Math.floor(((e.clock_out?new Date(e.clock_out):new Date())-new Date(e.clock_in))/60000); },0);
+        var clocked = d.entries.some(function(e){ return !e.clock_out; });
+        var isMe = TC.user && d.email === TC.user.email;
+        var jobs = [...new Set(d.entries.map(function(e){ return e.job_name; }).filter(Boolean))].join(', ') || 'No job';
+        return '<div class="team-member">'+
+          '<div class="team-avatar" style="background:'+colorFor(name)+';">'+(name[0]||'?').toUpperCase()+'</div>'+
+          '<div class="team-info">'+
+            '<div class="team-name">'+name+(isMe?' (You)':'')+'</div>'+
+            '<div class="team-job">'+jobs+'</div>'+
+          '</div>'+
+          '<div style="text-align:right;">'+
+            '<div class="team-dur" style="color:var(--navy);">'+fmtDur(mins)+'</div>'+
+            '<div style="font-size:10px;color:var(--muted);">'+d.entries.length+' entr'+(d.entries.length===1?'y':'ies')+'</div>'+
+          '</div>'+
+          '<div class="team-dot" style="background:'+(clocked?'var(--green)':'var(--muted)')+(clocked?';animation:pulse 2s infinite':'')+';margin-left:6px;"></div>'+
+        '</div>';
+      }).join('');
+    }
+  } catch(e) {
+    if (activeEl) activeEl.innerHTML = '<div class="empty">Error loading team data</div>';
+  }
+}
+
+async function loadMyHours() {
+  if (!TC.employee || !TC.employee.id) return;
+  var fmtTime = function(iso){ var d=new Date(iso),h=d.getHours()%12||12,m=d.getMinutes(),ap=d.getHours()>=12?'PM':'AM'; return h+':'+(m<10?'0':'')+m+' '+ap; };
+  var fmtDur  = function(mins){ return Math.floor(mins/60)+'h '+(mins%60)+'m'; };
+  var fmtDate = function(iso){ var d=new Date(iso); var days=['Sun','Mon','Tue','Wed','Thu','Fri','Sat']; return days[d.getDay()]+' '+(d.getMonth()+1)+'/'+d.getDate(); };
+  var since   = new Date(); since.setDate(since.getDate()-7);
+  var entries = await sb('/rest/v1/time_entries?employee_id=eq.'+TC.employee.id+'&clock_in=gte.'+since.toISOString()+'&order=clock_in.desc&limit=50&select=*') || [];
+  var today   = new Date(); today.setHours(0,0,0,0);
+  var wkStart = new Date(today); wkStart.setDate(today.getDate()-today.getDay());
+  var todayMins=0, weekMins=0;
+  entries.forEach(function(e){
+    var inT=new Date(e.clock_in), outT=e.clock_out?new Date(e.clock_out):new Date();
+    var m=Math.floor((outT-inT)/60000);
+    if(inT>=today)  todayMins+=m;
+    if(inT>=wkStart) weekMins+=m;
+  });
+  var s1=document.getElementById('hours-stat-today'); if(s1) s1.textContent=fmtDur(todayMins);
+  var s2=document.getElementById('hours-stat-week');  if(s2) s2.textContent=fmtDur(weekMins);
+  var el=document.getElementById('hours-entry-list');
+  if (!el) return;
+  if (!entries.length) { el.innerHTML='<div class="empty">No entries in the last 7 days</div>'; return; }
+  el.innerHTML = entries.map(function(e){
+    var mins = e.duration_minutes || Math.floor(((e.clock_out?new Date(e.clock_out):new Date())-new Date(e.clock_in))/60000);
+    var active = !e.clock_out;
+    return '<div class="team-member">'+
+      '<div style="font-size:10px;font-weight:700;color:var(--muted);min-width:44px;text-align:center;">'+fmtDate(e.clock_in)+'</div>'+
+      '<div class="team-info">'+
+        '<div class="team-name">'+(e.job_name||'No job')+'</div>'+
+        '<div class="team-job">'+fmtTime(e.clock_in)+(e.clock_out?' - '+fmtTime(e.clock_out):' Active')+'</div>'+
+      '</div>'+
+      '<div class="team-dur" style="color:'+(active?'var(--green)':'var(--navy)')+';">'+fmtDur(mins)+'</div>'+
+    '</div>';
+  }).join('');
+}
+
+// START
 document.addEventListener('DOMContentLoaded', function() {
   var u = checkAuth();
   if (u) { initApp(u); return; }
