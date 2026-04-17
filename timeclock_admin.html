@@ -388,7 +388,7 @@ function renderLive() {
 
   var active = ST.entries.filter(function(e) { return !e.clock_out && e.clock_in.startsWith(today); });
   var todayAll = ST.entries.filter(function(e) { return e.clock_in.startsWith(today); });
-  var withGPS = active.filter(function(e) { return e.clock_in_lat; });
+  var withGPS = active; // Show map for all clocked-in employees
 
   var h = '';
   h += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:20px;">';
@@ -546,7 +546,14 @@ async function initLiveMap(entries) {
     if (e.clock_in_lat) coords.push({ lat: parseFloat(e.clock_in_lat), lng: parseFloat(e.clock_in_lng), time: e.clock_in, type: 'start' });
     entryPings.forEach(function(p) { coords.push({ lat: parseFloat(p.lat), lng: parseFloat(p.lng), time: p.recorded_at, type: 'ping' }); });
 
-    if (!coords.length) return;
+    // If no GPS at all, use Appleton as default location
+    if (!coords.length) {
+      var defLat = 44.2619; var defLng = -88.4154;
+      bounds.push([defLat, defLng]);
+      var noGpsIcon = L.divIcon({className:'',html:'<div style="background:'+color+';color:#fff;width:38px;height:38px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;font-family:DM Sans,sans-serif;border:3px solid #fff;box-shadow:0 3px 10px rgba(0,0,0,.3);opacity:.6;">'+initials+'</div>',iconSize:[38,38],iconAnchor:[19,19]});
+      L.marker([defLat, defLng], {icon:noGpsIcon}).addTo(_liveMap).bindPopup('<b>'+e.employee_name+'</b><br>No GPS recorded at clock-in');
+      return;
+    }
     coords.forEach(function(c){ bounds.push([c.lat, c.lng]); });
 
     // Draw route polyline if 2+ points
@@ -595,9 +602,11 @@ async function initLiveMap(entries) {
     L.marker([last.lat, last.lng], { icon: mainIcon }).addTo(_liveMap).bindPopup(popup).openPopup();
   });
 
-  if (bounds.length === 1) {
-    _liveMap.setView(bounds[0], 15);
-  } else if (bounds.length > 1) {
+  if (!bounds.length) {
+    _liveMap.setView([44.2619, -88.4154], 12);
+  } else if (bounds.length === 1) {
+    _liveMap.setView(bounds[0], 14);
+  } else {
     _liveMap.fitBounds(bounds, { padding: [50, 50] });
   }
   setTimeout(function(){ if (_liveMap) _liveMap.invalidateSize(); }, 300);
