@@ -190,6 +190,7 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;min
   <button class="tc-tab" id="tab-timesheets" onclick="showTab('timesheets',this)">📋 Timesheets</button>
   <button class="tc-tab" id="tab-employees" onclick="showTab('employees',this)">👥 Employees</button>
   <button class="tc-tab" id="tab-reports" onclick="showTab('reports',this)">📊 Reports</button>
+  <button class="tc-tab" id="tab-routes" onclick="showTab('routes',this)">🗺 Routes</button>
 </div>
 
 <div class="tc-body" id="tc-body">
@@ -346,11 +347,20 @@ function render() {
   else if (ST.tab === 'timesheets') renderTimesheets();
   else if (ST.tab === 'employees') { if (isAdmin()) renderEmployees(); }
   else if (ST.tab === 'reports')   { if (isAdmin()) renderReports(); }
+  else if (ST.tab === 'routes')   renderRoutes();
 }
 
 // ── LIVE TAB ──────────────────────────────────────────────────────────────
 var _liveMap = null;
 var _liveMapVisible = false;
+var _selectedMapEmp = null;
+
+function selectMapEmployee(name) {
+  _selectedMapEmp = name;
+  // Re-init map with filter
+  if (_liveMap) { try { _liveMap.remove(); } catch(e){} _liveMap = null; }
+  renderLive();
+}
 
 function renderLive() {
   var today = new Date().toISOString().split('T')[0];
@@ -371,12 +381,26 @@ function renderLive() {
 
   // Map toggle button
   if (withGPS.length) {
-    h += '<div style="margin-bottom:12px;display:flex;gap:10px;align-items:center;">';
+    h += '<div style="margin-bottom:12px;">';
+    h += '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:8px;">';
     h += '<button class="btn ' + (_liveMapVisible ? 'btn-primary' : '') + '" id="map-toggle-btn" onclick="toggleLiveMap()" style="display:flex;align-items:center;gap:6px;padding:8px 16px;">';
     h += '<span style="font-size:16px;">📍</span> ' + (_liveMapVisible ? 'Hide Map' : 'Show Employee Map') + ' (' + withGPS.length + ' with GPS)</button>';
     h += '</div>';
+    // Employee filter pills (only show when map visible)
+    if (_liveMapVisible) {
+      h += '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px;">';
+      h += '<button onclick="selectMapEmployee(null)" style="padding:5px 12px;border-radius:20px;border:1.5px solid var(--border);font-size:12px;font-weight:600;cursor:pointer;font-family:DM Sans,sans-serif;background:'+(!_selectedMapEmp?'var(--navy)':'transparent')+';color:'+(!_selectedMapEmp?'#fff':'var(--muted)')+';transition:.15s;">All</button>';
+      withGPS.forEach(function(e, i) {
+        var colors = ['#e85d04','#0d2d5e','#2e7d32','#9c27b0','#00838f','#c62828','#f57c00','#795548'];
+        var col = colors[i % colors.length];
+        var sel = _selectedMapEmp === e.employee_name;
+        h += '<button onclick="selectMapEmployee(\''+e.employee_name.replace(/'/g,"\'")+'\')" style="padding:5px 12px;border-radius:20px;border:2px solid '+col+';font-size:12px;font-weight:600;cursor:pointer;font-family:DM Sans,sans-serif;background:'+(sel?col:'transparent')+';color:'+(sel?'#fff':col)+';transition:.15s;">'+e.employee_name+'</button>';
+      });
+      h += '</div>';
+    }
+    h += '</div>';
     h += '<div id="live-map-container" style="display:' + (_liveMapVisible ? 'block' : 'none') + ';margin-bottom:16px;">';
-    h += '<div id="live-map" style="height:360px;border-radius:12px;overflow:hidden;border:1.5px solid var(--border);"></div>';
+    h += '<div id="live-map" style="height:400px;border-radius:12px;overflow:hidden;border:1.5px solid var(--border);"></div>';
     h += '</div>';
   }
 
@@ -425,9 +449,22 @@ function renderLive() {
 
   document.getElementById('tc-body').innerHTML = h;
 
-  // Init map if visible
+  // Init map if visible — wait for DOM + Leaflet to be ready
   if (_liveMapVisible && withGPS.length) {
-    setTimeout(function() { initLiveMap(withGPS); }, 100);
+    var mapEntries = _selectedMapEmp
+      ? withGPS.filter(function(e){ return e.employee_name === _selectedMapEmp; })
+      : withGPS;
+    var _mapRetry = 0;
+    var _tryInitMap = function() {
+      var mapEl = document.getElementById('live-map');
+      if (mapEl && typeof L !== 'undefined') {
+        initLiveMap(mapEntries);
+      } else if (_mapRetry < 10) {
+        _mapRetry++;
+        setTimeout(_tryInitMap, 200);
+      }
+    };
+    setTimeout(_tryInitMap, 200);
   }
 
   setTimeout(function() { if (ST.tab === 'live') { loadAll().then(function(){ renderLive(); }); } }, 30000);
@@ -442,8 +479,12 @@ function toggleLiveMap() {
 
 async function initLiveMap(entries) {
   var mapEl = document.getElementById('live-map');
-  if (!mapEl || typeof L === 'undefined') return;
-  if (_liveMap) { _liveMap.remove(); _liveMap = null; }
+  if (!mapEl) { console.warn('Map element not found'); return; }
+  if (typeof L === 'undefined') { console.warn('Leaflet not loaded'); return; }
+  if (_liveMap) { try { _liveMap.remove(); } catch(e){} _liveMap = null; }
+  // Force map container to have explicit dimensions
+  mapEl.style.height = '360px';
+  mapEl.style.width = '100%';
 
   var colors = ['#e85d04','#0d2d5e','#2e7d32','#9c27b0','#00838f','#c62828','#f57c00','#795548'];
   _liveMap = L.map('live-map');
@@ -884,6 +925,170 @@ function renderEmployees() {
 }
 
 // ── REPORTS TAB ───────────────────────────────────────────────────────────
+function renderRoutes() {
+  var h = '';
+  var today = new Date().toISOString().split('T')[0];
+
+  h += '<div class="card" style="margin-bottom:16px;"><div class="card-body">';
+  h += '<div class="form-row">';
+  h += '<div><label class="form-label">Employee</label><select class="form-select" id="route-emp">';
+  h += '<option value="">All Employees</option>';
+  ST.employees.filter(function(e){return e.active;}).forEach(function(e){ h += '<option>'+e.name+'</option>'; });
+  h += '</select></div>';
+  h += '<div><label class="form-label">Date</label><input type="date" class="form-input" id="route-date" value="'+today+'"></div>';
+  h += '</div>';
+  h += '<button class="btn btn-primary" onclick="loadRouteMap()" style="margin-top:4px;padding:10px 24px;">🗺 Show Route</button>';
+  h += '</div></div>';
+
+  h += '<div id="route-map-wrap" style="display:none;margin-bottom:16px;">';
+  h += '<div id="route-legend" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;"></div>';
+  h += '<div id="route-map" style="height:480px;border-radius:12px;overflow:hidden;border:1.5px solid var(--border);"></div>';
+  h += '<div id="route-timeline" style="margin-top:12px;"></div>';
+  h += '</div>';
+
+  document.getElementById('tc-body').innerHTML = h;
+}
+
+var _routeMap = null;
+
+async function loadRouteMap() {
+  var empName = (document.getElementById('route-emp') || {}).value || '';
+  var date    = (document.getElementById('route-date') || {}).value || new Date().toISOString().split('T')[0];
+
+  var wrap = document.getElementById('route-map-wrap');
+  if (wrap) wrap.style.display = 'block';
+
+  // Load entries for this date
+  var entryFilter = '/rest/v1/time_entries?clock_in=gte.'+date+'T00:00:00&clock_in=lte.'+date+'T23:59:59&order=clock_in.asc&select=*';
+  if (empName) entryFilter += '&employee_name=eq.'+encodeURIComponent(empName);
+  var entries = await sb(entryFilter) || [];
+
+  if (!entries.length) {
+    var wrap2 = document.getElementById('route-map-wrap');
+    if (wrap2) wrap2.innerHTML = '<div class="card"><div class="empty" style="padding:24px;">No entries found for this date and employee</div></div>';
+    return;
+  }
+
+  // Load pings for this date
+  var pingFilter = '/rest/v1/location_pings?recorded_at=gte.'+date+'T00:00:00&recorded_at=lte.'+date+'T23:59:59&order=recorded_at.asc&select=*';
+  var allPings = await sb(pingFilter) || [];
+
+  // Group pings by entry_id
+  var pingsByEntry = {};
+  allPings.forEach(function(p){
+    if (!pingsByEntry[p.entry_id]) pingsByEntry[p.entry_id] = [];
+    pingsByEntry[p.entry_id].push(p);
+  });
+
+  // Init map
+  if (_routeMap) { try { _routeMap.remove(); } catch(e){} _routeMap = null; }
+  var mapEl = document.getElementById('route-map');
+  if (!mapEl || typeof L === 'undefined') return;
+
+  _routeMap = L.map('route-map');
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '© OpenStreetMap', maxZoom: 18
+  }).addTo(_routeMap);
+
+  var colors = ['#e85d04','#0d2d5e','#2e7d32','#9c27b0','#00838f','#c62828','#f57c00','#795548'];
+  var bounds = [];
+  var fmtTime = function(iso){ var d=new Date(iso),h=d.getHours()%12||12,m=d.getMinutes(),ap=d.getHours()>=12?'PM':'AM'; return h+':'+(m<10?'0':'')+m+' '+ap; };
+  var fmtDur = function(mins){ return Math.floor(mins/60)+'h '+(mins%60)+'m'; };
+
+  // Build legend
+  var legendHtml = '';
+  var timelineHtml = '<div class="card"><div class="card-hdr"><div class="card-title">Day Timeline</div></div><div style="padding:0;">';
+
+  // Group entries by employee for color assignment
+  var empColors = {};
+  var colorIdx = 0;
+  entries.forEach(function(e){
+    if (!empColors[e.employee_name]) empColors[e.employee_name] = colors[colorIdx++ % colors.length];
+  });
+
+  entries.forEach(function(e) {
+    var color = empColors[e.employee_name];
+    var pings = pingsByEntry[e.id] || [];
+    var initials = e.employee_name.split(' ').map(function(n){return n[0]||'';}).join('').toUpperCase();
+    var totalMins = e.duration_minutes || Math.floor(((e.clock_out?new Date(e.clock_out):new Date())-new Date(e.clock_in))/60000);
+
+    // Full coordinate path
+    var coords = [];
+    if (e.clock_in_lat) coords.push({ lat: parseFloat(e.clock_in_lat), lng: parseFloat(e.clock_in_lng), time: e.clock_in, type: 'start' });
+    pings.forEach(function(p){ coords.push({ lat: parseFloat(p.lat), lng: parseFloat(p.lng), time: p.recorded_at, type: 'ping' }); });
+    if (e.clock_out_lat) coords.push({ lat: parseFloat(e.clock_out_lat), lng: parseFloat(e.clock_out_lng), time: e.clock_out, type: 'end' });
+
+    coords.forEach(function(c){ bounds.push([c.lat, c.lng]); });
+
+    // Draw route
+    if (coords.length >= 2) {
+      L.polyline(coords.map(function(c){return [c.lat,c.lng];}), {
+        color: color, weight: 4, opacity: 0.75, dashArray: null
+      }).addTo(_routeMap);
+    }
+
+    // Ping dots with time tooltip
+    coords.filter(function(c){return c.type==='ping';}).forEach(function(c){
+      L.circleMarker([c.lat,c.lng],{radius:5,fillColor:color,color:'#fff',weight:2,fillOpacity:0.9})
+        .addTo(_routeMap)
+        .bindTooltip('<b>'+e.employee_name+'</b><br>'+fmtTime(c.time),{permanent:false});
+    });
+
+    // Start marker
+    if (e.clock_in_lat) {
+      var startIco = L.divIcon({className:'',html:'<div style="background:#fff;color:'+color+';width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:13px;border:2.5px solid '+color+';box-shadow:0 2px 6px rgba(0,0,0,.25);">▶</div>',iconSize:[28,28],iconAnchor:[14,14]});
+      L.marker([parseFloat(e.clock_in_lat),parseFloat(e.clock_in_lng)],{icon:startIco}).addTo(_routeMap)
+        .bindPopup('<b>'+e.employee_name+'</b><br>Clocked in: '+fmtTime(e.clock_in)+'<br>Job: '+(e.job_name||'No job'));
+    }
+
+    // End marker
+    if (e.clock_out_lat) {
+      var endIco = L.divIcon({className:'',html:'<div style="background:'+color+';color:#fff;width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:13px;border:2.5px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,.25);">■</div>',iconSize:[28,28],iconAnchor:[14,14]});
+      L.marker([parseFloat(e.clock_out_lat),parseFloat(e.clock_out_lng)],{icon:endIco}).addTo(_routeMap)
+        .bindPopup('<b>'+e.employee_name+'</b><br>Clocked out: '+fmtTime(e.clock_out));
+    } else {
+      // Current position (last ping)
+      var last = coords[coords.length-1];
+      if (last) {
+        var nowIco = L.divIcon({className:'',html:'<div style="background:'+color+';color:#fff;width:36px;height:36px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;font-family:DM Sans,sans-serif;border:3px solid #fff;box-shadow:0 3px 10px rgba(0,0,0,.3);">'+initials+'</div>',iconSize:[36,36],iconAnchor:[18,18]});
+        L.marker([last.lat,last.lng],{icon:nowIco}).addTo(_routeMap)
+          .bindPopup('<b>'+e.employee_name+'</b><br>Still clocked in<br>'+fmtTime(last.time));
+      }
+    }
+
+    // Legend
+    legendHtml += '<div style="display:flex;align-items:center;gap:6px;padding:5px 10px;background:rgba(13,45,94,.04);border-radius:8px;">';
+    legendHtml += '<div style="width:14px;height:14px;border-radius:50%;background:'+color+';flex-shrink:0;"></div>';
+    legendHtml += '<span style="font-size:12px;font-weight:600;color:var(--navy);">'+e.employee_name+'</span>';
+    legendHtml += '<span style="font-size:11px;color:var(--muted);">'+fmtTime(e.clock_in)+' – '+(e.clock_out?fmtTime(e.clock_out):'Active')+'</span>';
+    legendHtml += '<span style="font-size:11px;font-weight:700;color:'+color+';">'+fmtDur(totalMins)+'</span>';
+    legendHtml += '</div>';
+
+    // Timeline row
+    timelineHtml += '<div style="display:flex;align-items:center;gap:12px;padding:10px 16px;border-bottom:1px solid var(--border);">';
+    timelineHtml += '<div style="width:12px;height:12px;border-radius:50%;background:'+color+';flex-shrink:0;"></div>';
+    timelineHtml += '<div style="flex:1;">';
+    timelineHtml += '<div style="font-size:13px;font-weight:700;color:var(--navy);">'+e.employee_name+'</div>';
+    timelineHtml += '<div style="font-size:11px;color:var(--muted);">'+(e.job_name||'No job')+'</div>';
+    timelineHtml += '</div>';
+    timelineHtml += '<div style="text-align:right;">';
+    timelineHtml += '<div style="font-size:12px;font-weight:600;">'+fmtTime(e.clock_in)+' → '+(e.clock_out?fmtTime(e.clock_out):'Active')+'</div>';
+    timelineHtml += '<div style="font-size:11px;color:var(--muted);">'+fmtDur(totalMins)+' · '+pings.length+' GPS ping'+(pings.length!==1?'s':'')+'</div>';
+    timelineHtml += '</div></div>';
+  });
+
+  timelineHtml += '</div></div>';
+
+  var legendEl = document.getElementById('route-legend');
+  if (legendEl) legendEl.innerHTML = legendHtml;
+  var timelineEl = document.getElementById('route-timeline');
+  if (timelineEl) timelineEl.innerHTML = timelineHtml;
+
+  if (bounds.length === 1) _routeMap.setView(bounds[0], 14);
+  else if (bounds.length > 1) _routeMap.fitBounds(bounds, { padding: [50,50] });
+  else { _routeMap.setView([44.26, -88.41], 11); } // Default to Appleton area
+}
+
 function renderReports() {
   var fmtDur = function(mins){ return Math.floor(mins/60)+'h '+(mins%60)+'m'; };
   var durMins = function(e){ var out=e.clock_out?new Date(e.clock_out):new Date(); return Math.floor((out-new Date(e.clock_in))/60000); };
@@ -1475,7 +1680,9 @@ document.addEventListener('DOMContentLoaded', function() {
 });
 </script>
 <!-- ══ JG TIMECLOCK FLOATING WIDGET ══ -->
-<!-- Add this block just before </body> on every page -->
+<!-- Add this block just before   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+</body> on every page -->
 <style>
 .tc-fab {
   position: fixed; bottom: 70px; left: 8px;
