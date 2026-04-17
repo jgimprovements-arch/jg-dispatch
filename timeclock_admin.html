@@ -210,8 +210,59 @@ var ST = {
   filterEmp: 'All',
   filterDate: '',
   filterDateEnd: '',
-  editEmp: null
+  editEmp: null,
+  payPeriod: JSON.parse(localStorage.getItem('jg_pay_period') || 'null') || { type: 'biweekly', start: '2025-01-06' }
 };
+
+function getPayPeriods(type, startStr, count) {
+  var periods = [];
+  var start = new Date(startStr + 'T00:00:00');
+  var today = new Date();
+  var days = type === 'weekly' ? 7 : type === 'biweekly' ? 14 : null;
+  for (var i = 0; i < count; i++) {
+    var s, e;
+    if (days) {
+      s = new Date(start); s.setDate(start.getDate() + i * days);
+      e = new Date(s); e.setDate(s.getDate() + days - 1);
+    } else {
+      var mo = start.getMonth() + Math.floor(i/2);
+      var yr = start.getFullYear() + Math.floor(mo/12); mo = mo % 12;
+      if (i % 2 === 0) { s = new Date(yr, mo, 1); e = new Date(yr, mo, 15); }
+      else              { s = new Date(yr, mo, 16); e = new Date(yr, mo+1, 0); }
+    }
+    periods.push({ start: s, end: e, label: fmtD(s) + ' - ' + fmtD(e) });
+    if (s > today && periods.length > 3) break;
+  }
+  return periods.reverse();
+}
+
+function fmtD(d) { return (d.getMonth()+1) + '/' + d.getDate() + '/' + d.getFullYear(); }
+
+function getCurrentPeriod() {
+  var periods = getPayPeriods(ST.payPeriod.type, ST.payPeriod.start, 40);
+  var today = new Date(); today.setHours(0,0,0,0);
+  return periods.find(function(p){ return today >= p.start && today <= p.end; }) || periods[0];
+}
+
+function billableStart(clockInISO, approvedEarly) {
+  if (approvedEarly) return clockInISO;
+  var dt = new Date(clockInISO);
+  var cutoff = new Date(dt); cutoff.setHours(7, 30, 0, 0);
+  return dt < cutoff ? cutoff.toISOString() : clockInISO;
+}
+
+function billableMins(entry, breaks) {
+  var bStart = new Date(billableStart(entry.clock_in, entry.approved_early));
+  var bEnd = entry.clock_out ? new Date(entry.clock_out) : new Date();
+  var raw = Math.max(0, Math.floor((bEnd - bStart) / 60000));
+  var bkMins = (breaks||[]).reduce(function(s,b){ return s+(b.duration_minutes||0); }, 0);
+  return Math.max(0, raw - bkMins);
+}
+
+function isEarlyClockIn(clockInISO) {
+  var dt = new Date(clockInISO);
+  return dt.getHours() < 7 || (dt.getHours() === 7 && dt.getMinutes() < 30);
+}
 
 // ── AUTH ──────────────────────────────────────────────────────────────────
 function jgShowUser(u) {
@@ -347,60 +398,161 @@ function renderLive() {
 
 // ── TIMESHEETS TAB ────────────────────────────────────────────────────────
 function renderTimesheets() {
-  var today = new Date().toISOString().split('T')[0];
-  var fmt = function(d){ if(!d)return ''; var dt=new Date(d),h=dt.getHours()%12||12,m=dt.getMinutes(),ap=dt.getHours()>=12?'PM':'AM'; return h+':'+(m<10?'0':'')+m+' '+ap; };
-  var fmtDate = function(d){ if(!d)return ''; var dt=new Date(d); return (dt.getMonth()+1)+'/'+dt.getDate()+'/'+dt.getFullYear(); };
-  var fmtDur = function(mins){ if(!mins&&mins!==0)return ''; return Math.floor(mins/60)+'h '+(mins%60)+'m'; };
+  var fmt = function(iso){ if(!iso)return ''; var d=new Date(iso),h=d.getHours()%12||12,m=d.getMinutes(),ap=d.getHours()>=12?'PM':'AM'; return h+':'+(m<10?'0':'')+m+' '+ap; };
+  var fmtDur = function(mins){ if(!mins&&mins!==0)return '-'; return Math.floor(mins/60)+'h '+(mins%60)+'m'; };
   var durMins = function(e){ var out=e.clock_out?new Date(e.clock_out):new Date(); return Math.floor((out-new Date(e.clock_in))/60000); };
 
-  var filtered = ST.entries.filter(function(e) {
-    if (ST.filterEmp !== 'All' && e.employee_name !== ST.filterEmp) return false;
-    return true;
-  });
+  var periods = getPayPeriods(ST.payPeriod.type, ST.payPeriod.start, 40);
+  var selPeriod = ST.selPeriod || (periods[0] ? periods[0].label : null);
 
   var h = '';
+
+  // Pay period settings bar
+  h += '<div class="card" style="margin-bottom:16px;">';
+  h += '<div class="card-hdr" style="cursor:pointer;" onclick="var b=document.getElementById(\'pp-settings\');b.style.display=b.style.display===\'none\'?\'block\':\'none\'">';
+  h += '<div class="card-title">Pay Period Settings</div>';
+  h += '<div style="font-size:11px;color:var(--muted);">Click to configure</div>';
+  h += '</div>';
+  h += '<div id="pp-settings" style="display:none;padding:14px;border-top:1px solid var(--border);">';
+  h += '<div class="form-row">';
+  h += '<div><label class="form-label">Period Type</label>';
+  h += '<select class="form-select" id="pp-type" onchange="ST.payPeriod.type=this.value;localStorage.setItem(\'jg_pay_period\',JSON.stringify(ST.payPeriod));renderTimesheets();">';
+  ['weekly','biweekly','semimonthly'].forEach(function(t){
+    h += '<option value="'+t+'"'+(ST.payPeriod.type===t?' selected':'')+'>'+({weekly:'Weekly',biweekly:'Bi-Weekly',semimonthly:'Semi-Monthly'}[t])+'</option>';
+  });
+  h += '</select></div>';
+  h += '<div><label class="form-label">First Period Start Date</label>';
+  h += '<input type="date" class="form-input" id="pp-start" value="'+ST.payPeriod.start+'" onchange="ST.payPeriod.start=this.value;localStorage.setItem(\'jg_pay_period\',JSON.stringify(ST.payPeriod));renderTimesheets();">';
+  h += '</div></div>';
+  h += '<div style="font-size:11px;color:var(--muted);margin-top:8px;">7:30 AM rule: Clock-ins before 7:30am are adjusted to 7:30am for billable hours unless admin approves early start.</div>';
+  h += '</div></div>';
+
+  // Period selector
   h += '<div class="filter-bar">';
+  h += '<select onchange="ST.selPeriod=this.value;ST.filterEmp=\'All\';renderTimesheets();" style="min-width:220px;">';
+  h += '<option value="">-- Select Pay Period --</option>';
+  periods.forEach(function(p){
+    var isCur = p.label === selPeriod;
+    h += '<option value="'+p.label+'"'+(isCur?' selected':'')+'>'+p.label+'</option>';
+  });
+  h += '</select>';
   h += '<select onchange="ST.filterEmp=this.value;renderTimesheets()" style="min-width:160px;">';
   h += '<option value="All">All Employees</option>';
   var empNames = [...new Set(ST.entries.map(function(e){return e.employee_name;}))].sort();
   empNames.forEach(function(n){ h += '<option value="'+n+'"'+(ST.filterEmp===n?' selected':'')+'>'+n+'</option>'; });
   h += '</select>';
-  h += '<input type="date" value="'+(ST.filterDate||'')+'" onchange="ST.filterDate=this.value;loadAll()" style="min-width:140px;">';
-  h += '<span style="color:var(--muted);font-size:12px;">to</span>';
-  h += '<input type="date" value="'+(ST.filterDateEnd||'')+'" onchange="ST.filterDateEnd=this.value;loadAll()" style="min-width:140px;">';
-  h += '<button class="btn" onclick="ST.filterDate=\'\';ST.filterDateEnd=\'\';ST.filterEmp=\'All\';loadAll()">Clear</button>';
-  h += '<button class="btn btn-primary" onclick="exportCSV()" style="margin-left:auto;">↓ Export CSV</button>';
+  h += '<button class="btn btn-primary" onclick="exportPayPeriodCSV()" style="margin-left:auto;">Export CSV</button>';
   h += '</div>';
 
-  h += '<div class="card"><div class="card-hdr"><div class="card-title">Time Entries ('+filtered.length+')</div></div>';
-  if (!filtered.length) {
-    h += '<div class="empty">No entries found</div>';
+  // Find entries in selected period
+  var curPer = periods.find(function(p){ return p.label === selPeriod; });
+  var filtered = ST.entries.filter(function(e){
+    if (!curPer) return false;
+    var d = new Date(e.clock_in); d.setHours(0,0,0,0);
+    return d >= curPer.start && d <= curPer.end;
+  }).filter(function(e){
+    return ST.filterEmp === 'All' || e.employee_name === ST.filterEmp;
+  });
+
+  // Group by employee for summary
+  var byEmp = {};
+  filtered.forEach(function(e){
+    if (!byEmp[e.employee_name]) byEmp[e.employee_name] = { entries: [], totalBillable: 0, totalActual: 0, earlyFlags: 0 };
+    var breaks = ST.breaks.filter(function(b){ return b.entry_id === e.id; });
+    var bill = billableMins(e, breaks);
+    var actual = e.duration_minutes || durMins(e);
+    byEmp[e.employee_name].entries.push(e);
+    byEmp[e.employee_name].totalBillable += bill;
+    byEmp[e.employee_name].totalActual += actual;
+    if (isEarlyClockIn(e.clock_in) && !e.approved_early) byEmp[e.employee_name].earlyFlags++;
+  });
+
+  if (!curPer) {
+    h += '<div class="card"><div class="empty" style="padding:24px;">Select a pay period above</div></div>';
+  } else if (!filtered.length) {
+    h += '<div class="card"><div class="empty" style="padding:24px;">No entries for this pay period</div></div>';
   } else {
-    h += '<table class="tc-table"><thead><tr><th>Employee</th><th>Date</th><th>In</th><th>Out</th><th>Duration</th><th>Break</th><th>Job</th><th>Notes</th><th>GPS</th><th></th></tr></thead><tbody>';
-    filtered.forEach(function(e) {
-      var mins = e.duration_minutes || durMins(e);
-      var empBreaks = ST.breaks.filter(function(b){ return b.entry_id === e.id; });
-      var breakMins = empBreaks.reduce(function(s,b){return s+(b.duration_minutes||0);},0);
+    // Summary cards per employee
+    h += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px;margin-bottom:16px;">';
+    Object.entries(byEmp).forEach(function(kv){
+      var nm = kv[0], d = kv[1];
+      var emp = ST.employees.find(function(e){ return e.name === nm; });
+      var rate = emp ? emp.hourly_rate : 0;
+      var pay = rate ? '$' + ((d.totalBillable / 60) * rate).toFixed(2) : '';
+      h += '<div class="card" style="padding:14px;margin:0;">';
+      h += '<div style="font-size:13px;font-weight:700;color:var(--navy);margin-bottom:8px;">'+nm+'</div>';
+      h += '<div style="font-size:11px;color:var(--muted);">Billable: <strong style="color:var(--navy);">'+fmtDur(d.totalBillable)+'</strong></div>';
+      h += '<div style="font-size:11px;color:var(--muted);">Actual: '+fmtDur(d.totalActual)+'</div>';
+      if (pay) h += '<div style="font-size:12px;font-weight:700;color:#2e7d32;margin-top:4px;">Est. Pay: '+pay+'</div>';
+      if (d.earlyFlags) h += '<div style="font-size:11px;color:#c62828;margin-top:4px;">&#9888; '+d.earlyFlags+' early clock-in(s)</div>';
+      h += '</div>';
+    });
+    h += '</div>';
+
+    // Detail table
+    h += '<div class="card"><div class="card-hdr"><div class="card-title">Time Entries — '+selPeriod+'</div></div>';
+    h += '<table class="tc-table"><thead><tr>';
+    h += '<th>Employee</th><th>Date</th><th>Clock In</th><th>Clock Out</th>';
+    h += '<th>Actual</th><th>Billable</th><th>Break</th><th>Job</th><th>Flags</th><th></th>';
+    h += '</tr></thead><tbody>';
+
+    filtered.sort(function(a,b){ return new Date(a.clock_in)-new Date(b.clock_in); });
+    filtered.forEach(function(e){
+      var breaks = ST.breaks.filter(function(b){ return b.entry_id === e.id; });
+      var actual = e.duration_minutes || durMins(e);
+      var bill = billableMins(e, breaks);
+      var bkMins = breaks.reduce(function(s,b){ return s+(b.duration_minutes||0); }, 0);
+      var early = isEarlyClockIn(e.clock_in);
       var active = !e.clock_out;
-      h += '<tr>';
+      var flagCell = '';
+      if (early && !e.approved_early) flagCell = '<span style="color:#c62828;font-size:11px;font-weight:700;">Early<br><button class="btn btn-sm" onclick="approveEarly(\''+e.id+'\')">Approve</button></span>';
+      else if (early && e.approved_early) flagCell = '<span style="color:#2e7d32;font-size:11px;">Approved</span>';
+      h += '<tr'+(early&&!e.approved_early?' style="background:rgba(198,40,40,.04);"':'')+'>';
       h += '<td><strong>'+e.employee_name+'</strong></td>';
-      h += '<td>'+fmtDate(e.clock_in)+'</td>';
-      h += '<td class="mono">'+fmt(e.clock_in)+'</td>';
+      h += '<td>'+fmtD(new Date(e.clock_in))+'</td>';
+      h += '<td class="mono"'+(early&&!e.approved_early?' style="color:#c62828;font-weight:700;"':'')+'>'+fmt(e.clock_in)+'</td>';
       h += '<td class="mono">'+(active?'<span class="badge badge-green">Active</span>':fmt(e.clock_out))+'</td>';
-      h += '<td><strong>'+fmtDur(mins)+'</strong></td>';
-      h += '<td>'+(breakMins?fmtDur(breakMins):'-')+'</td>';
-      h += '<td style="max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+(e.job_name||'-')+'</td>';
-      h += '<td style="max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;color:var(--muted);">'+(e.notes||'')+'</td>';
-      h += '<td>'+(e.clock_in_lat?'<a href="https://maps.google.com/?q='+e.clock_in_lat+','+e.clock_in_lng+'" target="_blank" style="font-size:11px;color:var(--orange);">📍</a>':'-')+'</td>';
+      h += '<td>'+fmtDur(actual)+'</td>';
+      h += '<td><strong>'+fmtDur(bill)+'</strong></td>';
+      h += '<td>'+(bkMins?fmtDur(bkMins):'-')+'</td>';
+      h += '<td style="max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+(e.job_name||'-')+'</td>';
+      h += '<td>'+flagCell+'</td>';
       h += '<td><button class="btn btn-sm" onclick="editEntry(\''+e.id+'\')">Edit</button></td>';
       h += '</tr>';
     });
-    h += '</tbody></table>';
+    h += '</tbody></table></div>';
   }
-  h += '</div>';
 
   document.getElementById('tc-body').innerHTML = h;
 }
+
+async function approveEarly(entryId) {
+  await fetch(SB_URL + '/rest/v1/time_entries?id=eq.' + entryId, {
+    method: 'PATCH',
+    headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ approved_early: true })
+  });
+  toast('Early start approved');
+  await loadAll();
+  renderTimesheets();
+}
+
+function exportPayPeriodCSV() {
+  var rows = [['Employee','Date','Clock In','Clock Out','Actual Hrs','Billable Hrs','Break Mins','Job','Early Approved']];
+  var fmt = function(iso){ if(!iso)return ''; var d=new Date(iso),h=d.getHours()%12||12,m=d.getMinutes(),ap=d.getHours()>=12?'PM':'AM'; return h+':'+(m<10?'0':'')+m+' '+ap; };
+  var durMins = function(e){ var out=e.clock_out?new Date(e.clock_out):new Date(); return Math.floor((out-new Date(e.clock_in))/60000); };
+  ST.entries.forEach(function(e){
+    var breaks = ST.breaks.filter(function(b){ return b.entry_id === e.id; });
+    var actual = (e.duration_minutes || durMins(e)) / 60;
+    var bill = billableMins(e, breaks) / 60;
+    var bkMins = breaks.reduce(function(s,b){ return s+(b.duration_minutes||0); }, 0);
+    rows.push([e.employee_name, fmtD(new Date(e.clock_in)), fmt(e.clock_in), fmt(e.clock_out), actual.toFixed(2), bill.toFixed(2), bkMins, e.job_name||'', e.approved_early?'Yes':'']);
+  });
+  var csv = rows.map(function(r){ return r.map(function(c){ var s=String(c).split('"').join('""'); return '"'+s+'"'; }).join(','); }).join('\n');
+  var a = document.createElement('a'); a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
+  a.download = 'timesheets.csv'; a.click();
+}
+
 
 // ── EMPLOYEES TAB ─────────────────────────────────────────────────────────
 function renderEmployees() {
