@@ -1022,28 +1022,121 @@ function viewEntry(id) {
   showModal('Time Card — '+e.employee_name, html, null);
 }
 
-function editEntry(id) {
+async function editEntry(id) {
   var e = ST.entries.find(function(x){ return x.id===id; });
   if (!e) return;
   var toLocal = function(iso){ if(!iso)return ''; var d=new Date(iso); var pad=function(n){return String(n).padStart(2,'0');}; return d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate())+'T'+pad(d.getHours())+':'+pad(d.getMinutes()); };
+
+  // Build job select with loading state first
   var html = '<div class="form-row">' +
     '<div><label class="form-label">Clock In</label><input class="form-input" id="entry-in" type="datetime-local" value="'+toLocal(e.clock_in)+'"></div>' +
     '<div><label class="form-label">Clock Out</label><input class="form-input" id="entry-out" type="datetime-local" value="'+toLocal(e.clock_out)+'"></div>' +
     '</div>' +
-    '<div><label class="form-label">Job</label><input class="form-input" id="entry-job" type="text" value="'+(e.job_name||'')+'"></div>' +
-    '<div style="margin-top:12px;"><label class="form-label">Notes</label><input class="form-input" id="entry-notes" type="text" value="'+(e.notes||'')+'"></div>';
+    '<div style="margin-bottom:12px;"><label class="form-label">Job</label>' +
+    '<div style="position:relative;">' +
+    '<input class="form-input" id="entry-job-search" type="text" placeholder="Search jobs..." value="'+(e.job_name||'')+'" oninput="filterJobOptions(this.value)" autocomplete="off">' +
+    '<div id="entry-job-dropdown" style="display:none;position:absolute;top:100%;left:0;right:0;background:#fff;border:1.5px solid var(--border);border-radius:8px;max-height:200px;overflow-y:auto;z-index:100;box-shadow:0 4px 16px rgba(0,0,0,.15);"></div>' +
+    '<input type="hidden" id="entry-job-id" value="'+(e.job_id||'')+'">' +
+    '<input type="hidden" id="entry-job-name" value="'+(e.job_name||'')+'">' +
+    '</div></div>' +
+    '<div><label class="form-label">Notes</label><input class="form-input" id="entry-notes" type="text" value="'+(e.notes||'')+'"></div>';
   showModal('Edit Time Entry', html, 'saveEntry(\''+id+'\')');
+
+  // Load jobs from Albi in background
+  loadAlbiJobsForModal();
+}
+
+var _albiJobs = null;
+
+async function loadAlbiJobsForModal() {
+  var dropdown = document.getElementById('entry-job-dropdown');
+  if (!dropdown) return;
+
+  if (!_albiJobs) {
+    try {
+      var allJobs = [];
+      var page = 1;
+      while (page <= 20) {
+        var r = await fetch('https://jg-proxy-v2.vercel.app/api/albi?pageSize=50&page=' + page);
+        if (!r.ok) break;
+        var data = await r.json();
+        var items = Array.isArray(data) ? data : (data.data || data.results || data.projects || data.items || []);
+        if (!items.length) break;
+        items.forEach(function(p) {
+          var jid = String(p.uniqueNumber || p.id || '');
+          var name = p.name || p.projectName || jid;
+          var loc = (p.location || '').toString().toLowerCase();
+          var market = (loc.includes('stevens') || loc.includes('point')) ? 'Stevens Point' : 'Appleton';
+          if (jid) allJobs.push({ id: jid, name: name, market: market });
+        });
+        if (items.length < 50) break;
+        page++;
+      }
+      _albiJobs = allJobs.sort(function(a,b){ return a.name.localeCompare(b.name); });
+    } catch(err) {
+      _albiJobs = [];
+    }
+  }
+
+  filterJobOptions(document.getElementById('entry-job-search') ? document.getElementById('entry-job-search').value : '');
+}
+
+function filterJobOptions(q) {
+  var dropdown = document.getElementById('entry-job-dropdown');
+  var search = document.getElementById('entry-job-search');
+  if (!dropdown || !_albiJobs) return;
+
+  var filtered = q ? _albiJobs.filter(function(j){
+    return j.name.toLowerCase().includes(q.toLowerCase()) || j.id.includes(q);
+  }) : _albiJobs;
+
+  if (!filtered.length) {
+    dropdown.innerHTML = '<div style="padding:10px 14px;font-size:12px;color:var(--muted);">No jobs found</div>';
+    dropdown.style.display = 'block';
+    return;
+  }
+
+  dropdown.innerHTML = filtered.slice(0, 50).map(function(j){
+    return '<div onclick="selectJobOption(\''+j.id+'\',\''+j.name.replace(/'/g,'\\')+'\')" style="padding:10px 14px;font-size:13px;cursor:pointer;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;" onmouseover="this.style.background=\'#f0f4ff\'" onmouseout="this.style.background=\'\'">'+
+      '<span>'+j.name+'</span>'+
+      '<span style="font-size:10px;color:var(--muted);margin-left:8px;">'+j.market+'</span>'+
+    '</div>';
+  }).join('');
+  dropdown.style.display = 'block';
+
+  // Close dropdown on outside click
+  setTimeout(function(){
+    document.addEventListener('click', function closeDD(ev){
+      if (!dropdown.contains(ev.target) && ev.target !== search) {
+        dropdown.style.display = 'none';
+        document.removeEventListener('click', closeDD);
+      }
+    });
+  }, 100);
+}
+
+function selectJobOption(id, name) {
+  var search = document.getElementById('entry-job-search');
+  var hiddenId = document.getElementById('entry-job-id');
+  var hiddenName = document.getElementById('entry-job-name');
+  var dropdown = document.getElementById('entry-job-dropdown');
+  if (search) search.value = name;
+  if (hiddenId) hiddenId.value = id;
+  if (hiddenName) hiddenName.value = name;
+  if (dropdown) dropdown.style.display = 'none';
 }
 
 async function saveEntry(id) {
   var inVal = document.getElementById('entry-in').value;
   var outVal = document.getElementById('entry-out').value;
-  var jobVal = document.getElementById('entry-job').value;
+  var jobName = (document.getElementById('entry-job-name') || {}).value || (document.getElementById('entry-job-search') || {}).value || '';
+  var jobId   = (document.getElementById('entry-job-id')   || {}).value || '';
+  var jobVal = jobName;
   var notesVal = document.getElementById('entry-notes').value;
   var inISO = inVal ? new Date(inVal).toISOString() : null;
   var outISO = outVal ? new Date(outVal).toISOString() : null;
   var dur = (inISO && outISO) ? Math.floor((new Date(outISO)-new Date(inISO))/60000) : null;
-  await fetch(SB_URL+'/rest/v1/time_entries?id=eq.'+id, {method:'PATCH', headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json'}, body:JSON.stringify({clock_in:inISO,clock_out:outISO,duration_minutes:dur,job_name:jobVal,notes:notesVal})});
+  await fetch(SB_URL+'/rest/v1/time_entries?id=eq.'+id, {method:'PATCH', headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json'}, body:JSON.stringify({clock_in:inISO,clock_out:outISO,duration_minutes:dur,job_id:jobId||null,job_name:jobVal,notes:notesVal})});
   toast('✓ Entry updated');
   closeModal();
   await loadAll();
