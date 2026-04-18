@@ -599,6 +599,53 @@ body {
       <div style="font-size:10px;color:var(--muted);margin-bottom:8px;">★ = your shift &nbsp;·&nbsp; <span style="color:#1565c0;font-weight:700;">Tech</span> &nbsp;<span style="color:#6a1b9a;font-weight:700;">Bkp</span> &nbsp;<span style="color:#2e7d32;font-weight:700;">PM</span></div>
       <div id="oncall-full-schedule"><div class="empty">Loading...</div></div>
     </div>
+    <!-- Swap request button — techs only -->
+    <div id="oc-swap-btn-wrap" style="display:none;padding:0 0 12px;">
+      <button onclick="openSwapRequest()" style="width:100%;padding:13px;background:var(--orange);border:none;border-radius:12px;color:#fff;font-size:14px;font-weight:700;cursor:pointer;font-family:DM Sans,sans-serif;display:flex;align-items:center;justify-content:center;gap:8px;">
+        🔄 Request Schedule Swap
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- SWAP REQUEST SHEET -->
+<div class="sheet-overlay" id="swap-sheet" onclick="if(event.target===this)closeSwapSheet()">
+  <div class="sheet" onclick="event.stopPropagation()">
+    <div class="sheet-handle"></div>
+    <div class="sheet-title">🔄 Request Schedule Swap</div>
+    <p style="font-size:12px;color:var(--muted);margin-bottom:14px;line-height:1.5;">Submit a request to swap your on-call shift. A PM will review and approve.</p>
+
+    <div style="margin-bottom:12px;">
+      <label style="display:block;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:5px;">My Shift Date</label>
+      <input type="date" id="swap-my-date" class="field-input" style="margin-top:0;">
+    </div>
+
+    <div style="margin-bottom:12px;">
+      <label style="display:block;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:5px;">My Role on That Day</label>
+      <select id="swap-my-role" class="field-input" style="margin-top:0;appearance:none;-webkit-appearance:none;">
+        <option value="On-Call Tech">On-Call Tech</option>
+        <option value="Backup Tech">Backup Tech</option>
+        <option value="On-Call PM">On-Call PM</option>
+      </select>
+    </div>
+
+    <div style="margin-bottom:12px;">
+      <label style="display:block;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:5px;">Trading With</label>
+      <input type="text" id="swap-with-name" class="field-input" placeholder="Team member name..." style="margin-top:0;">
+    </div>
+
+    <div style="margin-bottom:12px;">
+      <label style="display:block;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:5px;">Their Shift Date (if trading a specific day)</label>
+      <input type="date" id="swap-their-date" class="field-input" style="margin-top:0;">
+    </div>
+
+    <div style="margin-bottom:14px;">
+      <label style="display:block;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:5px;">Reason</label>
+      <textarea id="swap-reason" rows="3" class="field-input" placeholder="Why do you need this swap?" style="margin-top:0;resize:none;"></textarea>
+    </div>
+
+    <button onclick="submitSwapRequest()" style="width:100%;padding:15px;background:var(--orange);border:none;border-radius:12px;color:#fff;font-size:15px;font-weight:700;cursor:pointer;font-family:DM Sans,sans-serif;margin-bottom:8px;">Submit Request</button>
+    <button onclick="closeSwapSheet()" style="width:100%;padding:12px;background:transparent;border:1.5px solid var(--border);border-radius:12px;font-size:14px;color:var(--muted);cursor:pointer;font-family:DM Sans,sans-serif;">Cancel</button>
   </div>
 </div>
 
@@ -1547,6 +1594,7 @@ function prevOCAppMonth() { _ocAppOffset--; loadOCApp(); }
 function nextOCAppMonth() { _ocAppOffset++; loadOCApp(); }
 
 async function loadOCApp() {
+  showSwapButtonIfTech();
   var mLabel = document.getElementById('oc-app-month-label');
   var calEl  = document.getElementById('oncall-full-schedule');
   if (!calEl) { console.warn('oncall-full-schedule not found'); return; }
@@ -1667,6 +1715,76 @@ async function loadOCApp() {
 function hexToRgbApp(hex) {
   var r=parseInt(hex.slice(1,3),16),g=parseInt(hex.slice(3,5),16),b=parseInt(hex.slice(5,7),16);
   return r+','+g+','+b;
+}
+
+// ── ON-CALL SWAP REQUESTS ────────────────────────────────────────────────
+function openSwapRequest() {
+  var today = new Date().toISOString().split('T')[0];
+  var myDateEl = document.getElementById('swap-my-date');
+  var theirDateEl = document.getElementById('swap-their-date');
+  var reasonEl = document.getElementById('swap-reason');
+  var withEl = document.getElementById('swap-with-name');
+  if (myDateEl) myDateEl.value = today;
+  if (theirDateEl) theirDateEl.value = today;
+  if (reasonEl) reasonEl.value = '';
+  if (withEl) withEl.value = '';
+  var sheet = document.getElementById('swap-sheet');
+  if (sheet) sheet.classList.add('open');
+}
+
+function closeSwapSheet() {
+  var sheet = document.getElementById('swap-sheet');
+  if (sheet) sheet.classList.remove('open');
+}
+
+async function submitSwapRequest() {
+  if (!TC.employee) { toast('Not signed in'); return; }
+  var myDate    = (document.getElementById('swap-my-date')    || {}).value || '';
+  var myRole    = (document.getElementById('swap-my-role')    || {}).value || '';
+  var withName  = (document.getElementById('swap-with-name')  || {}).value || '';
+  var theirDate = (document.getElementById('swap-their-date') || {}).value || '';
+  var reason    = (document.getElementById('swap-reason')     || {}).value || '';
+
+  if (!myDate || !withName.trim() || !reason.trim()) {
+    toast('Please fill in all required fields'); return;
+  }
+
+  var btn = document.querySelector('#swap-sheet button');
+  if (btn) { btn.textContent = 'Submitting...'; btn.disabled = true; }
+
+  try {
+    var r = await fetch(SB_URL + '/rest/v1/oncall_swap_requests', {
+      method: 'POST',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
+      body: JSON.stringify({
+        requester_name: TC.employee.name,
+        requester_email: TC.user ? TC.user.email : '',
+        market: TC.employee.market || 'Appleton',
+        my_date: myDate,
+        my_role: myRole,
+        trade_with: withName.trim(),
+        their_date: theirDate || null,
+        reason: reason.trim(),
+        status: 'pending'
+      })
+    });
+    if (!r.ok) throw new Error('Failed');
+    closeSwapSheet();
+    toast('✓ Swap request submitted — your PM will review it');
+  } catch(e) {
+    toast('Error submitting — try again');
+    if (btn) { btn.textContent = 'Submit Request'; btn.disabled = false; }
+  }
+}
+
+// Show swap button for technicians only
+function showSwapButtonIfTech() {
+  var role = TC.employee ? TC.employee.role : '';
+  var wrap = document.getElementById('oc-swap-btn-wrap');
+  if (!wrap) return;
+  // Show for Technicians, hide for PMs and admin
+  var isTech = !role || role === 'Technician';
+  wrap.style.display = isTech ? 'block' : 'none';
 }
 
 // ── ON-CALL ALERT ────────────────────────────────────────────────────────

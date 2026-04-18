@@ -400,6 +400,12 @@ function renderLive() {
     h += '<div class="stat-card" style="border:2px solid #2e7d32;cursor:pointer;" onclick="showTab(\'employees\',document.getElementById(\'tab-employees\'))">';
     h += '<div class="stat-val" style="color:#2e7d32;">'+(ST.pendingEmployees||[]).length+'</div><div class="stat-lbl">Pending Approval</div></div>';
   }
+  // Pending swap requests
+  var pendingSwaps = (ST.swapRequests||[]).filter(function(s){ return s.status==='pending'; });
+  if (pendingSwaps.length) {
+    h += '<div class="stat-card" style="border:2px solid var(--orange);cursor:pointer;" onclick="showTab(\'timesheets\',document.getElementById(\'tab-timesheets\'))">';
+    h += '<div class="stat-val" style="color:var(--orange);">'+pendingSwaps.length+'</div><div class="stat-lbl">Swap Requests</div></div>';
+  }
   var pendingCorr = (ST.corrections||[]).filter(function(c){ return c.status==='pending'; });
   if (pendingCorr.length) {
     h += '<div class="stat-card" style="border:2px solid var(--orange);cursor:pointer;" onclick="showTab(\'timesheets\',document.getElementById(\'tab-timesheets\'))">';
@@ -919,6 +925,36 @@ function renderTimesheets() {
     h += '</div>';
   }
 
+  // On-call swap requests
+  var swapList = (ST.swapRequests||[]).filter(function(s){
+    return ST.filterEmp === 'All' || s.requester_name === ST.filterEmp;
+  });
+  if (swapList.length) {
+    h += '<div class="card" style="margin-top:16px;"><div class="card-hdr" style="display:flex;align-items:center;justify-content:space-between;">';
+    h += '<div class="card-title">🔄 On-Call Swap Requests</div></div>';
+    h += '<table class="tc-table"><thead><tr><th>Requester</th><th>My Date</th><th>Role</th><th>Trading With</th><th>Their Date</th><th>Reason</th><th>Status</th><th></th></tr></thead><tbody>';
+    swapList.forEach(function(s){
+      var statusBadge = s.status==='pending' ? '<span class="badge badge-warn">Pending</span>' :
+                        s.status==='approved' ? '<span class="badge badge-green">Approved</span>' :
+                        '<span class="badge badge-gray">Dismissed</span>';
+      h += '<tr>';
+      h += '<td><strong>'+s.requester_name+'</strong><div style="font-size:10px;color:var(--muted);">'+(s.market||'')+'</div></td>';
+      h += '<td>'+fmtD(new Date(s.my_date+'T00:00:00'))+'</td>';
+      h += '<td style="font-size:11px;">'+s.my_role+'</td>';
+      h += '<td><strong>'+s.trade_with+'</strong></td>';
+      h += '<td>'+(s.their_date?fmtD(new Date(s.their_date+'T00:00:00')):'-')+'</td>';
+      h += '<td style="font-size:11px;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+s.reason+'</td>';
+      h += '<td>'+statusBadge+'</td>';
+      h += '<td style="display:flex;gap:4px;">';
+      if (s.status === 'pending') {
+        h += '<button class="btn btn-sm" style="background:#2e7d32;color:#fff;border-color:#2e7d32;" onclick="resolveSwap(\''+s.id+'\',\'approved\')">✓ Approve</button>';
+        h += '<button class="btn btn-sm btn-danger" onclick="resolveSwap(\''+s.id+'\',\'dismissed\')">✕</button>';
+      }
+      h += '</td></tr>';
+    });
+    h += '</tbody></table></div>';
+  }
+
   // Correction requests
   var corrList = (ST.corrections||[]).filter(function(c){
     return ST.filterEmp === 'All' || c.employee_name === ST.filterEmp;
@@ -949,6 +985,22 @@ function renderTimesheets() {
   }
 
   document.getElementById('tc-body').innerHTML = h;
+}
+
+async function resolveSwap(id, status) {
+  var req = (ST.swapRequests||[]).find(function(s){ return s.id === id; });
+  await fetch(SB_URL + '/rest/v1/oncall_swap_requests?id=eq.' + id, {
+    method: 'PATCH',
+    headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status: status, reviewed_by: 'Admin', reviewed_at: new Date().toISOString() })
+  });
+  if (status === 'approved' && req) {
+    toast('✓ Swap approved — update the on-call calendar manually');
+  } else {
+    toast('Swap request dismissed');
+  }
+  await loadAll();
+  renderTimesheets();
 }
 
 async function resolveCorrection(corrId, status, entryId) {
