@@ -556,16 +556,12 @@ body {
 <div id="oncall-panel-app" style="display:none;">
   <div class="body">
     <div class="team-card">
-      <div class="section-title" style="margin-bottom:12px;">My On-Call Schedule</div>
-      <div id="oncall-my-schedule"><div class="empty">Loading...</div></div>
-    </div>
-    <div class="team-card" style="margin-top:12px;">
-      <div class="section-title" style="margin-bottom:12px;">Full Month Schedule</div>
-      <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">
         <button onclick="prevOCAppMonth()" style="padding:4px 10px;border-radius:6px;border:1px solid var(--border);background:var(--surface);color:var(--text);cursor:pointer;font-size:13px;">◀</button>
-        <span id="oc-app-month-label" style="font-size:13px;font-weight:600;flex:1;text-align:center;"></span>
+        <span id="oc-app-month-label" style="font-size:14px;font-weight:700;flex:1;text-align:center;color:var(--navy);"></span>
         <button onclick="nextOCAppMonth()" style="padding:4px 10px;border-radius:6px;border:1px solid var(--border);background:var(--surface);color:var(--text);cursor:pointer;font-size:13px;">▶</button>
       </div>
+      <div style="font-size:10px;color:var(--muted);margin-bottom:8px;">★ = your shift &nbsp;·&nbsp; <span style="color:#1565c0;font-weight:700;">Tech</span> &nbsp;<span style="color:#6a1b9a;font-weight:700;">Bkp</span> &nbsp;<span style="color:#2e7d32;font-weight:700;">PM</span></div>
       <div id="oncall-full-schedule"><div class="empty">Loading...</div></div>
     </div>
   </div>
@@ -1517,13 +1513,13 @@ function nextOCAppMonth() { _ocAppOffset++; loadOCApp(); }
 
 async function loadOCApp() {
   var mLabel = document.getElementById('oc-app-month-label');
-  var myEl   = document.getElementById('oncall-my-schedule');
-  var fullEl = document.getElementById('oncall-full-schedule');
-  if (!myEl || !fullEl) return;
+  var calEl  = document.getElementById('oncall-full-schedule');
+  if (!calEl) return;
 
   var d = new Date(); d.setDate(1); d.setMonth(d.getMonth() + _ocAppOffset);
   if (mLabel) mLabel.textContent = d.toLocaleDateString('en-US', {month:'long', year:'numeric'});
 
+  // Load schedule from Supabase
   var ocSchedule = {};
   try {
     var r = await fetch(SB_URL + '/rest/v1/oncall_schedule?id=eq.current&select=data', {
@@ -1531,9 +1527,7 @@ async function loadOCApp() {
     });
     var rows = await r.json();
     if (rows && rows.length && rows[0].data) ocSchedule = rows[0].data;
-  } catch(e) {
-    // fallback empty
-  }
+  } catch(e) {}
 
   var myName = TC.employee ? TC.employee.name : '';
   var market = TC.employee ? (TC.employee.market || 'Appleton') : 'Appleton';
@@ -1541,84 +1535,98 @@ async function loadOCApp() {
   var mKey = ocAppMonthKey(_ocAppOffset);
   var year = d.getFullYear(), month = d.getMonth();
   var daysInMonth = new Date(year, month+1, 0).getDate();
+  var firstDow = new Date(year, month, 1).getDay();
   var today = new Date(); today.setHours(0,0,0,0);
-  var DAYS = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+  var DAYS_H = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
   var OC_ROLES_APP = ['On-Call Tech','Backup Tech','On-Call PM'];
   var OC_COLORS_APP = {'On-Call Tech':'#1565c0','Backup Tech':'#6a1b9a','On-Call PM':'#2e7d32'};
   var OC_LABELS_APP = {'On-Call Tech':'Tech','Backup Tech':'Bkp','On-Call PM':'PM'};
 
-  // My schedule — days I'm assigned
-  var myDays = [];
+  // Build calendar HTML
+  var html = '';
+
+  // Day headers
+  html += '<div style="display:grid;grid-template-columns:repeat(7,1fr);gap:1px;margin-bottom:2px;">';
+  DAYS_H.forEach(function(dh) {
+    html += '<div style="text-align:center;font-size:9px;font-weight:700;color:var(--muted);padding:3px 0;text-transform:uppercase;">' + dh + '</div>';
+  });
+  html += '</div>';
+
+  // Calendar grid
+  html += '<div style="display:grid;grid-template-columns:repeat(7,1fr);gap:2px;">';
+
+  // Blank offset cells
+  for (var b = 0; b < firstDow; b++) {
+    html += '<div style="min-height:80px;"></div>';
+  }
+
   for (var day = 1; day <= daysInMonth; day++) {
     var dt = new Date(year, month, day);
     var dayKey = dt.toISOString().split('T')[0];
-    OC_ROLES_APP.forEach(function(role) {
-      var ck = mKey + '|' + locKey + '|' + role + '|' + dayKey;
-      if (ocSchedule[ck] === myName) {
-        myDays.push({ date: dt, dayKey: dayKey, role: role });
-      }
-    });
-  }
+    var isToday = dt.getTime() === today.getTime();
+    var isWeekend = dt.getDay() === 0 || dt.getDay() === 6;
+    var isPast = dt < today;
 
-  if (!myName) {
-    myEl.innerHTML = '<div class="empty">Sign in to see your schedule</div>';
-  } else if (!myDays.length) {
-    myEl.innerHTML = '<div class="empty">No on-call shifts this month</div>';
-  } else {
-    var myHtml = '';
-    myDays.forEach(function(s) {
-      var isPast = s.date < today;
-      var isToday2 = s.date.getTime() === today.getTime();
-      var col = OC_COLORS_APP[s.role];
-      myHtml += '<div style="display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--border);">';
-      myHtml += '<div style="width:42px;text-align:center;flex-shrink:0;">';
-      myHtml += '<div style="font-size:10px;font-weight:700;color:var(--muted);">' + DAYS[s.date.getDay()] + '</div>';
-      myHtml += '<div style="font-size:20px;font-weight:700;color:' + (isToday2?'var(--orange)':isPast?'var(--muted)':'var(--navy)') + ';">' + s.date.getDate() + '</div>';
-      myHtml += '</div>';
-      myHtml += '<div style="flex:1;">';
-      myHtml += '<div style="font-size:13px;font-weight:700;color:' + col + ';">' + s.role + '</div>';
-      myHtml += '<div style="font-size:11px;color:var(--muted);">' + market + (isToday2?' · Today':isPast?' · Past':'') + '</div>';
-      myHtml += '</div>';
-      if (isToday2) myHtml += '<div style="font-size:11px;font-weight:700;padding:3px 10px;border-radius:10px;background:rgba(232,93,4,.1);color:var(--orange);">Today</div>';
-      myHtml += '</div>';
-    });
-    myEl.innerHTML = myHtml;
-  }
-
-  // Full month calendar — compact list
-  var fullHtml = '';
-  for (var day2 = 1; day2 <= daysInMonth; day2++) {
-    var dt2 = new Date(year, month, day2);
-    var dayKey2 = dt2.toISOString().split('T')[0];
-    var isToday3 = dt2.getTime() === today.getTime();
-    var isWeekend2 = dt2.getDay() === 0 || dt2.getDay() === 6;
+    // Gather slots for this day
     var slots = [];
     OC_ROLES_APP.forEach(function(role) {
-      var ck2 = mKey + '|' + locKey + '|' + role + '|' + dayKey2;
-      if (ocSchedule[ck2]) slots.push({ role: role, name: ocSchedule[ck2] });
+      var ck = mKey + '|' + locKey + '|' + role + '|' + dayKey;
+      if (ocSchedule[ck]) slots.push({ role: role, name: ocSchedule[ck] });
     });
-    if (!slots.length && !isToday3) continue; // skip empty days
-    fullHtml += '<div style="display:flex;gap:10px;padding:8px 0;border-bottom:1px solid var(--border);background:' + (isToday3?'rgba(232,93,4,.04)':isWeekend2?'rgba(13,45,94,.02)':'') + ';">';
-    fullHtml += '<div style="width:42px;flex-shrink:0;text-align:center;">';
-    fullHtml += '<div style="font-size:10px;font-weight:700;color:var(--muted);">' + DAYS[dt2.getDay()] + '</div>';
-    fullHtml += '<div style="font-size:16px;font-weight:700;color:' + (isToday3?'var(--orange)':'var(--navy)') + ';">' + day2 + '</div>';
-    fullHtml += '</div>';
-    fullHtml += '<div style="flex:1;display:flex;flex-wrap:wrap;gap:4px;align-items:center;">';
-    if (slots.length) {
-      slots.forEach(function(s2) {
-        var col2 = OC_COLORS_APP[s2.role];
-        var isMe = s2.name === myName;
-        fullHtml += '<div style="display:flex;align-items:center;gap:4px;padding:3px 8px;border-radius:8px;background:rgba(' + hexToRgbApp(col2) + ',' + (isMe?'.15':'.07') + ');border:1px solid ' + col2 + (isMe?'':' opacity:.4') + ';">';
-        fullHtml += '<span style="font-size:9px;font-weight:700;color:' + col2 + ';">' + OC_LABELS_APP[s2.role] + '</span>';
-        fullHtml += '<span style="font-size:11px;font-weight:' + (isMe?'700':'500') + ';color:' + col2 + ';">' + s2.name.split(' ')[0] + (isMe?' ★':'') + '</span>';
-        fullHtml += '</div>';
-      });
-    } else {
-      fullHtml += '<span style="font-size:11px;color:var(--muted);">—</span>';
-    }
-    fullHtml += '</div></div>';
+
+    var cellBg = isToday ? 'rgba(232,93,4,.06)' : isWeekend ? 'rgba(13,45,94,.03)' : 'var(--surface)';
+    var cellBorder = isToday ? '1.5px solid var(--orange)' : '1px solid var(--border)';
+
+    html += '<div style="background:' + cellBg + ';border:' + cellBorder + ';border-radius:6px;padding:4px;min-height:80px;display:flex;flex-direction:column;gap:2px;">';
+
+    // Day number
+    html += '<div style="font-size:11px;font-weight:700;color:' + (isToday?'var(--orange)':isPast?'var(--muted)':'var(--text)') + ';margin-bottom:2px;">' + day + '</div>';
+
+    // Role assignments
+    slots.forEach(function(s) {
+      var col = OC_COLORS_APP[s.role];
+      var isMe = s.name === myName;
+      var firstName = s.name.split(' ')[0];
+      html += '<div style="display:flex;align-items:center;gap:2px;padding:1px 3px;border-radius:4px;' +
+        'background:rgba(' + hexToRgbApp(col) + ',' + (isMe?'.18':'.08') + ');' +
+        'border-left:2px solid ' + col + ';">';
+      html += '<span style="font-size:8px;font-weight:700;color:' + col + ';min-width:14px;">' + OC_LABELS_APP[s.role] + '</span>';
+      html += '<span style="font-size:9px;font-weight:' + (isMe?'700':'500') + ';color:' + col + ';overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + firstName + (isMe?' ★':'') + '</span>';
+      html += '</div>';
+    });
+
+    html += '</div>';
   }
-  fullEl.innerHTML = fullHtml || '<div class="empty">No assignments this month</div>';
+  html += '</div>';
+
+  // My shifts summary below calendar
+  var myShifts = [];
+  for (var d2 = 1; d2 <= daysInMonth; d2++) {
+    var dt2 = new Date(year, month, d2);
+    var dk2 = dt2.toISOString().split('T')[0];
+    OC_ROLES_APP.forEach(function(role) {
+      var ck2 = mKey + '|' + locKey + '|' + role + '|' + dk2;
+      if (ocSchedule[ck2] === myName) myShifts.push({date:dt2, role:role});
+    });
+  }
+
+  if (myName && myShifts.length) {
+    html += '<div style="margin-top:16px;padding:12px;background:rgba(13,45,94,.04);border-radius:10px;">';
+    html += '<div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:8px;">My Shifts This Month</div>';
+    myShifts.forEach(function(s) {
+      var col = OC_COLORS_APP[s.role];
+      var isToday2 = s.date.getTime() === today.getTime();
+      html += '<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);">';
+      html += '<div style="font-size:12px;font-weight:700;color:' + (isToday2?'var(--orange)':'var(--navy)') + ';min-width:60px;">' +
+        ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][s.date.getDay()] + ' ' + s.date.getDate() + '</div>';
+      html += '<div style="font-size:12px;font-weight:600;color:' + col + ';">' + s.role + '</div>';
+      if (isToday2) html += '<div style="margin-left:auto;font-size:10px;font-weight:700;padding:2px 8px;border-radius:8px;background:rgba(232,93,4,.1);color:var(--orange);">TODAY</div>';
+      html += '</div>';
+    });
+    html += '</div>';
+  }
+
+  calEl.innerHTML = html;
 }
 
 function hexToRgbApp(hex) {
