@@ -631,7 +631,9 @@ body {
 
     <div style="margin-bottom:12px;">
       <label style="display:block;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:5px;">Trading With</label>
-      <input type="text" id="swap-with-name" class="field-input" placeholder="Team member name..." style="margin-top:0;">
+      <select id="swap-with-name" class="field-input" style="margin-top:0;appearance:none;-webkit-appearance:none;">
+        <option value="">— Select team member —</option>
+      </select>
     </div>
 
     <div style="margin-bottom:12px;">
@@ -1718,16 +1720,36 @@ function hexToRgbApp(hex) {
 }
 
 // ── ON-CALL SWAP REQUESTS ────────────────────────────────────────────────
-function openSwapRequest() {
+async function openSwapRequest() {
   var today = new Date().toISOString().split('T')[0];
-  var myDateEl = document.getElementById('swap-my-date');
-  var theirDateEl = document.getElementById('swap-their-date');
-  var reasonEl = document.getElementById('swap-reason');
-  var withEl = document.getElementById('swap-with-name');
-  if (myDateEl) myDateEl.value = today;
+  var myDateEl   = document.getElementById('swap-my-date');
+  var theirDateEl= document.getElementById('swap-their-date');
+  var reasonEl   = document.getElementById('swap-reason');
+  var withEl     = document.getElementById('swap-with-name');
+  if (myDateEl)    myDateEl.value = today;
   if (theirDateEl) theirDateEl.value = today;
-  if (reasonEl) reasonEl.value = '';
-  if (withEl) withEl.value = '';
+  if (reasonEl)    reasonEl.value = '';
+
+  // Populate employees from Supabase
+  if (withEl) {
+    withEl.innerHTML = '<option value="">— Select team member —</option>';
+    try {
+      var myName = TC.employee ? TC.employee.name : '';
+      var market = TC.employee ? (TC.employee.market || 'Appleton') : 'Appleton';
+      var r = await fetch(SB_URL + '/rest/v1/employees?active=eq.true&order=name.asc&select=name,market', {
+        headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+      });
+      var emps = await r.json() || [];
+      emps.forEach(function(e) {
+        if (e.name === myName) return; // skip self
+        var opt = document.createElement('option');
+        opt.value = e.name;
+        opt.textContent = e.name + (e.market && e.market !== market ? ' (' + e.market + ')' : '');
+        withEl.appendChild(opt);
+      });
+    } catch(err) { /* silent */ }
+  }
+
   var sheet = document.getElementById('swap-sheet');
   if (sheet) sheet.classList.add('open');
 }
@@ -1741,7 +1763,8 @@ async function submitSwapRequest() {
   if (!TC.employee) { toast('Not signed in'); return; }
   var myDate    = (document.getElementById('swap-my-date')    || {}).value || '';
   var myRole    = (document.getElementById('swap-my-role')    || {}).value || '';
-  var withName  = (document.getElementById('swap-with-name')  || {}).value || '';
+  var withEl2   = document.getElementById('swap-with-name');
+  var withName  = withEl2 ? withEl2.value : '';
   var theirDate = (document.getElementById('swap-their-date') || {}).value || '';
   var reason    = (document.getElementById('swap-reason')     || {}).value || '';
 
