@@ -397,6 +397,34 @@ body {
 .stat-lbl { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin-top: 4px; }
 
 .empty { text-align: center; padding: 30px 20px; color: var(--muted); font-size: 13px; }
+
+/* ── SWIPE TRANSITIONS ── */
+.tc-screen {
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  background: var(--bg);
+  will-change: transform;
+  transition: transform 0.28s cubic-bezier(.4,0,.2,1);
+}
+.tc-screen.hidden-right  { transform: translateX(100%);  pointer-events: none; }
+.tc-screen.hidden-left   { transform: translateX(-100%); pointer-events: none; }
+.tc-screen.active        { transform: translateX(0);     pointer-events: auto; }
+.tc-screen.slide-in-from-right { animation: slideInRight .28s cubic-bezier(.4,0,.2,1) forwards; }
+.tc-screen.slide-in-from-left  { animation: slideInLeft  .28s cubic-bezier(.4,0,.2,1) forwards; }
+.tc-screen.slide-out-left      { animation: slideOutLeft .28s cubic-bezier(.4,0,.2,1) forwards; }
+.tc-screen.slide-out-right     { animation: slideOutRight .28s cubic-bezier(.4,0,.2,1) forwards; }
+@keyframes slideInRight  { from { transform:translateX(100%); } to { transform:translateX(0); } }
+@keyframes slideInLeft   { from { transform:translateX(-100%); } to { transform:translateX(0); } }
+@keyframes slideOutLeft  { from { transform:translateX(0); } to { transform:translateX(-100%); } }
+@keyframes slideOutRight { from { transform:translateX(0); } to { transform:translateX(100%); } }
+
+.tc-screens-wrap {
+  position: relative;
+  flex: 1;
+  overflow: hidden;
+}
 </style>
 </head>
 <body ontouchstart="tcSwipeStart(event)" ontouchend="tcSwipeEnd(event)">
@@ -1962,32 +1990,96 @@ function tcSwipeEnd(e) {
   if (Math.abs(dx) < 50 || Math.abs(dy) > Math.abs(dx)) return;
   var idx = _TC_TABS.indexOf(_currentTab);
   if (dx < 0 && idx < _TC_TABS.length - 1) {
-    // Swipe left → next tab
-    switchTab(_TC_TABS[idx + 1]);
+    switchTab(_TC_TABS[idx + 1], 'left');
   } else if (dx > 0 && idx > 0) {
-    // Swipe right → previous tab
-    switchTab(_TC_TABS[idx - 1]);
+    switchTab(_TC_TABS[idx - 1], 'right');
   }
 }
 
-function switchTab(tab) {
+function getPanel(tab) {
+  var map = { clock:'app', team:'team-panel', hours:'hours-panel', oncall:'oncall-panel-app' };
+  return document.getElementById(map[tab]);
+}
+
+function switchTab(tab, direction) {
+  if (tab === _currentTab) return;
+  var oldTab = _currentTab;
   _currentTab = tab;
   sessionStorage.setItem('jg_tc_tab', tab);
+
+  // Update nav buttons
   ['clock','team','hours','oncall'].forEach(function(t) {
     var btn = document.getElementById('tabbtn-' + t);
     if (btn) btn.classList.toggle('active', t === tab);
   });
-  var clockEl   = document.getElementById('app');
-  var teamEl    = document.getElementById('team-panel');
-  var hoursEl   = document.getElementById('hours-panel');
-  var oncallEl  = document.getElementById('oncall-panel-app');
-  if (clockEl)  clockEl.style.display  = tab === 'clock'  ? 'block' : 'none';
-  if (teamEl)   teamEl.style.display   = tab === 'team'   ? 'block' : 'none';
-  if (hoursEl)  hoursEl.style.display  = tab === 'hours'  ? 'block' : 'none';
-  if (oncallEl) oncallEl.style.display = tab === 'oncall' ? 'block' : 'none';
-  if (tab === 'team')   loadTeamData();
-  if (tab === 'hours')  loadMyHours();
-  if (tab === 'oncall') loadOCApp();
+
+  // Determine direction if not passed
+  if (!direction) {
+    var oldIdx = _TC_TABS.indexOf(oldTab);
+    var newIdx = _TC_TABS.indexOf(tab);
+    direction = newIdx > oldIdx ? 'left' : 'right';
+  }
+
+  var outEl = getPanel(oldTab);
+  var inEl  = getPanel(tab);
+  if (!inEl) return;
+
+  // Show incoming panel off-screen
+  inEl.style.display = 'block';
+  inEl.style.position = 'fixed';
+  inEl.style.top = '0'; inEl.style.left = '0';
+  inEl.style.width = '100%'; inEl.style.height = '100%';
+  inEl.style.zIndex = '10';
+  inEl.style.overflowY = 'auto';
+  inEl.style.background = 'var(--bg)';
+  inEl.style.transform = direction === 'left' ? 'translateX(100%)' : 'translateX(-100%)';
+  inEl.style.transition = 'none';
+
+  // Animate out
+  if (outEl) {
+    outEl.style.position = 'fixed';
+    outEl.style.top = '0'; outEl.style.left = '0';
+    outEl.style.width = '100%'; outEl.style.height = '100%';
+    outEl.style.zIndex = '5';
+    outEl.style.overflowY = 'auto';
+    outEl.style.background = 'var(--bg)';
+    outEl.style.transition = 'transform 0.28s cubic-bezier(.4,0,.2,1)';
+    requestAnimationFrame(function() {
+      outEl.style.transform = direction === 'left' ? 'translateX(-30%)' : 'translateX(30%)';
+    });
+  }
+
+  // Animate in
+  requestAnimationFrame(function() {
+    requestAnimationFrame(function() {
+      inEl.style.transition = 'transform 0.28s cubic-bezier(.4,0,.2,1)';
+      inEl.style.transform = 'translateX(0)';
+    });
+  });
+
+  // Cleanup after animation
+  setTimeout(function() {
+    // Reset all panels
+    ['app','team-panel','hours-panel','oncall-panel-app'].forEach(function(id) {
+      var el = document.getElementById(id);
+      if (!el) return;
+      var isActive = el === inEl;
+      el.style.position = '';
+      el.style.top = ''; el.style.left = '';
+      el.style.width = ''; el.style.height = '';
+      el.style.zIndex = '';
+      el.style.overflowY = '';
+      el.style.background = '';
+      el.style.transform = '';
+      el.style.transition = '';
+      el.style.display = isActive ? 'block' : 'none';
+    });
+
+    // Load content
+    if (tab === 'team')   loadTeamData();
+    if (tab === 'hours')  loadMyHours();
+    if (tab === 'oncall') loadOCApp();
+  }, 300);
 }
 
 async function loadTeamData() {
