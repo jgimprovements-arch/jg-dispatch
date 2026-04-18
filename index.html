@@ -1783,14 +1783,23 @@ async function loadOCSwapRequests(){
   try {
     const r = await sbFetch('/rest/v1/oncall_swap_requests?order=created_at.desc&limit=50&select=*');
     if (!r.ok) { panel.style.display='block'; list.innerHTML='<div style="padding:14px 16px;font-size:13px;color:var(--muted);">Unable to load requests</div>'; return; }
-    const reqs = await r.json() || [];
+    const allReqs = await r.json() || [];
+    // Active = pending. Archived/resolved shown in history
+    const reqs = allReqs.filter(s => !s.archived || s.status === 'pending');
+    const history = allReqs.filter(s => s.archived && s.status !== 'pending');
 
     panel.style.display = 'block';
     const pending = reqs.filter(s=>s.status==='pending');
     if (count) count.textContent = pending.length ? pending.length + ' pending' : 'none pending';
     if (count) count.style.background = pending.length ? 'var(--orange)' : 'rgba(13,45,94,.2)';
 
-    if (!reqs.length) { list.innerHTML='<div style="padding:16px;font-size:13px;color:var(--muted);text-align:center;">No swap requests yet</div>'; return; }
+    if (!reqs.length && !history.length) { list.innerHTML='<div style="padding:16px;font-size:13px;color:var(--muted);text-align:center;">No swap requests yet</div>'; return; }
+    if (!reqs.length) {
+      // Only show history toggle
+      list.innerHTML = '<div style="padding:10px 16px;font-size:12px;color:var(--muted);text-align:center;">No pending requests · <a href="#" onclick="toggleSwapHistory(event)" style="color:var(--accent);">View history ('+history.length+')</a></div>' +
+        '<div id="swap-history" style="display:none;">' + renderSwapHistory(history, fmtD2) + '</div>';
+      return;
+    }
 
     const fmtD2 = iso => { if(!iso) return '—'; const d=new Date(iso+'T00:00:00'); return ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][d.getMonth()]+' '+d.getDate(); };
 
@@ -1815,8 +1824,25 @@ async function loadOCSwapRequests(){
         </div>
         <div style="display:flex;gap:6px;align-items:center;flex-shrink:0;">${btns}</div>
       </div>`;
-    }).join('');
+    }).join('') + (history.length ? '<div style="border-top:1px solid var(--border-mid);padding:8px 16px;"><a href="#" onclick="toggleSwapHistory(event)" style="font-size:11px;color:var(--muted);">Completed ('+history.length+')</a><div id="swap-history" style="display:none;">' + renderSwapHistory(history, fmtD2) + '</div></div>' : '');
   } catch(e) { console.warn('swap load failed:', e); }
+}
+
+function toggleSwapHistory(e) {
+  e.preventDefault();
+  var el = document.getElementById('swap-history');
+  if (el) el.style.display = el.style.display === 'none' ? 'block' : 'none';
+}
+
+function renderSwapHistory(history, fmtFn) {
+  if (!history.length) return '';
+  return history.slice(0,5).map(function(s) {
+    var col = s.status === 'approved' ? '#2e7d32' : '#6b7a96';
+    return '<div style="padding:10px 16px;border-top:1px solid var(--border-mid);display:flex;gap:10px;align-items:center;opacity:.7;">' +
+      '<span style="font-size:11px;font-weight:700;color:'+col+';">' + s.status.toUpperCase() + '</span>' +
+      '<span style="font-size:11px;color:var(--muted);flex:1;">' + s.requester_name + ' · ' + (s.my_date||'') + '</span>' +
+    '</div>';
+  }).join('');
 }
 
 async function resolveOCSwap(id, status) {
@@ -1873,25 +1899,92 @@ async function resolveOCSwap(id, status) {
       }
     }
 
-    // Save notification for the requester
+    // Format dates nicely
+    const fmtD3 = iso => { if(!iso) return ''; const d=new Date(iso+'T00:00:00'); return ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][d.getMonth()]+' '+d.getDate(); };
     const notifMsg = status === 'approved'
-      ? '✅ Your on-call swap request for ' + (req.my_date||'') + ' was approved. The calendar has been updated.'
-      : '❌ Your on-call swap request for ' + (req.my_date||'') + ' was denied. Please contact your PM for details.';
+      ? '✅ Your on-call swap request for ' + fmtD3(req.my_date) + ' (' + req.my_role + ') was approved. The calendar has been updated.'
+      : '❌ Your on-call swap request for ' + fmtD3(req.my_date) + ' (' + req.my_role + ') was denied. Please contact your PM for details.';
 
-    await sbFetch('/rest/v1/oncall_notifications', {
-      method: 'POST',
-      prefer: 'return=minimal',
-      body: JSON.stringify({
-        recipient_email: req.requester_email,
-        recipient_name:  req.requester_name,
-        message:         notifMsg,
-        swap_request_id: id,
-        status:          status,
-        read:            false
+    const logEntry = {
+      date: new Date().toISOString().split('T')[0],
+      action: status === 'approved' ? 'On-Call Swap Approved' : 'On-Call Swap Denied',
+      detail: (status === 'approved' ? 'Swap approved: ' : 'Swap denied: ') +
+              req.my_role + ' on ' + fmtD3(req.my_date) +
+              (req.their_date ? ' ↔ ' + fmtD3(req.their_date) : '') +
+              ' with ' + req.trade_with,
+      logged_by: 'PM/Admin',
+      type: 'oncall_swap'
+    };
+
+    // Save notification to requester
+    const notifPromises = [
+      sbFetch('/rest/v1/oncall_notifications', {
+        method: 'POST', prefer: 'return=minimal',
+        body: JSON.stringify({
+          recipient_email: req.requester_email,
+          recipient_name:  req.requester_name,
+          message:         notifMsg,
+          swap_request_id: id,
+          status:          status,
+          read:            false
+        })
+      }),
+      // Log to requester's employee file
+      sbFetch('/rest/v1/employee_log', {
+        method: 'POST', prefer: 'return=minimal',
+        body: JSON.stringify({
+          employee_name:  req.requester_name,
+          employee_email: req.requester_email,
+          ...logEntry
+        })
       })
+    ];
+
+    // If approved, also log to trade partner's employee file
+    if (status === 'approved' && req.trade_with) {
+      // Look up trade partner email
+      const empR = await sbFetch('/rest/v1/employees?name=eq.' + encodeURIComponent(req.trade_with) + '&select=email,name&limit=1');
+      if (empR.ok) {
+        const empRows = await empR.json();
+        const partner = empRows && empRows[0];
+        if (partner) {
+          notifPromises.push(
+            // Notify trade partner
+            sbFetch('/rest/v1/oncall_notifications', {
+              method: 'POST', prefer: 'return=minimal',
+              body: JSON.stringify({
+                recipient_email: partner.email,
+                recipient_name:  partner.name,
+                message: '✅ On-call swap approved: You are now covering ' + req.my_role + ' on ' + fmtD3(req.their_date || req.my_date) + ' (traded with ' + req.requester_name + ').',
+                swap_request_id: id,
+                status: 'approved',
+                read: false
+              })
+            }),
+            // Log to trade partner's employee file
+            sbFetch('/rest/v1/employee_log', {
+              method: 'POST', prefer: 'return=minimal',
+              body: JSON.stringify({
+                employee_name:  partner.name,
+                employee_email: partner.email,
+                ...logEntry,
+                detail: 'On-call swap: Covering ' + req.my_role + ' on ' + fmtD3(req.their_date || req.my_date) + ' for ' + req.requester_name
+              })
+            })
+          );
+        }
+      }
+    }
+
+    await Promise.all(notifPromises);
+
+    // Mark request as completed/archived so it clears from the tab
+    await sbFetch('/rest/v1/oncall_swap_requests?id=eq.'+id, {
+      method: 'PATCH',
+      body: JSON.stringify({ status: status, reviewed_at: new Date().toISOString(), archived: true })
     });
 
-    showToast(status === 'approved' ? '✓ Swap approved — calendar updated' : 'Request denied — requester notified');
+    showToast(status === 'approved' ? '✓ Swap approved — calendar updated, both employees notified' : 'Request denied — employee notified');
     loadOCSwapRequests();
   } catch(e) { console.error(e); showToast('Error updating request'); }
 }
