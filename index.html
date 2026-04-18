@@ -1781,13 +1781,15 @@ async function loadOCSwapRequests(){
 
   try {
     const r = await sbFetch('/rest/v1/oncall_swap_requests?order=created_at.desc&limit=50&select=*');
-    if (!r.ok) return;
-    const reqs = await r.json();
-    if (!reqs || !reqs.length) { panel.style.display='none'; return; }
+    if (!r.ok) { panel.style.display='block'; list.innerHTML='<div style="padding:14px 16px;font-size:13px;color:var(--muted);">Unable to load requests</div>'; return; }
+    const reqs = await r.json() || [];
 
+    panel.style.display = 'block';
     const pending = reqs.filter(s=>s.status==='pending');
-    panel.style.display = reqs.length ? 'block' : 'none';
-    if (count) count.textContent = pending.length + ' pending';
+    if (count) count.textContent = pending.length ? pending.length + ' pending' : 'none pending';
+    if (count) count.style.background = pending.length ? 'var(--orange)' : 'rgba(13,45,94,.2)';
+
+    if (!reqs.length) { list.innerHTML='<div style="padding:16px;font-size:13px;color:var(--muted);text-align:center;">No swap requests yet</div>'; return; }
 
     const fmtD2 = iso => { if(!iso) return '—'; const d=new Date(iso+'T00:00:00'); return ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][d.getMonth()]+' '+d.getDate(); };
 
@@ -1818,13 +1820,79 @@ async function loadOCSwapRequests(){
 
 async function resolveOCSwap(id, status) {
   try {
+    // Find the request
+    const r0 = await sbFetch('/rest/v1/oncall_swap_requests?id=eq.'+id+'&select=*');
+    const rows = r0.ok ? await r0.json() : [];
+    const req = rows[0];
+    if (!req) return;
+
+    // Update request status
     await sbFetch('/rest/v1/oncall_swap_requests?id=eq.'+id, {
       method: 'PATCH',
       body: JSON.stringify({ status: status, reviewed_at: new Date().toISOString() })
     });
-    showToast(status==='approved' ? '✓ Swap approved — update the calendar' : 'Request dismissed');
+
+    if (status === 'approved' && req.my_date && req.my_role) {
+      // Auto-apply the swap to the calendar
+      const mKey = req.my_date.slice(0,7);
+      const locKey = (req.market||'Appleton').toLowerCase().includes('point') ? 'stevens' : 'appleton';
+      const myDayKey   = req.my_date;
+      const theirDayKey = req.their_date || null;
+
+      // Reload latest ocData from Supabase
+      const ocR = await sbFetch('/rest/v1/oncall_schedule?id=eq.current&select=data');
+      if (ocR.ok) {
+        const ocRows = await ocR.json();
+        const latestData = (ocRows&&ocRows[0]&&ocRows[0].data) ? ocRows[0].data : {};
+
+        const myKey   = mKey+'|'+locKey+'|'+req.my_role+'|'+myDayKey;
+        const theirKey = theirDayKey ? mKey+'|'+locKey+'|'+req.my_role+'|'+theirDayKey : null;
+
+        const requesterName = req.requester_name;
+        const tradeName     = req.trade_with;
+
+        // Swap the calendar entries
+        const myVal    = latestData[myKey]   || '';
+        const theirVal = theirKey ? (latestData[theirKey] || '') : '';
+
+        latestData[myKey] = tradeName;   // their day now has requester's partner
+        if (theirKey) latestData[theirKey] = requesterName;
+
+        // Save back
+        await sbFetch('/rest/v1/oncall_schedule', {
+          method: 'POST',
+          prefer: 'resolution=merge-duplicates',
+          body: JSON.stringify({ id:'current', data: latestData, updated_at: new Date().toISOString() })
+        });
+
+        // Update local ocData
+        ocData = latestData;
+        localStorage.setItem('jg_oncall_v2', JSON.stringify(ocData));
+        renderOCMonth();
+      }
+    }
+
+    // Save notification for the requester
+    const notifMsg = status === 'approved'
+      ? '✅ Your on-call swap request for ' + (req.my_date||'') + ' was approved. The calendar has been updated.'
+      : '❌ Your on-call swap request for ' + (req.my_date||'') + ' was denied. Please contact your PM for details.';
+
+    await sbFetch('/rest/v1/oncall_notifications', {
+      method: 'POST',
+      prefer: 'return=minimal',
+      body: JSON.stringify({
+        recipient_email: req.requester_email,
+        recipient_name:  req.requester_name,
+        message:         notifMsg,
+        swap_request_id: id,
+        status:          status,
+        read:            false
+      })
+    });
+
+    showToast(status === 'approved' ? '✓ Swap approved — calendar updated' : 'Request denied — requester notified');
     loadOCSwapRequests();
-  } catch(e) { showToast('Error updating request'); }
+  } catch(e) { console.error(e); showToast('Error updating request'); }
 }
 
 function switchToTime(el){

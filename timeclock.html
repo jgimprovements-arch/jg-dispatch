@@ -464,6 +464,10 @@ body {
       <div class="hdr-title">Time Clock</div>
     </div>
     <div class="hdr-right">
+      <button id="notif-bell" onclick="openNotifications()" style="position:relative;background:none;border:none;cursor:pointer;padding:4px;display:none;">
+        <span style="font-size:20px;line-height:1;">🔔</span>
+        <span id="notif-badge" style="position:absolute;top:-2px;right:-2px;background:#c62828;color:#fff;border-radius:50%;width:16px;height:16px;font-size:9px;font-weight:700;display:none;align-items:center;justify-content:center;line-height:16px;"></span>
+      </button>
       <div class="hdr-name" id="hdr-name">—</div>
       <div class="hdr-avatar" id="hdr-avatar" onclick="toggleDD()">?</div>
     </div>
@@ -648,6 +652,16 @@ body {
 
     <button onclick="submitSwapRequest()" style="width:100%;padding:15px;background:var(--orange);border:none;border-radius:12px;color:#fff;font-size:15px;font-weight:700;cursor:pointer;font-family:DM Sans,sans-serif;margin-bottom:8px;">Submit Request</button>
     <button onclick="closeSwapSheet()" style="width:100%;padding:12px;background:transparent;border:1.5px solid var(--border);border-radius:12px;font-size:14px;color:var(--muted);cursor:pointer;font-family:DM Sans,sans-serif;">Cancel</button>
+  </div>
+</div>
+
+<!-- NOTIFICATION SHEET -->
+<div class="sheet-overlay" id="notif-sheet" onclick="if(event.target===this)closeNotifications()">
+  <div class="sheet" onclick="event.stopPropagation()">
+    <div class="sheet-handle"></div>
+    <div class="sheet-title">🔔 Notifications</div>
+    <div id="notif-list"><div class="empty">No notifications</div></div>
+    <button onclick="closeNotifications()" style="width:100%;padding:12px;background:transparent;border:1.5px solid var(--border);border-radius:12px;font-size:14px;color:var(--muted);cursor:pointer;font-family:DM Sans,sans-serif;margin-top:12px;">Close</button>
   </div>
 </div>
 
@@ -1808,6 +1822,72 @@ function showSwapButtonIfTech() {
   // Show for Technicians, hide for PMs and admin
   var isTech = !role || role === 'Technician';
   wrap.style.display = isTech ? 'block' : 'none';
+}
+
+// ── NOTIFICATIONS ────────────────────────────────────────────────────────
+async function loadNotifications() {
+  if (!TC.user) return;
+  var bell = document.getElementById('notif-bell');
+  var badge = document.getElementById('notif-badge');
+  if (!bell) return;
+
+  try {
+    var r = await fetch(SB_URL + '/rest/v1/oncall_notifications?recipient_email=eq.' +
+      encodeURIComponent(TC.user.email) + '&order=created_at.desc&limit=20&select=*', {
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+    });
+    var notifs = await r.json() || [];
+    var unread = notifs.filter(function(n){ return !n.read; });
+    bell.style.display = 'block';
+    if (unread.length) {
+      badge.style.display = 'flex';
+      badge.textContent = unread.length > 9 ? '9+' : unread.length;
+    } else {
+      badge.style.display = 'none';
+    }
+    // Store for sheet display
+    bell._notifs = notifs;
+  } catch(e) {}
+}
+
+function openNotifications() {
+  var bell = document.getElementById('notif-bell');
+  var list = document.getElementById('notif-list');
+  var notifs = (bell && bell._notifs) || [];
+
+  if (!notifs.length) {
+    list.innerHTML = '<div class="empty">No notifications yet</div>';
+  } else {
+    list.innerHTML = notifs.map(function(n) {
+      var isApproved = n.status === 'approved';
+      var bg = isApproved ? 'rgba(46,125,50,.06)' : 'rgba(198,40,40,.06)';
+      var border = isApproved ? '#2e7d32' : '#c62828';
+      return '<div style="padding:12px;border-radius:10px;background:' + bg + ';border-left:3px solid ' + border + ';margin-bottom:8px;">' +
+        '<div style="font-size:13px;font-weight:600;color:var(--text);line-height:1.4;">' + n.message + '</div>' +
+        '<div style="font-size:10px;color:var(--muted);margin-top:4px;">' + new Date(n.created_at).toLocaleDateString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}) + '</div>' +
+        '</div>';
+    }).join('');
+  }
+
+  var sheet = document.getElementById('notif-sheet');
+  if (sheet) sheet.classList.add('open');
+
+  // Mark all as read
+  if (TC.user && notifs.some(function(n){ return !n.read; })) {
+    fetch(SB_URL + '/rest/v1/oncall_notifications?recipient_email=eq.' + encodeURIComponent(TC.user.email) + '&read=eq.false', {
+      method: 'PATCH',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ read: true })
+    }).then(function() {
+      var badge = document.getElementById('notif-badge');
+      if (badge) badge.style.display = 'none';
+    });
+  }
+}
+
+function closeNotifications() {
+  var sheet = document.getElementById('notif-sheet');
+  if (sheet) sheet.classList.remove('open');
 }
 
 // ── ON-CALL ALERT ────────────────────────────────────────────────────────
