@@ -193,6 +193,7 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;min
   <button class="tc-tab" id="tab-reports" onclick="showTab('reports',this)">📊 Reports</button>
   <button class="tc-tab" id="tab-routes" onclick="showTab('routes',this)">🗺 Routes</button>
   <button class="tc-tab" id="tab-activity" onclick="showTab('activity',this)">📜 Activity</button>
+  <button class="tc-tab" id="tab-access" onclick="showTab('access',this)">🔐 Access</button>
 </div>
 
 <div class="tc-body" id="tc-body">
@@ -364,6 +365,8 @@ function render() {
   if (rptTab)      rptTab.style.display      = isAdmin() ? '' : 'none';
   if (routeTab)    routeTab.style.display    = canViewMaps() ? '' : 'none';
   if (activityTab) activityTab.style.display = isAdmin() ? '' : 'none';
+  var accessTab = document.getElementById('tab-access');
+  if (accessTab) accessTab.style.display = isAdmin() ? '' : 'none';
 
   if (ST.tab === 'live') renderLive();
   else if (ST.tab === 'timesheets') renderTimesheets();
@@ -371,6 +374,7 @@ function render() {
   else if (ST.tab === 'reports')   { if (isAdmin()) renderReports(); }
   else if (ST.tab === 'routes')   renderRoutes();
   else if (ST.tab === 'activity') { if (isAdmin()) renderActivity(); }
+  else if (ST.tab === 'access')   { if (isAdmin()) renderAccess(); }
 }
 
 // ── LIVE TAB ──────────────────────────────────────────────────────────────
@@ -1242,6 +1246,182 @@ function exportActivityCSV() {
   a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
   a.download = 'jg_activity_' + new Date().toISOString().split('T')[0] + '.csv';
   a.click();
+}
+
+// ── ACCESS CONTROL ────────────────────────────────────────────────────────
+const ACCESS_PAGES = [('dispatch', '📋 Dispatch Board', 'index.html'), ('sales', '📈 Sales Dashboard', 'sales.html'), ('sales_admin', '🔐 Sales Admin', 'sales_admin.html'), ('timeclock', '⏱ Clock In/Out', 'timeclock.html'), ('timeclock_admin', '📊 Time Admin', 'timeclock_admin.html'), ('qa', '🔍 QA Review', 'qa.html'), ('adjuster', '⚖️ Adjuster Rebuttal', 'adjuster.html'), ('recon', '🏗️ Recon Estimate', 'recon.html'), ('intelligence', '🧠 Adjuster Intel', 'intelligence.html')];
+const ACCESS_ROLES = ['Technician','Project Manager','Estimator','Office','Admin'];
+const ACCESS_DEFAULTS = {'dispatch': ['Project Manager', 'Estimator', 'Office', 'Admin'], 'sales': ['Project Manager', 'Estimator', 'Office', 'Admin'], 'sales_admin': ['Admin'], 'timeclock': ['Technician', 'Project Manager', 'Estimator', 'Office', 'Admin'], 'timeclock_admin': ['Office', 'Admin'], 'qa': ['Project Manager', 'Estimator', 'Office', 'Admin'], 'adjuster': ['Project Manager', 'Estimator', 'Office', 'Admin'], 'recon': ['Project Manager', 'Estimator', 'Admin'], 'intelligence': ['Project Manager', 'Estimator', 'Office', 'Admin']};
+
+function getAccessSettings() {
+  try {
+    return JSON.parse(localStorage.getItem('jg_access_settings') || 'null') || ACCESS_DEFAULTS;
+  } catch(e) { return Object.assign({}, ACCESS_DEFAULTS); }
+}
+
+function saveAccessSettings(settings) {
+  localStorage.setItem('jg_access_settings', JSON.stringify(settings));
+  // Also save to Supabase for platform-wide sync
+  fetch(SB_URL + '/rest/v1/platform_activity', {
+    method: 'POST',
+    headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
+    body: JSON.stringify({ action: 'Access Settings Updated', detail: 'Dashboard access permissions updated', category: 'employees', performed_by: 'Admin', ts: new Date().toISOString() })
+  }).catch(function(){});
+}
+
+async function saveAccessToDB(settings) {
+  try {
+    await fetch(SB_URL + '/rest/v1/access_settings', {
+      method: 'POST',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'resolution=merge-duplicates,return=minimal' },
+      body: JSON.stringify({ id: 'current', settings: settings, updated_at: new Date().toISOString() })
+    });
+  } catch(e) {}
+}
+
+async function loadAccessFromDB() {
+  try {
+    var r = await fetch(SB_URL + '/rest/v1/access_settings?id=eq.current&select=settings', {
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+    });
+    var rows = await r.json();
+    if (rows && rows[0] && rows[0].settings) {
+      localStorage.setItem('jg_access_settings', JSON.stringify(rows[0].settings));
+      return rows[0].settings;
+    }
+  } catch(e) {}
+  return getAccessSettings();
+}
+
+async function renderAccess() {
+  var settings = await loadAccessFromDB();
+  var h = '';
+
+  h += '<div style="margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;">';
+  h += '<div><div style="font-size:16px;font-weight:700;color:var(--navy);">🔐 Dashboard Access Control</div>';
+  h += '<div style="font-size:12px;color:var(--muted);margin-top:3px;">Control which roles can access each platform page</div></div>';
+  h += '<button class="btn" onclick="resetAccessDefaults()" style="background:var(--surface);border:1.5px solid var(--border);color:var(--muted);">Reset Defaults</button>';
+  h += '</div>';
+
+  // Legend
+  h += '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px;">';
+  var roleColors = {'Technician':'#546e7a','Project Manager':'#2e7d32','Estimator':'#1565c0','Office':'#6a1b9a','Admin':'#e85d04'};
+  ACCESS_ROLES.forEach(function(role) {
+    h += '<div style="display:flex;align-items:center;gap:5px;padding:4px 10px;border-radius:6px;background:rgba(0,0,0,.04);font-size:11px;font-weight:600;color:'+(roleColors[role]||'#333')+'">';
+    h += '● ' + role + '</div>';
+  });
+  h += '</div>';
+
+  // Page grid
+  h += '<div style="display:grid;gap:10px;">';
+  ACCESS_PAGES.forEach(function(page) {
+    var pageKey = page[0], pageLabel = page[1], pageUrl = page[2];
+    var allowed = settings[pageKey] || [];
+    h += '<div class="card" style="padding:14px 18px;">';
+    h += '<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;">';
+    h += '<div>';
+    h += '<div style="font-size:13px;font-weight:700;color:var(--navy);">' + pageLabel + '</div>';
+    h += '<div style="font-size:11px;color:var(--muted);">' + pageUrl + '</div>';
+    h += '</div>';
+    h += '<div style="display:flex;gap:6px;flex-wrap:wrap;">';
+    ACCESS_ROLES.forEach(function(role) {
+      var isOn = allowed.includes(role);
+      var col = roleColors[role] || '#333';
+      h += '<button onclick="toggleAccess(\''+pageKey+'\',\''+role+'\')" ';
+      h += 'style="padding:5px 12px;border-radius:6px;border:1.5px solid '+(isOn?col:'var(--border)')+';';
+      h += 'background:'+(isOn?'rgba('+hexToRgbAccess(col)+',.12)':'var(--surface)')+';';
+      h += 'color:'+(isOn?col:'var(--muted)')+';font-size:11px;font-weight:'+(isOn?'700':'500')+';cursor:pointer;';
+      h += 'font-family:DM Sans,sans-serif;">';
+      h += (isOn ? '✓ ' : '') + role + '</button>';
+    });
+    h += '</div></div></div>';
+  });
+  h += '</div>';
+
+  // Per-employee overrides
+  h += '<div style="margin-top:24px;">';
+  h += '<div style="font-size:14px;font-weight:700;color:var(--navy);margin-bottom:4px;">👤 Per-Employee Overrides</div>';
+  h += '<div style="font-size:12px;color:var(--muted);margin-bottom:12px;">Grant or restrict specific dashboards for individual employees, overriding their role.</div>';
+  var emps = (ST.employees||[]).filter(function(e){ return e.active; }).sort(function(a,b){return(a.name||'').localeCompare(b.name||'');});
+  if (!emps.length) {
+    h += '<div style="color:var(--muted);font-size:12px;">No active employees found</div>';
+  } else {
+    h += '<div style="display:grid;gap:8px;">';
+    emps.forEach(function(emp) {
+      var empOverrides = (settings['_emp_' + emp.id] || []);
+      var empDeny      = (settings['_deny_' + emp.id] || []);
+      h += '<div class="card" style="padding:12px 16px;">';
+      h += '<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">';
+      h += '<div style="width:32px;height:32px;border-radius:50%;background:var(--navy);color:#fff;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;">'+(emp.name||'?')[0]+'</div>';
+      h += '<div><div style="font-size:13px;font-weight:700;color:var(--navy);">'+(emp.name||'')+'</div>';
+      h += '<div style="font-size:11px;color:var(--muted);">'+(emp.role||'Technician')+'</div></div>';
+      h += '</div>';
+      h += '<div style="display:flex;flex-wrap:wrap;gap:4px;">';
+      ACCESS_PAGES.forEach(function(page) {
+        var pageKey = page[0], pageLabel = page[1];
+        var isGranted = empOverrides.includes(pageKey);
+        var isDenied  = empDeny.includes(pageKey);
+        var btnStyle = isGranted ? 'background:rgba(46,125,50,.12);border-color:#2e7d32;color:#2e7d32;font-weight:700;' :
+                       isDenied  ? 'background:rgba(192,32,32,.08);border-color:#c02020;color:#c02020;font-weight:700;' :
+                                   'background:var(--surface);border-color:var(--border);color:var(--muted);';
+        h += '<button onclick="cycleEmpAccess(\''+emp.id+'\',\''+pageKey+'\')" ';
+        h += 'title="Click to cycle: default → grant → deny" ';
+        h += 'style="padding:3px 10px;border-radius:5px;border:1.5px solid;font-size:10px;cursor:pointer;font-family:DM Sans,sans-serif;'+btnStyle+'">';
+        h += (isGranted?'✓ ':isDenied?'✕ ':'') + pageLabel.replace(/^[^\s]+\s/,'') + '</button>';
+      });
+      h += '</div></div>';
+    });
+    h += '</div>';
+  }
+  h += '</div>';
+
+  document.getElementById('tc-body').innerHTML = h;
+}
+
+function hexToRgbAccess(hex) {
+  hex = hex.replace('#','');
+  return parseInt(hex.slice(0,2),16)+','+parseInt(hex.slice(2,4),16)+','+parseInt(hex.slice(4,6),16);
+}
+
+function toggleAccess(pageKey, role) {
+  var settings = getAccessSettings();
+  if (!settings[pageKey]) settings[pageKey] = [];
+  var idx = settings[pageKey].indexOf(role);
+  if (idx > -1) settings[pageKey].splice(idx, 1);
+  else settings[pageKey].push(role);
+  saveAccessSettings(settings);
+  saveAccessToDB(settings);
+  renderAccess();
+}
+
+function cycleEmpAccess(empId, pageKey) {
+  var settings = getAccessSettings();
+  var grantKey = '_emp_' + empId;
+  var denyKey  = '_deny_' + empId;
+  if (!settings[grantKey]) settings[grantKey] = [];
+  if (!settings[denyKey])  settings[denyKey]  = [];
+  var isGranted = settings[grantKey].includes(pageKey);
+  var isDenied  = settings[denyKey].includes(pageKey);
+  // Cycle: default → grant → deny → default
+  if (!isGranted && !isDenied) {
+    settings[grantKey].push(pageKey);
+  } else if (isGranted) {
+    settings[grantKey] = settings[grantKey].filter(function(p){return p!==pageKey;});
+    settings[denyKey].push(pageKey);
+  } else {
+    settings[denyKey] = settings[denyKey].filter(function(p){return p!==pageKey;});
+  }
+  saveAccessSettings(settings);
+  saveAccessToDB(settings);
+  renderAccess();
+}
+
+function resetAccessDefaults() {
+  if (!confirm('Reset all access settings to defaults?')) return;
+  saveAccessSettings(Object.assign({}, ACCESS_DEFAULTS));
+  saveAccessToDB(Object.assign({}, ACCESS_DEFAULTS));
+  renderAccess();
+  toast('Access settings reset to defaults');
 }
 
 function renderRoutes() {
