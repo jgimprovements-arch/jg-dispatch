@@ -504,6 +504,13 @@
   .install-banner-sub { font-size: 11px; color: rgba(255,255,255,.6); margin-top: 2px; font-weight: 400; }
   .install-banner-btn { background: var(--orange); border: none; color: #fff; padding: 8px 14px; border-radius: 8px; font-size: 12px; font-weight: 700; cursor: pointer; white-space: nowrap; font-family: 'DM Sans', sans-serif; }
   .install-banner-close { background: none; border: none; color: rgba(255,255,255,.5); font-size: 18px; cursor: pointer; padding: 0; line-height: 1; }
+
+  /* ── SWIPE TRANSITIONS ── */
+  .screen {
+    transition: transform 0.28s cubic-bezier(.4,0,.2,1);
+    will-change: transform;
+    background: var(--bg);
+  }
 </style>
 <!-- Auto-update: service worker forces fresh fetch on every deploy -->
 <script>
@@ -520,7 +527,7 @@ if ('serviceWorker' in navigator) {
 </script>
 <!-- Auth handled via redirect to sales.html -->
 </head>
-<body>
+<body ontouchstart="saSwipeStart(event)" ontouchend="saSwipeEnd(event)">
 
 <!-- No login screen - auth handled by redirect to sales.html -->
 
@@ -900,6 +907,17 @@ async function loadAll() {
   renderRoutes();
   renderFollowups();
   checkRecurringRoutes();
+  // Restore last screen
+  var savedScreen = sessionStorage.getItem('jg_sales_screen');
+  if (savedScreen && savedScreen !== 'home' && document.getElementById('screen-' + savedScreen)) {
+    document.querySelectorAll('.screen').forEach(function(el){ el.classList.remove('active'); el.style.display='none'; });
+    document.querySelectorAll('.nav-btn').forEach(function(el){ el.classList.remove('active'); });
+    document.getElementById('screen-' + savedScreen).classList.add('active');
+    document.getElementById('screen-' + savedScreen).style.display = 'block';
+    var nb = document.getElementById('nav-' + savedScreen);
+    if (nb) nb.classList.add('active');
+    APP.screen = savedScreen;
+  }
 }
 
 // ── HOME ──────────────────────────────────────────────────────────────────
@@ -1636,12 +1654,94 @@ async function submitLogTouch() {
 }
 
 // ── NAV ───────────────────────────────────────────────────────────────────
-function showScreen(name) {
-  document.querySelectorAll('.screen').forEach(function(el){ el.classList.remove('active'); });
-  document.querySelectorAll('.nav-btn').forEach(function(el){ el.classList.remove('active'); });
-  document.getElementById('screen-' + name).classList.add('active');
-  document.getElementById('nav-' + name).classList.add('active');
-  APP.screen = name;
+var SA_SCREENS = ['home', 'partners', 'routes', 'followups'];
+var _saSwipeStartX = 0;
+var _saSwipeStartY = 0;
+
+function saSwipeStart(e) {
+  if (!e.touches || !e.touches[0]) return;
+  // Don't swipe if a sheet is open
+  if (document.querySelector('.sheet-overlay.open')) return;
+  _saSwipeStartX = e.touches[0].clientX;
+  _saSwipeStartY = e.touches[0].clientY;
+}
+
+function saSwipeEnd(e) {
+  if (!e.changedTouches || !e.changedTouches[0]) return;
+  if (document.querySelector('.sheet-overlay.open')) return;
+  var dx = e.changedTouches[0].clientX - _saSwipeStartX;
+  var dy = e.changedTouches[0].clientY - _saSwipeStartY;
+  if (Math.abs(dx) < 50 || Math.abs(dy) > Math.abs(dx)) return;
+  var idx = SA_SCREENS.indexOf(APP.screen);
+  if (dx < 0 && idx < SA_SCREENS.length - 1) {
+    showScreen(SA_SCREENS[idx + 1], 'left');
+  } else if (dx > 0 && idx > 0) {
+    showScreen(SA_SCREENS[idx - 1], 'right');
+  }
+}
+
+function showScreen(name, direction) {
+  if (name === APP.screen) return;
+  var oldName = APP.screen;
+  var oldEl = document.getElementById('screen-' + oldName);
+  var newEl = document.getElementById('screen-' + name);
+  if (!newEl) return;
+
+  // Determine direction if not passed
+  if (!direction) {
+    var oldIdx = SA_SCREENS.indexOf(oldName);
+    var newIdx = SA_SCREENS.indexOf(name);
+    direction = newIdx > oldIdx ? 'left' : 'right';
+  }
+
+  // Position new screen off-screen
+  newEl.style.display = 'block';
+  newEl.style.position = 'absolute';
+  newEl.style.inset = '0';
+  newEl.style.transform = direction === 'left' ? 'translateX(100%)' : 'translateX(-100%)';
+  newEl.style.transition = 'none';
+  newEl.style.zIndex = '2';
+
+  // Set up old screen
+  if (oldEl) {
+    oldEl.style.position = 'absolute';
+    oldEl.style.inset = '0';
+    oldEl.style.zIndex = '1';
+    oldEl.style.transition = 'transform 0.28s cubic-bezier(.4,0,.2,1)';
+  }
+
+  requestAnimationFrame(function() {
+    requestAnimationFrame(function() {
+      // Slide in new
+      newEl.style.transition = 'transform 0.28s cubic-bezier(.4,0,.2,1)';
+      newEl.style.transform = 'translateX(0)';
+      // Slide out old (parallax)
+      if (oldEl) {
+        oldEl.style.transform = direction === 'left' ? 'translateX(-30%)' : 'translateX(30%)';
+      }
+    });
+  });
+
+  // Cleanup
+  setTimeout(function() {
+    document.querySelectorAll('.screen').forEach(function(el) {
+      el.classList.remove('active');
+      el.style.position = '';
+      el.style.inset = '';
+      el.style.transform = '';
+      el.style.transition = '';
+      el.style.zIndex = '';
+      el.style.display = 'none';
+    });
+    newEl.classList.add('active');
+    newEl.style.display = 'block';
+    document.querySelectorAll('.nav-btn').forEach(function(el){ el.classList.remove('active'); });
+    var navBtn = document.getElementById('nav-' + name);
+    if (navBtn) navBtn.classList.add('active');
+    APP.screen = name;
+    // Save tab
+    sessionStorage.setItem('jg_sales_screen', name);
+  }, 300);
 }
 
 // ── UTILS ─────────────────────────────────────────────────────────────────
@@ -1759,25 +1859,14 @@ function triggerInstall() {
 
 document.addEventListener('DOMContentLoaded', function() {
   try {
-    if (window._pendingAppUser) { initApp(window._pendingAppUser); window._pendingAppUser = null; return; }
-    var u = checkAuth();
-    if (u) { initApp(u); return; }
-    var base = 'https://jgimprovements-arch.github.io/jg-dispatch/';
+    if (window._pendingAppUser) { dbg('pending user found'); initApp(window._pendingAppUser); window._pendingAppUser = null; return; }
+      var u = checkAuth();
+      if (u) { initApp(u); return; }
+      var base = 'https://jgimprovements-arch.github.io/jg-dispatch/';
     var returnUrl = base + 'sales_app.html';
-    if (sessionStorage.getItem('jg_redirect_attempt')) {
-      sessionStorage.removeItem('jg_redirect_attempt');
-      document.body.innerHTML = '<div style="padding:40px 24px;font-family:DM Sans,sans-serif;text-align:center;">' +
-        '<div style="font-size:48px;margin-bottom:16px;">\uD83D\uDD10</div>' +
-        '<div style="font-size:20px;font-weight:700;color:#0d2d5e;margin-bottom:8px;">Sign In Required</div>' +
-        '<div style="font-size:14px;color:#6b7a96;margin-bottom:24px;">Please sign in through the Sales Dashboard first.</div>' +
-        '<a href="' + base + 'sales.html" style="display:inline-block;padding:14px 28px;background:#e85d04;color:#fff;border-radius:12px;font-weight:700;font-size:15px;text-decoration:none;">Go to Sales Dashboard</a>' +
-        '</div>';
-      return;
-    }
-    sessionStorage.setItem('jg_redirect_attempt', '1');
     window.location.replace(base + 'sales.html?return=' + encodeURIComponent(returnUrl));
   } catch(e) {
-    document.body.innerHTML = '<div style="padding:40px;font-family:sans-serif;color:#c62828;"><b>Error:</b> ' + e.message + '<br><a href="sales.html">Go to Sales Dashboard</a></div>';
+      document.body.innerHTML = '<div style="padding:40px;font-family:sans-serif;color:#c62828;"><b>Error:</b> ' + e.message + '<br><br><pre>' + e.stack + '</pre><br><a href="sales.html">Go to Sales Dashboard</a></div>';
   }
 });
 </script>
