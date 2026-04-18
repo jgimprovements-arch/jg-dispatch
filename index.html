@@ -470,6 +470,17 @@ body{padding-left:48px;box-sizing:border-box;}
     <button onclick="saveOCData()" style="padding:4px 14px;border-radius:6px;border:none;background:var(--surface);border:1.5px solid var(--border-mid);color:var(--text);cursor:pointer;font-size:12px;font-weight:600;">💾 Save</button>
     <button onclick="pushOCToTSheets()" style="padding:4px 14px;border-radius:6px;border:none;background:var(--accent);color:#fff;cursor:pointer;font-size:12px;font-weight:600;">↑ Push to T-Sheets</button>
   </div>
+  <!-- SWAP REQUESTS PANEL -->
+  <div id="oc-swap-panel" style="margin-bottom:16px;display:none;">
+    <div style="background:var(--surface);border-radius:12px;border:1.5px solid var(--orange);overflow:hidden;">
+      <div style="background:rgba(232,93,4,.06);padding:10px 16px;display:flex;align-items:center;justify-content:space-between;">
+        <div style="font-size:13px;font-weight:700;color:var(--orange);">🔄 On-Call Swap Requests</div>
+        <div id="oc-swap-count" style="font-size:11px;font-weight:700;padding:2px 10px;background:var(--orange);color:#fff;border-radius:10px;"></div>
+      </div>
+      <div id="oc-swap-list" style="padding:0;"></div>
+    </div>
+  </div>
+
   <div style="display:flex;gap:8px;margin-bottom:16px;">
     <button id="oc-tab-appleton" onclick="switchOCLoc('appleton')" style="padding:8px 20px;border-radius:10px;border:2px solid #0d2d5e;background:#0d2d5e;color:#fff;font-size:13px;font-weight:700;cursor:pointer;font-family:DM Sans,sans-serif;box-shadow:0 2px 8px rgba(13,45,94,.3);">📍 Appleton</button>
     <button id="oc-tab-stevens" onclick="switchOCLoc('stevens')" style="padding:8px 20px;border-radius:10px;border:2px solid #f5a623;background:#fff;color:#f5a623;font-size:13px;font-weight:700;cursor:pointer;font-family:DM Sans,sans-serif;">📍 Stevens Point</button>
@@ -1759,6 +1770,61 @@ async function switchToOnCall(el){
   document.getElementById('oncall-panel').style.display='block';
   await loadOCData();
   renderOCMonth();
+  loadOCSwapRequests();
+}
+
+async function loadOCSwapRequests(){
+  var panel = document.getElementById('oc-swap-panel');
+  var list  = document.getElementById('oc-swap-list');
+  var count = document.getElementById('oc-swap-count');
+  if (!panel || !list) return;
+
+  try {
+    const r = await sbFetch('/rest/v1/oncall_swap_requests?order=created_at.desc&limit=50&select=*');
+    if (!r.ok) return;
+    const reqs = await r.json();
+    if (!reqs || !reqs.length) { panel.style.display='none'; return; }
+
+    const pending = reqs.filter(s=>s.status==='pending');
+    panel.style.display = reqs.length ? 'block' : 'none';
+    if (count) count.textContent = pending.length + ' pending';
+
+    const fmtD2 = iso => { if(!iso) return '—'; const d=new Date(iso+'T00:00:00'); return ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][d.getMonth()]+' '+d.getDate(); };
+
+    list.innerHTML = reqs.map(s => {
+      const isPending = s.status === 'pending';
+      const badgeColor = isPending ? '#e65100' : s.status==='approved' ? '#2e7d32' : '#6b7a96';
+      const badge = `<span style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:8px;background:rgba(${isPending?'230,81,0':s.status==='approved'?'46,125,50':'107,122,150'},.1);color:${badgeColor};">${s.status.toUpperCase()}</span>`;
+      const btns = isPending ? `
+        <button onclick="resolveOCSwap('${s.id}','approved')" style="font-size:11px;padding:4px 12px;border-radius:6px;border:none;background:#2e7d32;color:#fff;cursor:pointer;font-weight:600;font-family:DM Sans,sans-serif;">✓ Approve</button>
+        <button onclick="resolveOCSwap('${s.id}','dismissed')" style="font-size:11px;padding:4px 10px;border-radius:6px;border:1.5px solid var(--border-mid);background:var(--surface);color:var(--muted);cursor:pointer;font-family:DM Sans,sans-serif;">✕</button>` : '';
+      return `<div style="padding:12px 16px;border-bottom:1px solid var(--border-mid);display:flex;align-items:flex-start;gap:12px;flex-wrap:wrap;">
+        <div style="flex:1;min-width:200px;">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
+            <span style="font-size:13px;font-weight:700;color:var(--text);">${s.requester_name}</span>
+            <span style="font-size:10px;color:var(--muted);">${s.market||''}</span>
+            ${badge}
+          </div>
+          <div style="font-size:12px;color:var(--muted);margin-bottom:2px;">
+            📅 <strong>${fmtD2(s.my_date)}</strong> · ${s.my_role} → trading with <strong>${s.trade_with}</strong>${s.their_date?' ('+fmtD2(s.their_date)+')':''}
+          </div>
+          <div style="font-size:11px;color:var(--muted);font-style:italic;">"${s.reason}"</div>
+        </div>
+        <div style="display:flex;gap:6px;align-items:center;flex-shrink:0;">${btns}</div>
+      </div>`;
+    }).join('');
+  } catch(e) { console.warn('swap load failed:', e); }
+}
+
+async function resolveOCSwap(id, status) {
+  try {
+    await sbFetch('/rest/v1/oncall_swap_requests?id=eq.'+id, {
+      method: 'PATCH',
+      body: JSON.stringify({ status: status, reviewed_at: new Date().toISOString() })
+    });
+    showToast(status==='approved' ? '✓ Swap approved — update the calendar' : 'Request dismissed');
+    loadOCSwapRequests();
+  } catch(e) { showToast('Error updating request'); }
 }
 
 function switchToTime(el){
