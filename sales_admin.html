@@ -810,50 +810,43 @@ function setTab(tab) {
 }
 
 async function renderActivityLog() {
-  var app = document.getElementById('app');
-  if (!app) return;
-
-  var today = new Date().toISOString().split('T')[0];
-  var fromDefault = new Date(Date.now() - 30*86400000).toISOString().split('T')[0];
-
-  // Build filter bar HTML inside app
-  var filterHtml = '<div style="padding:16px;max-width:1300px;margin:0 auto;">';
-  filterHtml += '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px;align-items:center;">';
-  filterHtml += '<select id="act-cat" onchange="renderActivityLog()" style="padding:8px 12px;border-radius:6px;border:1.5px solid var(--brd);background:#fff;font-size:12px;font-family:DM Sans,sans-serif;color:var(--txt);">';
-  filterHtml += '<option value="">All Categories</option>';
-  [['sales','🤝 Sales'],['dispatch','📋 Dispatch'],['time_clock','⏱ Time Clock'],['on_call','📅 On-Call'],['employees','👥 Employees'],['corrections','✏️ Corrections'],['general','⚙ General']].forEach(function(c){
-    filterHtml += '<option value="'+c[0]+'">'+c[1]+'</option>';
-  });
-  filterHtml += '</select>';
-  filterHtml += '<input type="date" id="act-from" value="'+fromDefault+'" onchange="renderActivityLog()" style="padding:8px 12px;border-radius:6px;border:1.5px solid var(--brd);font-size:12px;font-family:DM Sans,sans-serif;">';
-  filterHtml += '<span style="font-size:12px;color:var(--dim);">to</span>';
-  filterHtml += '<input type="date" id="act-to" value="'+today+'" onchange="renderActivityLog()" style="padding:8px 12px;border-radius:6px;border:1.5px solid var(--brd);font-size:12px;font-family:DM Sans,sans-serif;">';
-  filterHtml += '<input type="text" id="act-search" placeholder="Search..." oninput="renderActivityLog()" style="padding:8px 12px;border-radius:6px;border:1.5px solid var(--brd);font-size:12px;font-family:DM Sans,sans-serif;min-width:180px;">';
-  filterHtml += '<button onclick="exportSalesActivityCSV()" style="margin-left:auto;padding:8px 16px;background:var(--navy);color:#fff;border:none;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;font-family:DM Sans,sans-serif;">Export CSV</button>';
-  filterHtml += '</div>';
-  filterHtml += '<div id="act-results"><div style="text-align:center;padding:40px;color:var(--dim);">Loading...</div></div>';
-  filterHtml += '</div>';
-
-  // Append filter bar to app (after existing header content)
-  var existing = app.innerHTML;
-  // Find where the padding div ends — inject after tab bar
-  app.innerHTML = existing + filterHtml.replace('<div style="padding:16px;max-width:1300px;margin:0 auto;">','');
-
-  // Actually rebuild cleanly
-  app.innerHTML = app.innerHTML.split('<div style="padding:16px;max-width:1300px;margin:0 auto;">')[0];
-  var mainDiv = document.createElement('div');
-  mainDiv.style.cssText = 'padding:16px;max-width:1300px;margin:0 auto;';
-  mainDiv.innerHTML = filterHtml.replace('<div style="padding:16px;max-width:1300px;margin:0 auto;">','').replace('</div>','');
-  app.appendChild(mainDiv);
-
+  // Only inject the filter UI once — if already present just re-fetch
+  if (!document.getElementById('act-results')) {
+    var today = new Date().toISOString().split('T')[0];
+    var fromDefault = new Date(Date.now() - 30*86400000).toISOString().split('T')[0];
+    var wrap = document.createElement('div');
+    wrap.style.cssText = 'padding:16px;max-width:1300px;margin:0 auto;';
+    wrap.innerHTML =
+      '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px;align-items:center;">' +
+        '<select id="act-cat" onchange="fetchAndRenderActivity()" style="padding:8px 12px;border-radius:6px;border:1.5px solid var(--brd);background:#fff;font-size:12px;font-family:DM Sans,sans-serif;color:var(--txt);">' +
+          '<option value="sales" selected>🤝 Sales</option>' +
+          '<option value="">All Categories</option>' +
+          '<option value="dispatch">📋 Dispatch</option>' +
+          '<option value="time_clock">⏱ Time Clock</option>' +
+          '<option value="on_call">📅 On-Call</option>' +
+          '<option value="employees">👥 Employees</option>' +
+          '<option value="corrections">✏️ Corrections</option>' +
+          '<option value="general">⚙ General</option>' +
+        '</select>' +
+        '<input type="date" id="act-from" value="'+fromDefault+'" onchange="fetchAndRenderActivity()" style="padding:8px 12px;border-radius:6px;border:1.5px solid var(--brd);font-size:12px;">' +
+        '<span style="font-size:12px;color:var(--dim);">to</span>' +
+        '<input type="date" id="act-to" value="'+today+'" onchange="fetchAndRenderActivity()" style="padding:8px 12px;border-radius:6px;border:1.5px solid var(--brd);font-size:12px;">' +
+        '<input type="text" id="act-search" placeholder="Search..." oninput="fetchAndRenderActivity()" style="padding:8px 12px;border-radius:6px;border:1.5px solid var(--brd);font-size:12px;min-width:180px;">' +
+        '<button onclick="exportSalesActivityCSV()" style="margin-left:auto;padding:8px 16px;background:var(--navy);color:#fff;border:none;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;font-family:DM Sans,sans-serif;">Export CSV</button>' +
+      '</div>' +
+      '<div id="act-results"><div style="text-align:center;padding:40px;color:var(--dim);">Loading...</div></div>';
+    var app = document.getElementById('app');
+    if (app) app.appendChild(wrap);
+  }
   await fetchAndRenderActivity();
 }
 
 async function fetchAndRenderActivity() {
   var resultsEl = document.getElementById('act-results');
   if (!resultsEl) return;
+  resultsEl.innerHTML = '<div style="text-align:center;padding:40px;color:var(--dim);">Loading...</div>';
 
-  var cat    = (document.getElementById('act-cat')    ||{}).value || '';
+  var cat    = (document.getElementById('act-cat')    ||{}).value || 'sales';
   var from   = (document.getElementById('act-from')   ||{}).value || '';
   var to     = (document.getElementById('act-to')     ||{}).value || '';
   var search = ((document.getElementById('act-search')||{}).value || '').toLowerCase().trim();
@@ -864,7 +857,10 @@ async function fetchAndRenderActivity() {
   if (to)   url += '&ts=lte.' + to + 'T23:59:59';
 
   try {
-    var r = await fetch(url, { headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY } });
+    var r = await fetch(url, {
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' }
+    });
+    if (!r.ok) throw new Error('HTTP ' + r.status + ': ' + await r.text().catch(function(){return '';}));
     var rows = await r.json() || [];
 
     if (search) rows = rows.filter(function(row) {
