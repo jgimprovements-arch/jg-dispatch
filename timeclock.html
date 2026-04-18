@@ -426,6 +426,7 @@ body {
   overflow: hidden;
 }
 </style>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body ontouchstart="tcSwipeStart(event)" ontouchend="tcSwipeEnd(event)">
 
@@ -2466,6 +2467,56 @@ document.addEventListener('DOMContentLoaded', function() {
   document.getElementById('login-screen').style.display = 'flex';
 });
 </script>
-<script src="https://accounts.google.com/gsi/client" async defer></script>
+<script src="https://accounts.google.com/gsi/client" async defer>
+// ── REALTIME SYNC ─────────────────────────────────────────────────────────
+var _rtClient = null;
+var _rtChannels = [];
+
+function initRealtimeSync() {
+  if (_rtClient) return;
+  try {
+    _rtClient = supabase.createClient(SB_URL, SB_KEY);
+    var tables = ["time_entries","employees","oncall_schedule","oncall_swap_requests","oncall_notifications"];
+    tables.forEach(function(table) {
+      var ch = _rtClient.channel('rt_' + table)
+        .on('postgres_changes', { event: '*', schema: 'public', table: table }, function(payload) {
+          console.log('[RT] ' + table + ' changed');
+          onRealtimeChange(table, payload);
+        })
+        .subscribe(function(status) {
+          if (status === 'SUBSCRIBED') console.log('[RT] subscribed to ' + table);
+        });
+      _rtChannels.push(ch);
+    });
+  } catch(e) { console.warn('[RT] init failed:', e); }
+}
+
+function onRealtimeChange(table, payload) {
+  if (table === 'time_entries') {
+    loadTeamData();
+    if (_currentTab === 'hours') loadMyHours();
+  }
+  if (table === 'employees') {
+    // reload employee profile if needed
+    if (TC.employee) { 
+      fetch(SB_URL + '/rest/v1/employees?email=eq.' + encodeURIComponent(TC.user.email) + '&select=*&limit=1', {
+        headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+      }).then(function(r){ return r.json(); }).then(function(rows){ if(rows&&rows[0]) TC.employee=rows[0]; });
+    }
+  }
+  if (table === 'oncall_schedule') {
+    loadOCApp();
+    checkOnCallToday();
+  }
+  if (table === 'oncall_swap_requests') {
+    loadNotifications();
+    if (_currentTab === 'oncall') loadOCApp();
+  }
+  if (table === 'oncall_notifications') {
+    loadNotifications();
+  }
+}
+
+</script>
 </body>
 </html>
