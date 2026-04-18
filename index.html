@@ -2015,6 +2015,27 @@ const OC_LABELS = {
   'On-Call PM':   'PM'
 };
 
+function applyWeekTemplate(locKey, mKey, mondayDate){
+  // Fill Mon-Sun from Monday's selections
+  const mondayKey = mondayDate.toISOString().split('T')[0];
+  OC_ROLES.forEach(role=>{
+    const templateVal = ocData[mKey+'|'+locKey+'|'+role+'|'+mondayKey] || '';
+    // Apply to Tue-Sun of the same week
+    for(let offset=1; offset<=6; offset++){
+      const d = new Date(mondayDate);
+      d.setDate(mondayDate.getDate() + offset);
+      // Stop at month boundary
+      if(d.getMonth() !== mondayDate.getMonth()) break;
+      const dk = d.toISOString().split('T')[0];
+      const ck = mKey+'|'+locKey+'|'+role+'|'+dk;
+      // Only fill if not already individually overridden (marked with override flag)
+      const overrideFlag = mKey+'|'+locKey+'|'+role+'|'+dk+'|override';
+      if(!ocData[overrideFlag]) ocData[ck] = templateVal;
+    }
+  });
+  renderOCMonth();
+}
+
 function renderOCLocation(locKey, monthDate, mKey){
   const grid = document.getElementById('oc-grid-'+locKey);
   if(!grid) return;
@@ -2024,55 +2045,73 @@ function renderOCLocation(locKey, monthDate, mKey){
   const daysInMonth = new Date(year, month+1, 0).getDate();
   const today = new Date(); today.setHours(0,0,0,0);
 
-  // Calendar grid wrapper
   const wrap = document.createElement('div');
   wrap.style.cssText='width:100%;';
 
-  // Day-of-week headers
+  // Day-of-week headers — Mon first since weeks run Mon-Sun
   const dowHdr = document.createElement('div');
   dowHdr.style.cssText='display:grid;grid-template-columns:repeat(7,1fr);gap:2px;margin-bottom:2px;';
-  ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].forEach(d=>{
+  ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'].forEach((d,i)=>{
     const cell = document.createElement('div');
     cell.textContent = d;
-    cell.style.cssText='text-align:center;font-size:10px;font-weight:700;color:var(--muted);padding:4px 0;text-transform:uppercase;letter-spacing:.04em;';
+    cell.style.cssText='text-align:center;font-size:10px;font-weight:700;color:'+(i===0?'var(--accent)':'var(--muted)')+';padding:4px 0;text-transform:uppercase;letter-spacing:.04em;'+(i===0?'border-bottom:2px solid var(--accent);':'');
     dowHdr.appendChild(cell);
   });
   wrap.appendChild(dowHdr);
 
-  // Calendar cells grid
   const cal = document.createElement('div');
   cal.style.cssText='display:grid;grid-template-columns:repeat(7,1fr);gap:3px;';
 
-  // First day offset — blank cells
+  // Mon-first offset: getDay() returns 0=Sun,1=Mon...
+  // We want Monday as col 0, so offset = (getDay()+6)%7
   const firstDow = new Date(year, month, 1).getDay();
-  for(let i=0; i<firstDow; i++){
+  const firstOffset = (firstDow + 6) % 7; // Mon=0, Tue=1, ..., Sun=6
+  for(let i=0; i<firstOffset; i++){
     const blank = document.createElement('div');
-    blank.style.cssText='min-height:90px;';
+    blank.style.cssText='min-height:110px;';
     cal.appendChild(blank);
   }
 
   for(let day=1; day<=daysInMonth; day++){
     const dt = new Date(year, month, day);
     const dayKey = dt.toISOString().split('T')[0];
-    const dow = dt.getDay();
+    const dow = dt.getDay(); // 0=Sun,1=Mon,...
+    const isMonday = dow === 1;
     const isWeekend = dow===0||dow===6;
     const isToday = dt.getTime()===today.getTime();
 
     const cell = document.createElement('div');
-    cell.style.cssText='background:'+(isWeekend?'rgba(13,45,94,.04)':'var(--surface)')+
-      ';border-radius:8px;border:1.5px solid '+(isToday?'var(--orange)':'var(--border-mid)')+
-      ';padding:5px;min-height:90px;display:flex;flex-direction:column;gap:2px;cursor:default;';
+    cell.style.cssText='background:'+(isWeekend?'rgba(13,45,94,.03)':isMonday?'rgba(13,45,94,.06)':'var(--surface)')+
+      ';border-radius:8px;border:1.5px solid '+(isToday?'var(--orange)':isMonday?'var(--accent)':'var(--border-mid)')+
+      ';padding:5px;min-height:110px;display:flex;flex-direction:column;gap:2px;';
 
-    // Day number
+    // Day number row
+    const dayRow = document.createElement('div');
+    dayRow.style.cssText='display:flex;align-items:center;justify-content:space-between;margin-bottom:3px;';
+
     const dayNum = document.createElement('div');
-    dayNum.style.cssText='font-size:12px;font-weight:700;color:'+(isToday?'var(--orange)':'var(--text)')+';margin-bottom:3px;';
+    dayNum.style.cssText='font-size:12px;font-weight:700;color:'+(isToday?'var(--orange)':isMonday?'var(--accent)':'var(--text)')+';';
     dayNum.textContent = day;
-    cell.appendChild(dayNum);
+    dayRow.appendChild(dayNum);
+
+    // Monday gets "Fill Week →" button
+    if(isMonday){
+      const fillBtn = document.createElement('button');
+      fillBtn.textContent='Fill Week →';
+      fillBtn.title='Copy this Monday assignments to Tue-Sun';
+      fillBtn.style.cssText='font-size:8px;padding:1px 5px;border-radius:4px;border:1px solid var(--accent);background:rgba(13,45,94,.08);color:var(--accent);cursor:pointer;font-family:DM Sans,sans-serif;font-weight:700;white-space:nowrap;';
+      const capturedDt = new Date(dt);
+      fillBtn.addEventListener('click',()=>applyWeekTemplate(locKey, mKey, capturedDt));
+      dayRow.appendChild(fillBtn);
+    }
+    cell.appendChild(dayRow);
 
     // Role slots
     OC_ROLES.forEach(role=>{
       const cellKey = mKey+'|'+locKey+'|'+role+'|'+dayKey;
+      const overrideFlag = cellKey+'|override';
       const val = ocData[cellKey]||'';
+      const isOverride = !!ocData[overrideFlag];
       const color = OC_COLORS[role];
       const label = OC_LABELS[role];
 
@@ -2085,8 +2124,11 @@ function renderOCLocation(locKey, monthDate, mKey){
       slotWrap.appendChild(lbl);
 
       const sel = document.createElement('select');
-      sel.style.cssText='flex:1;font-size:9px;padding:1px 2px;border-radius:4px;border:1px solid '+(val?color:'var(--border-mid)')+
-        ';color:'+(val?color:'var(--muted)')+';background:'+(val?'rgba('+hexToRgb(color)+',.07)':'var(--surface)')+
+      sel.style.cssText='flex:1;font-size:9px;padding:1px 2px;border-radius:4px;'+
+        'border:1px solid '+(val?color:'var(--border-mid)')+
+        (isOverride&&!isMonday?';outline:2px solid var(--gold);outline-offset:1px;':'')+
+        ';color:'+(val?color:'var(--muted)')+
+        ';background:'+(val?'rgba('+hexToRgb(color)+',.07)':'var(--surface)')+
         ';cursor:pointer;max-width:100%;font-family:DM Sans,sans-serif;font-weight:'+(val?'700':'400')+';';
 
       const blank = document.createElement('option');
@@ -2101,12 +2143,19 @@ function renderOCLocation(locKey, monthDate, mKey){
       });
 
       sel.addEventListener('change',()=>{
-        ocData[cellKey]=sel.value;
-        // Re-style on change
+        ocData[cellKey] = sel.value;
+        // Mark as override on non-Monday changes so Fill Week won't overwrite it
+        if(!isMonday) ocData[overrideFlag] = sel.value ? '1' : '';
         sel.style.border='1px solid '+(sel.value?color:'var(--border-mid)');
         sel.style.color=sel.value?color:'var(--muted)';
         sel.style.background=sel.value?'rgba('+hexToRgb(color)+',.07)':'var(--surface)';
         sel.style.fontWeight=sel.value?'700':'400';
+        if(!isMonday && sel.value){
+          sel.style.outline='2px solid var(--gold)';
+          sel.style.outlineOffset='1px';
+        } else {
+          sel.style.outline='none';
+        }
       });
 
       slotWrap.appendChild(sel);
@@ -2115,7 +2164,15 @@ function renderOCLocation(locKey, monthDate, mKey){
 
     cal.appendChild(cell);
   }
+
+  // Legend
+  const legend = document.createElement('div');
+  legend.style.cssText='margin-top:8px;font-size:10px;color:var(--muted);display:flex;gap:12px;';
+  legend.innerHTML='<span><strong style="color:var(--accent);">Monday</strong> = set week template</span>'+
+    '<span style="display:flex;align-items:center;gap:4px;"><span style="display:inline-block;width:10px;height:10px;border-radius:2px;border:2px solid var(--gold);"></span> = individual override</span>';
+
   wrap.appendChild(cal);
+  wrap.appendChild(legend);
   grid.appendChild(wrap);
 }
 
