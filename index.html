@@ -470,9 +470,9 @@ body{padding-left:48px;box-sizing:border-box;}
     <button onclick="saveOCData()" style="padding:4px 14px;border-radius:6px;border:none;background:var(--surface);border:1.5px solid var(--border-mid);color:var(--text);cursor:pointer;font-size:12px;font-weight:600;">💾 Save</button>
     <button onclick="pushOCToTSheets()" style="padding:4px 14px;border-radius:6px;border:none;background:var(--accent);color:#fff;cursor:pointer;font-size:12px;font-weight:600;">↑ Push to T-Sheets</button>
   </div>
-  <div style="display:flex;gap:6px;margin-bottom:16px;">
-    <button id="oc-tab-appleton" onclick="switchOCLoc('appleton')" style="padding:6px 18px;border-radius:8px;border:2px solid var(--accent);background:var(--accent);color:#fff;font-size:12px;font-weight:700;cursor:pointer;font-family:DM Sans,sans-serif;">📍 Appleton</button>
-    <button id="oc-tab-stevens" onclick="switchOCLoc('stevens')" style="padding:6px 18px;border-radius:8px;border:2px solid var(--border-mid);background:var(--surface);color:var(--muted);font-size:12px;font-weight:700;cursor:pointer;font-family:DM Sans,sans-serif;">📍 Stevens Point</button>
+  <div style="display:flex;gap:8px;margin-bottom:16px;">
+    <button id="oc-tab-appleton" onclick="switchOCLoc('appleton')" style="padding:8px 20px;border-radius:10px;border:2px solid #0d2d5e;background:#0d2d5e;color:#fff;font-size:13px;font-weight:700;cursor:pointer;font-family:DM Sans,sans-serif;box-shadow:0 2px 8px rgba(13,45,94,.3);">📍 Appleton</button>
+    <button id="oc-tab-stevens" onclick="switchOCLoc('stevens')" style="padding:8px 20px;border-radius:10px;border:2px solid #f5a623;background:#fff;color:#f5a623;font-size:13px;font-weight:700;cursor:pointer;font-family:DM Sans,sans-serif;">📍 Stevens Point</button>
   </div>
   <div id="oc-grid-appleton"></div>
   <div id="oc-grid-stevens" style="display:none;"></div>
@@ -1752,11 +1752,12 @@ function ocMonthKey(offset=0){
   return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0');
 }
 
-function switchToOnCall(el){
+async function switchToOnCall(el){
   document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
   el.classList.add('active');
   document.getElementById('dispatch-view').style.display='none';
   document.getElementById('oncall-panel').style.display='block';
+  await loadOCData();
   renderOCMonth();
 }
 
@@ -1900,12 +1901,12 @@ function switchOCLoc(loc) {
   var apGrid = document.getElementById('oc-grid-appleton');
   var spGrid = document.getElementById('oc-grid-stevens');
   if (loc === 'appleton') {
-    apBtn.style.background='var(--accent)'; apBtn.style.borderColor='var(--accent)'; apBtn.style.color='#fff';
-    spBtn.style.background='var(--surface)'; spBtn.style.borderColor='var(--border-mid)'; spBtn.style.color='var(--muted)';
+    apBtn.style.background='#0d2d5e'; apBtn.style.borderColor='#0d2d5e'; apBtn.style.color='#fff'; apBtn.style.boxShadow='0 2px 8px rgba(13,45,94,.3)';
+    spBtn.style.background='#fff'; spBtn.style.borderColor='#f5a623'; spBtn.style.color='#f5a623'; spBtn.style.boxShadow='none';
     apGrid.style.display=''; spGrid.style.display='none';
   } else {
-    spBtn.style.background='var(--gold)'; spBtn.style.borderColor='var(--gold)'; spBtn.style.color='#fff';
-    apBtn.style.background='var(--surface)'; apBtn.style.borderColor='var(--border-mid)'; apBtn.style.color='var(--muted)';
+    spBtn.style.background='#f5a623'; spBtn.style.borderColor='#f5a623'; spBtn.style.color='#fff'; spBtn.style.boxShadow='0 2px 8px rgba(245,166,35,.3)';
+    apBtn.style.background='#fff'; apBtn.style.borderColor='#0d2d5e'; apBtn.style.color='#0d2d5e'; apBtn.style.boxShadow='none';
     spGrid.style.display=''; apGrid.style.display='none';
   }
 }
@@ -1913,9 +1914,36 @@ function switchOCLoc(loc) {
 function prevOCMonth(){ ocMonthOffset--; renderOCMonth(); }
 function nextOCMonth(){ ocMonthOffset++; renderOCMonth(); }
 
-function saveOCData(){
+async function saveOCData(){
   localStorage.setItem('jg_oncall_v2', JSON.stringify(ocData));
-  showToast('On-call schedule saved');
+  // Also save to Supabase so all users see the same schedule
+  try {
+    await sbFetch('/rest/v1/oncall_schedule', {
+      method: 'POST',
+      prefer: 'resolution=merge-duplicates',
+      body: JSON.stringify({ id: 'current', data: ocData, updated_at: new Date().toISOString() })
+    });
+    showToast('✓ On-call schedule saved');
+  } catch(e) {
+    showToast('✓ Saved locally (sync failed)');
+  }
+}
+
+async function loadOCData(){
+  // Try Supabase first, fallback to localStorage
+  try {
+    const r = await sbFetch('/rest/v1/oncall_schedule?id=eq.current&select=data');
+    if (r.ok) {
+      const rows = await r.json();
+      if (rows && rows.length && rows[0].data) {
+        ocData = rows[0].data;
+        localStorage.setItem('jg_oncall_v2', JSON.stringify(ocData));
+        return;
+      }
+    }
+  } catch(e) {}
+  // Fallback to localStorage
+  ocData = JSON.parse(localStorage.getItem('jg_oncall_v2') || '{}');
 }
 
 async function pushOCToTSheets(){
