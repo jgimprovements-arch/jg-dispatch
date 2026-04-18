@@ -243,7 +243,7 @@ input[type=file]{display:none}
   <a href="index.html" class="sb-lnk "><span class="sb-icon">📋</span><span class="sb-label">Dispatch</span></a>
   <div class="sb-sec">SALES</div>
   <a href="sales.html" class="sb-lnk"><span class="sb-icon">📈</span><span class="sb-label">Sales Dashboard</span></a>
-  <a href="sales_admin.html" class="sb-lnk active"><span class="sb-icon">📈</span><span class="sb-label">Sales Dashboard</span></a>
+  <a href="sales_admin.html" class="sb-lnk active"><span class="sb-icon">🔐</span><span class="sb-label">Sales Admin</span></a>
   <div class="sb-sec">AI TOOLS</div>
   <a href="qa.html" class="sb-lnk"><span class="sb-icon">🔍</span><span class="sb-label">QA Review</span></a>
   <a href="adjuster.html" class="sb-lnk "><span class="sb-icon">⚖️</span><span class="sb-label">Adjuster Rebuttal</span></a>
@@ -304,30 +304,22 @@ var AD = {
 
 async function sbGet(path) {
   try {
-    var r = await fetch(SB_URL+path, {
-      headers:{
+    var r = await fetch(SB_URL + path, {
+      method: 'GET',
+      headers: {
         'apikey': SB_KEY,
-        'Authorization': 'Bearer ' + SB_KEY,
-        'Content-Type': 'application/json'
+        'Authorization': 'Bearer ' + SB_KEY
       }
     });
     if (!r.ok) {
-      var txt = await r.text().catch(function(){return '';});
-      console.error('sbGet HTTP '+r.status+':', txt, path);
+      var txt = await r.text().catch(function(){return r.status;});
+      console.error('sbGet ' + r.status + ':', txt);
       return [];
     }
-    return await r.json();
+    var data = await r.json();
+    return Array.isArray(data) ? data : [];
   } catch(e) {
-    console.error('sbGet:', e.message, path);
-    // Show visible error on page
-    var app = document.getElementById('app');
-    if (app && !document.getElementById('sb-err')) {
-      var d = document.createElement('div');
-      d.id = 'sb-err';
-      d.style.cssText = 'padding:12px 16px;background:#fff0f0;border:1px solid #c02020;border-radius:8px;font-size:12px;color:#c02020;margin:16px;';
-      d.innerHTML = '<strong>Connection error:</strong> ' + e.message + '<br>Check your internet connection and try refreshing.';
-      app.prepend(d);
-    }
+    console.error('sbGet error:', e.message, path);
     return [];
   }
 }
@@ -818,8 +810,9 @@ async function renderActivityLog() {
     wrap.style.cssText = 'padding:16px;max-width:1300px;margin:0 auto;';
     wrap.innerHTML =
       '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px;align-items:center;">' +
-        '<select id="act-cat" onchange="fetchAndRenderActivity()" style="padding:8px 12px;border-radius:6px;border:1.5px solid var(--brd);background:#fff;font-size:12px;font-family:DM Sans,sans-serif;color:var(--txt);">' +
-          '<option value="sales" selected>🤝 All Sales Activity</option>' +
+        '<select id="act-rep" onchange="fetchAndRenderActivity()" style="padding:8px 12px;border-radius:6px;border:1.5px solid var(--brd);background:#fff;font-size:12px;font-family:DM Sans,sans-serif;color:var(--txt);">' +
+          '<option value="">All Reps</option>' +
+          REPS.map(function(r){ return '<option value="'+r+'">'+r+'</option>'; }).join('') +
         '</select>' +
         '<input type="date" id="act-from" value="'+fromDefault+'" onchange="fetchAndRenderActivity()" style="padding:8px 12px;border-radius:6px;border:1.5px solid var(--brd);font-size:12px;">' +
         '<span style="font-size:12px;color:var(--dim);">to</span>' +
@@ -839,13 +832,13 @@ async function fetchAndRenderActivity() {
   if (!resultsEl) return;
   resultsEl.innerHTML = '<div style="text-align:center;padding:40px;color:var(--dim);">Loading...</div>';
 
-  var cat    = (document.getElementById('act-cat')    ||{}).value || 'sales';
+  var rep    = (document.getElementById('act-rep')    ||{}).value || '';
   var from   = (document.getElementById('act-from')   ||{}).value || '';
   var to     = (document.getElementById('act-to')     ||{}).value || '';
   var search = ((document.getElementById('act-search')||{}).value || '').toLowerCase().trim();
 
-  var url = SB_URL + '/rest/v1/platform_activity?order=ts.desc&limit=500&select=*';
-  if (cat)  url += '&category=eq.' + encodeURIComponent(cat);
+  var url = SB_URL + '/rest/v1/platform_activity?order=ts.desc&limit=500&select=*&category=eq.sales';
+  if (rep)  url += '&performed_by=eq.' + encodeURIComponent(rep);
   if (from) url += '&ts=gte.' + from + 'T00:00:00';
   if (to)   url += '&ts=lte.' + to + 'T23:59:59';
 
