@@ -1463,7 +1463,8 @@ async function clockIn() {
     TC.clockedIn = true;
     TC.clockInTime = Date.now();
     TC.entries.push(result[0]);
-    startPinging(); // begin location tracking
+    startPinging();
+    logActivity('Clock In', 'Clocked in — Job: ' + (TC.selectedJob ? TC.selectedJob.name : 'None'), 'time_clock');
     // 7:30 rule check
     var nowDt = new Date();
     var isEarly = nowDt.getHours() < 7 || (nowDt.getHours() === 7 && nowDt.getMinutes() < 30);
@@ -1519,7 +1520,8 @@ async function clockOut() {
   if (idx !== -1) { TC.entries[idx].clock_out = now; TC.entries[idx].duration_minutes = duration; }
 
   TC.clockedIn = false; TC.onBreak = false;
-  stopPinging(); // stop location tracking
+  stopPinging();
+  logActivity('Clock Out', 'Clocked out', 'time_clock');
   var banner = document.getElementById('early-banner');
   if (banner) banner.style.display = 'none';
   TC.activeEntry = null; TC.clockInTime = null;
@@ -1809,6 +1811,7 @@ async function submitSwapRequest() {
     if (!r.ok) throw new Error('Failed');
     closeSwapSheet();
     toast('✓ Swap request submitted — your PM will review it');
+    logActivity('Swap Request Submitted', 'On-call swap requested for ' + myDate + ' (' + myRole + ') with ' + withName, 'on_call');
   } catch(e) {
     toast('Error submitting — try again');
     if (btn) { btn.textContent = 'Submit Request'; btn.disabled = false; }
@@ -1926,6 +1929,23 @@ async function checkOnCallToday() {
   } catch(e) {
     // silent fail
   }
+}
+
+async function logActivity(action, detail, category, employeeName) {
+  try {
+    var u = TC.user || {};
+    await fetch(SB_URL + '/rest/v1/platform_activity', {
+      method: 'POST',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
+      body: JSON.stringify({
+        action: action, detail: detail, category: category || 'time_clock',
+        employee_name: employeeName || (TC.employee ? TC.employee.name : null),
+        performed_by: TC.employee ? TC.employee.name : (u.email || 'Employee'),
+        performed_by_email: u.email || null,
+        ts: new Date().toISOString()
+      })
+    });
+  } catch(e) {}
 }
 
 // Supabase query helper for My Hours tab
