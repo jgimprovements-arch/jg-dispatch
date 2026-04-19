@@ -196,6 +196,7 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;min
   <button class="tc-tab" id="tab-reports" onclick="showTab('reports',this)">📊 Reports</button>
   <button class="tc-tab" id="tab-routes" onclick="showTab('routes',this)">🗺 Routes & Live</button>
   <button class="tc-tab" id="tab-jobcost" onclick="showTab('jobcost',this)">💰 Job Costing</button>
+  <button class="tc-tab" id="tab-archive" onclick="showTab('archive',this)">🗄 Archive</button>
   <button class="tc-tab" id="tab-activity" onclick="showTab('activity',this)">📜 Activity</button>
   <button class="tc-tab" id="tab-access" onclick="showTab('access',this)">🔐 Access</button>
 </div>
@@ -418,7 +419,7 @@ async function loadAll() {
 
 // ── TABS ──────────────────────────────────────────────────────────────────
 function showTab(tab, el) {
-  var adminOnly = ['employees', 'reports'];
+  var adminOnly = ['employees', 'reports', 'archive'];
   var mapTabs = ['routes'];
   if (adminOnly.includes(tab) && !isAdmin()) {
     toast('Admin access required');
@@ -453,6 +454,7 @@ function render() {
   else if (ST.tab === 'reports')   { if (isAdmin()) renderReports(); }
   else if (ST.tab === 'routes')   renderRoutes();
   else if (ST.tab === 'jobcost')  { renderJobCost(); }
+  else if (ST.tab === 'archive')  { if (isAdmin()) renderArchive(); }
   else if (ST.tab === 'activity') { if (isAdmin()) renderActivity(); }
   else if (ST.tab === 'access')   { if (isAdmin()) renderAccess(); }
 }
@@ -2136,6 +2138,302 @@ async function logActivity(action, detail, category, employeeName) {
       })
     });
   } catch(e) { /* non-fatal */ }
+}
+
+// ── ARCHIVE TAB ──────────────────────────────────────────────────────────
+// Dedicated archive browser: all approved timecards across all time, searchable/filterable
+var _archiveData = null;  // cached list of archive records
+var _archiveFilter = { employee: 'All', year: 'All', search: '' };
+
+async function renderArchive() {
+  var body = document.getElementById('tc-body');
+  if (!_archiveData) {
+    body.innerHTML = '<div class="card"><div class="empty" style="padding:40px;">Loading archive...</div></div>';
+    _archiveData = await sb('/rest/v1/timecard_archive?select=*&order=approved_at.desc&limit=2000') || [];
+  }
+
+  var data = _archiveData.slice();
+
+  // Apply filters
+  if (_archiveFilter.employee !== 'All') {
+    data = data.filter(function(r){ return r.employee_name === _archiveFilter.employee; });
+  }
+  if (_archiveFilter.year !== 'All') {
+    data = data.filter(function(r){ return new Date(r.approved_at).getFullYear() === parseInt(_archiveFilter.year); });
+  }
+  if (_archiveFilter.search) {
+    var q = _archiveFilter.search.toLowerCase();
+    data = data.filter(function(r){
+      return (r.employee_name && r.employee_name.toLowerCase().indexOf(q) !== -1)
+        || (r.period_label && r.period_label.toLowerCase().indexOf(q) !== -1)
+        || (r.approved_by && r.approved_by.toLowerCase().indexOf(q) !== -1);
+    });
+  }
+
+  // Unique employees and years for filter dropdowns
+  var allEmps = [...new Set(_archiveData.map(function(r){ return r.employee_name; }).filter(Boolean))].sort();
+  var allYears = [...new Set(_archiveData.map(function(r){ return new Date(r.approved_at).getFullYear(); }))].sort(function(a,b){ return b - a; });
+
+  // Summary stats
+  var totalHours = data.reduce(function(s,r){ return s + (parseFloat(r.total_hours)||0); }, 0);
+  var totalGross = data.reduce(function(s,r){ return s + (parseFloat(r.gross_pay)||0); }, 0);
+  var uniqueEmps = new Set(data.map(function(r){ return r.employee_name; })).size;
+
+  var h = '';
+
+  // Header + filters
+  h += '<div class="card" style="margin-bottom:16px;">';
+  h += '<div class="card-hdr" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">';
+  h += '<div class="card-title">🗄 Timecard Archive <span style="font-size:11px;font-weight:400;color:var(--muted);">(all approved timecards, all time)</span></div>';
+  h += '<button class="btn btn-sm" onclick="_archiveData=null;renderArchive();">↻ Refresh</button>';
+  h += '</div>';
+  h += '<div class="card-body">';
+  h += '<div class="filter-bar" style="gap:12px;">';
+
+  // Employee filter
+  h += '<div><label class="form-label">Employee</label><select class="form-select" onchange="_archiveFilter.employee=this.value;renderArchive();">';
+  h += '<option value="All">All Employees</option>';
+  allEmps.forEach(function(e){ h += '<option value="'+e+'"'+(_archiveFilter.employee===e?' selected':'')+'>'+e+'</option>'; });
+  h += '</select></div>';
+
+  // Year filter
+  h += '<div><label class="form-label">Year</label><select class="form-select" onchange="_archiveFilter.year=this.value;renderArchive();">';
+  h += '<option value="All">All Years</option>';
+  allYears.forEach(function(y){ h += '<option value="'+y+'"'+(_archiveFilter.year==y?' selected':'')+'>'+y+'</option>'; });
+  h += '</select></div>';
+
+  // Search
+  h += '<div style="flex:1;"><label class="form-label">Search</label><input type="text" class="form-input" placeholder="Search employee, period, approver..." value="'+(_archiveFilter.search||'')+'" oninput="_archiveFilter.search=this.value;clearTimeout(_archiveSearchTimer);_archiveSearchTimer=setTimeout(renderArchive,300);"></div>';
+
+  h += '</div></div></div>';
+
+  // Stats row
+  h += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:16px;">';
+  h += '<div class="stat-card"><div class="stat-val">'+data.length+'</div><div class="stat-lbl">Approved Timecards</div></div>';
+  h += '<div class="stat-card"><div class="stat-val">'+uniqueEmps+'</div><div class="stat-lbl">Employees</div></div>';
+  h += '<div class="stat-card"><div class="stat-val">'+totalHours.toFixed(1)+'h</div><div class="stat-lbl">Total Hours</div></div>';
+  h += '<div class="stat-card"><div class="stat-val" style="color:#2e7d32;">$'+totalGross.toFixed(0)+'</div><div class="stat-lbl">Total Gross</div></div>';
+  h += '</div>';
+
+  // Records table
+  if (!data.length) {
+    h += '<div class="card"><div class="empty" style="padding:40px;">No approved timecards match these filters.</div></div>';
+  } else {
+    h += '<div class="card"><div class="card-hdr"><div class="card-title">Archived Records ('+data.length+')</div></div>';
+    h += '<table class="tc-table">';
+    h += '<thead><tr><th>Employee</th><th>Pay Period</th><th>Total Hrs</th><th>Reg</th><th>OT</th><th style="text-align:right;">Gross</th><th>Approved By</th><th>Approved At</th><th></th></tr></thead><tbody>';
+
+    data.forEach(function(r, idx) {
+      var apprDate = r.approved_at ? new Date(r.approved_at).toLocaleDateString('en-US',{month:'numeric',day:'numeric',year:'2-digit'}) : '—';
+      h += '<tr>';
+      h += '<td><strong style="color:var(--navy);">'+r.employee_name+'</strong></td>';
+      h += '<td style="font-size:11px;">'+r.period_label+'</td>';
+      h += '<td style="font-weight:700;">'+(parseFloat(r.total_hours)||0).toFixed(2)+'h</td>';
+      h += '<td>'+(parseFloat(r.reg_hours)||0).toFixed(2)+'h</td>';
+      h += '<td style="color:'+((parseFloat(r.ot_hours)||0)>0?'#c62828':'var(--muted)')+';">'+(parseFloat(r.ot_hours)||0).toFixed(2)+'h</td>';
+      h += '<td style="text-align:right;font-weight:700;color:#2e7d32;">$'+(parseFloat(r.gross_pay)||0).toFixed(2)+'</td>';
+      h += '<td style="font-size:11px;">'+(r.approved_by||'—')+'</td>';
+      h += '<td style="font-size:11px;color:var(--muted);">'+apprDate+'</td>';
+      h += '<td><button class="btn btn-sm" onclick="_archiveRedownload('+idx+')" title="Re-download PDF">📄 PDF</button> ';
+      h += '<button class="btn btn-sm" onclick="_archiveViewSnapshot('+idx+')" title="View entry snapshot">👁</button></td>';
+      h += '</tr>';
+    });
+    h += '</tbody></table></div>';
+
+    // Export all filtered records to CSV
+    h += '<div style="margin-top:12px;display:flex;gap:8px;">';
+    h += '<button class="btn btn-primary" onclick="_archiveExportCSV()">📥 Export All Filtered to CSV</button>';
+    h += '<div style="margin-left:auto;font-size:11px;color:var(--muted);align-self:center;">Showing '+data.length+' of '+_archiveData.length+' total archived</div>';
+    h += '</div>';
+  }
+
+  // Store filtered list for action callbacks
+  window._archiveFiltered = data;
+
+  body.innerHTML = h;
+}
+
+var _archiveSearchTimer = null;
+
+async function _archiveRedownload(idx) {
+  var r = (window._archiveFiltered || [])[idx];
+  if (!r) return;
+  toast('Regenerating PDF for ' + r.employee_name + '...');
+  // Regenerate from archived snapshot data directly
+  try {
+    var doc = _archiveGeneratePDFFromSnapshot(r);
+    if (!doc) return;
+    var nameSlug = r.employee_name.replace(/[^a-z0-9]+/gi, '_');
+    var dateSlug = r.approved_at ? r.approved_at.split('T')[0] : new Date().toISOString().split('T')[0];
+    doc.save(nameSlug + '_archived_' + dateSlug + '.pdf');
+  } catch (e) {
+    console.warn('PDF regen failed:', e.message);
+    toast('PDF generation failed');
+  }
+}
+
+function _archiveGeneratePDFFromSnapshot(record) {
+  if (typeof window.jspdf === 'undefined') { toast('PDF library not loaded'); return null; }
+  var jsPDF = window.jspdf.jsPDF;
+  var doc = new jsPDF({ orientation:'portrait', unit:'pt', format:'letter' });
+  var pageW = doc.internal.pageSize.getWidth();
+
+  // Header
+  doc.setFillColor(13, 45, 94);
+  doc.rect(0, 0, pageW, 70, 'F');
+  doc.setTextColor(255,255,255);
+  doc.setFont('helvetica','bold'); doc.setFontSize(18);
+  doc.text('JG RESTORATION', 40, 32);
+  doc.setFont('helvetica','normal'); doc.setFontSize(11);
+  doc.text('Archived Timecard', 40, 52);
+  doc.setFontSize(9);
+  doc.text('Fire • Water • Mold • Reconstruction', pageW - 40, 32, { align: 'right' });
+  doc.text('jg-restoration.com  |  (920) 428-4200', pageW - 40, 48, { align: 'right' });
+
+  var y = 96;
+  doc.setTextColor(13,45,94);
+  doc.setFont('helvetica','bold'); doc.setFontSize(13);
+  doc.text(record.employee_name, 40, y);
+  doc.setFont('helvetica','normal'); doc.setFontSize(10);
+  doc.setTextColor(100,100,100);
+  y += 16; doc.text('Pay Period: ' + record.period_label, 40, y);
+  y += 14; doc.text('Pay Type: ' + (record.pay_type||'hourly') + (record.rate ? '  •  Rate: $' + parseFloat(record.rate).toFixed(2) + '/hr' : ''), 40, y);
+  y += 14; doc.text('Approved by: ' + (record.approved_by||'Admin') + '  •  ' + new Date(record.approved_at).toLocaleString(), 40, y);
+  y += 20;
+
+  // Summary card
+  doc.setFillColor(248, 249, 252);
+  doc.rect(40, y, pageW - 80, 70, 'F');
+  doc.setDrawColor(220,225,235);
+  doc.rect(40, y, pageW - 80, 70);
+  var colW = (pageW - 80) / 4;
+  var cells = [
+    { label: 'Total Hours', value: (parseFloat(record.total_hours)||0).toFixed(2) },
+    { label: 'Regular', value: (parseFloat(record.reg_hours)||0).toFixed(2) },
+    { label: 'Overtime', value: (parseFloat(record.ot_hours)||0).toFixed(2) },
+    { label: 'Gross Pay', value: '$' + (parseFloat(record.gross_pay)||0).toFixed(2) }
+  ];
+  cells.forEach(function(c, i) {
+    doc.setFont('helvetica','normal'); doc.setFontSize(8);
+    doc.setTextColor(120,120,135);
+    doc.text(c.label.toUpperCase(), 40 + i*colW + 12, y + 22);
+    doc.setFont('helvetica','bold'); doc.setFontSize(16);
+    doc.setTextColor(13,45,94);
+    if (c.label === 'Overtime' && (parseFloat(record.ot_hours)||0) > 0) doc.setTextColor(232, 93, 4);
+    doc.text(c.value, 40 + i*colW + 12, y + 48);
+  });
+  y += 90;
+
+  // Entry detail from snapshot
+  var snap = [];
+  try { snap = typeof record.entry_snapshot === 'string' ? JSON.parse(record.entry_snapshot) : (record.entry_snapshot || []); }
+  catch(e) { snap = []; }
+
+  var fmtDt = function(iso) { if(!iso) return '-'; var d=new Date(iso); return d.toLocaleDateString('en-US',{month:'numeric',day:'numeric',year:'2-digit'}); };
+  var fmtTm = function(iso) { if(!iso) return '-'; var d=new Date(iso); var h=d.getHours()%12||12; var m=d.getMinutes(); var ap=d.getHours()>=12?'PM':'AM'; return h+':'+(m<10?'0':'')+m+' '+ap; };
+  var fmtHM = function(mins) { return Math.floor(mins/60)+'h '+(mins%60)+'m'; };
+
+  var tableBody = snap.map(function(e) {
+    return [
+      fmtDt(e.clock_in),
+      fmtTm(e.clock_in),
+      fmtTm(e.clock_out),
+      fmtHM(e.duration_minutes||0),
+      (e.job_name || '-').substring(0, 30),
+      e.self_verified ? '✓' : ''
+    ];
+  });
+
+  if (tableBody.length && doc.autoTable) {
+    doc.autoTable({
+      startY: y,
+      head: [['Date','Clock In','Clock Out','Duration','Job','Verified']],
+      body: tableBody,
+      theme: 'grid',
+      styles: { fontSize: 8, cellPadding: 4 },
+      headStyles: { fillColor: [13, 45, 94], textColor: 255, fontStyle: 'bold' },
+      alternateRowStyles: { fillColor: [248, 249, 252] },
+      margin: { left: 40, right: 40 }
+    });
+    y = doc.lastAutoTable.finalY + 20;
+  }
+
+  doc.setFont('helvetica','italic'); doc.setFontSize(8);
+  doc.setTextColor(130,130,145);
+  doc.text('Archived timecard — immutable snapshot from approval date. Regenerated ' + new Date().toLocaleString() + ' by ' + getApprovedBy(), 40, y, { maxWidth: pageW - 80 });
+
+  return doc;
+}
+
+function _archiveViewSnapshot(idx) {
+  var r = (window._archiveFiltered || [])[idx];
+  if (!r) return;
+  var snap = [];
+  try { snap = typeof r.entry_snapshot === 'string' ? JSON.parse(r.entry_snapshot) : (r.entry_snapshot || []); }
+  catch(e) { snap = []; }
+
+  var fmt = function(iso){ if(!iso)return '-'; var d=new Date(iso); return d.toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}); };
+  var fmtHM = function(mins){ return Math.floor(mins/60)+'h '+(mins%60)+'m'; };
+
+  var body = '<div style="font-size:12px;color:var(--muted);margin-bottom:12px;">';
+  body += '<strong style="color:var(--navy);">'+r.employee_name+'</strong> — '+r.period_label;
+  body += '<br>Approved by '+(r.approved_by||'—')+' on '+new Date(r.approved_at).toLocaleString();
+  body += '</div>';
+
+  if (!snap.length) {
+    body += '<div style="text-align:center;color:var(--muted);padding:20px;">No entry snapshot available (older archive).</div>';
+  } else {
+    body += '<div style="max-height:400px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;">';
+    body += '<table style="width:100%;border-collapse:collapse;font-size:11px;">';
+    body += '<thead style="background:rgba(13,45,94,.04);position:sticky;top:0;"><tr>';
+    body += '<th style="padding:8px;text-align:left;">Clock In</th>';
+    body += '<th style="padding:8px;text-align:left;">Clock Out</th>';
+    body += '<th style="padding:8px;text-align:left;">Duration</th>';
+    body += '<th style="padding:8px;text-align:left;">Job</th>';
+    body += '<th style="padding:8px;text-align:center;">✓</th>';
+    body += '</tr></thead><tbody>';
+    snap.forEach(function(e) {
+      body += '<tr style="border-top:1px solid var(--border);">';
+      body += '<td style="padding:6px;">'+fmt(e.clock_in)+'</td>';
+      body += '<td style="padding:6px;">'+fmt(e.clock_out)+'</td>';
+      body += '<td style="padding:6px;">'+fmtHM(e.duration_minutes||0)+'</td>';
+      body += '<td style="padding:6px;font-size:10px;">'+(e.job_name||'—')+'</td>';
+      body += '<td style="padding:6px;text-align:center;color:#2e7d32;font-weight:700;">'+(e.self_verified?'✓':'')+'</td>';
+      body += '</tr>';
+    });
+    body += '</tbody></table></div>';
+  }
+  showModal('Entry Snapshot', body, null);
+}
+
+function _archiveExportCSV() {
+  var data = window._archiveFiltered || [];
+  if (!data.length) { toast('Nothing to export'); return; }
+  var rows = [['Employee','Pay Period','Pay Type','Rate','Total Hours','Regular','Overtime','Gross Pay','Approved By','Approved At','Entry Count']];
+  data.forEach(function(r) {
+    rows.push([
+      r.employee_name,
+      r.period_label,
+      r.pay_type || '',
+      r.rate != null ? '$' + parseFloat(r.rate).toFixed(2) : '',
+      (parseFloat(r.total_hours)||0).toFixed(2),
+      (parseFloat(r.reg_hours)||0).toFixed(2),
+      (parseFloat(r.ot_hours)||0).toFixed(2),
+      '$' + (parseFloat(r.gross_pay)||0).toFixed(2),
+      r.approved_by || '',
+      r.approved_at ? new Date(r.approved_at).toLocaleString() : '',
+      r.entry_count || 0
+    ]);
+  });
+  var csv = rows.map(function(row){
+    return row.map(function(c){ var s=String(c==null?'':c).split('"').join('""'); return '"'+s+'"'; }).join(',');
+  }).join('\n');
+  var blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement('a');
+  a.href = url; a.download = 'timecard_archive_' + new Date().toISOString().split('T')[0] + '.csv'; a.click();
+  URL.revokeObjectURL(url);
+  toast('✓ Archive exported');
 }
 
 async function renderActivity() {
