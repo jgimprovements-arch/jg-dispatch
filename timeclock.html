@@ -706,30 +706,6 @@ body {
   </div>
 </div>
 
-<!-- CLOCK-OUT REVIEW SHEET -->
-<div class="sheet-overlay" id="clockout-review-sheet" onclick="event.stopPropagation()">
-  <div class="sheet" onclick="event.stopPropagation()">
-    <div class="sheet-handle"></div>
-    <div class="sheet-title">✓ Confirm Your Day</div>
-    <p style="font-size:12px;color:var(--muted);margin-bottom:14px;line-height:1.5;">Review before clocking out. This locks in your hours and helps payroll run on time.</p>
-
-    <div id="review-summary" style="background:linear-gradient(135deg,#0d2d5e,#1a4480);color:#fff;border-radius:12px;padding:16px;margin-bottom:14px;">
-      <div style="font-size:10px;font-weight:700;color:rgba(255,255,255,.6);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">Today's Shift</div>
-      <div id="review-duration" style="font-size:28px;font-weight:700;line-height:1;margin-bottom:8px;">—</div>
-      <div id="review-job" style="font-size:13px;color:rgba(255,255,255,.85);line-height:1.4;"></div>
-      <div id="review-times" style="font-size:11px;color:rgba(255,255,255,.6);margin-top:6px;font-family:'JetBrains Mono',monospace;"></div>
-    </div>
-
-    <div id="review-breaks" style="background:rgba(245,166,35,.06);border:1px solid rgba(245,166,35,.3);border-radius:10px;padding:12px;margin-bottom:14px;font-size:12px;color:var(--navy);display:none;"></div>
-
-    <div style="display:flex;gap:8px;">
-      <button id="review-fix-btn" onclick="reviewFix()" style="flex:1;padding:14px 10px;background:transparent;border:1.5px solid var(--border);border-radius:12px;font-size:13px;font-weight:600;color:var(--muted);cursor:pointer;font-family:DM Sans,sans-serif;">Something's wrong</button>
-      <button id="review-confirm-btn" onclick="reviewConfirm()" style="flex:2;padding:14px;background:#2e7d32;border:none;border-radius:12px;color:#fff;font-size:15px;font-weight:700;cursor:pointer;font-family:DM Sans,sans-serif;">✓ Confirm & Clock Out</button>
-    </div>
-    <button onclick="closeReviewSheet()" style="width:100%;padding:10px;margin-top:8px;background:transparent;border:none;font-size:12px;color:var(--muted);cursor:pointer;font-family:DM Sans,sans-serif;">Cancel — stay clocked in</button>
-  </div>
-</div>
-
 <!-- NOTES SHEET -->
 <div class="sheet-overlay" id="notes-overlay" onclick="if(event.target===this)closeNotes()">
   <div class="sheet" onclick="event.stopPropagation()">
@@ -818,6 +794,10 @@ body {
         <div style="font-size:11px;color:var(--muted);" id="pto-used-label"></div>
         <div style="font-size:11px;color:var(--muted);" id="pto-accrual-label"></div>
       </div>
+      <button onclick="openVacationRequest()" style="width:100%;margin-top:12px;padding:10px 16px;background:#e85d04;color:#fff;border:none;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans',sans-serif;display:flex;align-items:center;justify-content:center;gap:8px;">
+        🏖 Request Time Off
+      </button>
+      <div id="vacation-request-history" style="margin-top:10px;"></div>
     </div>
     <div class="team-card">
       <div class="section-title" style="margin-bottom:10px;">My Recent Entries</div>
@@ -1135,14 +1115,6 @@ async function loadAll() {
       TC.clockInTime = new Date(active.clock_in).getTime();
       TC.selectedJobId = active.job_id || '';
       TC.selectedJobName = active.job_name || '';
-    } else {
-      // Check for abandoned entries from prior days (forgot to clock out)
-      var weekAgo = new Date(Date.now() - 7*86400000).toISOString().split('T')[0];
-      var orphanR = await sb('/rest/v1/time_entries?employee_id=eq.' + TC.employee.id + '&clock_in=gte.' + weekAgo + 'T00:00:00&clock_in=lt.' + today + 'T00:00:00&clock_out=is.null&order=clock_in.desc&limit=3&select=*');
-      if (orphanR && orphanR.length) {
-        TC.abandonedEntries = orphanR;
-        setTimeout(showAbandonedEntryPrompt, 1200);
-      }
     }
   }
 
@@ -1179,9 +1151,7 @@ async function loadJobs() {
       items.forEach(function(p) {
         var jid = String(p.uniqueNumber || p.id || '');
         if (!jid || jobMap[jid]) return;
-        var name = p.name || p.projectName || '';
-        // Skip jobs without a real name — prevents raw IDs from being stored as job_name
-        if (!name || !/[a-zA-Z]/.test(name)) return;
+        var name = p.name || p.projectName || jid;
         // Determine market from location field
         var loc = (p.location || p.locationId || '').toString().toLowerCase();
         var market = (loc.includes('stevens') || loc.includes('point')) ? 'Stevens Point' : 'Appleton';
@@ -1477,7 +1447,7 @@ function filterJobs() { renderJobs(); }
 
 async function handleMainBtn() {
   if (TC.clockedIn) {
-    showClockOutReview();
+    await clockOut();
   } else {
     if (!TC.selectedJobId) {
       toast('Select a job first to clock in');
@@ -1551,15 +1521,6 @@ async function checkClockInCelebration(u) {
 async function clockIn() {
   if (!TC.employee || !TC.employee.id) { toast('Employee record not found'); return; }
   if (!TC.selectedJobId) { toast('Select a job number to clock in'); return; }
-
-  // Block clock-in if there's an abandoned entry from a prior day — force resolution first
-  if (TC.abandonedEntries && TC.abandonedEntries.length) {
-    if (confirm('⚠ You have an unresolved open shift from a previous day.\n\nYou need to fix that before clocking in to a new job. Open the correction form now?')) {
-      showAbandonedEntryPrompt();
-    }
-    return;
-  }
-
   var btn = document.getElementById('main-btn');
   if (btn) { btn.style.opacity = '.6'; btn.style.pointerEvents = 'none'; }
   toast('Getting location...');
@@ -1625,107 +1586,8 @@ async function clockIn() {
   updateStats();
 }
 
-function showAbandonedEntryPrompt() {
-  if (!TC.abandonedEntries || !TC.abandonedEntries.length) return;
-  var entry = TC.abandonedEntries[0];
-  var inTime = new Date(entry.clock_in);
-  var fmtDate = inTime.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
-  var fmtTime = function(d){ var h=d.getHours()%12||12; var m=d.getMinutes(); var ap=d.getHours()>=12?'PM':'AM'; return h+':'+(m<10?'0':'')+m+' '+ap; };
-
-  // Build a one-off overlay since this is a high-priority prompt
-  if (document.getElementById('abandoned-overlay')) return;
-  var overlay = document.createElement('div');
-  overlay.id = 'abandoned-overlay';
-  overlay.style.cssText = 'position:fixed;inset:0;z-index:99998;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.7);padding:20px;';
-
-  var card = document.createElement('div');
-  card.style.cssText = 'background:#fff;border-radius:16px;max-width:420px;width:100%;padding:24px;font-family:DM Sans,sans-serif;';
-  card.innerHTML =
-    '<div style="font-size:32px;margin-bottom:10px;">⏰</div>' +
-    '<div style="font-size:20px;font-weight:700;color:#0d2d5e;margin-bottom:8px;">Forgot to clock out?</div>' +
-    '<div style="font-size:13px;color:#6b7a96;margin-bottom:16px;line-height:1.5;">We noticed you still had an open shift from <strong>'+fmtDate+'</strong> at '+fmtTime(inTime)+' on <strong>'+(entry.job_name||'no job')+'</strong>. Let\'s fix it so your hours are right for payroll.</div>' +
-    '<button id="abandoned-fix-btn" style="width:100%;padding:14px;background:#e85d04;border:none;border-radius:12px;color:#fff;font-size:15px;font-weight:700;cursor:pointer;font-family:DM Sans,sans-serif;margin-bottom:8px;">Submit correction</button>' +
-    '<button id="abandoned-later-btn" style="width:100%;padding:12px;background:transparent;border:1.5px solid #e2e8f0;border-radius:12px;font-size:13px;font-weight:600;color:#6b7a96;cursor:pointer;font-family:DM Sans,sans-serif;">Remind me later</button>';
-  overlay.appendChild(card);
-  document.body.appendChild(overlay);
-
-  document.getElementById('abandoned-fix-btn').onclick = function() {
-    overlay.remove();
-    var outLabel = 'FORGOT TO CLOCK OUT';
-    openCorrectionRequest(entry.id, fmtTime(inTime), outLabel, entry.job_name);
-    // Pre-fill the correction type/note
-    setTimeout(function() {
-      var typeSel = document.getElementById('corr-type');
-      var noteBox = document.getElementById('corr-note');
-      if (typeSel) typeSel.value = 'missed_punch';
-      if (noteBox && !noteBox.value) noteBox.value = 'Forgot to clock out on ' + fmtDate + '. Actual clock-out time was approximately ____ (please fill in).';
-      if (noteBox) noteBox.focus();
-    }, 200);
-  };
-  document.getElementById('abandoned-later-btn').onclick = function() { overlay.remove(); };
-}
-
-function showClockOutReview() {
+async function clockOut() {
   if (!TC.activeEntry) return;
-
-  var now = new Date();
-  var inTime = new Date(TC.clockInTime);
-  var totalMins = Math.floor((now - inTime) / 60000);
-  var hrs = Math.floor(totalMins/60), mins = totalMins % 60;
-
-  document.getElementById('review-duration').textContent = hrs + 'h ' + mins + 'm';
-  document.getElementById('review-job').textContent = TC.activeEntry.job_name || 'No job selected';
-
-  var fmt = function(d){ var h = d.getHours()%12 || 12; var m = d.getMinutes(); var ap = d.getHours()>=12?'PM':'AM'; return h+':'+(m<10?'0':'')+m+' '+ap; };
-  document.getElementById('review-times').textContent = fmt(inTime) + ' → ' + fmt(now);
-
-  // Show breaks if any
-  var breaks = (TC.breaks || []).filter(function(b){ return b.entry_id === TC.activeEntry.id; });
-  var breakBox = document.getElementById('review-breaks');
-  if (breaks.length) {
-    var totalBreak = breaks.reduce(function(s,b){ return s + (b.duration_minutes||0); }, 0);
-    breakBox.innerHTML = '☕ <strong>' + breaks.length + ' break' + (breaks.length>1?'s':'') + '</strong> — ' + totalBreak + ' min total';
-    breakBox.style.display = 'block';
-  } else {
-    breakBox.style.display = 'none';
-  }
-
-  document.getElementById('clockout-review-sheet').classList.add('open');
-}
-
-function closeReviewSheet() {
-  document.getElementById('clockout-review-sheet').classList.remove('open');
-}
-
-async function reviewConfirm() {
-  closeReviewSheet();
-  await clockOut(true);  // pass self_verified flag
-}
-
-function reviewFix() {
-  closeReviewSheet();
-  // Open correction request for the active entry
-  if (TC.activeEntry) {
-    var inTime = new Date(TC.activeEntry.clock_in);
-    var fmt = function(d){ var h = d.getHours()%12 || 12; var m = d.getMinutes(); var ap = d.getHours()>=12?'PM':'AM'; return h+':'+(m<10?'0':'')+m+' '+ap; };
-    openCorrectionRequest(TC.activeEntry.id, fmt(inTime), 'now', TC.activeEntry.job_name);
-  }
-}
-
-
-async function clockOut(selfVerified) {
-  if (!TC.activeEntry) return;
-
-  // Guard against accidental tap — if clocking out under 2 minutes after clock-in,
-  // require explicit confirmation to prevent zero-duration noise
-  var sessionMins = Math.floor((Date.now() - TC.clockInTime) / 60000);
-  if (sessionMins < 2) {
-    var sessionSecs = Math.floor((Date.now() - TC.clockInTime) / 1000);
-    if (!confirm('You just clocked in ' + sessionSecs + ' seconds ago. Clock out anyway?\n\n(This usually means an accidental tap.)')) {
-      return;
-    }
-  }
-
   var btn = document.getElementById('main-btn');
   btn.style.opacity = '.6'; btn.style.pointerEvents = 'none';
   toast('Getting location...');
@@ -1745,9 +1607,7 @@ async function clockOut(selfVerified) {
       duration_minutes: duration,
       clock_out_lat: loc ? loc.lat : null,
       clock_out_lng: loc ? loc.lng : null,
-      status: 'complete',
-      self_verified: !!selfVerified,
-      self_verified_at: selfVerified ? now : null
+      status: 'complete'
     })
   });
 
@@ -2845,6 +2705,299 @@ async function loadTeamData() {
   }
 }
 
+// ── VACATION REQUESTS ───────────────────────────────────────────────────
+// Count weekdays (Mon-Fri) between two dates inclusive
+function _vrCountWeekdays(startStr, endStr) {
+  var s = new Date(startStr + 'T00:00:00');
+  var e = new Date(endStr + 'T00:00:00');
+  if (e < s) return 0;
+  var count = 0;
+  var cur = new Date(s);
+  while (cur <= e) {
+    var dow = cur.getDay();
+    if (dow !== 0 && dow !== 6) count++;
+    cur.setDate(cur.getDate() + 1);
+  }
+  return count;
+}
+
+function openVacationRequest() {
+  if (!TC.employee) { alert('Please wait for employee data to load'); return; }
+  var today = new Date().toISOString().split('T')[0];
+  var ptoAvail = parseFloat(TC.employee.pto_hours_available || 0);
+
+  // Build modal
+  var overlay = document.createElement('div');
+  overlay.id = 'vr-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(13,29,60,.75);display:flex;align-items:flex-end;justify-content:center;z-index:9000;';
+  overlay.onclick = function(e) { if (e.target === overlay) closeVacationRequest(); };
+
+  var sheet = document.createElement('div');
+  sheet.style.cssText = 'width:100%;max-width:500px;background:#fff;border-radius:18px 18px 0 0;padding:20px 18px 24px;max-height:90vh;overflow-y:auto;animation:vr-up .25s cubic-bezier(.4,0,.2,1);';
+
+  var html = '<style>@keyframes vr-up{from{transform:translateY(100%);}to{transform:translateY(0);}}</style>';
+  html += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">';
+  html += '<div style="font-size:16px;font-weight:700;color:#0d2d5e;">🏖 Request Time Off</div>';
+  html += '<button onclick="closeVacationRequest()" style="background:transparent;border:none;font-size:22px;color:#6b7a96;cursor:pointer;padding:0 6px;">×</button>';
+  html += '</div>';
+
+  // PTO summary
+  html += '<div style="background:rgba(46,125,50,.05);border:1px solid rgba(46,125,50,.2);border-radius:10px;padding:10px 14px;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center;">';
+  html += '<div style="font-size:11px;color:#6b7a96;text-transform:uppercase;letter-spacing:.04em;font-weight:700;">PTO Available</div>';
+  html += '<div style="font-size:18px;font-weight:700;color:#2e7d32;">'+ptoAvail.toFixed(1)+'h <span style="font-size:11px;color:#6b7a96;">(' + (ptoAvail/8).toFixed(1) + ' days)</span></div>';
+  html += '</div>';
+
+  // Policy reminder
+  html += '<div style="background:rgba(13,45,94,.04);border-left:3px solid #0d2d5e;border-radius:6px;padding:8px 12px;margin-bottom:14px;font-size:11px;color:#6b7a96;line-height:1.5;">';
+  html += '<strong style="color:#0d2d5e;">📋 Policy:</strong> Multi-day time off requires <strong>30 days notice</strong>. Medical and family emergencies are exempt. Same-day or 1-day requests can be submitted anytime.';
+  html += '</div>';
+
+  // Form
+  html += '<div style="margin-bottom:12px;">';
+  html += '<label style="font-size:11px;font-weight:700;color:#6b7a96;text-transform:uppercase;letter-spacing:.04em;display:block;margin-bottom:6px;">Start Date</label>';
+  html += '<input type="date" id="vr-start" min="'+today+'" value="'+today+'" onchange="_vrUpdatePreview()" style="width:100%;padding:11px 12px;border-radius:8px;border:1.5px solid rgba(13,45,94,.15);font-size:15px;">';
+  html += '</div>';
+
+  html += '<div style="margin-bottom:12px;">';
+  html += '<label style="font-size:11px;font-weight:700;color:#6b7a96;text-transform:uppercase;letter-spacing:.04em;display:block;margin-bottom:6px;">End Date</label>';
+  html += '<input type="date" id="vr-end" min="'+today+'" value="'+today+'" onchange="_vrUpdatePreview()" style="width:100%;padding:11px 12px;border-radius:8px;border:1.5px solid rgba(13,45,94,.15);font-size:15px;">';
+  html += '</div>';
+
+  html += '<div style="margin-bottom:12px;">';
+  html += '<label style="font-size:11px;font-weight:700;color:#6b7a96;text-transform:uppercase;letter-spacing:.04em;display:block;margin-bottom:6px;">Reason</label>';
+  html += '<select id="vr-reason" onchange="_vrUpdatePreview()" style="width:100%;padding:11px 12px;border-radius:8px;border:1.5px solid rgba(13,45,94,.15);font-size:15px;background:#fff;">';
+  ['Vacation','Personal','Family','Medical','Other'].forEach(function(r){ html += '<option value="'+r+'">'+r+'</option>'; });
+  html += '</select></div>';
+
+  html += '<div style="margin-bottom:14px;">';
+  html += '<label style="font-size:11px;font-weight:700;color:#6b7a96;text-transform:uppercase;letter-spacing:.04em;display:block;margin-bottom:6px;">Notes (optional)</label>';
+  html += '<textarea id="vr-notes" placeholder="Anything your manager should know..." style="width:100%;padding:11px 12px;border-radius:8px;border:1.5px solid rgba(13,45,94,.15);font-size:14px;min-height:70px;resize:vertical;font-family:inherit;"></textarea>';
+  html += '</div>';
+
+  // Preview box
+  html += '<div id="vr-preview" style="background:rgba(13,45,94,.04);border-radius:10px;padding:12px 14px;margin-bottom:14px;"></div>';
+
+  // Submit button
+  html += '<button onclick="submitVacationRequest()" id="vr-submit-btn" style="width:100%;padding:14px 16px;background:#e85d04;color:#fff;border:none;border-radius:10px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit;">Submit Request for Approval</button>';
+  html += '<div style="font-size:11px;color:#6b7a96;text-align:center;margin-top:10px;">Your request will go to Hannah / Josh for approval.</div>';
+
+  sheet.innerHTML = html;
+  overlay.appendChild(sheet);
+  document.body.appendChild(overlay);
+
+  _vrUpdatePreview();
+}
+
+function closeVacationRequest() {
+  var o = document.getElementById('vr-overlay');
+  if (o) o.remove();
+}
+
+function _vrUpdatePreview() {
+  var startEl = document.getElementById('vr-start');
+  var endEl = document.getElementById('vr-end');
+  var reasonEl = document.getElementById('vr-reason');
+  var prev = document.getElementById('vr-preview');
+  var btn = document.getElementById('vr-submit-btn');
+  if (!startEl || !endEl || !prev) return;
+
+  var start = startEl.value, end = endEl.value;
+  var reason = reasonEl ? reasonEl.value : 'Vacation';
+  if (!start || !end) { prev.innerHTML = '<div style="font-size:12px;color:#6b7a96;">Select both dates</div>'; return; }
+  if (new Date(end) < new Date(start)) {
+    prev.innerHTML = '<div style="font-size:12px;color:#c62828;font-weight:700;">⚠ End date is before start date</div>';
+    if (btn) btn.disabled = true;
+    return;
+  }
+
+  var days = _vrCountWeekdays(start, end);
+  var hours = days * 8;
+  var ptoAvail = parseFloat(TC.employee.pto_hours_available || 0);
+  var overBalance = hours > ptoAvail;
+
+  // 30-day notice calculation (calendar days from today to start date)
+  var today = new Date(); today.setHours(0,0,0,0);
+  var startDate = new Date(start + 'T00:00:00');
+  var msPerDay = 24 * 60 * 60 * 1000;
+  var noticeDays = Math.round((startDate - today) / msPerDay);
+  var isEmergencyReason = (reason === 'Medical' || reason === 'Family');
+  var isMultiDay = days > 1;
+  var noticeRequired = isMultiDay && !isEmergencyReason;
+  var noticeMet = !noticeRequired || noticeDays >= 30;
+
+  var startD = new Date(start+'T12:00:00');
+  var endD = new Date(end+'T12:00:00');
+  var startLabel = startD.toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'});
+  var endLabel = endD.toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'});
+
+  var html = '';
+  html += '<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;"><span style="color:#6b7a96;">Dates</span><strong style="color:#0d2d5e;">'+startLabel+' → '+endLabel+'</strong></div>';
+  html += '<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;"><span style="color:#6b7a96;">Workdays requested</span><strong style="color:#0d2d5e;">'+days+' day'+(days!==1?'s':'')+' ('+hours+'h)</strong></div>';
+
+  if (noticeRequired) {
+    html += '<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;"><span style="color:#6b7a96;">Notice given</span>';
+    if (noticeMet) {
+      html += '<strong style="color:#2e7d32;">'+noticeDays+' days ✓</strong>';
+    } else {
+      html += '<strong style="color:#c62828;">'+noticeDays+' days (need 30)</strong>';
+    }
+    html += '</div>';
+  }
+
+  html += '<div style="display:flex;justify-content:space-between;font-size:12px;"><span style="color:#6b7a96;">PTO balance after</span>';
+  if (overBalance) {
+    html += '<strong style="color:#c62828;">-'+(hours-ptoAvail).toFixed(1)+'h (over balance)</strong>';
+  } else {
+    html += '<strong style="color:#2e7d32;">'+(ptoAvail-hours).toFixed(1)+'h remaining</strong>';
+  }
+  html += '</div>';
+
+  // 30-day notice warning (policy: multi-day requests require 30 days notice; Medical/Family exempt)
+  if (noticeRequired && !noticeMet) {
+    html += '<div style="margin-top:10px;padding:10px 12px;background:rgba(198,40,40,.08);border:1.5px solid rgba(198,40,40,.3);border-radius:8px;">';
+    html += '<div style="font-size:12px;color:#c62828;font-weight:700;margin-bottom:4px;">⚠ 30-Day Notice Policy</div>';
+    html += '<div style="font-size:11px;color:#c62828;line-height:1.5;">Time off requests longer than 1 day require <strong>30 days advance notice</strong>. Your request is only '+noticeDays+' day'+(noticeDays!==1?'s':'')+' out — <strong>this may be denied</strong> at management\'s discretion. You can still submit, but please have a backup plan.</div>';
+    html += '</div>';
+  }
+
+  if (overBalance) {
+    html += '<div style="margin-top:8px;padding:8px 10px;background:rgba(198,40,40,.08);border-radius:6px;font-size:11px;color:#c62828;">⚠ Over your PTO balance. You can still submit, but manager may deny or partially approve.</div>';
+  }
+  if (days === 0) {
+    html += '<div style="margin-top:8px;padding:8px 10px;background:rgba(230,81,0,.08);border-radius:6px;font-size:11px;color:#e65100;">⚠ No workdays in selected range. Weekends don\'t count.</div>';
+    if (btn) btn.disabled = true;
+  } else {
+    if (btn) btn.disabled = false;
+  }
+
+  prev.innerHTML = html;
+}
+
+async function submitVacationRequest() {
+  var start = (document.getElementById('vr-start')||{}).value;
+  var end = (document.getElementById('vr-end')||{}).value;
+  var reason = (document.getElementById('vr-reason')||{}).value;
+  var notes = (document.getElementById('vr-notes')||{}).value || '';
+
+  if (!start || !end) { alert('Please pick start and end dates'); return; }
+  if (new Date(end) < new Date(start)) { alert('End date must be after start date'); return; }
+  var days = _vrCountWeekdays(start, end);
+  if (days === 0) { alert('No workdays in that range'); return; }
+  var hours = days * 8;
+
+  // 30-day notice calculation
+  var today = new Date(); today.setHours(0,0,0,0);
+  var startDate = new Date(start + 'T00:00:00');
+  var msPerDay = 24 * 60 * 60 * 1000;
+  var noticeDays = Math.round((startDate - today) / msPerDay);
+  var isEmergencyReason = (reason === 'Medical' || reason === 'Family');
+  var isMultiDay = days > 1;
+  var noticeRequired = isMultiDay && !isEmergencyReason;
+  var noticeMet = !noticeRequired || noticeDays >= 30;
+
+  // Extra confirmation if notice policy not met
+  if (noticeRequired && !noticeMet) {
+    var confirmed = confirm(
+      '⚠ 30-Day Notice Policy\n\n' +
+      'Your request is ' + noticeDays + ' day' + (noticeDays!==1?'s':'') + ' out, less than the 30 days our policy requires for multi-day time off.\n\n' +
+      'This request may be DENIED.\n\n' +
+      'Submit anyway?'
+    );
+    if (!confirmed) return;
+  }
+
+  var btn = document.getElementById('vr-submit-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Submitting...'; }
+
+  var payload = {
+    employee_name: TC.employee.name,
+    employee_id: TC.employee.id,
+    employee_email: TC.employee.email || null,
+    start_date: start,
+    end_date: end,
+    days_requested: days,
+    hours_requested: hours,
+    reason: reason,
+    notes: notes || null,
+    status: 'pending',
+    notice_days: noticeDays,
+    notice_met: noticeMet
+  };
+
+  try {
+    var r = await fetch(SB_URL + '/rest/v1/vacation_requests', {
+      method: 'POST',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
+      body: JSON.stringify(payload)
+    });
+    if (!r.ok) throw new Error('Submit failed: ' + r.status);
+
+    // Log activity
+    try {
+      var activityDetail = TC.employee.name + ' • ' + days + ' day' + (days!==1?'s':'') + ' ' + start + ' → ' + end + ' (' + reason + ')';
+      if (noticeRequired && !noticeMet) activityDetail += ' ⚠ Notice: ' + noticeDays + 'd';
+      await fetch(SB_URL + '/rest/v1/platform_activity', {
+        method: 'POST',
+        headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
+        body: JSON.stringify({
+          action: 'Time Off Requested',
+          detail: activityDetail,
+          category: 'time_clock',
+          employee_name: TC.employee.name,
+          performed_by: TC.employee.name,
+          performed_by_email: TC.employee.email,
+          ts: new Date().toISOString()
+        })
+      });
+    } catch(e) {}
+
+    closeVacationRequest();
+    var successMsg = '✓ Time off request submitted!\n\nYou\'ll be notified when it\'s reviewed.';
+    if (noticeRequired && !noticeMet) {
+      successMsg += '\n\nNote: Because this is within the 30-day notice window, please plan for a possible denial.';
+    }
+    alert(successMsg);
+    loadMyVacationHistory();
+  } catch(err) {
+    alert('Error submitting request: ' + err.message);
+    if (btn) { btn.disabled = false; btn.textContent = 'Submit Request for Approval'; }
+  }
+}
+
+async function loadMyVacationHistory() {
+  if (!TC.employee || !TC.employee.name) return;
+  var container = document.getElementById('vacation-request-history');
+  if (!container) return;
+
+  try {
+    var url = '/rest/v1/vacation_requests?employee_name=eq.' + encodeURIComponent(TC.employee.name) + '&order=submitted_at.desc&limit=10';
+    var rows = await sbQ(url) || [];
+    if (!rows.length) { container.innerHTML = ''; return; }
+
+    var html = '<div style="font-size:11px;font-weight:700;color:#6b7a96;text-transform:uppercase;letter-spacing:.04em;margin-top:14px;margin-bottom:6px;">My Recent Requests</div>';
+    rows.slice(0, 3).forEach(function(r) {
+      var s = new Date(r.start_date+'T12:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric'});
+      var e = new Date(r.end_date+'T12:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric'});
+      var statusColor = r.status==='approved' ? '#2e7d32' : r.status==='denied' ? '#c62828' : '#e65100';
+      var statusBg = r.status==='approved' ? 'rgba(46,125,50,.08)' : r.status==='denied' ? 'rgba(198,40,40,.08)' : 'rgba(230,81,0,.08)';
+      var statusLabel = r.status.charAt(0).toUpperCase()+r.status.slice(1);
+      html += '<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 10px;background:'+statusBg+';border-radius:8px;margin-bottom:4px;">';
+      html += '<div>';
+      html += '<div style="font-size:12px;font-weight:700;color:#0d2d5e;">'+s+' → '+e+'</div>';
+      html += '<div style="font-size:10px;color:#6b7a96;">'+(r.days_requested||0)+'d • '+r.reason+'</div>';
+      if (r.status === 'denied' && r.review_notes) {
+        html += '<div style="font-size:10px;color:#c62828;margin-top:2px;">Reason: '+r.review_notes+'</div>';
+      }
+      html += '</div>';
+      html += '<div style="font-size:10px;font-weight:700;color:'+statusColor+';text-transform:uppercase;letter-spacing:.04em;">'+statusLabel+'</div>';
+      html += '</div>';
+    });
+    container.innerHTML = html;
+  } catch(err) {
+    console.warn('Vacation history load failed:', err);
+  }
+}
+
 async function loadMyHours() {
   if (!TC.employee || !TC.employee.id) return;
   // Update PTO card in this tab
@@ -2896,6 +3049,10 @@ async function loadMyHours() {
       (atLimit ? '<div style="font-size:12px;color:#c62828;font-weight:600;padding:8px 10px;background:rgba(198,40,40,.06);border-radius:8px;">⚠️ You have reached your sick day limit. Please speak with your manager.</div>' : '') +
       (nearLimit ? '<div style="font-size:12px;color:#e65100;font-weight:600;padding:8px 10px;background:rgba(230,81,0,.06);border-radius:8px;">⚠️ You are approaching your sick day limit (' + sickCount + ' of ' + sickLimit + ').</div>' : '');
   } catch(e2) { /* non-fatal */ }
+
+  // Load vacation request history
+  try { loadMyVacationHistory(); } catch(e3) { /* non-fatal */ }
+
   var fmtTime = function(iso){ var d=new Date(iso),h=d.getHours()%12||12,m=d.getMinutes(),ap=d.getHours()>=12?'PM':'AM'; return h+':'+(m<10?'0':'')+m+' '+ap; };
   var fmtDur  = function(mins){ return Math.floor(mins/60)+'h '+(mins%60)+'m'; };
   var fmtDate = function(iso){ var d=new Date(iso); var days=['Sun','Mon','Tue','Wed','Thu','Fri','Sat']; return days[d.getDay()]+' '+(d.getMonth()+1)+'/'+d.getDate(); };
