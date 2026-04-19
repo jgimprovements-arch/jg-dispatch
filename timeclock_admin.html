@@ -2523,9 +2523,15 @@ async function loadRouteMap() {
   setTimeout(function(){ if (_routeMap) _routeMap.invalidateSize(); }, 300);
 }
 
-function renderJobCost() {
+async function renderJobCost() {
   var fmtDur = function(mins){ return Math.floor(mins/60)+'h '+(mins%60)+'m'; };
   var durMins = function(e){ var out=e.clock_out?new Date(e.clock_out):new Date(); return Math.floor((out-new Date(e.clock_in))/60000); };
+
+  // Show loading while Albi data loads (first time only)
+  if (!_albiJobs) {
+    document.getElementById('tc-body').innerHTML = '<div class="card"><div class="empty" style="padding:40px;">Loading Albi project names...</div></div>';
+  }
+  await ensureAlbiJobsLoaded();
 
   var h = '';
   h += '<div class="filter-bar" style="margin-bottom:16px;">';
@@ -2550,10 +2556,11 @@ function renderJobCost() {
     return;
   }
 
-  // Group by job
+  // Group by job — use resolved Albi name as the display key
   var byJob = {};
   filtered.forEach(function(e) {
-    var jobKey = e.job_name || 'No Job Assigned';
+    var resolvedName = resolveJobName(e.job_id, e.job_name);
+    var jobKey = resolvedName || 'No Job Assigned';
     if (!byJob[jobKey]) byJob[jobKey] = { jobId: e.job_id||'', entries: [], totalMins: 0, employees: {} };
     var mins = e.duration_minutes || durMins(e);
     byJob[jobKey].entries.push(e);
@@ -2618,11 +2625,12 @@ function renderJobCost() {
     var rate = emp ? parseFloat(emp.hourly_rate || 0) : 0;
     var mins = e.duration_minutes || durMins(e);
     var cost = rate * mins / 60;
+    var resolvedName = resolveJobName(e.job_id, e.job_name);
     var isNewEmp = e.employee_name !== prevEmp;
-    var isNewJob = e.job_name !== prevJob || isNewEmp;
+    var isNewJob = resolvedName !== prevJob || isNewEmp;
     h += '<tr'+(isNewEmp?' style="border-top:2px solid var(--border);"':'')+'>';
     h += '<td>'+(isNewEmp?'<strong>'+e.employee_name+'</strong>':'')+'</td>';
-    h += '<td>'+(isNewJob?'<span style="font-weight:600;color:var(--navy);">'+(e.job_name||'<em style="color:var(--muted);">No Job</em>')+'</span>':'')+'</td>';
+    h += '<td>'+(isNewJob?'<span style="font-weight:600;color:var(--navy);">'+(resolvedName||'<em style="color:var(--muted);">No Job</em>')+'</span>':'')+'</td>';
     h += '<td style="font-size:11px;">'+fmtD(new Date(e.clock_in))+'</td>';
     h += '<td><strong>'+fmtDur(mins)+'</strong></td>';
     h += '<td class="mono" style="font-size:11px;">'+fmt(e.clock_in)+'</td>';
@@ -2630,7 +2638,7 @@ function renderJobCost() {
     h += '<td style="font-size:11px;">'+(cost>0?'$'+cost.toFixed(2):'-')+'</td>';
     h += '</tr>';
     prevEmp = e.employee_name;
-    prevJob = e.job_name;
+    prevJob = resolvedName;
   });
   h += '</tbody></table></div>';
 
@@ -3096,36 +3104,50 @@ async function editEntry(id) {
 
 var _albiJobs = null;
 
+// Standalone Albi load — safe to call from anywhere, caches globally
+async function ensureAlbiJobsLoaded() {
+  if (_albiJobs) return _albiJobs;
+  try {
+    var allJobs = [];
+    var page = 1;
+    while (page <= 20) {
+      var r = await fetch('https://jg-proxy-v2.vercel.app/api/albi?pageSize=50&page=' + page);
+      if (!r.ok) break;
+      var data = await r.json();
+      var items = Array.isArray(data) ? data : (data.data || data.results || data.projects || data.items || []);
+      if (!items.length) break;
+      items.forEach(function(p) {
+        var jid = String(p.uniqueNumber || p.id || '');
+        var name = p.name || p.projectName || jid;
+        var loc = (p.location || '').toString().toLowerCase();
+        var market = (loc.includes('stevens') || loc.includes('point')) ? 'Stevens Point' : 'Appleton';
+        if (jid) allJobs.push({ id: jid, name: name, market: market });
+      });
+      if (items.length < 50) break;
+      page++;
+    }
+    _albiJobs = allJobs.sort(function(a,b){ return a.name.localeCompare(b.name); });
+  } catch(err) {
+    _albiJobs = [];
+  }
+  return _albiJobs;
+}
+
+// Quick lookup — resolves a job_id (or a job_name that IS an ID) to Albi project name
+function resolveJobName(jobId, fallbackName) {
+  if (!_albiJobs) return fallbackName || jobId || 'No Job';
+  var idStr = String(jobId || fallbackName || '');
+  var match = _albiJobs.find(function(j){ return j.id === idStr; });
+  if (match) return match.name;
+  // If fallback is already a readable name (contains a dash and non-numeric), use it
+  if (fallbackName && /[a-zA-Z]/.test(fallbackName) && fallbackName.indexOf('-') !== -1) return fallbackName;
+  return fallbackName || ('ID: ' + idStr);
+}
+
 async function loadAlbiJobsForModal() {
   var dropdown = document.getElementById('entry-job-dropdown');
   if (!dropdown) return;
-
-  if (!_albiJobs) {
-    try {
-      var allJobs = [];
-      var page = 1;
-      while (page <= 20) {
-        var r = await fetch('https://jg-proxy-v2.vercel.app/api/albi?pageSize=50&page=' + page);
-        if (!r.ok) break;
-        var data = await r.json();
-        var items = Array.isArray(data) ? data : (data.data || data.results || data.projects || data.items || []);
-        if (!items.length) break;
-        items.forEach(function(p) {
-          var jid = String(p.uniqueNumber || p.id || '');
-          var name = p.name || p.projectName || jid;
-          var loc = (p.location || '').toString().toLowerCase();
-          var market = (loc.includes('stevens') || loc.includes('point')) ? 'Stevens Point' : 'Appleton';
-          if (jid) allJobs.push({ id: jid, name: name, market: market });
-        });
-        if (items.length < 50) break;
-        page++;
-      }
-      _albiJobs = allJobs.sort(function(a,b){ return a.name.localeCompare(b.name); });
-    } catch(err) {
-      _albiJobs = [];
-    }
-  }
-
+  await ensureAlbiJobsLoaded();
   filterJobOptions(document.getElementById('entry-job-search') ? document.getElementById('entry-job-search').value : '');
 }
 
