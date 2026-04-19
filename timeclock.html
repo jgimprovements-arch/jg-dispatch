@@ -518,6 +518,7 @@ body {
       </div>
       <div class="break-row" id="break-row" style="display:none;">
         <button class="break-btn" id="break-btn" onclick="handleBreak()">🥪 Start Break</button>
+        <button class="break-btn" onclick="openSwitchJob()" style="background:rgba(21,101,192,.12);color:#1565c0;border-color:#1565c0;">🔄 Switch Job</button>
         <button class="break-btn" onclick="openNotes()">📝 Note</button>
       </div>
       <div class="break-banner" id="break-banner">
@@ -663,6 +664,22 @@ body {
     <div class="sheet-title">🔔 Notifications</div>
     <div id="notif-list"><div class="empty">No notifications</div></div>
     <button onclick="closeNotifications()" style="width:100%;padding:12px;background:transparent;border:1.5px solid var(--border);border-radius:12px;font-size:14px;color:var(--muted);cursor:pointer;font-family:DM Sans,sans-serif;margin-top:12px;">Close</button>
+  </div>
+</div>
+
+<!-- SWITCH JOB SHEET -->
+<div class="sheet-overlay" id="switch-job-sheet" onclick="if(event.target===this)closeSwitchJob()">
+  <div class="sheet" onclick="event.stopPropagation()">
+    <div class="sheet-handle"></div>
+    <div class="sheet-title">🔄 Switch Job</div>
+    <p style="font-size:12px;color:var(--muted);margin-bottom:16px;line-height:1.5;">Your current job will be clocked out and a new entry started for the new job. Both entries count toward today's total hours.</p>
+    <div id="switch-current-job" style="padding:10px 14px;background:rgba(13,45,94,.05);border-radius:10px;margin-bottom:14px;font-size:13px;color:var(--navy);font-weight:600;"></div>
+    <label class="field-label">New Job Number</label>
+    <input id="switch-job-input" class="field-input" type="text" placeholder="Search job..." oninput="switchJobSearch()" autocomplete="off">
+    <div id="switch-job-results" style="display:none;background:var(--surface);border:1.5px solid var(--border);border-radius:12px;max-height:220px;overflow-y:auto;margin-top:4px;margin-bottom:12px;"></div>
+    <div id="switch-job-selected" style="display:none;padding:10px 14px;background:rgba(21,101,192,.07);border-radius:10px;margin-bottom:14px;font-size:13px;color:#1565c0;font-weight:600;"></div>
+    <button onclick="submitSwitchJob()" style="width:100%;padding:15px;background:#1565c0;border:none;border-radius:12px;color:#fff;font-size:15px;font-weight:700;cursor:pointer;font-family:DM Sans,sans-serif;margin-bottom:8px;">Switch Job</button>
+    <button onclick="closeSwitchJob()" style="width:100%;padding:12px;background:transparent;border:1.5px solid var(--border);border-radius:12px;font-size:14px;color:var(--muted);cursor:pointer;font-family:DM Sans,sans-serif;">Cancel</button>
   </div>
 </div>
 
@@ -2021,6 +2038,132 @@ async function logActivity(action, detail, category, employeeName) {
       })
     });
   } catch(e) {}
+}
+
+// ── SWITCH JOB ────────────────────────────────────────────────────────────
+var _switchJobId   = null;
+var _switchJobName = '';
+
+function openSwitchJob() {
+  var cur = document.getElementById('switch-current-job');
+  if (cur) cur.textContent = 'Current: ' + (TC.selectedJobName || TC.selectedJobId || 'Unknown job');
+  var inp = document.getElementById('switch-job-input');
+  if (inp) inp.value = '';
+  var res = document.getElementById('switch-job-results');
+  if (res) res.style.display = 'none';
+  var sel = document.getElementById('switch-job-selected');
+  if (sel) sel.style.display = 'none';
+  _switchJobId = null; _switchJobName = '';
+  var sheet = document.getElementById('switch-job-sheet');
+  if (sheet) sheet.classList.add('open');
+}
+
+function closeSwitchJob() {
+  var sheet = document.getElementById('switch-job-sheet');
+  if (sheet) sheet.classList.remove('open');
+}
+
+async function switchJobSearch() {
+  var q = (document.getElementById('switch-job-input') || {}).value || '';
+  var res = document.getElementById('switch-job-results');
+  if (!res) return;
+  if (q.length < 2) { res.style.display = 'none'; return; }
+
+  try {
+    var r = await fetch(SB_URL + '/rest/v1/rpc/search_jobs', {
+      method: 'POST',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ q: q })
+    });
+    // Fallback: use Albi proxy
+    var jobs = [];
+    var ar = await fetch('https://jg-proxy-v2.vercel.app/api/albi', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'get_projects', search: q, limit: 10 })
+    });
+    if (ar.ok) {
+      var ad = await ar.json();
+      jobs = (ad.projects || ad.data || []).slice(0, 8);
+    }
+    if (!jobs.length) { res.style.display = 'none'; return; }
+    res.innerHTML = jobs.map(function(j) {
+      var jid = j.id || j.projectId || '';
+      var jname = j.name || j.projectName || jid;
+      var safeId2 = jid.replace(/"/g,'&quot;');
+      var safeName2 = jname.replace(/"/g,'&quot;');
+      return '<div onclick="selectSwitchJob(\"'+safeId2+'\",\"'+safeName2+'\")" style="padding:12px 14px;border-bottom:1px solid var(--border);cursor:pointer;font-size:13px;font-weight:600;color:var(--navy);">' + jname + '</div>';
+    }).join('');
+    res.style.display = 'block';
+  } catch(e) { res.style.display = 'none'; }
+}
+
+function selectSwitchJob(id, name) {
+  _switchJobId   = id;
+  _switchJobName = name;
+  var inp = document.getElementById('switch-job-input');
+  if (inp) inp.value = '';
+  var res = document.getElementById('switch-job-results');
+  if (res) res.style.display = 'none';
+  var sel = document.getElementById('switch-job-selected');
+  if (sel) { sel.textContent = '✓ ' + name; sel.style.display = 'block'; }
+}
+
+async function submitSwitchJob() {
+  if (!_switchJobId) { toast('Select a job first'); return; }
+  if (!TC.activeEntry) { toast('Not clocked in'); return; }
+
+  var btn = document.querySelector('#switch-job-sheet button');
+  if (btn) { btn.textContent = 'Switching...'; btn.disabled = true; }
+
+  // 1. Clock out current job
+  var loc = await getLocation();
+  var now = new Date().toISOString();
+  var duration = Math.floor((Date.now() - TC.clockInTime) / 60000);
+
+  await fetch(SB_URL + '/rest/v1/time_entries?id=eq.' + TC.activeEntry.id, {
+    method: 'PATCH',
+    headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ clock_out: now, duration_minutes: duration, clock_out_lat: loc ? loc.lat : null, clock_out_lng: loc ? loc.lng : null, status: 'complete', notes: 'Job switch → ' + _switchJobName })
+  });
+
+  logActivity('Job Switch', 'Switched from ' + (TC.selectedJobName||TC.selectedJobId) + ' to ' + _switchJobName, 'time_clock');
+
+  // 2. Clock into new job — keep same day link
+  var newEntry = {
+    employee_id:   TC.employee ? TC.employee.id : null,
+    employee_name: TC.employee ? TC.employee.name : '',
+    job_id:        _switchJobId,
+    job_name:      _switchJobName,
+    clock_in:      now,
+    clock_in_lat:  loc ? loc.lat : null,
+    clock_in_lng:  loc ? loc.lng : null,
+    status:        'active',
+    market:        TC.employee ? (TC.employee.market || 'Appleton') : 'Appleton',
+    notes:         'Switched from ' + (TC.selectedJobName || TC.selectedJobId)
+  };
+
+  var cr = await fetch(SB_URL + '/rest/v1/time_entries', {
+    method: 'POST',
+    headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=representation' },
+    body: JSON.stringify(newEntry)
+  });
+
+  if (cr.ok) {
+    var newRows = await cr.json();
+    TC.activeEntry   = newRows[0];
+    TC.clockInTime   = Date.now();
+    TC.selectedJobId = _switchJobId;
+    TC.selectedJobName = _switchJobName;
+    startPinging();
+    closeSwitchJob();
+    toast('✓ Switched to ' + _switchJobName);
+    renderStatus();
+    renderEntries();
+  } else {
+    toast('Error switching job — try again');
+    if (btn) { btn.textContent = 'Switch Job'; btn.disabled = false; }
+  }
 }
 
 // Supabase query helper for My Hours tab
