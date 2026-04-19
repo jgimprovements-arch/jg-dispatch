@@ -546,6 +546,17 @@ body {
           <button id="filter-sp" onclick="setJobMarket('Stevens Point')" style="padding:4px 10px;border-radius:20px;border:1.5px solid var(--border);font-size:11px;font-weight:600;cursor:pointer;background:transparent;color:var(--muted);">Stevens Pt</button>
         </div>
       </div>
+      <!-- Office Hours quick-clock (only shown for non-technician roles) -->
+      <div id="office-hours-option" style="display:none;margin-bottom:10px;">
+        <button onclick="selectOfficeHours()" id="office-hours-btn" style="width:100%;padding:12px 14px;border-radius:10px;border:1.5px dashed #6a1b9a;background:rgba(106,27,154,.04);color:#6a1b9a;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:space-between;transition:all .15s;">
+          <span style="display:flex;align-items:center;gap:8px;">
+            <span style="font-size:16px;">🏢</span>
+            <span>Office Hours (no job)</span>
+          </span>
+          <span id="office-hours-check" style="font-size:14px;opacity:0;">✓</span>
+        </button>
+        <div style="text-align:center;margin:8px 0;font-size:10px;color:var(--muted);letter-spacing:.08em;font-weight:600;text-transform:uppercase;">— or pick a job —</div>
+      </div>
       <input class="job-search" type="text" placeholder="Search by job name or number..." id="job-search-input" oninput="filterJobs()">
       <div id="job-count" style="font-size:10px;color:var(--muted);margin:4px 0 6px;"></div>
       <div class="job-list" id="job-list">
@@ -1045,6 +1056,9 @@ async function initApp(u) {
     if (adminBtn) adminBtn.style.display = 'none';
   }
 
+  // Show/hide Office Hours button based on role
+  updateOfficeHoursVisibility();
+
   startClock();
   await loadAll();
 
@@ -1324,7 +1338,8 @@ function renderStatus() {
     durationEl.style.display = 'block';
     if (TC.selectedJobName) {
       jobBadge.style.display = 'block';
-      jobBadge.textContent = '📋 ' + TC.selectedJobName;
+      var isOffice = TC.selectedJobName === 'Office Hours' || (TC.activeEntry && !TC.activeEntry.job_id);
+      jobBadge.textContent = (isOffice ? '🏢 ' : '📋 ') + (isOffice ? 'Office Hours' : TC.selectedJobName);
     }
     if (TC.onBreak) {
       document.getElementById('break-btn').textContent = '▶ End Break';
@@ -1387,11 +1402,42 @@ function selectJob(elOrId, name, market) {
   TC.selectedJobId   = id;
   TC.selectedJobName = nm;
 
+  // Deselect Office Hours button if it was previously selected
+  var oBtn = document.getElementById('office-hours-btn');
+  var oChk = document.getElementById('office-hours-check');
+  if (oBtn) { oBtn.style.background = 'rgba(106,27,154,.04)'; oBtn.style.color = '#6a1b9a'; }
+  if (oChk) oChk.style.opacity = '0';
+
   if (TC.clockedIn && TC.activeEntry) {
     openJobSheet(id, nm, true);
   } else {
     openJobSheet(id, nm, false);
   }
+}
+
+// Select Office Hours (non-job clock-in for office staff)
+function selectOfficeHours() {
+  // Clear any job selection
+  TC.selectedJobId = '';
+  TC.selectedJobName = 'Office Hours';
+  // Visual feedback on the button
+  var btn = document.getElementById('office-hours-btn');
+  var chk = document.getElementById('office-hours-check');
+  if (btn) { btn.style.background = '#6a1b9a'; btn.style.color = '#fff'; }
+  if (chk) chk.style.opacity = '1';
+  // Clear job-row selection styling
+  document.querySelectorAll('.job-row.selected').forEach(function(r){ r.classList.remove('selected'); });
+  // Open the same action sheet as a job selection so the clock-in flow is identical
+  openJobSheet('', 'Office Hours', TC.clockedIn && TC.activeEntry);
+}
+
+// Show/hide the Office Hours button based on role
+function updateOfficeHoursVisibility() {
+  var wrap = document.getElementById('office-hours-option');
+  if (!wrap || !TC.employee) return;
+  var role = TC.employee.role || 'Technician';
+  var allowed = ['Office','Admin','Project Manager','Sales','Estimator'];
+  wrap.style.display = allowed.indexOf(role) !== -1 ? 'block' : 'none';
 }
 
 function openJobSheet(id, name, isSwitching) {
@@ -1461,7 +1507,10 @@ async function handleMainBtn() {
   if (TC.clockedIn) {
     await clockOut();
   } else {
-    if (!TC.selectedJobId) {
+    // Check if office staff can clock in without a job
+    var role = TC.employee ? (TC.employee.role || 'Technician') : 'Technician';
+    var jobOptional = ['Office','Admin','Project Manager','Sales','Estimator'].indexOf(role) !== -1;
+    if (!TC.selectedJobId && !jobOptional) {
       toast('Select a job first to clock in');
       // Scroll to job selector
       var el = document.getElementById('job-select-section');
@@ -1532,7 +1581,11 @@ async function checkClockInCelebration(u) {
 
 async function clockIn() {
   if (!TC.employee || !TC.employee.id) { toast('Employee record not found'); return; }
-  if (!TC.selectedJobId) { toast('Select a job number to clock in'); return; }
+  var role = TC.employee.role || 'Technician';
+  var jobOptional = ['Office','Admin','Project Manager','Sales','Estimator'].indexOf(role) !== -1;
+  if (!TC.selectedJobId && !jobOptional) { toast('Select a job number to clock in'); return; }
+  // If clocking in without a job, treat as Office Hours
+  var isOfficeHours = !TC.selectedJobId;
   var btn = document.getElementById('main-btn');
   if (btn) { btn.style.opacity = '.6'; btn.style.pointerEvents = 'none'; }
   toast('Getting location...');
@@ -1548,7 +1601,7 @@ async function clockIn() {
     employee_name: TC.employee.name,
     employee_email: TC.user.email,
     job_id: TC.selectedJobId || null,
-    job_name: TC.selectedJobName || null,
+    job_name: isOfficeHours ? 'Office Hours' : (TC.selectedJobName || null),
     market: TC.employee.market || 'Appleton',
     clock_in: now,
     clock_in_lat: loc ? loc.lat : null,
@@ -1567,9 +1620,13 @@ async function clockIn() {
     TC.activeEntry = result[0];
     TC.clockedIn = true;
     TC.clockInTime = Date.now();
+    if (isOfficeHours) {
+      TC.selectedJobId = '';
+      TC.selectedJobName = 'Office Hours';
+    }
     TC.entries.push(result[0]);
     startPinging();
-    logActivity('Clock In', 'Clocked in — Job: ' + (TC.selectedJob ? TC.selectedJob.name : 'None'), 'time_clock');
+    logActivity('Clock In', 'Clocked in — ' + (isOfficeHours ? 'Office Hours (non-job)' : 'Job: ' + (TC.selectedJob ? TC.selectedJob.name : 'None')), 'time_clock');
     // Birthday & anniversary — fire on first clock-in on or after the date
     checkClockInCelebration(TC.user);
 
