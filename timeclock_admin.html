@@ -6548,6 +6548,9 @@ async function attemptDeleteEmployee(empId) {
 }
 
 function _showDeleteBlocked(emp, counts) {
+  // Stash counts for the force-delete modal
+  window._forceDeleteCtx = { emp: emp, counts: counts };
+
   var body = '';
   body += '<div style="text-align:center;margin-bottom:16px;">';
   body += '<div style="font-size:40px;margin-bottom:8px;">🛡</div>';
@@ -6573,7 +6576,164 @@ function _showDeleteBlocked(emp, counts) {
   body += '<div style="font-size:12px;color:var(--navy);line-height:1.5;"><strong>Recommended:</strong> Use <strong style="color:var(--orange);">Deactivate</strong> instead. This hides them from active lists while preserving history — the industry-standard pattern used by Paychex, Workday, and every buyer\'s due-diligence expectation.</div>';
   body += '</div>';
 
+  // Escape hatch for test accounts / mistaken entries
+  body += '<div style="border-top:1px dashed rgba(192,32,32,.3);padding-top:12px;margin-top:12px;">';
+  body += '<div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;text-align:center;margin-bottom:8px;">Test Account / Mistaken Entry?</div>';
+  body += '<button class="btn btn-sm" onclick="_showForceDelete()" style="width:100%;background:transparent;color:#c62828;border:1px solid rgba(198,40,40,.4);font-size:11px;">⚠ Force Delete Anyway (with reason + audit log)</button>';
+  body += '</div>';
+
   showModal('Delete Blocked', body, null);
+}
+
+function _showForceDelete() {
+  var ctx = window._forceDeleteCtx;
+  if (!ctx || !ctx.emp) { toast('Context lost — try again'); return; }
+  var emp = ctx.emp;
+  var counts = ctx.counts;
+  var confirmPhrase = 'DELETE ' + emp.name;
+
+  var body = '';
+  body += '<div style="text-align:center;margin-bottom:16px;">';
+  body += '<div style="font-size:40px;margin-bottom:8px;">⚠️</div>';
+  body += '<div style="font-size:16px;font-weight:700;color:#c62828;margin-bottom:6px;">Force Delete '+emp.name+'</div>';
+  body += '<div style="font-size:13px;color:var(--muted);line-height:1.5;">You are overriding the audit safety check. <strong style="color:#c62828;">ALL</strong> historical data listed below will be <strong>permanently destroyed</strong>.</div>';
+  body += '</div>';
+
+  // Impact summary
+  body += '<div style="background:rgba(198,40,40,.06);border:1.5px solid #c62828;border-radius:8px;padding:14px;margin-bottom:14px;">';
+  body += '<div style="font-size:11px;font-weight:700;color:#c62828;text-transform:uppercase;margin-bottom:8px;">WILL BE PERMANENTLY DELETED</div>';
+  var items = [];
+  if (counts.timeEntries > 0) items.push('<strong>'+counts.timeEntries+'</strong> time entr'+(counts.timeEntries!==1?'ies':'y'));
+  if (counts.timecardArchives > 0) items.push('<strong>'+counts.timecardArchives+'</strong> approved timecard archive'+(counts.timecardArchives!==1?'s':''));
+  if (counts.commissions > 0) items.push('<strong>'+counts.commissions+'</strong> commission entr'+(counts.commissions!==1?'ies':'y'));
+  if (counts.absences > 0) items.push('<strong>'+counts.absences+'</strong> absence record'+(counts.absences!==1?'s':''));
+  if (counts.vacationRequests > 0) items.push('<strong>'+counts.vacationRequests+'</strong> vacation request'+(counts.vacationRequests!==1?'s':''));
+  if (counts.signedOnboarding > 0) items.push('Signed onboarding acknowledgment <strong style="color:#c62828;">⚠ legal record</strong>');
+  items.push('All invite records for this employee');
+  items.push('All non-compete signatures (if any)');
+  items.push('Employee record itself');
+  items.forEach(function(item) {
+    body += '<div style="font-size:12px;color:#c62828;padding:3px 0;">• ' + item + '</div>';
+  });
+  body += '</div>';
+
+  // Reason field (required)
+  body += '<div class="form-row">';
+  body += '<label class="form-label" style="color:#c62828;">Reason for force delete (required, will be logged) *</label>';
+  body += '<input type="text" id="fd-reason" class="form-input" placeholder="e.g. Test account from failed invite setup" oninput="_checkFdReady()">';
+  body += '<div style="font-size:10px;color:var(--muted);margin-top:4px;">This reason will be permanently logged to the activity feed with your name as the person who force-deleted.</div>';
+  body += '</div>';
+
+  // Confirmation phrase
+  body += '<div class="form-row">';
+  body += '<label class="form-label">To confirm, type exactly: <strong style="color:#c62828;font-family:DM Mono,monospace;">'+confirmPhrase+'</strong></label>';
+  body += '<input type="text" id="fd-confirm" class="form-input" placeholder="'+confirmPhrase+'" oninput="_checkFdReady()" style="font-family:DM Mono,monospace;">';
+  body += '</div>';
+
+  // Buttons (stacked for emphasis)
+  body += '<div style="display:flex;gap:8px;flex-direction:column;">';
+  body += '<button class="btn" id="fd-confirm-btn" onclick="_executeForceDelete()" disabled style="width:100%;background:#c62828;color:#fff;border-color:#c62828;padding:14px 16px;font-weight:700;opacity:.4;cursor:not-allowed;font-size:13px;">⚠ Permanently Destroy All Data</button>';
+  body += '<button class="btn" onclick="closeModal()" style="width:100%;">Cancel — Keep This Employee</button>';
+  body += '</div>';
+
+  showModal('⚠ Force Delete Confirmation', body, null);
+}
+
+function _checkFdReady() {
+  var ctx = window._forceDeleteCtx;
+  if (!ctx) return;
+  var expected = 'DELETE ' + ctx.emp.name;
+  var reason = (document.getElementById('fd-reason')||{}).value.trim();
+  var confirmTxt = (document.getElementById('fd-confirm')||{}).value.trim();
+  var btn = document.getElementById('fd-confirm-btn');
+  if (!btn) return;
+  var ready = reason.length >= 5 && confirmTxt === expected;
+  btn.disabled = !ready;
+  btn.style.opacity = ready ? '1' : '.4';
+  btn.style.cursor = ready ? 'pointer' : 'not-allowed';
+}
+
+async function _executeForceDelete() {
+  var ctx = window._forceDeleteCtx;
+  if (!ctx || !ctx.emp) return;
+  var emp = ctx.emp;
+  var counts = ctx.counts;
+  var reason = document.getElementById('fd-reason').value.trim();
+
+  var btn = document.getElementById('fd-confirm-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Destroying data...'; }
+
+  var empId = emp.id;
+  var empName = emp.name;
+  var errors = [];
+
+  // Build structured audit log entry BEFORE delete so we have record of what was destroyed
+  var auditDetail = 'Force deleted ' + empName + ' (' + (emp.email||'no email') + '). Reason: "' + reason + '". Destroyed: ' +
+    counts.timeEntries + ' time entries, ' +
+    counts.timecardArchives + ' timecard archives, ' +
+    counts.commissions + ' commissions, ' +
+    counts.absences + ' absences, ' +
+    counts.vacationRequests + ' vacation requests' +
+    (counts.signedOnboarding > 0 ? ', signed onboarding' : '');
+
+  try {
+    // 1. Delete time entries (by id and by name to catch legacy)
+    await fetch(SB_URL + '/rest/v1/time_entries?or=(employee_id.eq.'+empId+',employee_name.eq.'+encodeURIComponent(empName)+')', {
+      method: 'DELETE', headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+    }).catch(function(e){ errors.push('time_entries: '+e.message); });
+
+    // 2. Delete timecard archives
+    await fetch(SB_URL + '/rest/v1/timecard_archive?employee_id=eq.'+empId, {
+      method: 'DELETE', headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+    }).catch(function(e){ errors.push('timecard_archive: '+e.message); });
+
+    // 3. Delete commissions
+    await fetch(SB_URL + '/rest/v1/commissions?or=(employee_id.eq.'+empId+',employee_name.eq.'+encodeURIComponent(empName)+')', {
+      method: 'DELETE', headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+    }).catch(function(e){ errors.push('commissions: '+e.message); });
+
+    // 4. Delete absence records
+    await fetch(SB_URL + '/rest/v1/absence_records?employee_name=eq.'+encodeURIComponent(empName), {
+      method: 'DELETE', headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+    }).catch(function(e){ errors.push('absence_records: '+e.message); });
+
+    // 5. Delete vacation requests
+    await fetch(SB_URL + '/rest/v1/vacation_requests?or=(employee_id.eq.'+empId+',employee_name.eq.'+encodeURIComponent(empName)+')', {
+      method: 'DELETE', headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+    }).catch(function(e){ errors.push('vacation_requests: '+e.message); });
+
+    // 6. Delete employee_invites (all statuses, this is a force wipe)
+    await fetch(SB_URL + '/rest/v1/employee_invites?employee_id=eq.'+empId, {
+      method: 'DELETE', headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+    }).catch(function(e){ errors.push('employee_invites: '+e.message); });
+
+    // 7. Delete noncompete_signatures + noncompete_requests
+    await fetch(SB_URL + '/rest/v1/noncompete_signatures?employee_id=eq.'+empId, {
+      method: 'DELETE', headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+    }).catch(function(e){ errors.push('noncompete_signatures: '+e.message); });
+    await fetch(SB_URL + '/rest/v1/noncompete_requests?employee_id=eq.'+empId, {
+      method: 'DELETE', headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+    }).catch(function(e){ errors.push('noncompete_requests: '+e.message); });
+
+    // 8. Finally delete the employee row itself
+    var r = await fetch(SB_URL + '/rest/v1/employees?id=eq.'+empId, {
+      method: 'DELETE', headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+    });
+    if (!r.ok) throw new Error('Employee delete failed: ' + r.status);
+
+    // 9. Log to activity AFTER (so the audit survives even though emp row is gone)
+    logActivity('Employee Force Deleted', auditDetail, 'employees', empName);
+
+    closeModal();
+    window._forceDeleteCtx = null;
+    toast('⚠ Force deleted ' + empName + (errors.length ? ' (with '+errors.length+' non-fatal errors)' : ''));
+    if (errors.length) console.warn('Force delete non-fatal errors:', errors);
+    await loadAll();
+  } catch(err) {
+    console.error(err);
+    alert('Force delete failed: ' + err.message + '\n\nSome data may have been destroyed before the failure. Check the activity log and Supabase directly.');
+    if (btn) { btn.disabled = false; btn.textContent = '⚠ Permanently Destroy All Data'; btn.style.opacity = '1'; }
+  }
 }
 
 function _showDeleteConfirm(emp) {
