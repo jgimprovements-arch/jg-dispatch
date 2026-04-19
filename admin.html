@@ -1,0 +1,964 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>JG Restoration — Admin Panel</title>
+<link rel="icon" type="image/png" href="https://jgimprovements-arch.github.io/jg-dispatch/logo.png">
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+:root{
+  --navy:#0d2d5e;--orange:#e85d04;--gold:#f5a623;
+  --bg:#f0ede8;--s1:#faf9f7;--s2:#f0ede8;--s3:#e8e4df;
+  --brd:rgba(13,45,94,.12);--brdH:rgba(13,45,94,.3);
+  --surface:#faf9f7;--border:rgba(13,45,94,.12);--muted:#6b7a96;
+  --acc:#e85d04;--accD:rgba(232,93,4,.08);
+  --txt:#0d1f3c;--dim:#6b7a96;--mut:#a0abbf;
+  --red:#c02020;--redD:rgba(192,32,32,.08);
+  --grn:#2e7d32;--grnD:rgba(46,125,50,.08);
+  --wrn:#e65100;--wrnD:rgba(230,81,0,.08);
+  --blu:#1565c0;--bluD:rgba(21,101,192,.08);
+  --purp:#6a1b9a;--purpD:rgba(106,27,154,.08);
+  --ok:#2e7d32;--danger:#c02020;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--txt);font-family:'DM Sans',system-ui,sans-serif;min-height:100vh;padding-left:48px;}
+.mono{font-family:'DM Mono',monospace}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* Sidebar (matches hub/other pages) */
+#jg-sidebar{
+  position:fixed;left:0;top:0;bottom:0;width:48px;background:#0d2d5e;
+  display:flex;flex-direction:column;z-index:90;
+  box-shadow:2px 0 12px rgba(0,0,0,.15);
+  transition:width .22s cubic-bezier(.4,0,.2,1);
+  overflow:hidden;white-space:nowrap;
+}
+#jg-sidebar:hover,#jg-sidebar.expanded{width:200px;z-index:200;box-shadow:4px 0 24px rgba(0,0,0,.3);}
+#jg-sidebar .sb-logo{padding:10px 12px;border-bottom:1px solid rgba(255,255,255,.1);display:flex;align-items:center;min-height:52px;flex-shrink:0;}
+#jg-sidebar .sb-logo img{height:28px;width:28px;object-fit:contain;flex-shrink:0;border-radius:4px;}
+#jg-sidebar .sb-sec{font-size:9px;font-weight:700;color:rgba(255,255,255,.3);text-transform:uppercase;letter-spacing:.1em;padding:12px 14px 4px;font-family:monospace;opacity:0;transition:opacity .15s .1s;}
+#jg-sidebar:hover .sb-sec,#jg-sidebar.expanded .sb-sec{opacity:1;}
+#jg-sidebar a.sb-lnk{display:flex;align-items:center;gap:10px;padding:9px 14px;font-size:12px;font-weight:500;color:rgba(255,255,255,.65);text-decoration:none;border-left:3px solid transparent;transition:all .15s;flex-shrink:0;}
+#jg-sidebar a.sb-lnk:hover{background:rgba(255,255,255,.08);color:#fff;border-left-color:rgba(255,255,255,.3);}
+#jg-sidebar a.sb-lnk.active{background:rgba(255,255,255,.12);color:#fff;border-left-color:#e85d04;font-weight:600;}
+#jg-sidebar .sb-icon{font-size:16px;width:20px;text-align:center;flex-shrink:0;}
+#jg-sidebar .sb-label{opacity:0;transition:opacity .15s .05s;overflow:hidden;}
+#jg-sidebar:hover .sb-label,#jg-sidebar.expanded .sb-label{opacity:1;}
+#jg-sidebar .sb-btm{margin-top:auto;padding:10px 14px;border-top:1px solid rgba(255,255,255,.1);flex-shrink:0;}
+#jg-sidebar .sb-user{display:flex;align-items:center;gap:8px;font-size:11px;color:rgba(255,255,255,.55);cursor:pointer;padding:4px 0;}
+#jg-sidebar .sb-user:hover{color:#fff;}
+#jg-sidebar .sb-user-label{opacity:0;transition:opacity .15s .05s;overflow:hidden;}
+#jg-sidebar:hover .sb-user-label,#jg-sidebar.expanded .sb-user-label{opacity:1;}
+
+/* Header */
+.admin-hdr{background:var(--navy);padding:0 16px;height:50px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:95;}
+.export-btn{padding:8px 16px;border-radius:6px;border:none;font-size:12px;font-weight:600;cursor:pointer;font-family:'DM Sans',sans-serif;display:flex;align-items:center;gap:6px;}
+
+/* Top-level panel tabs */
+.panel-tabs{background:#fff;border-bottom:1px solid var(--brd);padding:0 16px;display:flex;gap:0;position:sticky;top:50px;z-index:94;}
+.panel-tab{padding:12px 20px;border:none;background:transparent;font-size:13px;font-weight:500;color:var(--dim);cursor:pointer;border-bottom:3px solid transparent;font-family:'DM Sans',sans-serif;}
+.panel-tab.active{color:var(--orange);border-bottom-color:var(--orange);font-weight:700;}
+.panel-tab:hover{color:var(--navy);}
+
+/* Sub-tab bar within a panel */
+.sub-tab-bar{background:var(--s1);border-bottom:1px solid var(--brd);padding:0 16px;display:flex;gap:0;}
+.sub-tab{padding:10px 18px;border:none;background:transparent;font-size:12px;font-weight:500;color:var(--dim);cursor:pointer;border-bottom:2px solid transparent;font-family:'DM Sans',sans-serif;}
+.sub-tab.active{color:var(--orange);border-bottom-color:var(--orange);font-weight:700;}
+
+/* Sales admin styles */
+.admin-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px;margin-bottom:20px;}
+.kpi-card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px 18px;position:relative;overflow:hidden;}
+.kpi-card::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;background:var(--accent,var(--orange));}
+.kpi-val{font-size:28px;font-weight:700;color:var(--navy);font-family:'DM Mono',monospace;line-height:1;}
+.kpi-lbl{font-size:10px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-top:6px;}
+.kpi-sub{font-size:11px;color:var(--muted);margin-top:4px;}
+.section-hdr{font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin:20px 0 10px;font-family:'DM Mono',monospace;display:flex;align-items:center;gap:8px;}
+.section-hdr::after{content:'';flex:1;height:1px;background:var(--border);}
+.rep-row{display:flex;align-items:center;gap:12px;padding:10px 14px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:6px;}
+.rep-avatar{width:34px;height:34px;border-radius:50%;background:var(--navy);color:#fff;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;flex-shrink:0;}
+.bar-wrap{flex:1;height:8px;background:var(--border);border-radius:4px;overflow:hidden;}
+.bar-fill{height:100%;border-radius:4px;background:var(--orange);transition:width .4s ease;}
+.touch-type-row{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border);}
+.period-btn{padding:5px 14px;border-radius:20px;border:1.5px solid var(--border);font-size:11px;font-weight:600;cursor:pointer;background:var(--surface);color:var(--muted);font-family:'DM Sans',sans-serif;}
+.period-btn.active{background:var(--navy);border-color:var(--navy);color:#fff;}
+
+/* Access control card styles */
+.card{background:var(--surface);border:1px solid var(--border);border-radius:10px;}
+.btn{padding:7px 14px;border-radius:6px;border:1.5px solid var(--border);background:var(--surface);color:var(--navy);font-size:12px;font-weight:600;cursor:pointer;font-family:'DM Sans',sans-serif;}
+.btn:hover{border-color:var(--brdH);}
+
+::-webkit-scrollbar{width:5px}::-webkit-scrollbar-thumb{background:var(--mut);border-radius:3px}
+</style>
+</head>
+<body>
+
+<!-- Login overlay -->
+<div id="jg-login" style="display:none;position:fixed;inset:0;background:rgba(13,29,60,.96);align-items:center;justify-content:center;z-index:9999;">
+  <div style="background:#fff;border-radius:16px;padding:40px 36px;width:100%;max-width:360px;text-align:center;box-shadow:0 24px 64px rgba(0,0,0,.4);">
+    <img src="https://jgimprovements-arch.github.io/jg-dispatch/logo.png" style="height:72px;width:auto;margin-bottom:14px;">
+    <div style="font-size:19px;font-weight:700;color:#0d2d5e;margin-bottom:4px;">JG Restoration</div>
+    <div style="font-size:13px;color:#6b82a0;margin-bottom:24px;">Sign in with your @jg-restoration.com account</div>
+    <div id="g_id_onload" data-client_id="209231675110-6id8vr3ehcocg4df7tvpc89jsmrvhogk.apps.googleusercontent.com" data-ux_mode="popup" data-callback="jgGoogleCb" data-auto_prompt="false"></div>
+    <div class="g_id_signin" data-type="standard" data-size="large" data-theme="outline" data-text="sign_in_with" data-shape="rectangular" data-logo_alignment="left" data-width="288"></div>
+    <div id="jg-login-err" style="font-size:12px;color:#c0392b;margin-top:12px;min-height:16px;"></div>
+  </div>
+</div>
+
+<!-- Sidebar -->
+<nav id="jg-sidebar">
+  <div class="sb-logo">
+    <img src="https://jgimprovements-arch.github.io/jg-dispatch/logo.png" alt="JG">
+  </div>
+  <div class="sb-sec">PLATFORM</div>
+  <a href="hub.html" class="sb-lnk"><span class="sb-icon">🏠</span><span class="sb-label">Hub</span></a>
+  <div class="sb-sec">OPERATIONS</div>
+  <a href="index.html" class="sb-lnk"><span class="sb-icon">📋</span><span class="sb-label">Dispatch</span></a>
+  <a href="timeclock_admin.html" class="sb-lnk"><span class="sb-icon">⏱</span><span class="sb-label">Time Clock / Payroll</span></a>
+  <a href="timeclock.html" class="sb-lnk"><span class="sb-icon">🕐</span><span class="sb-label">Clock In/Out</span></a>
+  <div class="sb-sec">SALES</div>
+  <a href="sales.html" class="sb-lnk"><span class="sb-icon">📈</span><span class="sb-label">Sales Dashboard</span></a>
+  <div class="sb-sec">AI TOOLS</div>
+  <a href="qa.html" class="sb-lnk"><span class="sb-icon">🔍</span><span class="sb-label">QA Review</span></a>
+  <a href="adjuster.html" class="sb-lnk"><span class="sb-icon">⚖️</span><span class="sb-label">Adjuster Rebuttal</span></a>
+  <a href="recon.html" class="sb-lnk"><span class="sb-icon">🏗️</span><span class="sb-label">Recon Estimate</span></a>
+  <div class="sb-sec">INSIGHTS</div>
+  <a href="intelligence.html" class="sb-lnk"><span class="sb-icon">🧠</span><span class="sb-label">Adjuster Intel</span></a>
+  <div class="sb-sec">ADMIN</div>
+  <a href="admin.html" class="sb-lnk active"><span class="sb-icon">🛡</span><span class="sb-label">Admin Panel</span></a>
+  <div class="sb-btm">
+    <div class="sb-user" onclick="jgSignOut()" title="Sign out">
+      <span id="sb-av">👤</span>
+      <span class="sb-user-label"><span id="sb-nm">...</span></span>
+    </div>
+  </div>
+</nav>
+
+<!-- Header -->
+<div class="admin-hdr">
+  <div style="display:flex;align-items:center;gap:10px;">
+    <span style="font-size:18px;">🛡</span>
+    <span style="font-size:13px;font-weight:600;color:#fff;letter-spacing:-.3px;">JG Restoration <span style="color:var(--gold);">Admin Panel</span></span>
+  </div>
+  <div id="hdr-actions" style="display:flex;gap:8px;align-items:center;"></div>
+</div>
+
+<!-- Panel tabs -->
+<div class="panel-tabs">
+  <button class="panel-tab active" id="ptab-sales" onclick="switchPanel('sales')">🛠 Sales Admin</button>
+  <button class="panel-tab" id="ptab-access" onclick="switchPanel('access')">🔐 Access Control</button>
+</div>
+
+<div id="app"><div style="padding:40px;text-align:center;color:#6b7a96;">Loading...</div></div>
+
+<script>
+// ═══════════════════════════════════════════════════════════════════════════
+// SHARED CORE
+// ═══════════════════════════════════════════════════════════════════════════
+const SB_URL='https://nuykvchgecpiuikoerze.supabase.co';
+const SB_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im51eWt2Y2hnZWNwaXVpa29lcnplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYyNjM3ODYsImV4cCI6MjA5MTgzOTc4Nn0.39hZ8DdjT_0iFJXPeAL2FXUSLw8FZBirDVzxZTO1W9s';
+const ALBI_PROXY='https://jg-proxy-v2.vercel.app/api/albi';
+const REPS=['Kristina','Rylan','David','Brent','Josh'];
+const REP_COLORS=['#e85d04','#1565c0','#2e7d32','#6a1b9a','#0d2d5e'];
+
+var CURRENT_PANEL = 'sales';  // 'sales' | 'access'
+
+// ═══════════════════════════════════════════════════════════════════════════
+// AUTH (Google Sign-In for @jg-restoration.com)
+// ═══════════════════════════════════════════════════════════════════════════
+const _JG_KEY='jg_platform_user',_JG_EXP='jg_platform_exp';
+function jgGoogleCb(r){try{const p=JSON.parse(atob(r.credential.split('.')[1]));if(!p.email.endsWith('@jg-restoration.com')){document.getElementById('jg-login-err').textContent='Access restricted to @jg-restoration.com accounts.';return;}const u={name:p.name||p.given_name,email:p.email,picture:p.picture||''};localStorage.setItem(_JG_KEY,JSON.stringify(u));localStorage.setItem(_JG_EXP,String(Date.now()+43200000));jgHideLogin();jgShowUser(u);bootAdmin();}catch(e){document.getElementById('jg-login-err').textContent='Sign in failed.';}}
+function jgCheckAuth(){const r=localStorage.getItem(_JG_KEY),e=localStorage.getItem(_JG_EXP);if(r&&e&&Date.now()<parseInt(e)){jgHideLogin();jgShowUser(JSON.parse(r));return true;}jgShowLogin();return false;}
+function jgShowLogin(){const e=document.getElementById('jg-login');if(e)e.style.display='flex';}
+function jgHideLogin(){const e=document.getElementById('jg-login');if(e)e.style.display='none';}
+function jgShowUser(u){const n=document.getElementById('sb-nm'),a=document.getElementById('sb-av');if(n)n.textContent=u.name?u.name.split(' ')[0]:u.email.split('@')[0];if(a)a.innerHTML=u.picture?'<img src="'+u.picture+'" style="width:22px;height:22px;border-radius:50%;">':'👤';}
+function jgSignOut(){if(confirm('Sign out?')){localStorage.removeItem(_JG_KEY);localStorage.removeItem(_JG_EXP);window.location.href='hub.html';}}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SHARED SUPABASE HELPER
+// ═══════════════════════════════════════════════════════════════════════════
+async function sbGet(path) {
+  try {
+    var r = await fetch(SB_URL + path, {
+      method: 'GET',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+    });
+    if (!r.ok) { console.error('sbGet '+r.status); return []; }
+    var data = await r.json();
+    return Array.isArray(data) ? data : [];
+  } catch(e) { console.error('sbGet error:', e.message); return []; }
+}
+
+async function logActivity(action, detail, category, repName) {
+  try {
+    var u = JSON.parse(localStorage.getItem('jg_platform_user') || '{}');
+    await fetch(SB_URL + '/rest/v1/platform_activity', {
+      method: 'POST',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
+      body: JSON.stringify({
+        action: action, detail: detail, category: category || 'sales',
+        employee_name: repName || null,
+        performed_by: u.name || u.email || 'Admin',
+        performed_by_email: u.email || null,
+        ts: new Date().toISOString()
+      })
+    });
+  } catch(e) {}
+}
+
+function toast(msg) {
+  var t = document.createElement('div');
+  t.textContent = msg;
+  t.style.cssText = 'position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#0d2d5e;color:#fff;padding:10px 18px;border-radius:8px;font-size:12px;font-weight:600;z-index:9999;box-shadow:0 4px 16px rgba(0,0,0,.25);';
+  document.body.appendChild(t);
+  setTimeout(function(){ t.remove(); }, 2500);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PANEL SWITCHER
+// ═══════════════════════════════════════════════════════════════════════════
+function switchPanel(panel) {
+  CURRENT_PANEL = panel;
+  document.querySelectorAll('.panel-tab').forEach(function(t){ t.classList.remove('active'); });
+  var btn = document.getElementById('ptab-' + panel);
+  if (btn) btn.classList.add('active');
+
+  // Update header actions per panel
+  var hdrActions = document.getElementById('hdr-actions');
+  if (panel === 'sales') {
+    hdrActions.innerHTML = (AD.lastRefresh ? '<span style="font-size:10px;color:rgba(255,255,255,.5);">Updated '+AD.lastRefresh.toLocaleTimeString()+'</span>' : '') +
+      '<button class="export-btn" style="background:var(--gold);color:var(--navy);" onclick="sa_exportExcel()">📊 Excel</button>' +
+      '<button class="export-btn" style="background:#6a1b9a;color:#fff;" onclick="sa_exportWeeklyPDF()">📄 Weekly PDF</button>' +
+      '<button class="export-btn" style="background:#c0392b;color:#fff;" onclick="sa_exportMonthlyPDF()">📄 Monthly PDF</button>' +
+      '<button class="export-btn" style="background:rgba(255,255,255,.1);color:#fff;" onclick="sa_loadData()">↻ Refresh</button>';
+    sa_render();
+  } else if (panel === 'access') {
+    hdrActions.innerHTML = '<button class="export-btn" style="background:rgba(255,255,255,.1);color:#fff;" onclick="ac_resetDefaults()">Reset Defaults</button>';
+    ac_render();
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SALES ADMIN PANEL  (prefix: sa_)
+// ═══════════════════════════════════════════════════════════════════════════
+var AD = {
+  period: 30, market: 'All', loading: false,
+  partners: [], touches: [], routes: [], followups: [],
+  albiJobs: [], albiLoading: false, lastRefresh: null, tab: 'dashboard'
+};
+
+function sa_mkPeriodBtn(d) {
+  var cls = 'period-btn' + (AD.period===d ? ' active' : '');
+  return '<button class="'+cls+'" onclick="sa_setPeriod('+d+')">Last '+d+' days</button>';
+}
+function sa_setPeriod(d) { AD.period=d; sa_loadData(); }
+function sa_mkMarketBtn(m) {
+  var cls = 'period-btn' + (AD.market===m ? ' active' : '');
+  return '<button class="'+cls+'" onclick="sa_setMkt(this)">'+m+'</button>';
+}
+function sa_setMkt(el) { AD.market = el.textContent.trim(); sa_loadData(); }
+function sa_setTab(tab) { AD.tab = tab; sa_render(); }
+
+async function sa_loadData() {
+  AD.loading = true; sa_render();
+  try {
+    var cutoff = new Date(); cutoff.setDate(cutoff.getDate() - AD.period);
+    var cutoffStr = cutoff.toISOString().split('T')[0];
+    var mFilter = AD.market === 'All' ? '' : '&market=eq.'+encodeURIComponent(AD.market);
+
+    var allP = [];
+    for (var pg = 0; pg < 5; pg++) {
+      var chunk = await sbGet('/rest/v1/sales_partners?order=name.asc&limit=1000&offset='+(pg*1000)+mFilter);
+      if (!chunk || !chunk.length) break;
+      allP = allP.concat(chunk);
+      if (chunk.length < 1000) break;
+    }
+
+    var results = await Promise.all([
+      sbGet('/rest/v1/sales_touches?touch_date=gte.'+cutoffStr+'&order=touch_date.desc&limit=2000'+mFilter),
+      sbGet('/rest/v1/sales_routes?route_date=gte.'+cutoffStr+'&order=route_date.desc&limit=200'+mFilter),
+      sbGet('/rest/v1/sales_followups?order=due_date.asc&limit=1000'+mFilter)
+    ]);
+
+    AD.partners  = allP||[];
+    AD.touches   = results[0]||[];
+    AD.routes    = results[1]||[];
+    AD.followups = results[2]||[];
+    AD.lastRefresh = new Date();
+  } catch(e) { console.error('sa_loadData failed:', e); }
+  AD.loading = false;
+  if (CURRENT_PANEL === 'sales') sa_render();
+}
+
+async function sa_loadAlbi() {
+  AD.albiLoading = true; sa_render();
+  try {
+    var cutoff = new Date(); cutoff.setDate(cutoff.getDate() - AD.period);
+    var results = await Promise.all([
+      fetch(ALBI_PROXY, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'get_projects',locationId:222,limit:100})}).then(function(r){return r.ok?r.json():{};}),
+      fetch(ALBI_PROXY, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'get_projects',locationId:1477,limit:100})}).then(function(r){return r.ok?r.json():{};})
+    ]);
+    var appJobs = results[0], spJobs = results[1];
+    var jobs = ((appJobs.projects||appJobs.data||[]).map(function(j){return Object.assign({location:'Appleton'},j);})
+      .concat((spJobs.projects||spJobs.data||[]).map(function(j){return Object.assign({location:'Stevens Point'},j);})));
+    AD.albiJobs = jobs.filter(function(j) {
+      var d = j.createdAt||j.created_at||j.dateCreated||'';
+      return !d || new Date(d) >= cutoff;
+    });
+  } catch(e) { console.error('Albi pull failed:', e); AD.albiJobs = []; }
+  logActivity('Albi Data Pull', 'Pulled '+AD.albiJobs.length+' jobs from Albi — Last '+AD.period+' days', 'sales');
+  AD.albiLoading = false; sa_render();
+}
+
+function sa_getStats() {
+  var p = AD.partners, t = AD.touches, r = AD.routes, f = AD.followups;
+  var now = new Date(); now.setHours(0,0,0,0);
+  var stale = p.filter(function(x) {
+    if(!x.last_touch_date) return true;
+    return (now - new Date(x.last_touch_date+'T00:00:00')) > 30*86400000;
+  }).length;
+  var byRep = {};
+  REPS.forEach(function(rep) { byRep[rep] = t.filter(function(x){return x.logged_by===rep;}).length; });
+  var maxTouches = Math.max.apply(null, Object.values(byRep).concat([1]));
+  var byType = {};
+  t.forEach(function(x) { byType[x.touch_type||'Other'] = (byType[x.touch_type||'Other']||0)+1; });
+  var fuTotal = f.length, fuDone = f.filter(function(x){return x.completed;}).length;
+  var fuRate = fuTotal > 0 ? Math.round(fuDone/fuTotal*100) : 0;
+  var fuOverdue = f.filter(function(x){return !x.completed && new Date(x.due_date+'T00:00:00') < now;}).length;
+  var cutoff = new Date(); cutoff.setDate(cutoff.getDate()-AD.period);
+  var newPartners = p.filter(function(x){ return x.created_at && new Date(x.created_at) >= cutoff; }).length;
+  var refByRep = {};
+  REPS.forEach(function(rep) {
+    refByRep[rep] = p.filter(function(x){return x.assigned_to===rep;}).reduce(function(s,x){return s+(x.referral_count||0);},0);
+  });
+  var totalStops = 0, completedStops = 0;
+  r.forEach(function(rt) { var stops = rt.stops||[]; totalStops += stops.length; completedStops += stops.filter(function(s){return s.completed;}).length; });
+  var routeRate = totalStops > 0 ? Math.round(completedStops/totalStops*100) : 0;
+  var posRate = t.length > 0 ? Math.round(t.filter(function(x){return x.outcome==='Positive';}).length/t.length*100) : 0;
+  return {stale:stale,byRep:byRep,maxTouches:maxTouches,byType:byType,fuTotal:fuTotal,fuDone:fuDone,fuRate:fuRate,fuOverdue:fuOverdue,newPartners:newPartners,refByRep:refByRep,routeRate:routeRate,posRate:posRate,totalStops:totalStops,completedStops:completedStops};
+}
+
+function sa_render() {
+  var a = document.getElementById('app'); if(!a) return;
+  var h = '';
+
+  // Period + market filter bar
+  h += '<div style="background:var(--surface);border-bottom:1px solid var(--border);padding:8px 16px;display:flex;gap:10px;align-items:center;">';
+  h += '<span style="font-size:11px;font-weight:600;color:var(--muted);">PERIOD:</span>';
+  [7,30,90].forEach(function(d) { h += sa_mkPeriodBtn(d); });
+  h += '<span style="margin-left:12px;font-size:11px;font-weight:600;color:var(--muted);">MARKET:</span>';
+  ['All','Appleton','Stevens Point'].forEach(function(m) { h += sa_mkMarketBtn(m); });
+  h += '</div>';
+
+  // Sub-tabs
+  h += '<div class="sub-tab-bar">';
+  ['dashboard','activity'].forEach(function(tab) {
+    var isActive = (AD.tab||'dashboard') === tab;
+    var label = tab === 'dashboard' ? '📊 Dashboard' : '📜 Activity Log';
+    h += '<button class="sub-tab'+(isActive?' active':'')+'" onclick="sa_setTab(\''+tab+'\')">'+label+'</button>';
+  });
+  h += '</div>';
+
+  h += '<div style="padding:16px;max-width:1300px;margin:0 auto;">';
+
+  if ((AD.tab||'dashboard') === 'activity') {
+    h += '</div>'; a.innerHTML = h;
+    sa_renderActivity();
+    return;
+  }
+
+  if(AD.loading) {
+    h += '<div style="text-align:center;padding:60px;color:var(--muted);">Loading sales data...</div>';
+    h += '</div>'; a.innerHTML=h; return;
+  }
+
+  var S = sa_getStats();
+
+  // KPI cards
+  h += '<div class="section-hdr">Key Metrics — Last '+AD.period+' Days</div>';
+  h += '<div class="admin-grid">';
+  var kpis = [
+    {val:AD.touches.length, lbl:'Total Touches', sub:AD.period+'d window', accent:'#e85d04'},
+    {val:S.posRate+'%', lbl:'Positive Rate', sub:AD.touches.filter(function(t){return t.outcome==='Positive';}).length+' positive', accent:'#2e7d32'},
+    {val:S.newPartners, lbl:'Partners Added', sub:'Last '+AD.period+' days', accent:'#1565c0'},
+    {val:AD.partners.length, lbl:'Total Partners', sub:AD.market+' market', accent:'#0d2d5e'},
+    {val:S.stale, lbl:'Stale Partners', sub:'30+ days no touch', accent:'#c0392b'},
+    {val:S.fuRate+'%', lbl:'Follow-up Rate', sub:S.fuDone+'/'+S.fuTotal+' completed', accent:'#6a1b9a'},
+    {val:S.fuOverdue, lbl:'Overdue Follow-ups', sub:'Need attention now', accent:'#e65100'},
+    {val:S.routeRate+'%', lbl:'Route Completion', sub:S.completedStops+'/'+S.totalStops+' stops', accent:'#00838f'}
+  ];
+  kpis.forEach(function(k) {
+    h += '<div class="kpi-card" style="--accent:'+k.accent+';">';
+    h += '<div class="kpi-val">'+k.val+'</div>';
+    h += '<div class="kpi-lbl">'+k.lbl+'</div>';
+    h += '<div class="kpi-sub">'+k.sub+'</div>';
+    h += '</div>';
+  });
+  h += '</div>';
+
+  // Two columns
+  h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:20px;">';
+  h += '<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px;">';
+  h += '<div class="section-hdr" style="margin-top:0;">👥 Touches by Rep</div>';
+  REPS.forEach(function(rep, i) {
+    var cnt = S.byRep[rep]||0;
+    var pct = S.maxTouches > 0 ? Math.round(cnt/S.maxTouches*100) : 0;
+    var refs = S.refByRep[rep]||0;
+    h += '<div class="rep-row">';
+    h += '<div class="rep-avatar" style="background:'+REP_COLORS[i]+';">'+rep[0]+'</div>';
+    h += '<div style="flex:1;min-width:0;">';
+    h += '<div style="display:flex;justify-content:space-between;margin-bottom:4px;">';
+    h += '<span style="font-size:12px;font-weight:700;color:var(--navy);">'+rep+'</span>';
+    h += '<span style="font-size:11px;font-family:DM Mono,monospace;font-weight:600;">'+cnt+' touches</span>';
+    h += '</div>';
+    h += '<div class="bar-wrap"><div class="bar-fill" style="width:'+pct+'%;background:'+REP_COLORS[i]+';"></div></div>';
+    h += '<div style="font-size:10px;color:var(--muted);margin-top:3px;">'+refs+' referrals · '+(AD.partners.filter(function(p){return p.assigned_to===rep;}).length)+' assigned</div>';
+    h += '</div></div>';
+  });
+  h += '</div>';
+
+  h += '<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px;">';
+  h += '<div class="section-hdr" style="margin-top:0;">📋 Touches by Type</div>';
+  var typeIcons = {Call:'📞',Visit:'🚗',Email:'📧',Text:'💬','Drop-in':'🚪',Event:'🎉',Other:'📋'};
+  var maxType = Math.max.apply(null, Object.values(S.byType).concat([1]));
+  Object.entries(S.byType).sort(function(a,b){return b[1]-a[1];}).forEach(function(e) {
+    var pct = Math.round(e[1]/maxType*100);
+    h += '<div class="touch-type-row">';
+    h += '<span style="font-size:16px;width:24px;">'+(typeIcons[e[0]]||'📋')+'</span>';
+    h += '<span style="font-size:12px;font-weight:600;width:90px;">'+e[0]+'</span>';
+    h += '<div class="bar-wrap"><div class="bar-fill" style="width:'+pct+'%;"></div></div>';
+    h += '<span style="font-size:11px;font-family:DM Mono,monospace;font-weight:600;width:30px;text-align:right;">'+e[1]+'</span>';
+    h += '</div>';
+  });
+  if(!Object.keys(S.byType).length) h += '<div style="color:var(--muted);font-size:12px;padding:20px 0;text-align:center;">No touches in this period</div>';
+  h += '</div>';
+  h += '</div>';
+
+  // Albi jobs
+  h += '<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px;margin-bottom:20px;">';
+  h += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">';
+  h += '<div class="section-hdr" style="margin:0;">🏗️ Albi Jobs — Last '+AD.period+' Days</div>';
+  h += '<button class="export-btn" style="background:var(--navy);color:#fff;font-size:11px;" onclick="sa_loadAlbi()">'+(AD.albiLoading?'Loading...':'Pull from Albi')+'</button>';
+  h += '</div>';
+  if(AD.albiJobs.length) {
+    var totalRCV = AD.albiJobs.reduce(function(s,j){return s+(parseFloat(j.totalRevenue||j.revenue||j.rcv||0));}, 0);
+    var byStatus = {};
+    AD.albiJobs.forEach(function(j){var st=j.status||j.projectStatus||'Unknown';byStatus[st]=(byStatus[st]||0)+1;});
+    h += '<div class="admin-grid" style="margin-bottom:12px;">';
+    h += '<div class="kpi-card" style="--accent:#e85d04;"><div class="kpi-val">'+AD.albiJobs.length+'</div><div class="kpi-lbl">Total Jobs</div></div>';
+    h += '<div class="kpi-card" style="--accent:#2e7d32;"><div class="kpi-val">$'+Math.round(totalRCV).toLocaleString()+'</div><div class="kpi-lbl">Total Revenue</div></div>';
+    h += '<div class="kpi-card" style="--accent:#1565c0;"><div class="kpi-val">$'+Math.round(totalRCV/Math.max(AD.albiJobs.length,1)).toLocaleString()+'</div><div class="kpi-lbl">Avg Job Size</div></div>';
+    h += '<div class="kpi-card" style="--accent:#6a1b9a;"><div class="kpi-val">'+Object.keys(byStatus).length+'</div><div class="kpi-lbl">Status Types</div></div>';
+    h += '</div>';
+    h += '<div style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;font-size:11px;">';
+    h += '<thead><tr style="background:var(--navy);color:#fff;">';
+    ['Project','Location','Status','Revenue','Created'].forEach(function(c){h+='<th style="padding:7px 10px;text-align:left;font-size:9px;text-transform:uppercase;">'+c+'</th>';});
+    h += '</tr></thead><tbody>';
+    AD.albiJobs.slice(0,20).forEach(function(j,i) {
+      var rev = parseFloat(j.totalRevenue||j.revenue||j.rcv||0);
+      var dt = j.createdAt||j.created_at||j.dateCreated||'';
+      h += '<tr style="background:'+(i%2===0?'var(--s1)':'#fff')+';border-bottom:1px solid var(--border);">';
+      h += '<td style="padding:6px 10px;font-weight:600;">'+(j.name||j.projectName||'—')+'</td>';
+      h += '<td style="padding:6px 10px;color:var(--muted);">'+(j.location||'—')+'</td>';
+      h += '<td style="padding:6px 10px;">'+(j.status||j.projectStatus||'—')+'</td>';
+      h += '<td style="padding:6px 10px;font-family:DM Mono,monospace;color:'+(rev>0?'var(--ok)':'var(--muted)')+';">'+(rev>0?'$'+Math.round(rev).toLocaleString():'—')+'</td>';
+      h += '<td style="padding:6px 10px;color:var(--muted);">'+(dt?new Date(dt).toLocaleDateString('en-US',{month:'short',day:'numeric'}):'—')+'</td>';
+      h += '</tr>';
+    });
+    h += '</tbody></table></div>';
+    if(AD.albiJobs.length>20) h+='<div style="text-align:center;padding:8px;font-size:11px;color:var(--muted);">Showing 20 of '+AD.albiJobs.length+' jobs</div>';
+  } else {
+    h += '<div style="text-align:center;padding:30px;color:var(--muted);">'+(AD.albiLoading?'Pulling from Albi...':'Click "Pull from Albi" to load recent jobs')+'</div>';
+  }
+  h += '</div>';
+
+  // Recent touches
+  h += '<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px;">';
+  h += '<div class="section-hdr" style="margin-top:0;">📋 Recent Touches Log</div>';
+  h += '<table style="width:100%;border-collapse:collapse;font-size:11px;">';
+  h += '<thead><tr style="background:var(--navy);color:#fff;">';
+  ['Date','Rep','Partner','Type','Outcome','Notes'].forEach(function(c){h+='<th style="padding:7px 10px;text-align:left;font-size:9px;text-transform:uppercase;">'+c+'</th>';});
+  h += '</tr></thead><tbody>';
+  AD.touches.slice(0,30).forEach(function(t,i) {
+    h += '<tr style="background:'+(i%2===0?'var(--s1)':'#fff')+';border-bottom:1px solid var(--border);">';
+    h += '<td style="padding:6px 10px;font-family:DM Mono,monospace;font-size:10px;">'+(t.touch_date||'')+'</td>';
+    h += '<td style="padding:6px 10px;font-weight:600;">'+(t.logged_by||'—')+'</td>';
+    h += '<td style="padding:6px 10px;">'+(t.partner_name||'—')+'</td>';
+    h += '<td style="padding:6px 10px;"><span style="font-size:10px;padding:1px 6px;border-radius:4px;background:rgba(13,45,94,.08);font-weight:600;">'+(t.touch_type||'')+'</span></td>';
+    h += '<td style="padding:6px 10px;font-weight:600;color:'+(t.outcome==='Positive'?'var(--ok)':t.outcome==='Not Interested'?'var(--danger)':'var(--muted)')+';">'+(t.outcome||'')+'</td>';
+    h += '<td style="padding:6px 10px;color:var(--muted);max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+(t.notes||'—')+'</td>';
+    h += '</tr>';
+  });
+  if(!AD.touches.length) h += '<tr><td colspan="6" style="padding:20px;text-align:center;color:var(--muted);">No touches in this period</td></tr>';
+  h += '</tbody></table></div>';
+
+  h += '</div>';
+  a.innerHTML = h;
+}
+
+// Activity log within Sales tab
+async function sa_renderActivity() {
+  var app = document.getElementById('app');
+  if (!document.getElementById('act-results')) {
+    var today = new Date().toISOString().split('T')[0];
+    var fromDefault = new Date(Date.now() - 30*86400000).toISOString().split('T')[0];
+    var wrap = document.createElement('div');
+    wrap.style.cssText = 'padding:16px;max-width:1300px;margin:0 auto;';
+    wrap.innerHTML =
+      '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px;align-items:center;">' +
+        '<select id="act-rep" onchange="sa_fetchActivity()" style="padding:8px 12px;border-radius:6px;border:1.5px solid var(--brd);background:#fff;font-size:12px;">' +
+          '<option value="">All Reps</option>' +
+          REPS.map(function(r){ return '<option value="'+r+'">'+r+'</option>'; }).join('') +
+        '</select>' +
+        '<input type="date" id="act-from" value="'+fromDefault+'" onchange="sa_fetchActivity()" style="padding:8px 12px;border-radius:6px;border:1.5px solid var(--brd);font-size:12px;">' +
+        '<span style="font-size:12px;color:var(--dim);">to</span>' +
+        '<input type="date" id="act-to" value="'+today+'" onchange="sa_fetchActivity()" style="padding:8px 12px;border-radius:6px;border:1.5px solid var(--brd);font-size:12px;">' +
+        '<input type="text" id="act-search" placeholder="Search..." oninput="sa_fetchActivity()" style="padding:8px 12px;border-radius:6px;border:1.5px solid var(--brd);font-size:12px;min-width:180px;">' +
+      '</div>' +
+      '<div id="act-results"><div style="text-align:center;padding:40px;color:var(--dim);">Loading...</div></div>';
+    app.appendChild(wrap);
+  }
+  await sa_fetchActivity();
+}
+
+async function sa_fetchActivity() {
+  var resultsEl = document.getElementById('act-results');
+  if (!resultsEl) return;
+  resultsEl.innerHTML = '<div style="text-align:center;padding:40px;color:var(--dim);">Loading...</div>';
+
+  var rep = (document.getElementById('act-rep')||{}).value || '';
+  var from = (document.getElementById('act-from')||{}).value || '';
+  var to = (document.getElementById('act-to')||{}).value || '';
+  var search = ((document.getElementById('act-search')||{}).value || '').toLowerCase().trim();
+
+  var url = SB_URL + '/rest/v1/platform_activity?order=ts.desc&limit=500&select=*&category=eq.sales';
+  if (rep) url += '&performed_by=eq.' + encodeURIComponent(rep);
+  if (from) url += '&ts=gte.' + from + 'T00:00:00';
+  if (to) url += '&ts=lte.' + to + 'T23:59:59';
+
+  try {
+    var r = await fetch(url, { headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY } });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    var rows = await r.json() || [];
+
+    if (search) rows = rows.filter(function(row) {
+      return (row.action||'').toLowerCase().includes(search) ||
+             (row.detail||'').toLowerCase().includes(search) ||
+             (row.performed_by||'').toLowerCase().includes(search);
+    });
+
+    if (!rows.length) { resultsEl.innerHTML = '<div style="text-align:center;padding:40px;color:var(--dim);">No activity found</div>'; return; }
+
+    var fmtTs = function(iso) {
+      var d = new Date(iso);
+      return d.toLocaleDateString('en-US',{month:'short',day:'numeric'}) + ' ' + d.toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'});
+    };
+
+    var html = '<div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:12px;padding:10px 14px;background:var(--s1);border-radius:10px;border:1px solid var(--brd);">';
+    html += '<div style="font-size:12px;font-weight:700;color:var(--navy);">'+rows.length+' events</div>';
+    html += '</div>';
+
+    html += '<table style="width:100%;border-collapse:collapse;font-size:11px;">';
+    html += '<thead><tr style="background:var(--navy);color:#fff;">';
+    ['Time','Action','Detail','By'].forEach(function(c){html+='<th style="padding:7px 10px;text-align:left;font-size:9px;">'+c+'</th>';});
+    html += '</tr></thead><tbody>';
+    rows.forEach(function(row,i) {
+      html += '<tr style="background:'+(i%2===0?'var(--s1)':'#fff')+';border-bottom:1px solid var(--border);">';
+      html += '<td style="padding:6px 10px;font-family:DM Mono,monospace;font-size:10px;color:var(--dim);">'+fmtTs(row.ts)+'</td>';
+      html += '<td style="padding:6px 10px;font-weight:600;">'+(row.action||'—')+'</td>';
+      html += '<td style="padding:6px 10px;color:var(--dim);">'+(row.detail||'—')+'</td>';
+      html += '<td style="padding:6px 10px;font-size:11px;color:var(--dim);">'+(row.performed_by||'—')+'</td>';
+      html += '</tr>';
+    });
+    html += '</tbody></table>';
+    resultsEl.innerHTML = html;
+  } catch(e) {
+    resultsEl.innerHTML = '<div style="padding:20px;color:var(--red);">Error: '+e.message+'</div>';
+  }
+}
+
+// Sales exports
+function sa_exportWeeklyPDF(){ sa_exportPDF('weekly'); }
+function sa_exportMonthlyPDF(){ sa_exportPDF('monthly'); }
+
+function sa_exportExcel() {
+  logActivity('Excel Export', 'Sales report exported — Last '+AD.period+' days, Market: '+AD.market, 'sales');
+  var wb = XLSX.utils.book_new();
+  var tHeaders = ['Date','Rep','Partner','Type','Outcome','Notes','Market'];
+  var tData = AD.touches.map(function(t){return[t.touch_date||'',t.logged_by||'',t.partner_name||'',t.touch_type||'',t.outcome||'',t.notes||'',t.market||''];});
+  var tSheet = [['JG RESTORATION — SALES TOUCHES REPORT'],['Period: Last '+AD.period+' days','Market: '+AD.market],[],tHeaders].concat(tData);
+  var ws1 = XLSX.utils.aoa_to_sheet(tSheet);
+  ws1['!cols']=[{wch:12},{wch:12},{wch:25},{wch:10},{wch:14},{wch:40},{wch:14}];
+  XLSX.utils.book_append_sheet(wb, ws1, 'Touches');
+
+  var pHeaders=['Name','Company','Type','Tier','Phone','Email','City','Market','Assigned To','Touches','Referrals','Last Touch','Status'];
+  var pData = AD.partners.map(function(p){return[p.name||'',p.company||'',p.type||'',p.tier||'',p.phone||'',p.email||'',p.city||'',p.market||'',p.assigned_to||'',p.touch_count||0,p.referral_count||0,p.last_touch_date||'',p.status||''];});
+  var pSheet = [['JG RESTORATION — PARTNER LIST'],[],pHeaders].concat(pData);
+  var ws2 = XLSX.utils.aoa_to_sheet(pSheet);
+  ws2['!cols']=[{wch:22},{wch:22},{wch:18},{wch:6},{wch:14},{wch:28},{wch:14},{wch:14},{wch:12},{wch:8},{wch:10},{wch:12},{wch:10}];
+  XLSX.utils.book_append_sheet(wb, ws2, 'Partners');
+
+  var S = sa_getStats();
+  var rHeaders=['Rep','Assigned Partners','Touches','Referrals','Avg Touches/Partner'];
+  var rData = REPS.map(function(rep){
+    var assigned=AD.partners.filter(function(p){return p.assigned_to===rep;}).length;
+    var touches=S.byRep[rep]||0;
+    var refs=S.refByRep[rep]||0;
+    return[rep,assigned,touches,refs,assigned>0?Math.round(touches/assigned*10)/10:0];
+  });
+  var rSheet=[['JG RESTORATION — REP SUMMARY'],['Period: Last '+AD.period+' days'],[],rHeaders].concat(rData);
+  var ws3=XLSX.utils.aoa_to_sheet(rSheet);
+  ws3['!cols']=[{wch:14},{wch:18},{wch:10},{wch:12},{wch:20}];
+  XLSX.utils.book_append_sheet(wb,ws3,'Rep Summary');
+
+  var fHeaders=['Partner','Type','Due Date','Priority','Reason','Assigned To','Status'];
+  var fData=AD.followups.map(function(f){return[f.partner_name||'',f.partner_type||'',f.due_date||'',f.priority||'',f.reason||'',f.assigned_to||'',f.completed?'Completed':'Open'];});
+  var fSheet=[['JG RESTORATION — FOLLOW-UPS'],[],fHeaders].concat(fData);
+  var ws4=XLSX.utils.aoa_to_sheet(fSheet);
+  XLSX.utils.book_append_sheet(wb,ws4,'Follow-ups');
+
+  var today=new Date().toISOString().split('T')[0];
+  XLSX.writeFile(wb, 'JG_Sales_Report_'+today+'.xlsx');
+}
+
+async function sa_exportPDF(type) {
+  logActivity((type==='weekly'?'Weekly':'Monthly')+' PDF Export', 'Sales PDF report — Last '+AD.period+' days, Market: '+AD.market, 'sales');
+  var jsPDF = window.jspdf.jsPDF;
+  var doc = new jsPDF({orientation:'portrait',unit:'mm',format:'letter'});
+  var S = sa_getStats();
+  var today = new Date().toLocaleDateString('en-US',{month:'long',day:'numeric',year:'numeric'});
+  var periodLabel = type==='weekly' ? 'Weekly Summary' : 'Monthly Report';
+
+  doc.setFillColor(13,45,94);
+  doc.rect(0,0,216,28,'F');
+  doc.setTextColor(255,255,255);
+  doc.setFontSize(18); doc.setFont('helvetica','bold');
+  doc.text('JG RESTORATION', 14, 12);
+  doc.setFontSize(11); doc.setFont('helvetica','normal');
+  doc.text('Sales '+periodLabel+' — Last '+AD.period+' Days', 14, 20);
+  doc.setFontSize(9);
+  doc.text('Generated: '+today+' | Market: '+AD.market, 216-14, 20, {align:'right'});
+
+  var y = 36;
+  doc.setTextColor(13,45,94);
+  doc.setFontSize(9); doc.setFont('helvetica','bold');
+  doc.text('KEY METRICS', 14, y); y+=6;
+
+  var kpiData = [
+    ['Total Touches', AD.touches.length],['Positive Rate', S.posRate+'%'],
+    ['Partners Added', S.newPartners],['Total Partners', AD.partners.length],
+    ['Stale Partners', S.stale],['Follow-up Rate', S.fuRate+'%'],
+    ['Overdue Follow-ups', S.fuOverdue],['Route Completion', S.routeRate+'%']
+  ];
+  var cols=4, colW=47, rowH=14;
+  kpiData.forEach(function(k,i) {
+    var cx=14+(i%cols)*colW, cy=y+Math.floor(i/cols)*rowH;
+    doc.setFillColor(248,248,250); doc.setDrawColor(220,225,235);
+    doc.roundedRect(cx,cy,colW-2,rowH-2,2,2,'FD');
+    doc.setFontSize(14); doc.setFont('helvetica','bold'); doc.setTextColor(13,45,94);
+    doc.text(String(k[1]),cx+4,cy+8);
+    doc.setFontSize(7); doc.setFont('helvetica','normal'); doc.setTextColor(107,122,150);
+    doc.text(k[0].toUpperCase(),cx+4,cy+12);
+  });
+  y += Math.ceil(kpiData.length/cols)*rowH + 6;
+
+  doc.setFontSize(9); doc.setFont('helvetica','bold'); doc.setTextColor(13,45,94);
+  doc.text('TOUCHES BY REP', 14, y); y+=5;
+  REPS.forEach(function(rep) {
+    var cnt=S.byRep[rep]||0, refs=S.refByRep[rep]||0;
+    var assigned=AD.partners.filter(function(p){return p.assigned_to===rep;}).length;
+    doc.setFillColor(248,248,250); doc.rect(14,y,188,7,'F');
+    doc.setFontSize(8); doc.setFont('helvetica','bold'); doc.setTextColor(13,45,94);
+    doc.text(rep,16,y+5);
+    doc.setFont('helvetica','normal'); doc.setTextColor(107,122,150);
+    doc.text(cnt+' touches',70,y+5);
+    doc.text(assigned+' assigned',100,y+5);
+    doc.text(refs+' referrals',140,y+5);
+    var barW=Math.round((cnt/Math.max(S.maxTouches,1))*50);
+    doc.setFillColor(232,93,4); doc.rect(160,y+2,barW,3,'F');
+    y+=8;
+  });
+  y+=6;
+
+  doc.setFillColor(13,45,94);
+  doc.rect(0,272,216,8,'F');
+  doc.setTextColor(255,255,255); doc.setFontSize(7);
+  doc.text('JG Restoration | Appleton & Stevens Point | Confidential Sales Report', 14, 277);
+  doc.text('Page 1', 202, 277, {align:'right'});
+
+  var fname='JG_Sales_'+(type==='weekly'?'Weekly':'Monthly')+'_'+new Date().toISOString().split('T')[0]+'.pdf';
+  doc.save(fname);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ACCESS CONTROL PANEL  (prefix: ac_)
+// ═══════════════════════════════════════════════════════════════════════════
+const ACCESS_PAGES = [
+  ['dispatch',       '📋 Dispatch Board',        'index.html'],
+  ['sales',          '📈 Sales Dashboard',       'sales.html'],
+  ['sales_admin',    '🛠 Sales Admin (Admin Panel)','admin.html'],
+  ['timeclock',      '⏱ Clock In/Out',           'timeclock.html'],
+  ['timeclock_admin','📊 Time Clock / Payroll',  'timeclock_admin.html'],
+  ['qa',             '🔍 QA Review',             'qa.html'],
+  ['adjuster',       '⚖️ Adjuster Rebuttal',     'adjuster.html'],
+  ['recon',          '🏗️ Recon Estimate',        'recon.html'],
+  ['intelligence',   '🧠 Adjuster Intel',        'intelligence.html'],
+  ['admin',          '🛡 Admin Panel',           'admin.html']
+];
+const ACCESS_ROLES = ['Technician','Project Manager','Estimator','Office','Admin'];
+const ACCESS_DEFAULTS = {
+  dispatch:       ['Project Manager','Estimator','Office','Admin'],
+  sales:          ['Project Manager','Estimator','Office','Admin'],
+  sales_admin:    ['Admin'],
+  timeclock:      ['Technician','Project Manager','Estimator','Office','Admin'],
+  timeclock_admin:['Office','Admin'],
+  qa:             ['Project Manager','Estimator','Office','Admin'],
+  adjuster:       ['Project Manager','Estimator','Office','Admin'],
+  recon:          ['Project Manager','Estimator','Admin'],
+  intelligence:   ['Project Manager','Estimator','Office','Admin'],
+  admin:          ['Admin']
+};
+const TAB_ACCESS_PAGES = [
+  ['tab_commissions', '💵 Commissions Tab', 'Who can view the Commissions tab in Time Clock / Payroll'],
+  ['tab_commissions_edit', '✏️ Commissions — Edit/Approve', 'Who can add, approve, mark paid, or delete commission entries']
+];
+const TAB_ACCESS_DEFAULTS = {
+  tab_commissions:      ['Technician','Project Manager','Estimator','Office','Admin'],
+  tab_commissions_edit: ['Office','Admin']
+};
+
+function ac_getSettings() {
+  var merged = Object.assign({}, ACCESS_DEFAULTS, TAB_ACCESS_DEFAULTS);
+  try {
+    var saved = JSON.parse(localStorage.getItem('jg_access_settings') || 'null');
+    return saved ? Object.assign({}, merged, saved) : merged;
+  } catch(e) { return merged; }
+}
+
+function ac_saveSettings(settings) {
+  localStorage.setItem('jg_access_settings', JSON.stringify(settings));
+  fetch(SB_URL + '/rest/v1/platform_activity', {
+    method: 'POST',
+    headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
+    body: JSON.stringify({ action: 'Access Settings Updated', detail: 'Dashboard access permissions updated', category: 'employees', performed_by: 'Admin', ts: new Date().toISOString() })
+  }).catch(function(){});
+}
+
+async function ac_saveToDB(settings) {
+  try {
+    await fetch(SB_URL + '/rest/v1/access_settings', {
+      method: 'POST',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'resolution=merge-duplicates,return=minimal' },
+      body: JSON.stringify({ id: 'current', settings: settings, updated_at: new Date().toISOString() })
+    });
+  } catch(e) {}
+}
+
+async function ac_loadFromDB() {
+  try {
+    var r = await fetch(SB_URL + '/rest/v1/access_settings?id=eq.current&select=settings', {
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+    });
+    var rows = await r.json();
+    if (rows && rows[0] && rows[0].settings) {
+      localStorage.setItem('jg_access_settings', JSON.stringify(rows[0].settings));
+      return rows[0].settings;
+    }
+  } catch(e) {}
+  return ac_getSettings();
+}
+
+function ac_hexToRgb(hex) {
+  hex = hex.replace('#','');
+  return parseInt(hex.slice(0,2),16)+','+parseInt(hex.slice(2,4),16)+','+parseInt(hex.slice(4,6),16);
+}
+
+// Employee cache for per-employee overrides
+var _acEmployees = null;
+async function ac_loadEmployees() {
+  if (_acEmployees) return _acEmployees;
+  _acEmployees = await sbGet('/rest/v1/employees?active=eq.true&order=name.asc&select=id,name,role');
+  return _acEmployees;
+}
+
+async function ac_render() {
+  var app = document.getElementById('app'); if(!app) return;
+  app.innerHTML = '<div style="padding:40px;text-align:center;color:var(--dim);">Loading access settings...</div>';
+
+  var settings = await ac_loadFromDB();
+  var emps = await ac_loadEmployees();
+
+  var roleColors = {'Technician':'#546e7a','Project Manager':'#2e7d32','Estimator':'#1565c0','Office':'#6a1b9a','Admin':'#e85d04'};
+  var h = '<div style="padding:16px;max-width:1300px;margin:0 auto;">';
+
+  // Header
+  h += '<div style="margin-bottom:16px;">';
+  h += '<div style="font-size:16px;font-weight:700;color:var(--navy);">🔐 Dashboard Access Control</div>';
+  h += '<div style="font-size:12px;color:var(--muted);margin-top:3px;">Control which roles can access each platform page</div>';
+  h += '</div>';
+
+  // Legend
+  h += '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px;">';
+  ACCESS_ROLES.forEach(function(role) {
+    h += '<div style="display:flex;align-items:center;gap:5px;padding:4px 10px;border-radius:6px;background:rgba(0,0,0,.04);font-size:11px;font-weight:600;color:'+(roleColors[role]||'#333')+'">';
+    h += '● ' + role + '</div>';
+  });
+  h += '</div>';
+
+  // Page grid
+  h += '<div style="display:grid;gap:10px;">';
+  ACCESS_PAGES.forEach(function(page) {
+    var pageKey = page[0], pageLabel = page[1], pageUrl = page[2];
+    var allowed = settings[pageKey] || [];
+    h += '<div class="card" style="padding:14px 18px;">';
+    h += '<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;">';
+    h += '<div>';
+    h += '<div style="font-size:13px;font-weight:700;color:var(--navy);">' + pageLabel + '</div>';
+    h += '<div style="font-size:11px;color:var(--muted);">' + pageUrl + '</div>';
+    h += '</div>';
+    h += '<div style="display:flex;gap:6px;flex-wrap:wrap;">';
+    ACCESS_ROLES.forEach(function(role) {
+      var isOn = allowed.includes(role);
+      var col = roleColors[role] || '#333';
+      h += '<button onclick="ac_toggle(\''+pageKey+'\',\''+role+'\')" ';
+      h += 'style="padding:5px 12px;border-radius:6px;border:1.5px solid '+(isOn?col:'var(--border)')+';';
+      h += 'background:'+(isOn?'rgba('+ac_hexToRgb(col)+',.12)':'var(--surface)')+';';
+      h += 'color:'+(isOn?col:'var(--muted)')+';font-size:11px;font-weight:'+(isOn?'700':'500')+';cursor:pointer;';
+      h += 'font-family:DM Sans,sans-serif;">';
+      h += (isOn ? '✓ ' : '') + role + '</button>';
+    });
+    h += '</div></div></div>';
+  });
+  h += '</div>';
+
+  // Tab-level
+  h += '<div style="margin-top:28px;padding-top:20px;border-top:2px solid var(--border);">';
+  h += '<div style="font-size:14px;font-weight:700;color:var(--navy);margin-bottom:4px;">📑 Tab-Level Controls (within Time Clock / Payroll)</div>';
+  h += '<div style="font-size:12px;color:var(--muted);margin-bottom:12px;">Finer-grained controls for specific tabs. These only apply if the user can access Time Clock / Payroll first.</div>';
+  h += '<div style="display:grid;gap:10px;">';
+  TAB_ACCESS_PAGES.forEach(function(page) {
+    var pageKey = page[0], pageLabel = page[1], pageDesc = page[2];
+    var allowed = settings[pageKey] || TAB_ACCESS_DEFAULTS[pageKey] || [];
+    h += '<div class="card" style="padding:14px 18px;">';
+    h += '<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;">';
+    h += '<div>';
+    h += '<div style="font-size:13px;font-weight:700;color:var(--navy);">' + pageLabel + '</div>';
+    h += '<div style="font-size:11px;color:var(--muted);">' + pageDesc + '</div>';
+    h += '</div>';
+    h += '<div style="display:flex;gap:6px;flex-wrap:wrap;">';
+    ACCESS_ROLES.forEach(function(role) {
+      var isOn = allowed.includes(role);
+      var col = roleColors[role] || '#333';
+      h += '<button onclick="ac_toggle(\''+pageKey+'\',\''+role+'\')" ';
+      h += 'style="padding:5px 12px;border-radius:6px;border:1.5px solid '+(isOn?col:'var(--border)')+';';
+      h += 'background:'+(isOn?'rgba('+ac_hexToRgb(col)+',.12)':'var(--surface)')+';';
+      h += 'color:'+(isOn?col:'var(--muted)')+';font-size:11px;font-weight:'+(isOn?'700':'500')+';cursor:pointer;';
+      h += 'font-family:DM Sans,sans-serif;">';
+      h += (isOn ? '✓ ' : '') + role + '</button>';
+    });
+    h += '</div></div></div>';
+  });
+  h += '</div></div>';
+
+  // Per-employee overrides
+  h += '<div style="margin-top:24px;">';
+  h += '<div style="font-size:14px;font-weight:700;color:var(--navy);margin-bottom:4px;">👤 Per-Employee Overrides</div>';
+  h += '<div style="font-size:12px;color:var(--muted);margin-bottom:12px;">Grant or restrict specific dashboards for individual employees, overriding their role.</div>';
+  if (!emps.length) {
+    h += '<div style="color:var(--muted);font-size:12px;">No active employees found</div>';
+  } else {
+    h += '<div style="display:grid;gap:8px;">';
+    emps.forEach(function(emp) {
+      var empOverrides = (settings['_emp_' + emp.id] || []);
+      var empDeny = (settings['_deny_' + emp.id] || []);
+      h += '<div class="card" style="padding:12px 16px;">';
+      h += '<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">';
+      h += '<div style="width:32px;height:32px;border-radius:50%;background:var(--navy);color:#fff;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;">'+(emp.name||'?')[0]+'</div>';
+      h += '<div><div style="font-size:13px;font-weight:700;color:var(--navy);">'+(emp.name||'')+'</div>';
+      h += '<div style="font-size:11px;color:var(--muted);">'+(emp.role||'Technician')+'</div></div>';
+      h += '</div>';
+      h += '<div style="display:flex;flex-wrap:wrap;gap:4px;">';
+      ACCESS_PAGES.forEach(function(page) {
+        var pageKey = page[0], pageLabel = page[1];
+        var isGranted = empOverrides.includes(pageKey);
+        var isDenied = empDeny.includes(pageKey);
+        var btnStyle = isGranted ? 'background:rgba(46,125,50,.12);border-color:#2e7d32;color:#2e7d32;font-weight:700;' :
+                       isDenied ? 'background:rgba(192,32,32,.08);border-color:#c02020;color:#c02020;font-weight:700;' :
+                                  'background:var(--surface);border-color:var(--border);color:var(--muted);';
+        h += '<button onclick="ac_cycleEmp(\''+emp.id+'\',\''+pageKey+'\')" ';
+        h += 'title="Click to cycle: default → grant → deny" ';
+        h += 'style="padding:3px 10px;border-radius:5px;border:1.5px solid;font-size:10px;cursor:pointer;font-family:DM Sans,sans-serif;'+btnStyle+'">';
+        h += (isGranted?'✓ ':isDenied?'✕ ':'') + pageLabel.replace(/^\S+\s/,'') + '</button>';
+      });
+      h += '</div></div>';
+    });
+    h += '</div>';
+  }
+  h += '</div>';
+
+  h += '</div>';
+  app.innerHTML = h;
+}
+
+function ac_toggle(pageKey, role) {
+  var settings = ac_getSettings();
+  if (!settings[pageKey]) settings[pageKey] = [];
+  var idx = settings[pageKey].indexOf(role);
+  if (idx > -1) settings[pageKey].splice(idx, 1);
+  else settings[pageKey].push(role);
+  ac_saveSettings(settings);
+  ac_saveToDB(settings);
+  ac_render();
+}
+
+function ac_cycleEmp(empId, pageKey) {
+  var settings = ac_getSettings();
+  var grantKey = '_emp_' + empId;
+  var denyKey = '_deny_' + empId;
+  if (!settings[grantKey]) settings[grantKey] = [];
+  if (!settings[denyKey]) settings[denyKey] = [];
+  var isGranted = settings[grantKey].includes(pageKey);
+  var isDenied = settings[denyKey].includes(pageKey);
+  if (!isGranted && !isDenied) {
+    settings[grantKey].push(pageKey);
+  } else if (isGranted) {
+    settings[grantKey] = settings[grantKey].filter(function(p){return p!==pageKey;});
+    settings[denyKey].push(pageKey);
+  } else {
+    settings[denyKey] = settings[denyKey].filter(function(p){return p!==pageKey;});
+  }
+  ac_saveSettings(settings);
+  ac_saveToDB(settings);
+  ac_render();
+}
+
+function ac_resetDefaults() {
+  if (!confirm('Reset all access settings to defaults?')) return;
+  var defaults = Object.assign({}, ACCESS_DEFAULTS, TAB_ACCESS_DEFAULTS);
+  ac_saveSettings(defaults);
+  ac_saveToDB(defaults);
+  ac_render();
+  toast('Access settings reset to defaults');
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// BOOT
+// ═══════════════════════════════════════════════════════════════════════════
+async function bootAdmin() {
+  // Default: Sales tab
+  switchPanel('sales');
+  await sa_loadData();
+}
+
+document.addEventListener('DOMContentLoaded', function(){
+  var authed = jgCheckAuth();
+  var u = JSON.parse(localStorage.getItem('jg_platform_user')||'null');
+  if (u) jgShowUser(u);
+  if (authed) bootAdmin();
+});
+</script>
+</body>
+</html>
