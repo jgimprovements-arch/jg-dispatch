@@ -111,9 +111,13 @@
     /* PM edit view */
     '.tcd-lane{background:#fff;border-radius:10px;margin-bottom:10px;overflow:hidden;box-shadow:0 1px 3px rgba(13,45,94,.05);}',
     '.tcd-lane.me{border:2px solid #e85d04;}',
+    '.tcd-lane.pm{border-left:4px solid #1565c0;}',
+    '.tcd-lane.pm .tcd-lane-head{background:linear-gradient(90deg,rgba(21,101,192,.14),rgba(21,101,192,.04));}',
+    '.tcd-lane.pm .tcd-lane-role{color:#1565c0;font-weight:700;}',
     '.tcd-lane-head{padding:10px 12px;display:flex;align-items:center;justify-content:space-between;background:rgba(13,45,94,.04);border-bottom:1px solid rgba(13,45,94,.08);}',
     '.tcd-lane-head-l{display:flex;align-items:center;gap:8px;}',
     '.tcd-lane-avatar{width:28px;height:28px;border-radius:50%;background:#0d2d5e;color:#fff;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;font-family:"DM Mono",monospace;}',
+    '.tcd-lane-avatar.pm{background:#1565c0;border:2px solid #a0c4f0;}',
     '.tcd-lane-name{font-size:13px;font-weight:700;}',
     '.tcd-lane-role{font-size:9px;color:#6b7a96;text-transform:uppercase;letter-spacing:.04em;font-family:"DM Mono",monospace;}',
     '.tcd-lane-count{font-size:10px;background:rgba(13,45,94,.08);color:#0d1f3c;padding:3px 8px;border-radius:10px;font-weight:700;font-family:"DM Mono",monospace;}',
@@ -257,7 +261,7 @@
 
       // For PMs/Admins, pull the employee roster
       if (canEdit()) {
-        var emp = await window.sb('/rest/v1/employees?active=eq.true&role=in.(Technician,%22Project%20Manager%22)&select=id,name,role,market');
+        var emp = await window.sb('/rest/v1/employees?active=eq.true&role=in.(Technician,%22Project%20Manager%22,Admin)&select=id,name,role,market');
         D.employees = emp || [];
       }
 
@@ -367,6 +371,14 @@
     var all = fromEmp.concat(fromBoard);
     var seen = {};
     return all.filter(function(n) { if (seen[n]) return false; seen[n] = true; return true; }).sort();
+  }
+
+  // Look up an employee's role by name (case-insensitive). Defaults to 'Technician' if unknown.
+  function roleForName(name) {
+    if (!name || !D.employees || !D.employees.length) return 'Technician';
+    var k = name.toLowerCase().trim();
+    var match = D.employees.filter(function(e){ return (e.name||'').toLowerCase().trim() === k; })[0];
+    return match && match.role ? match.role : 'Technician';
   }
 
   // ── RENDER ───────────────────────────────
@@ -536,10 +548,12 @@
         var jobs = assignments[tech] || [];
         var isMe = tech.toLowerCase() === (myName() || '').toLowerCase();
         var over = jobs.length > 5; // soft cap
-        html += '<div class="tcd-lane' + (isMe ? ' me' : '') + '">';
+        var techRole = roleForName(tech);
+        var isPM = techRole === 'Project Manager';
+        html += '<div class="tcd-lane' + (isMe ? ' me' : '') + (isPM ? ' pm' : '') + '">';
         html += '<div class="tcd-lane-head">';
-        html += '<div class="tcd-lane-head-l"><div class="tcd-lane-avatar">' + initials(tech) + '</div>';
-        html += '<div><div class="tcd-lane-name">' + esc(tech) + (isMe ? ' <span style="color:#e85d04;font-size:10px;">(you)</span>' : '') + '</div><div class="tcd-lane-role">Technician</div></div></div>';
+        html += '<div class="tcd-lane-head-l"><div class="tcd-lane-avatar' + (isPM ? ' pm' : '') + '">' + initials(tech) + '</div>';
+        html += '<div><div class="tcd-lane-name">' + esc(tech) + (isMe ? ' <span style="color:#e85d04;font-size:10px;">(you)</span>' : '') + '</div><div class="tcd-lane-role">' + esc(techRole) + '</div></div></div>';
         html += '<span class="tcd-lane-count' + (over ? ' over' : '') + '">' + jobs.length + '</span>';
         html += '</div>';
         html += '<div class="tcd-lane-body' + (jobs.length ? '' : ' empty') + '" data-market="' + m + '" data-tech="' + esc(tech) + '">';
