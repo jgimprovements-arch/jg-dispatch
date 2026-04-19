@@ -48,6 +48,22 @@ body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);min
 .stat-val{font-size:16px;font-weight:600;color:var(--navy);font-family:'DM Mono',monospace;line-height:1.1;}
 .stat-val.red{color:var(--danger);}
 .stat-val.sm{font-size:12px;margin-top:2px;}
+/* Job search (stats bar) */
+.job-search-wrap{margin-left:auto;display:flex;align-items:center;gap:6px;padding:4px 10px;border-radius:6px;background:rgba(13,45,94,.04);border:1px solid var(--border);transition:all .15s;position:relative;min-width:220px;}
+.job-search-wrap:focus-within{background:#fff;border-color:var(--orange);box-shadow:0 0 0 2px rgba(232,93,4,.12);}
+.job-search-icon{font-size:11px;opacity:.5;flex-shrink:0;}
+.job-search-input{border:none;background:transparent;outline:none;font-size:12px;font-family:inherit;color:var(--text);width:180px;padding:2px 0;}
+.job-search-input::placeholder{color:var(--muted);font-weight:400;}
+.job-search-clear{border:none;background:transparent;color:var(--muted);cursor:pointer;font-size:16px;line-height:1;padding:0 4px;display:none;font-family:inherit;}
+.job-search-clear.show{display:block;}
+.job-search-clear:hover{color:var(--danger);}
+/* Board dim/highlight when searching */
+.board.searching .job-card,.board.searching .card{opacity:.25;transition:opacity .15s;}
+.board.searching .job-card.search-hit,.board.searching .card.search-hit{opacity:1;box-shadow:0 0 0 2px var(--orange),0 4px 12px rgba(232,93,4,.25);}
+.board.searching .lane{transition:opacity .15s;}
+.board.searching .lane.search-lane-dim{opacity:.5;}
+.pool-wrap.searching .uc{opacity:.25;transition:opacity .15s;}
+.pool-wrap.searching .uc.search-hit{opacity:1;box-shadow:0 0 0 2px var(--orange);}
 .legend-toggle{margin-left:auto;display:flex;align-items:center;gap:6px;cursor:pointer;padding:4px 10px;border-radius:6px;font-size:10px;color:var(--muted);transition:all .15s;border:1px solid transparent;position:relative;}
 .legend-toggle:hover{background:var(--border);color:var(--text);border-color:var(--border-mid);}
 .legend-toggle .chevron{transition:transform .2s;font-size:8px;}
@@ -327,6 +343,11 @@ body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);min
   <div class="stat"><div class="stat-lbl">Techs Active</div><div class="stat-val" id="s4">—</div></div>
   <div class="stat"><div class="stat-lbl">Techs Out</div><div class="stat-val red" id="s5">0</div></div>
   <div class="stat"><div class="stat-lbl">Waste Flags</div><div class="stat-val red" id="s6">0</div></div>
+  <div class="job-search-wrap">
+    <span class="job-search-icon">🔍</span>
+    <input type="text" id="job-search-input" class="job-search-input" placeholder="Search jobs, techs, cities…" oninput="filterBoardBySearch(this.value)" autocomplete="off">
+    <button class="job-search-clear" id="job-search-clear" onclick="clearBoardSearch()" title="Clear search">×</button>
+  </div>
   <div class="cache-banner" id="cache-banner">
     ⚡ Cached <span class="cache-age" id="cache-age"></span> old
     <button onclick="forceRefresh()">Refresh</button>
@@ -1074,27 +1095,40 @@ async function lookupTSIds(){
       const ur=await fetch(TS_PROXY+'?path=users&qs=group_ids='+gid+'%26active=yes');
       if(!ur.ok)continue;
       const ud=await ur.json();
-      // Load employee dispatch flags from Supabase
-      let dispatchFlags = {};
+      // Load employee roster from Supabase (role + dispatch flag)
+      // Dispatch logic: ONLY Technicians and Project Managers appear.
+      // Office/Admin/Sales/Estimator never appear on dispatch.
+      // Even within allowed roles, show_on_dispatch=false is an explicit opt-out (e.g. on leave).
+      let roleMap = {};         // name(lower) -> role
+      let dispatchFlags = {};   // name(lower) -> true/false (defaults to true)
       try {
         const SB_URL2 = 'https://nuykvchgecpiuikoerze.supabase.co';
         const SB_KEY2 = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im51eWt2Y2hnZWNwaXVpa29lcnplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYyNjM3ODYsImV4cCI6MjA5MTgzOTc4Nn0.39hZ8DdjT_0iFJXPeAL2FXUSLw8FZBirDVzxZTO1W9s';
-        const er = await fetch(SB_URL2 + '/rest/v1/employees?select=name,show_on_dispatch', { headers: { 'apikey': SB_KEY2, 'Authorization': 'Bearer ' + SB_KEY2 } });
+        const er = await fetch(SB_URL2 + '/rest/v1/employees?select=name,role,show_on_dispatch&active=eq.true', { headers: { 'apikey': SB_KEY2, 'Authorization': 'Bearer ' + SB_KEY2 } });
         if (er.ok) {
           const emps = await er.json();
           (emps || []).forEach(function(e) {
-            // Only store explicit false — don't store null/undefined which would exclude by default
-            if (e.show_on_dispatch === false) dispatchFlags[e.name.toLowerCase()] = false;
+            if (!e.name) return;
+            const k = e.name.toLowerCase().trim();
+            roleMap[k] = e.role || '';
+            if (e.show_on_dispatch === false) dispatchFlags[k] = false;
           });
         }
-      } catch(e2) { console.warn('dispatch flags fetch failed, showing all techs'); }
+      } catch(e2) { console.warn('employee roster fetch failed:', e2.message); }
+
+      const DISPATCH_ROLES = new Set(['Technician','Project Manager']);
 
       Object.values(ud.results?.users||{}).forEach(u=>{
         const nm=u.first_name+' '+u.last_name;
-        // Skip if explicitly excluded from dispatch
-        const flag = dispatchFlags[nm.toLowerCase()];
-        // Always show Josh regardless of dispatch flag (owner override)
-        const isOwner = nm.toLowerCase().includes('josh') || nm.toLowerCase().includes('greil');
+        const k=nm.toLowerCase().trim();
+        const role = roleMap[k];
+        const flag = dispatchFlags[k];
+        // Always show Josh regardless of role (owner override)
+        const isOwner = k.includes('josh') || k.includes('greil');
+        // If we have a role on record, enforce the allow-list. If we DON'T have them in Supabase yet,
+        // include them by default (first-load behavior before roster sync) — fail open, not closed.
+        if (role !== undefined && !DISPATCH_ROLES.has(role) && !isOwner) return;
+        // Respect explicit opt-out
         if (flag === false && !isOwner) return;
         tsIdMap[nm.toLowerCase()]=u.id;
         // Preserve existing job assignments if this tech was already loaded
@@ -1311,7 +1345,11 @@ async function pushTech(nm, locOverride){
 function toISO(d,h){const hr=Math.floor(h),mn=Math.round((h-hr)*60);return `${d}T${String(hr).padStart(2,'0')}:${String(mn).padStart(2,'0')}:00-06:00`;}
 
 // ── RENDER ────────────────────────────────
-function render(){renderBoard();renderPool();updateStats();saveBoardState();}
+function render(){renderBoard();renderPool();updateStats();saveBoardState();
+  // Re-apply job search if active
+  var si = document.getElementById('job-search-input');
+  if (si && si.value) filterBoardBySearch(si.value);
+}
 
 function renderBoard(){
   const techs=techQ[loc];const depot=LOCATIONS[loc];
@@ -1757,6 +1795,82 @@ document.addEventListener('click', function(e){
   if(panel.contains(e.target) || btn.contains(e.target)) return;
   panel.classList.remove('open');
   btn.classList.remove('open');
+});
+
+// ── JOB SEARCH ────────────────────────────
+// Matches against job name, address, city, tech name, status
+// Highlights matching cards, dims non-matching. Also dims lanes with no matches.
+function filterBoardBySearch(raw){
+  const q = (raw || '').trim().toLowerCase();
+  const board = document.getElementById('board');
+  const poolWrap = document.querySelector('.pool-wrap') || document.querySelector('.unassigned-wrap');
+  const clearBtn = document.getElementById('job-search-clear');
+  if (clearBtn) clearBtn.classList.toggle('show', !!q);
+  if (!q) { clearBoardSearch(); return; }
+
+  if (board) board.classList.add('searching');
+  if (poolWrap) poolWrap.classList.add('searching');
+
+  // Match each card against the query
+  const cards = document.querySelectorAll('.job-card, .card, .uc');
+  let hits = 0;
+  cards.forEach(function(card){
+    const jid = card.dataset.jobId;
+    const j = jid && window.jobs ? window.jobs[jid] || jobs[jid] : null;
+    // Also match the tech lane name (card.dataset.tech or nearest .tech-nm)
+    const laneEl = card.closest('.lane');
+    const techName = laneEl ? (laneEl.querySelector('.tech-nm')?.textContent || '') : '';
+    const haystack = [
+      j ? (j.name||'') : '',
+      j ? (j.addr||'') : '',
+      j ? (j.city||'') : '',
+      j ? (j.status||'') : '',
+      j ? (j.type||'') : '',
+      techName,
+      card.dataset.tech || '',
+      card.textContent || ''
+    ].join(' ').toLowerCase();
+    if (haystack.indexOf(q) !== -1) {
+      card.classList.add('search-hit');
+      hits++;
+    } else {
+      card.classList.remove('search-hit');
+    }
+  });
+
+  // Dim lanes that have no hits
+  document.querySelectorAll('.lane').forEach(function(lane){
+    const hasHit = lane.querySelector('.job-card.search-hit, .card.search-hit');
+    lane.classList.toggle('search-lane-dim', !hasHit);
+  });
+}
+
+function clearBoardSearch(){
+  const input = document.getElementById('job-search-input');
+  if (input) input.value = '';
+  const clearBtn = document.getElementById('job-search-clear');
+  if (clearBtn) clearBtn.classList.remove('show');
+  const board = document.getElementById('board');
+  const poolWrap = document.querySelector('.pool-wrap') || document.querySelector('.unassigned-wrap');
+  if (board) board.classList.remove('searching');
+  if (poolWrap) poolWrap.classList.remove('searching');
+  document.querySelectorAll('.search-hit').forEach(function(el){ el.classList.remove('search-hit'); });
+  document.querySelectorAll('.search-lane-dim').forEach(function(el){ el.classList.remove('search-lane-dim'); });
+}
+
+// Keyboard: / focuses search, Escape clears
+document.addEventListener('keydown', function(e){
+  if (e.key === '/' && document.activeElement.tagName !== 'INPUT' && document.activeElement.tagName !== 'TEXTAREA') {
+    e.preventDefault();
+    const input = document.getElementById('job-search-input');
+    if (input) input.focus();
+  } else if (e.key === 'Escape') {
+    const input = document.getElementById('job-search-input');
+    if (input && document.activeElement === input) {
+      clearBoardSearch();
+      input.blur();
+    }
+  }
 });
 
 // ── ON-CALL ROTATION ─────────────────────
