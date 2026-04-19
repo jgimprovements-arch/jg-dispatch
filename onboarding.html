@@ -158,7 +158,8 @@ textarea.form-input{min-height:72px;resize:vertical;}
     </div>
     <div class="form-row">
       <label class="form-label">Date of Birth</label>
-      <input type="date" id="s2-dob" class="form-input">
+      <input type="text" id="s2-dob" class="form-input" placeholder="MM/DD/YYYY" inputmode="numeric" autocomplete="bday" maxlength="10" oninput="maskDate(this)">
+      <div id="s2-dob-err" style="font-size:11px;color:#c02020;margin-top:4px;display:none;">Enter a valid date like 04/19/1985</div>
     </div>
     <div class="form-row">
       <label class="form-label">Emergency Contact Name</label>
@@ -382,6 +383,34 @@ var OB = {
   noncompeteSignedPdfUrl: null,
   noncompeteSignedPath: null
 };
+
+// Auto-format date input as the user types: 4191985 → 04/19/1985
+// Also handles paste events and backspacing cleanly
+function maskDate(el) {
+  var digits = (el.value || '').replace(/\D/g, '').slice(0, 8); // max 8 digits (MMDDYYYY)
+  var out = '';
+  if (digits.length >= 1) out = digits.slice(0, 2);
+  if (digits.length >= 3) out += '/' + digits.slice(2, 4);
+  if (digits.length >= 5) out += '/' + digits.slice(4, 8);
+  el.value = out;
+  // Hide error hint as they type (re-validated on submit)
+  var err = document.getElementById('s2-dob-err');
+  if (err) err.style.display = 'none';
+}
+
+// Parse MM/DD/YYYY → "YYYY-MM-DD" (ISO). Returns null if invalid.
+function parseDateMDY(s) {
+  var m = (s || '').match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (!m) return null;
+  var mm = parseInt(m[1], 10), dd = parseInt(m[2], 10), yyyy = parseInt(m[3], 10);
+  if (mm < 1 || mm > 12) return null;
+  if (dd < 1 || dd > 31) return null;
+  if (yyyy < 1900 || yyyy > 2100) return null;
+  // Verify the date actually exists (Feb 30, etc.)
+  var d = new Date(yyyy, mm - 1, dd);
+  if (d.getFullYear() !== yyyy || d.getMonth() !== mm - 1 || d.getDate() !== dd) return null;
+  return yyyy + '-' + String(mm).padStart(2, '0') + '-' + String(dd).padStart(2, '0');
+}
 
 async function bootOnboarding() {
   var params = new URLSearchParams(window.location.search);
@@ -722,10 +751,24 @@ async function nextStep(fromStep) {
 
     showStep(2);
   } else if (fromStep === 2) {
+    // Validate DOB format (MM/DD/YYYY)
+    var dobRaw = document.getElementById('s2-dob').value.trim();
+    var dobISO = null;
+    var dobErr = document.getElementById('s2-dob-err');
+    if (dobRaw) {
+      var parsed = parseDateMDY(dobRaw);
+      if (!parsed) {
+        if (dobErr) dobErr.style.display = 'block';
+        document.getElementById('s2-dob').focus();
+        return;
+      }
+      dobISO = parsed;
+      if (dobErr) dobErr.style.display = 'none';
+    }
     // Save step 2 data (address, DOB, emergency contact) to employee record
     OB.step2Data = {
       address: document.getElementById('s2-address').value.trim(),
-      dob: document.getElementById('s2-dob').value,
+      dob: dobISO,
       ec_name: document.getElementById('s2-ec-name').value.trim(),
       ec_phone: document.getElementById('s2-ec-phone').value.trim(),
       ec_rel: document.getElementById('s2-ec-rel').value.trim()
