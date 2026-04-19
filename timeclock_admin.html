@@ -208,6 +208,63 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;min
 var SB_URL = 'https://nuykvchgecpiuikoerze.supabase.co';
 var SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im51eWt2Y2hnZWNwaXVpa29lcnplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYyNjM3ODYsImV4cCI6MjA5MTgzOTc4Nn0.39hZ8DdjT_0iFJXPeAL2FXUSLw8FZBirDVzxZTO1W9s';
 
+// Zapier SMS webhook — routes to Twilio via Paths based on `type` field
+// REPLACE THIS URL with your actual Zapier Catch Hook URL
+var HOOKS = {
+  sms: 'https://hooks.zapier.com/hooks/catch/12653197/ujr6r82/'
+};
+
+// Cooldown cache so we don't spam the same person repeatedly
+var _smsCooldown = {};  // { "empName|type": timestamp } — 4 hour cooldown per pair
+var SMS_COOLDOWN_MS = 4 * 60 * 60 * 1000;
+
+async function fireSMS(type, payload) {
+  if (!HOOKS.sms || HOOKS.sms.indexOf('REPLACE_ME') !== -1) {
+    console.warn('SMS webhook not configured');
+    toast('⚠ SMS webhook not configured — add Zapier URL to HOOKS.sms');
+    return false;
+  }
+  if (!payload.phone) {
+    console.warn('SMS skipped — no phone for', payload.employee_name);
+    return false;
+  }
+
+  // Cooldown check
+  var cooldownKey = (payload.employee_name || '') + '|' + type;
+  var lastSent = _smsCooldown[cooldownKey];
+  if (lastSent && (Date.now() - lastSent) < SMS_COOLDOWN_MS) {
+    var minsAgo = Math.round((Date.now() - lastSent) / 60000);
+    console.log('SMS cooldown:', payload.employee_name, type, 'last sent', minsAgo, 'min ago');
+    return false;
+  }
+
+  try {
+    var body = Object.assign({ type: type, sent_at: new Date().toISOString() }, payload);
+    // Fire-and-forget; Zapier webhooks don't need CORS-compliant response
+    await fetch(HOOKS.sms, {
+      method: 'POST',
+      mode: 'no-cors',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    _smsCooldown[cooldownKey] = Date.now();
+    logActivity('SMS Sent', type + ' → ' + (payload.employee_name || '') + ' (' + payload.phone + ')', 'time_clock', payload.employee_name);
+    return true;
+  } catch (e) {
+    console.warn('SMS fire failed:', e.message);
+    return false;
+  }
+}
+
+// Format a US phone for SMS (+1XXXXXXXXXX)
+function _fmtSmsPhone(raw) {
+  if (!raw) return null;
+  var digits = String(raw).replace(/\D/g, '');
+  if (digits.length === 10) return '+1' + digits;
+  if (digits.length === 11 && digits[0] === '1') return '+' + digits;
+  return null;
+}
+
 var ST = {
   tab: 'timesheets',
   employees: [],
@@ -440,6 +497,16 @@ function renderLive() {
   if (pendingCorr.length) {
     h += '<div class="stat-card" style="border:2px solid var(--orange);cursor:pointer;" onclick="showTab(\'timesheets\',document.getElementById(\'tab-timesheets\'))">';
     h += '<div class="stat-val" style="color:var(--orange);">'+pendingCorr.length+'</div><div class="stat-lbl">Correction Requests</div></div>';
+  }
+  // Missed clock-out detection (active > 12 hours)
+  var missedCO = ST.entries.filter(function(e) {
+    return !e.clock_out && ((Date.now() - new Date(e.clock_in).getTime()) > 12*60*60*1000);
+  });
+  if (missedCO.length) {
+    h += '<div class="stat-card" style="border:2px solid #c62828;background:rgba(198,40,40,.04);">';
+    h += '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;"><div>';
+    h += '<div class="stat-val" style="color:#c62828;">'+missedCO.length+'</div><div class="stat-lbl" style="color:#c62828;font-weight:700;">&#9888; Missed Clock-Outs</div>';
+    h += '</div><button class="btn btn-sm" onclick="nudgeAllMissedCO()" style="background:#c62828;color:#fff;border-color:#c62828;white-space:nowrap;">📱 Text All</button></div></div>';
   }
   h += '</div>';
 
@@ -781,6 +848,123 @@ function _calcOT(entries) {
   return { regMins: regMins, otMins: otMins };
 }
 
+// ── SMS FLOW HELPERS ─────────────────────────────────────────────────────
+// Flow 1: Nudge a single missed clock-out (manual button on row)
+async function nudgeMissedCO(entryId) {
+  var e = ST.entries.find(function(x){ return x.id === entryId; });
+  if (!e) { toast('Entry not found'); return; }
+  var emp = ST.employees.find(function(x){ return x.name === e.employee_name; });
+  if (!emp || !emp.phone) { toast('No phone on file for ' + e.employee_name); return; }
+
+  var phone = _fmtSmsPhone(emp.phone);
+  if (!phone) { toast('Invalid phone number: ' + emp.phone); return; }
+
+  var entryDate = new Date(e.clock_in).toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
+  var sent = await fireSMS('missed_clockout', {
+    phone: phone,
+    employee_name: e.employee_name,
+    first_name: e.employee_name.split(' ')[0],
+    entry_date: entryDate,
+    job_name: e.job_name || 'no job',
+    fix_url: 'https://jgimprovements-arch.github.io/jg-dispatch/timeclock.html'
+  });
+  if (sent) toast('✓ Text sent to ' + e.employee_name.split(' ')[0]);
+  else toast('⚠ Text not sent (cooldown or config issue)');
+}
+
+// Flow 1b: Auto-nudge ALL missed clock-outs at once
+async function nudgeAllMissedCO() {
+  var missed = ST.entries.filter(function(e) {
+    return !e.clock_out && ((Date.now() - new Date(e.clock_in).getTime()) > 12*60*60*1000);
+  });
+  if (!missed.length) { toast('No missed clock-outs'); return; }
+  if (!confirm('Text ' + missed.length + ' employee(s) about missed clock-outs?')) return;
+
+  var sent = 0, skipped = 0;
+  for (var i = 0; i < missed.length; i++) {
+    var e = missed[i];
+    var emp = ST.employees.find(function(x){ return x.name === e.employee_name; });
+    if (!emp || !emp.phone) { skipped++; continue; }
+    var phone = _fmtSmsPhone(emp.phone);
+    if (!phone) { skipped++; continue; }
+    var entryDate = new Date(e.clock_in).toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
+    var ok = await fireSMS('missed_clockout', {
+      phone: phone,
+      employee_name: e.employee_name,
+      first_name: e.employee_name.split(' ')[0],
+      entry_date: entryDate,
+      job_name: e.job_name || 'no job',
+      fix_url: 'https://jgimprovements-arch.github.io/jg-dispatch/timeclock.html'
+    });
+    if (ok) sent++; else skipped++;
+  }
+  toast('✓ Sent ' + sent + ' text(s)' + (skipped ? ', skipped ' + skipped : ''));
+}
+
+// Flow 2: Verification reminder — send to all techs with unverified hours in current period
+async function sendVerificationReminders() {
+  var curPer = getCurrentPeriod();
+  if (!curPer) { toast('No current pay period'); return; }
+  var perStart = curPer.start.toISOString();
+  var perEnd = new Date(curPer.end); perEnd.setHours(23,59,59,999);
+
+  // Group entries by employee for current period
+  var byEmp = {};
+  ST.entries.forEach(function(e) {
+    var d = new Date(e.clock_in);
+    if (d < curPer.start || d > perEnd) return;
+    if (!e.clock_out) return;  // skip active entries
+    if (!byEmp[e.employee_name]) byEmp[e.employee_name] = { verified: 0, unverified: 0, totalMins: 0 };
+    var brks = ST.breaks.filter(function(b){ return b.entry_id === e.id; });
+    byEmp[e.employee_name].totalMins += billableMins(e, brks);
+    if (e.self_verified) byEmp[e.employee_name].verified++;
+    else byEmp[e.employee_name].unverified++;
+  });
+
+  // Filter to techs with at least one unverified entry
+  var toNudge = Object.entries(byEmp).filter(function(kv){ return kv[1].unverified > 0; });
+  if (!toNudge.length) { toast('All techs have verified hours — nothing to send'); return; }
+  if (!confirm('Send verification reminder to ' + toNudge.length + ' employee(s) with unverified hours this period?')) return;
+
+  var sent = 0, skipped = 0;
+  for (var i = 0; i < toNudge.length; i++) {
+    var nm = toNudge[i][0], d = toNudge[i][1];
+    var emp = ST.employees.find(function(x){ return x.name === nm; });
+    if (!emp || !emp.phone) { skipped++; continue; }
+    var phone = _fmtSmsPhone(emp.phone);
+    if (!phone) { skipped++; continue; }
+    var hrs = (d.totalMins / 60).toFixed(1);
+    var ok = await fireSMS('verify_reminder', {
+      phone: phone,
+      employee_name: nm,
+      first_name: nm.split(' ')[0],
+      total_hours: hrs,
+      unverified_count: d.unverified,
+      pay_period: curPer.label,
+      review_url: 'https://jgimprovements-arch.github.io/jg-dispatch/timeclock.html'
+    });
+    if (ok) sent++; else skipped++;
+  }
+  toast('✓ Sent ' + sent + ' verification reminder(s)' + (skipped ? ', skipped ' + skipped : ''));
+}
+
+// Flow 3: Fire when admin resolves a correction request
+async function smsCorrectionUpdate(correction, status, adminNote) {
+  var emp = ST.employees.find(function(x){ return x.name === correction.employee_name; });
+  if (!emp || !emp.phone) return false;
+  var phone = _fmtSmsPhone(emp.phone);
+  if (!phone) return false;
+
+  return fireSMS('correction_update', {
+    phone: phone,
+    employee_name: correction.employee_name,
+    first_name: correction.employee_name.split(' ')[0],
+    status: status,
+    original_issue: (correction.correction_type || 'correction') + ' — ' + (correction.note || '').substring(0, 60),
+    admin_note: adminNote || ''
+  });
+}
+
 // ── APPROVAL FUNCTIONS ───────────────────────────────────────────────────
 function getApprovalKey(periodLabel, empName) {
   return periodLabel + '|' + empName;
@@ -870,13 +1054,80 @@ async function unlockTimecard(periodLabel, empName) {
 function exportPayrollReport(periodLabel, byEmp, curPer) {
   if (!byEmp || !Object.keys(byEmp).length) { toast('No data to export'); return; }
 
-  var rows = [];
-  rows.push(['JG Restoration — Payroll Report']);
-  rows.push(['Pay Period', periodLabel]);
-  rows.push(['Generated', new Date().toLocaleString()]);
-  rows.push(['Generated By', getApprovedBy()]);
-  rows.push([]);
-  rows.push(['Employee', 'Pay Type', 'Rate', 'Reg Hrs', 'OT Hrs', 'Total Hrs', 'Reg Pay', 'OT Pay', 'Gross', 'Status', 'Approved By', 'Approved At']);
+  // ─── Paychex Flex Import Format ───
+  // Columns: Employee ID, Worked Date, Earnings Code, Hours, Department
+  var paychexRows = [];
+  paychexRows.push(['Employee ID', 'Worked Date', 'Earnings Code', 'Hours', 'Department']);
+
+  var missingIds = [];
+  var notApproved = [];
+
+  Object.entries(byEmp).forEach(function(kv) {
+    var nm = kv[0], d = kv[1];
+    var emp = ST.employees.find(function(e){ return e.name === nm; });
+    var paychexId = emp && emp.paychex_id ? emp.paychex_id : '';
+    var dept = emp && emp.market ? emp.market : '';
+
+    if (!paychexId) missingIds.push(nm);
+    if (getApprovalStatus(periodLabel, nm) !== 'approved') notApproved.push(nm);
+
+    // Paychex wants daily hours per employee, split reg/OT at 40/week
+    // Group entries by week, then apply OT at the week level but distribute back to days
+    var dailyMap = {};  // date → total minutes
+    d.entries.forEach(function(e) {
+      var eb = ST.breaks.filter(function(b){ return b.entry_id === e.id; });
+      var mins = billableMins(e, eb);
+      var day = e.clock_in.split('T')[0];
+      dailyMap[day] = (dailyMap[day] || 0) + mins;
+    });
+
+    // Week-level OT calculation: for each week, total > 40hrs = OT
+    var weekBuckets = {};
+    Object.keys(dailyMap).sort().forEach(function(day) {
+      var wk = _getWeekKey(day);
+      if (!weekBuckets[wk]) weekBuckets[wk] = [];
+      weekBuckets[wk].push({ day: day, mins: dailyMap[day] });
+    });
+
+    Object.values(weekBuckets).forEach(function(days) {
+      var runningTotal = 0;
+      days.forEach(function(dayObj) {
+        var dayMins = dayObj.mins;
+        var weekSoFar = runningTotal;
+        var weekAfter = runningTotal + dayMins;
+        var regMins, otMins;
+
+        if (weekAfter <= 2400) {
+          // Entire day is regular
+          regMins = dayMins; otMins = 0;
+        } else if (weekSoFar >= 2400) {
+          // Entire day is OT
+          regMins = 0; otMins = dayMins;
+        } else {
+          // Split day
+          regMins = 2400 - weekSoFar;
+          otMins = dayMins - regMins;
+        }
+
+        if (regMins > 0) {
+          paychexRows.push([paychexId, dayObj.day, 'REG', (regMins/60).toFixed(2), dept]);
+        }
+        if (otMins > 0) {
+          paychexRows.push([paychexId, dayObj.day, 'OVT', (otMins/60).toFixed(2), dept]);
+        }
+        runningTotal = weekAfter;
+      });
+    });
+  });
+
+  // ─── Summary report (human-readable, audit trail) ───
+  var summaryRows = [];
+  summaryRows.push(['JG Restoration — Payroll Summary']);
+  summaryRows.push(['Pay Period', periodLabel]);
+  summaryRows.push(['Generated', new Date().toLocaleString()]);
+  summaryRows.push(['Generated By', getApprovedBy()]);
+  summaryRows.push([]);
+  summaryRows.push(['Employee', 'Paychex ID', 'Pay Type', 'Rate', 'Reg Hrs', 'OT Hrs', 'Total Hrs', 'Reg Pay', 'OT Pay', 'Gross', 'Status', 'Approved By', 'Approved At']);
 
   var grandTotal = 0, grandReg = 0, grandOT = 0, grandGross = 0;
 
@@ -885,6 +1136,7 @@ function exportPayrollReport(periodLabel, byEmp, curPer) {
     var emp = ST.employees.find(function(e){ return e.name === nm; });
     var rate = emp ? parseFloat(emp.hourly_rate || 0) : 0;
     var payType = emp ? (emp.pay_type || 'hourly') : 'hourly';
+    var paychexId = emp && emp.paychex_id ? emp.paychex_id : '(missing)';
     var ot = _calcOT(d.entries);
     var regHrs = ot.regMins / 60;
     var otHrs = ot.otMins / 60;
@@ -907,43 +1159,51 @@ function exportPayrollReport(periodLabel, byEmp, curPer) {
 
     grandReg += regHrs; grandOT += otHrs; grandTotal += totalHrs; grandGross += gross;
 
-    var approvalKey = getApprovalKey(periodLabel, nm);
-    var approval = ST.approvals[approvalKey] || {};
+    var approval = ST.approvals[getApprovalKey(periodLabel, nm)] || {};
     var status = approval.status || 'pending';
 
-    rows.push([
-      nm,
-      payType,
+    summaryRows.push([
+      nm, paychexId, payType,
       (typeof rate === 'number' ? '$' + rate.toFixed(2) + '/hr' : rate),
-      regHrs.toFixed(2),
-      otHrs.toFixed(2),
-      totalHrs.toFixed(2),
-      '$' + regPay.toFixed(2),
-      '$' + otPay.toFixed(2),
-      '$' + gross.toFixed(2),
-      status,
-      approval.approved_by || '',
+      regHrs.toFixed(2), otHrs.toFixed(2), totalHrs.toFixed(2),
+      '$' + regPay.toFixed(2), '$' + otPay.toFixed(2), '$' + gross.toFixed(2),
+      status, approval.approved_by || '',
       approval.approved_at ? new Date(approval.approved_at).toLocaleString() : ''
     ]);
   });
 
-  rows.push([]);
-  rows.push(['TOTALS', '', '', grandReg.toFixed(2), grandOT.toFixed(2), grandTotal.toFixed(2), '', '', '$' + grandGross.toFixed(2)]);
+  summaryRows.push([]);
+  summaryRows.push(['TOTALS', '', '', '', grandReg.toFixed(2), grandOT.toFixed(2), grandTotal.toFixed(2), '', '', '$' + grandGross.toFixed(2)]);
 
-  var csv = rows.map(function(r){
-    return r.map(function(c){ var s = String(c == null ? '' : c).split('"').join('""'); return '"' + s + '"'; }).join(',');
-  }).join('\n');
+  // ─── Pre-flight warnings ───
+  var warnings = [];
+  if (missingIds.length) warnings.push('⚠ Missing Paychex ID: ' + missingIds.join(', '));
+  if (notApproved.length) warnings.push('⚠ Not approved yet: ' + notApproved.join(', '));
 
-  var blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-  var url = URL.createObjectURL(blob);
-  var a = document.createElement('a');
-  a.href = url;
-  a.download = 'payroll_' + periodLabel.replace(/[^a-z0-9]+/gi, '_') + '.csv';
-  a.click();
-  URL.revokeObjectURL(url);
+  if (warnings.length) {
+    if (!confirm(warnings.join('\n\n') + '\n\nExport anyway? (Missing IDs will produce blank rows in Paychex)')) return;
+  }
 
-  logActivity('Payroll Report Exported', periodLabel + ' — ' + Object.keys(byEmp).length + ' employees, $' + grandGross.toFixed(2) + ' gross', 'time_clock', null);
-  toast('✓ Payroll report downloaded');
+  // ─── Download both files ───
+  var toCsv = function(rows) {
+    return rows.map(function(r){
+      return r.map(function(c){ var s = String(c == null ? '' : c).split('"').join('""'); return '"' + s + '"'; }).join(',');
+    }).join('\n');
+  };
+  var download = function(csv, filename) {
+    var blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url; a.download = filename; a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  var safeName = periodLabel.replace(/[^a-z0-9]+/gi, '_');
+  download(toCsv(paychexRows), 'paychex_import_' + safeName + '.csv');
+  setTimeout(function() { download(toCsv(summaryRows), 'payroll_summary_' + safeName + '.csv'); }, 300);
+
+  logActivity('Payroll Export', periodLabel + ' — ' + Object.keys(byEmp).length + ' employees, $' + grandGross.toFixed(2) + ' gross' + (missingIds.length?' ('+missingIds.length+' missing IDs)':''), 'time_clock', null);
+  toast('✓ Paychex import + summary downloaded');
 }
 
 function renderTimesheets() {
@@ -1146,12 +1406,13 @@ function renderTimesheets() {
     if (!allApproved) {
       h += '<button class="btn btn-primary" style="background:#2e7d32;border-color:#2e7d32;" onclick="_tcApproveAll()">&#10003; Approve All</button>';
     }
-    h += '<button class="btn btn-primary" onclick="_tcPayrollReport()">&#128229; Payroll Report</button>';
+    h += '<button class="btn" onclick="sendVerificationReminders()" style="background:#0d2d5e;color:#fff;border-color:#0d2d5e;">📱 Text Unverified</button>';
+    h += '<button class="btn btn-primary" onclick="_tcPayrollReport()">📥 Paychex Export</button>';
     h += '</div></div>';
 
     // Detail table
     h += '<div class="card"><div class="card-hdr"><div class="card-title">Time Entries — '+selPeriod+'</div></div>';
-    h += '<table class="tc-table"><thead><tr><th>Employee</th><th>Date</th><th>Clock In</th><th>Clock Out</th><th>Actual</th><th>Billable</th><th>Break</th><th>Job</th><th>Flags</th><th></th></tr></thead><tbody>';
+    h += '<table class="tc-table"><thead><tr><th>Employee</th><th>Date</th><th>Clock In</th><th>Clock Out</th><th>Actual</th><th>Billable</th><th>Break</th><th>Job</th><th>Verified</th><th>Flags</th><th></th></tr></thead><tbody>';
     filtered.sort(function(a,b){return new Date(a.clock_in)-new Date(b.clock_in);});
     filtered.forEach(function(e){
       var breaks=ST.breaks.filter(function(b){return b.entry_id===e.id;});
@@ -1160,18 +1421,29 @@ function renderTimesheets() {
       var bkMins=breaks.reduce(function(s,b){return s+(b.duration_minutes||0);},0);
       var early=isEarlyClockIn(e.clock_in);
       var active=!e.clock_out;
+      // Missed clock-out: active entry over 12 hours old
+      var missedCO = active && ((Date.now() - new Date(e.clock_in).getTime()) > 12*60*60*1000);
       var flagCell='';
-      if(early&&!e.approved_early) flagCell='<span style="color:#c62828;font-size:11px;font-weight:700;">Early<br><button class="btn btn-sm" onclick="approveEarly(\''+e.id+'\')">Approve</button></span>';
-      else if(early&&e.approved_early) flagCell='<span style="color:#2e7d32;font-size:11px;">Approved</span>';
-      h += '<tr'+(early&&!e.approved_early?' style="background:rgba(198,40,40,.04);"':'')+'>'; 
+      if(missedCO) {
+        flagCell='<span style="color:#c62828;font-size:11px;font-weight:700;">&#9888; Missed clock-out<br><button class="btn btn-sm" onclick="editEntry(\''+e.id+'\')">Fix</button> <button class="btn btn-sm" onclick="nudgeMissedCO(\''+e.id+'\')" style="background:#0d2d5e;color:#fff;border-color:#0d2d5e;">📱 Text</button></span>';
+      }
+      else if(early&&!e.approved_early) flagCell='<span style="color:#c62828;font-size:11px;font-weight:700;">Early<br><button class="btn btn-sm" onclick="approveEarly(\''+e.id+'\')">Approve</button></span>';
+      else if(early&&e.approved_early) flagCell='<span style="color:#2e7d32;font-size:11px;">Early OK</span>';
+      // Verified indicator
+      var verifiedCell = e.self_verified
+        ? '<span title="Tech self-verified on clock-out" style="color:#2e7d32;font-size:16px;font-weight:700;">&#10003;</span>'
+        : (active ? '<span style="color:var(--muted);font-size:11px;">—</span>' : '<span title="Not self-verified" style="color:#c62828;font-size:11px;">unverified</span>');
+      var rowBg = missedCO ? 'background:rgba(198,40,40,.08);' : (early&&!e.approved_early?'background:rgba(198,40,40,.04);':'');
+      h += '<tr style="'+rowBg+'">';
       h += '<td><strong>'+e.employee_name+'</strong></td>';
       h += '<td>'+fmtD(new Date(e.clock_in))+'</td>';
       h += '<td class="mono"'+(early&&!e.approved_early?' style="color:#c62828;font-weight:700;"':'')+'>'+fmt(e.clock_in)+'</td>';
-      h += '<td class="mono">'+(active?'<span class="badge badge-green">Active</span>':fmt(e.clock_out))+'</td>';
+      h += '<td class="mono">'+(active?(missedCO?'<span class="badge" style="background:#c62828;color:#fff;">MISSED</span>':'<span class="badge badge-green">Active</span>'):fmt(e.clock_out))+'</td>';
       h += '<td>'+fmtDur(actual)+'</td>';
       h += '<td><strong>'+fmtDur(bill)+'</strong></td>';
       h += '<td>'+(bkMins?fmtDur(bkMins):'-')+'</td>';
       h += '<td style="max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+(e.job_name||'-')+'</td>';
+      h += '<td style="text-align:center;">'+verifiedCell+'</td>';
       h += '<td>'+flagCell+'</td>';
       var tcApproved = getApprovalStatus(selPeriod, e.employee_name) === 'approved';
       if (tcApproved) {
@@ -1283,15 +1555,22 @@ async function resolveSwap(id, status) {
 }
 
 async function resolveCorrection(corrId, status, entryId) {
+  var correction = ST.corrections.find(function(c){ return c.id === corrId; });
   await fetch(SB_URL + '/rest/v1/time_corrections?id=eq.' + corrId, {
     method: 'PATCH',
     headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
     body: JSON.stringify({ status: status })
   });
+  // Fire SMS to employee notifying of the resolution
+  if (correction) {
+    var noteMsg = status === 'approved'
+      ? 'Thanks — updating your timecard now.'
+      : 'Please see your supervisor if you need to discuss.';
+    smsCorrectionUpdate(correction, status, noteMsg);
+  }
   if (status === 'approved' && entryId) {
-    // Open the edit modal for admin to make the actual fix
     toast('Correction approved — edit the entry to apply the fix');
-    logActivity('Correction Approved', 'Time correction approved for ' + (ST.corrections.find(function(c){return c.id===corrId;})||{}).employee_name, 'corrections');
+    logActivity('Correction Approved', 'Time correction approved for ' + (correction||{}).employee_name, 'corrections');
     await loadAll();
     editEntry(entryId);
   } else {
@@ -2323,13 +2602,15 @@ function buildEmpForm(emp) {
     '<div id="emp-hourly-fields" style="display:'+(emp.pay_type=="salary"?"none":"block")+';">' +
     '<div class="form-row">' +
     '<div><label class="form-label">Hourly Rate ($)</label><input class="form-input" id="emp-rate" type="number" step="0.01" value="'+(emp.hourly_rate||'')+'"></div>' +
-    '<div></div>' +
+    '<div><label class="form-label">Paychex Employee ID</label><input class="form-input" id="emp-paychex-id" type="text" value="'+(emp.paychex_id||'')+'" placeholder="required for payroll export"></div>' +
     '</div></div>' +
     '<div id="emp-salary-fields" style="display:'+(emp.pay_type=="salary"?"block":"none")+';">' +
     '<div class="form-row">' +
     '<div><label class="form-label">Annual Salary ($)</label><input class="form-input" id="emp-salary" type="number" step="100" value="'+(emp.annual_salary||'')+'" placeholder="e.g. 52000" oninput="calcDailyRate()"></div>' +
     '<div><label class="form-label">Daily Rate (auto)</label><input class="form-input" id="emp-daily-rate" type="number" step="0.01" value="'+(emp.annual_salary?(emp.annual_salary/260).toFixed(2):(emp.daily_rate||''))+'" placeholder="salary ÷ 260 days" readonly style="background:rgba(13,45,94,.03);"></div>' +
-    '</div></div>' +
+    '</div>' +
+    '<div class="form-row"><div><label class="form-label">Paychex Employee ID</label><input class="form-input" id="emp-paychex-id-sal" type="text" value="'+(emp.paychex_id||'')+'" placeholder="required for payroll export"></div><div></div></div>' +
+    '</div>' +
     '<div style="border-top:1px solid var(--border);margin:12px 0;padding-top:12px;">' +
     '<div style="display:flex;align-items:center;justify-content:space-between;">' +
     '<div>' +
@@ -2386,7 +2667,8 @@ async function saveEmployee() {
     pto_hours_used: parseFloat((document.getElementById('emp-pto-used')||{}).value) || 0,
     pto_hours_available: Math.max(0, (parseFloat((document.getElementById('emp-pto-total')||{}).value)||0) - (parseFloat((document.getElementById('emp-pto-used')||{}).value)||0)),
     pto_accrual_rate: parseFloat(document.getElementById('emp-pto-accrual').value) || 0,
-    pto_notes: (document.getElementById('emp-pto-notes').value || '').trim()
+    pto_notes: (document.getElementById('emp-pto-notes').value || '').trim(),
+    paychex_id: (((document.getElementById('emp-paychex-id')||{}).value) || ((document.getElementById('emp-paychex-id-sal')||{}).value) || '').trim() || null
   };
   if (!data.name || !data.email) { toast('Name and email are required'); return; }
   var saveHeaders = {'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json'};

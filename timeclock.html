@@ -706,6 +706,30 @@ body {
   </div>
 </div>
 
+<!-- CLOCK-OUT REVIEW SHEET -->
+<div class="sheet-overlay" id="clockout-review-sheet" onclick="event.stopPropagation()">
+  <div class="sheet" onclick="event.stopPropagation()">
+    <div class="sheet-handle"></div>
+    <div class="sheet-title">✓ Confirm Your Day</div>
+    <p style="font-size:12px;color:var(--muted);margin-bottom:14px;line-height:1.5;">Review before clocking out. This locks in your hours and helps payroll run on time.</p>
+
+    <div id="review-summary" style="background:linear-gradient(135deg,#0d2d5e,#1a4480);color:#fff;border-radius:12px;padding:16px;margin-bottom:14px;">
+      <div style="font-size:10px;font-weight:700;color:rgba(255,255,255,.6);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">Today's Shift</div>
+      <div id="review-duration" style="font-size:28px;font-weight:700;line-height:1;margin-bottom:8px;">—</div>
+      <div id="review-job" style="font-size:13px;color:rgba(255,255,255,.85);line-height:1.4;"></div>
+      <div id="review-times" style="font-size:11px;color:rgba(255,255,255,.6);margin-top:6px;font-family:'JetBrains Mono',monospace;"></div>
+    </div>
+
+    <div id="review-breaks" style="background:rgba(245,166,35,.06);border:1px solid rgba(245,166,35,.3);border-radius:10px;padding:12px;margin-bottom:14px;font-size:12px;color:var(--navy);display:none;"></div>
+
+    <div style="display:flex;gap:8px;">
+      <button id="review-fix-btn" onclick="reviewFix()" style="flex:1;padding:14px 10px;background:transparent;border:1.5px solid var(--border);border-radius:12px;font-size:13px;font-weight:600;color:var(--muted);cursor:pointer;font-family:DM Sans,sans-serif;">Something's wrong</button>
+      <button id="review-confirm-btn" onclick="reviewConfirm()" style="flex:2;padding:14px;background:#2e7d32;border:none;border-radius:12px;color:#fff;font-size:15px;font-weight:700;cursor:pointer;font-family:DM Sans,sans-serif;">✓ Confirm & Clock Out</button>
+    </div>
+    <button onclick="closeReviewSheet()" style="width:100%;padding:10px;margin-top:8px;background:transparent;border:none;font-size:12px;color:var(--muted);cursor:pointer;font-family:DM Sans,sans-serif;">Cancel — stay clocked in</button>
+  </div>
+</div>
+
 <!-- NOTES SHEET -->
 <div class="sheet-overlay" id="notes-overlay" onclick="if(event.target===this)closeNotes()">
   <div class="sheet" onclick="event.stopPropagation()">
@@ -1111,6 +1135,14 @@ async function loadAll() {
       TC.clockInTime = new Date(active.clock_in).getTime();
       TC.selectedJobId = active.job_id || '';
       TC.selectedJobName = active.job_name || '';
+    } else {
+      // Check for abandoned entries from prior days (forgot to clock out)
+      var weekAgo = new Date(Date.now() - 7*86400000).toISOString().split('T')[0];
+      var orphanR = await sb('/rest/v1/time_entries?employee_id=eq.' + TC.employee.id + '&clock_in=gte.' + weekAgo + 'T00:00:00&clock_in=lt.' + today + 'T00:00:00&clock_out=is.null&order=clock_in.desc&limit=3&select=*');
+      if (orphanR && orphanR.length) {
+        TC.abandonedEntries = orphanR;
+        setTimeout(showAbandonedEntryPrompt, 1200);
+      }
     }
   }
 
@@ -1443,7 +1475,7 @@ function filterJobs() { renderJobs(); }
 
 async function handleMainBtn() {
   if (TC.clockedIn) {
-    await clockOut();
+    showClockOutReview();
   } else {
     if (!TC.selectedJobId) {
       toast('Select a job first to clock in');
@@ -1582,7 +1614,95 @@ async function clockIn() {
   updateStats();
 }
 
-async function clockOut() {
+function showAbandonedEntryPrompt() {
+  if (!TC.abandonedEntries || !TC.abandonedEntries.length) return;
+  var entry = TC.abandonedEntries[0];
+  var inTime = new Date(entry.clock_in);
+  var fmtDate = inTime.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
+  var fmtTime = function(d){ var h=d.getHours()%12||12; var m=d.getMinutes(); var ap=d.getHours()>=12?'PM':'AM'; return h+':'+(m<10?'0':'')+m+' '+ap; };
+
+  // Build a one-off overlay since this is a high-priority prompt
+  if (document.getElementById('abandoned-overlay')) return;
+  var overlay = document.createElement('div');
+  overlay.id = 'abandoned-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:99998;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.7);padding:20px;';
+
+  var card = document.createElement('div');
+  card.style.cssText = 'background:#fff;border-radius:16px;max-width:420px;width:100%;padding:24px;font-family:DM Sans,sans-serif;';
+  card.innerHTML =
+    '<div style="font-size:32px;margin-bottom:10px;">⏰</div>' +
+    '<div style="font-size:20px;font-weight:700;color:#0d2d5e;margin-bottom:8px;">Forgot to clock out?</div>' +
+    '<div style="font-size:13px;color:#6b7a96;margin-bottom:16px;line-height:1.5;">We noticed you still had an open shift from <strong>'+fmtDate+'</strong> at '+fmtTime(inTime)+' on <strong>'+(entry.job_name||'no job')+'</strong>. Let\'s fix it so your hours are right for payroll.</div>' +
+    '<button id="abandoned-fix-btn" style="width:100%;padding:14px;background:#e85d04;border:none;border-radius:12px;color:#fff;font-size:15px;font-weight:700;cursor:pointer;font-family:DM Sans,sans-serif;margin-bottom:8px;">Submit correction</button>' +
+    '<button id="abandoned-later-btn" style="width:100%;padding:12px;background:transparent;border:1.5px solid #e2e8f0;border-radius:12px;font-size:13px;font-weight:600;color:#6b7a96;cursor:pointer;font-family:DM Sans,sans-serif;">Remind me later</button>';
+  overlay.appendChild(card);
+  document.body.appendChild(overlay);
+
+  document.getElementById('abandoned-fix-btn').onclick = function() {
+    overlay.remove();
+    var outLabel = 'FORGOT TO CLOCK OUT';
+    openCorrectionRequest(entry.id, fmtTime(inTime), outLabel, entry.job_name);
+    // Pre-fill the correction type/note
+    setTimeout(function() {
+      var typeSel = document.getElementById('corr-type');
+      var noteBox = document.getElementById('corr-note');
+      if (typeSel) typeSel.value = 'missed_punch';
+      if (noteBox && !noteBox.value) noteBox.value = 'Forgot to clock out on ' + fmtDate + '. Actual clock-out time was approximately ____ (please fill in).';
+      if (noteBox) noteBox.focus();
+    }, 200);
+  };
+  document.getElementById('abandoned-later-btn').onclick = function() { overlay.remove(); };
+}
+
+function showClockOutReview() {
+  if (!TC.activeEntry) return;
+
+  var now = new Date();
+  var inTime = new Date(TC.clockInTime);
+  var totalMins = Math.floor((now - inTime) / 60000);
+  var hrs = Math.floor(totalMins/60), mins = totalMins % 60;
+
+  document.getElementById('review-duration').textContent = hrs + 'h ' + mins + 'm';
+  document.getElementById('review-job').textContent = TC.activeEntry.job_name || 'No job selected';
+
+  var fmt = function(d){ var h = d.getHours()%12 || 12; var m = d.getMinutes(); var ap = d.getHours()>=12?'PM':'AM'; return h+':'+(m<10?'0':'')+m+' '+ap; };
+  document.getElementById('review-times').textContent = fmt(inTime) + ' → ' + fmt(now);
+
+  // Show breaks if any
+  var breaks = (TC.breaks || []).filter(function(b){ return b.entry_id === TC.activeEntry.id; });
+  var breakBox = document.getElementById('review-breaks');
+  if (breaks.length) {
+    var totalBreak = breaks.reduce(function(s,b){ return s + (b.duration_minutes||0); }, 0);
+    breakBox.innerHTML = '☕ <strong>' + breaks.length + ' break' + (breaks.length>1?'s':'') + '</strong> — ' + totalBreak + ' min total';
+    breakBox.style.display = 'block';
+  } else {
+    breakBox.style.display = 'none';
+  }
+
+  document.getElementById('clockout-review-sheet').classList.add('open');
+}
+
+function closeReviewSheet() {
+  document.getElementById('clockout-review-sheet').classList.remove('open');
+}
+
+async function reviewConfirm() {
+  closeReviewSheet();
+  await clockOut(true);  // pass self_verified flag
+}
+
+function reviewFix() {
+  closeReviewSheet();
+  // Open correction request for the active entry
+  if (TC.activeEntry) {
+    var inTime = new Date(TC.activeEntry.clock_in);
+    var fmt = function(d){ var h = d.getHours()%12 || 12; var m = d.getMinutes(); var ap = d.getHours()>=12?'PM':'AM'; return h+':'+(m<10?'0':'')+m+' '+ap; };
+    openCorrectionRequest(TC.activeEntry.id, fmt(inTime), 'now', TC.activeEntry.job_name);
+  }
+}
+
+
+async function clockOut(selfVerified) {
   if (!TC.activeEntry) return;
   var btn = document.getElementById('main-btn');
   btn.style.opacity = '.6'; btn.style.pointerEvents = 'none';
@@ -1603,7 +1723,9 @@ async function clockOut() {
       duration_minutes: duration,
       clock_out_lat: loc ? loc.lat : null,
       clock_out_lng: loc ? loc.lng : null,
-      status: 'complete'
+      status: 'complete',
+      self_verified: !!selfVerified,
+      self_verified_at: selfVerified ? now : null
     })
   });
 
