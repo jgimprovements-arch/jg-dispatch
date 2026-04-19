@@ -372,12 +372,34 @@ async function loadAppSettings() {
     if (rows && rows.length) {
       rows.forEach(function(r) {
         if (r.id && r.value != null) {
-          _appSettings[r.id] = typeof r.value === 'number' ? r.value : (parseFloat(r.value) || _appSettings[r.id]);
+          // pay_period_config is an object; labor_burden_rate and similar are numbers
+          if (r.id === 'pay_period_config' && typeof r.value === 'object') {
+            _appSettings[r.id] = r.value;
+            // Hydrate ST.payPeriod from DB
+            if (r.value.type && r.value.start) {
+              ST.payPeriod = { type: r.value.type, start: r.value.start };
+              // Mirror to localStorage for offline resilience
+              try { localStorage.setItem('jg_pay_period', JSON.stringify(ST.payPeriod)); } catch(e){}
+            }
+          } else {
+            _appSettings[r.id] = typeof r.value === 'number' ? r.value : (parseFloat(r.value) || _appSettings[r.id]);
+          }
         }
       });
     }
   } catch(e) { console.warn('loadAppSettings failed:', e); }
   return _appSettings;
+}
+
+// Save pay period to Supabase app_settings so tech timeclock can read the same config
+async function savePayPeriodConfig() {
+  try {
+    await fetch(SB_URL + '/rest/v1/app_settings', {
+      method: 'POST',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'resolution=merge-duplicates,return=minimal' },
+      body: JSON.stringify({ id: 'pay_period_config', value: { type: ST.payPeriod.type, start: ST.payPeriod.start }, updated_at: new Date().toISOString() })
+    });
+  } catch(e) { console.warn('savePayPeriodConfig failed:', e); }
 }
 
 function getLaborBurdenRate() {
@@ -432,6 +454,11 @@ async function _saveLaborBurdenFromModal() {
 // ── LOAD ──────────────────────────────────────────────────────────────────
 async function loadAll() {
   await loadAppSettings();
+
+  // If Supabase doesn't have pay period config yet but localStorage does, seed it
+  if (!_appSettings.pay_period_config && ST.payPeriod) {
+    savePayPeriodConfig();  // fire-and-forget
+  }
 
   var emps = await sb('/rest/v1/employees?order=name.asc&select=*');
   ST.employees = emps || [];
@@ -2240,10 +2267,10 @@ function renderTimesheets() {
   h += '</div>';
   h += '<div id="pp-settings" style="display:none;padding:14px;border-top:1px solid var(--border);">';
   h += '<div class="form-row">';
-  h += '<div><label class="form-label">Period Type</label><select class="form-select" id="pp-type" onchange="ST.payPeriod.type=this.value;localStorage.setItem(\'jg_pay_period\',JSON.stringify(ST.payPeriod));renderTimesheets();">';
+  h += '<div><label class="form-label">Period Type</label><select class="form-select" id="pp-type" onchange="ST.payPeriod.type=this.value;localStorage.setItem(\'jg_pay_period\',JSON.stringify(ST.payPeriod));savePayPeriodConfig();renderTimesheets();">';
   ['weekly','biweekly','semimonthly'].forEach(function(t){ h += '<option value="'+t+'"'+(ST.payPeriod.type===t?' selected':'')+'>'+({weekly:'Weekly',biweekly:'Bi-Weekly',semimonthly:'Semi-Monthly'}[t])+'</option>'; });
   h += '</select></div>';
-  h += '<div><label class="form-label">First Period Start Date</label><input type="date" class="form-input" id="pp-start" value="'+ST.payPeriod.start+'" onchange="ST.payPeriod.start=this.value;localStorage.setItem(\'jg_pay_period\',JSON.stringify(ST.payPeriod));renderTimesheets();"></div>';
+  h += '<div><label class="form-label">First Period Start Date</label><input type="date" class="form-input" id="pp-start" value="'+ST.payPeriod.start+'" onchange="ST.payPeriod.start=this.value;localStorage.setItem(\'jg_pay_period\',JSON.stringify(ST.payPeriod));savePayPeriodConfig();renderTimesheets();"></div>';
   h += '</div>';
   h += '<div style="font-size:11px;color:var(--muted);margin-top:8px;">7:30 AM rule: Clock-ins before 7:30am are adjusted to 7:30am for billable hours unless admin approves early start.</div>';
   h += '</div></div>';

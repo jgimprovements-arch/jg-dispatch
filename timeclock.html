@@ -781,7 +781,11 @@ body {
   <div class="body">
     <div class="stats-row" id="hours-stats-row">
       <div class="stat-card"><div class="stat-val" id="hours-stat-today">0h 0m</div><div class="stat-lbl">Today</div></div>
-      <div class="stat-card"><div class="stat-val" id="hours-stat-week">0h 0m</div><div class="stat-lbl">This Week</div></div>
+      <div class="stat-card">
+        <div class="stat-val" id="hours-stat-week">0h 0m</div>
+        <div class="stat-lbl" id="hours-stat-week-lbl">Pay Period</div>
+        <div class="stat-sub" id="hours-stat-period-dates" style="font-size:10px;color:var(--muted);margin-top:2px;"></div>
+      </div>
     </div>
     <!-- PTO BALANCE CARD -->
     <div id="pto-balance-card" style="display:none;background:var(--surface);border-radius:16px;padding:14px 16px;margin-bottom:16px;box-shadow:0 2px 12px rgba(13,45,94,.07);">
@@ -853,7 +857,8 @@ var TC = {
   selectedJobName: '',
   entries: [],
   clockInTime: null,
-  durationTimer: null
+  durationTimer: null,
+  payPeriodConfig: { type: 'biweekly', start: '2025-01-06' }  // default; overridden by app_settings.pay_period_config
 };
 
 // AUTH -
@@ -1101,6 +1106,7 @@ async function initApp(u) {
 
   startClock();
   await loadAll();
+  await loadPayPeriodConfig();  // Pull pay period from app_settings (shared with admin)
 
   // Celebrations fire on first clock-in on/after birthday or anniversary (see clockIn())
   loadNotifications();
@@ -3161,6 +3167,40 @@ async function loadMyVacationHistory() {
   }
 }
 
+// Calculate current pay period given type ('weekly' | 'biweekly' | 'semimonthly') and anchor start date
+function getCurrentPayPeriod(config) {
+  var type = (config && config.type) || 'biweekly';
+  var startStr = (config && config.start) || '2025-01-06';
+  var anchor = new Date(startStr + 'T00:00:00');
+  var today = new Date(); today.setHours(0,0,0,0);
+
+  if (type === 'weekly' || type === 'biweekly') {
+    var days = type === 'weekly' ? 7 : 14;
+    // How many complete periods since anchor
+    var msSince = today - anchor;
+    var periodsElapsed = Math.floor(msSince / (days * 86400000));
+    var start = new Date(anchor); start.setDate(anchor.getDate() + periodsElapsed * days);
+    var end = new Date(start); end.setDate(start.getDate() + days - 1); end.setHours(23,59,59,999);
+    return { start: start, end: end };
+  }
+  // Semi-monthly: 1st-15th and 16th-last day of month
+  var mo = today.getMonth(), yr = today.getFullYear();
+  if (today.getDate() <= 15) {
+    return { start: new Date(yr, mo, 1), end: new Date(yr, mo, 15, 23, 59, 59) };
+  }
+  return { start: new Date(yr, mo, 16), end: new Date(yr, mo + 1, 0, 23, 59, 59) };
+}
+
+// Load pay period config from Supabase app_settings (shared with admin)
+async function loadPayPeriodConfig() {
+  try {
+    var rows = await sb('/rest/v1/app_settings?id=eq.pay_period_config&select=value');
+    if (rows && rows[0] && rows[0].value && rows[0].value.type && rows[0].value.start) {
+      TC.payPeriodConfig = { type: rows[0].value.type, start: rows[0].value.start };
+    }
+  } catch(e) { /* fall back to default */ }
+}
+
 async function loadMyHours() {
   if (!TC.employee || !TC.employee.id) return;
   // Update PTO card in this tab
@@ -3219,22 +3259,31 @@ async function loadMyHours() {
   var fmtTime = function(iso){ var d=new Date(iso),h=d.getHours()%12||12,m=d.getMinutes(),ap=d.getHours()>=12?'PM':'AM'; return h+':'+(m<10?'0':'')+m+' '+ap; };
   var fmtDur  = function(mins){ return Math.floor(mins/60)+'h '+(mins%60)+'m'; };
   var fmtDate = function(iso){ var d=new Date(iso); var days=['Sun','Mon','Tue','Wed','Thu','Fri','Sat']; return days[d.getDay()]+' '+(d.getMonth()+1)+'/'+d.getDate(); };
-  var since   = new Date(); since.setDate(since.getDate()-7);
-  var entries = await sb('/rest/v1/time_entries?employee_id=eq.'+TC.employee.id+'&clock_in=gte.'+since.toISOString()+'&order=clock_in.desc&limit=50&select=*') || [];
-  var today   = new Date(); today.setHours(0,0,0,0);
-  var wkStart = new Date(today); wkStart.setDate(today.getDate()-today.getDay());
-  var todayMins=0, weekMins=0;
+  var fmtShort = function(d){ var mos=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']; return mos[d.getMonth()]+' '+d.getDate(); };
+
+  // Use the shared pay period config (from app_settings, loaded at boot)
+  var period = getCurrentPayPeriod(TC.payPeriodConfig);
+  var since  = period.start;
+  var until  = period.end;
+
+  var entries = await sb('/rest/v1/time_entries?employee_id=eq.'+TC.employee.id+'&clock_in=gte.'+since.toISOString()+'&clock_in=lte.'+until.toISOString()+'&order=clock_in.desc&limit=100&select=*') || [];
+  var today = new Date(); today.setHours(0,0,0,0);
+  var todayMins=0, periodMins=0;
   entries.forEach(function(e){
     var inT=new Date(e.clock_in), outT=e.clock_out?new Date(e.clock_out):new Date();
     var m=Math.floor((outT-inT)/60000);
     if(inT>=today)  todayMins+=m;
-    if(inT>=wkStart) weekMins+=m;
+    periodMins += m;  // all fetched entries are within the pay period window
   });
+
   var s1=document.getElementById('hours-stat-today'); if(s1) s1.textContent=fmtDur(todayMins);
-  var s2=document.getElementById('hours-stat-week');  if(s2) s2.textContent=fmtDur(weekMins);
+  var s2=document.getElementById('hours-stat-week');  if(s2) s2.textContent=fmtDur(periodMins);
+  var periodLabel = fmtShort(period.start) + ' – ' + fmtShort(period.end);
+  var s3=document.getElementById('hours-stat-period-dates'); if(s3) s3.textContent=periodLabel;
+
   var el=document.getElementById('hours-entry-list');
   if (!el) return;
-  if (!entries.length) { el.innerHTML='<div class="empty">No entries in the last 7 days</div>'; return; }
+  if (!entries.length) { el.innerHTML='<div class="empty">No entries in this pay period ('+periodLabel+')</div>'; return; }
   el.innerHTML = entries.map(function(e){
     var mins = e.duration_minutes || Math.floor(((e.clock_out?new Date(e.clock_out):new Date())-new Date(e.clock_in))/60000);
     var active = !e.clock_out;
