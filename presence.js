@@ -106,7 +106,17 @@
 
     ensureSupabase(function(){
       try {
-        if (!_client) _client = window.supabase.createClient(SB_URL, SB_KEY);
+        // Use the shared Supabase instance (creates it if no one has yet)
+        if (!_client) {
+          if (window.JGSupabase && window.JGSupabase.client) {
+            _client = window.JGSupabase.client;
+          } else {
+            _client = window.supabase.createClient(SB_URL, SB_KEY);
+            // Publish it for other scripts on this page to share
+            window.JGSupabase = window.JGSupabase || {};
+            window.JGSupabase.client = _client;
+          }
+        }
         _channel = _client.channel(CHANNEL, {
           config: { presence: { key: _me.email } }
         });
