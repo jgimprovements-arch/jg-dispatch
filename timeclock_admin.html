@@ -141,6 +141,8 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;min
 .toast.show{opacity:1;transform:translateX(-50%) translateY(0);}
 </style>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
 </head>
 <body>
 
@@ -829,6 +831,27 @@ function _tcPayrollReport() {
   exportPayrollReport(period, _tcByEmp, _tcCurPer);
 }
 
+function _tcToggleApproved() {
+  var sec = document.getElementById('approved-section');
+  var icon = document.getElementById('approved-toggle-icon');
+  if (!sec) return;
+  if (sec.style.display === 'none') {
+    sec.style.display = 'block';
+    if (icon) icon.textContent = '▼';
+  } else {
+    sec.style.display = 'none';
+    if (icon) icon.textContent = '▶';
+  }
+}
+
+async function _tcRedownloadPDF(idx) {
+  var k = _tcEmpKeys[idx];
+  if (!k) return;
+  var approvalInfo = ST.approvals[getApprovalKey(k[0], k[1])] || {};
+  toast('Regenerating PDF for ' + k[1] + '...');
+  await generateAndArchiveTimecard(k[1], k[0], approvalInfo.approved_by || 'Admin', approvalInfo.approved_at || new Date().toISOString());
+}
+
 // Top-level OT helpers (also defined locally inside renderTimesheets — kept for module scope access)
 function _getWeekKey(iso) {
   var d = new Date(iso); var day = d.getDay();
@@ -965,6 +988,203 @@ async function smsCorrectionUpdate(correction, status, adminNote) {
   });
 }
 
+// ── TIMECARD PDF GENERATION ──────────────────────────────────────────────
+function _computeTimecardTotals(empName, periodStart, periodEnd) {
+  // Gather entries for this employee + period
+  var pStart = new Date(periodStart); pStart.setHours(0,0,0,0);
+  var pEnd = new Date(periodEnd); pEnd.setHours(23,59,59,999);
+
+  var entries = ST.entries.filter(function(e) {
+    if (e.employee_name !== empName) return false;
+    var d = new Date(e.clock_in);
+    return d >= pStart && d <= pEnd && e.clock_out;
+  }).sort(function(a,b){ return new Date(a.clock_in) - new Date(b.clock_in); });
+
+  var ot = _calcOT(entries);
+  var emp = ST.employees.find(function(x){ return x.name === empName; });
+  var rate = emp ? parseFloat(emp.hourly_rate || 0) : 0;
+  var payType = emp ? (emp.pay_type || 'hourly') : 'hourly';
+  var regHrs = ot.regMins / 60;
+  var otHrs = ot.otMins / 60;
+  var totalHrs = regHrs + otHrs;
+  var regPay = 0, otPay = 0, gross = 0;
+
+  if (payType === 'salary' && emp && emp.annual_salary) {
+    var perPeriod = parseFloat(emp.annual_salary) / (ST.payPeriod.type==='weekly'?52:ST.payPeriod.type==='biweekly'?26:24);
+    var pd = ST.payPeriod.type==='weekly'?5:10;
+    var wd = new Set(entries.map(function(e){ return e.clock_in.split('T')[0]; })).size;
+    var md = Math.max(0, pd - wd);
+    gross = perPeriod - md*(perPeriod/pd);
+    regPay = gross;
+  } else if (rate) {
+    regPay = rate * regHrs;
+    otPay = rate * 1.5 * otHrs;
+    gross = regPay + otPay;
+  }
+
+  return {
+    entries: entries, employee: emp, rate: rate, payType: payType,
+    regHrs: regHrs, otHrs: otHrs, totalHrs: totalHrs,
+    regPay: regPay, otPay: otPay, gross: gross
+  };
+}
+
+function generateTimecardPDF(empName, periodLabel, approverName, approvedAt) {
+  if (typeof window.jspdf === 'undefined') { toast('PDF library not loaded — refresh page'); return null; }
+  var jsPDF = window.jspdf.jsPDF;
+
+  // Find period dates from label
+  var periods = getPayPeriods(ST.payPeriod.type, ST.payPeriod.start, 80);
+  var period = periods.find(function(p){ return p.label === periodLabel; });
+  if (!period) { toast('Period not found for PDF'); return null; }
+
+  var t = _computeTimecardTotals(empName, period.start, period.end);
+  var doc = new jsPDF({ orientation:'portrait', unit:'pt', format:'letter' });
+  var pageW = doc.internal.pageSize.getWidth();
+
+  // Header band
+  doc.setFillColor(13, 45, 94);
+  doc.rect(0, 0, pageW, 70, 'F');
+  doc.setTextColor(255,255,255);
+  doc.setFont('helvetica','bold'); doc.setFontSize(18);
+  doc.text('JG RESTORATION', 40, 32);
+  doc.setFont('helvetica','normal'); doc.setFontSize(11);
+  doc.text('Approved Timecard', 40, 52);
+  doc.setFontSize(9);
+  doc.text('Fire • Water • Mold • Reconstruction', pageW - 40, 32, { align: 'right' });
+  doc.text('jg-restoration.com  |  (920) 428-4200', pageW - 40, 48, { align: 'right' });
+
+  // Employee info block
+  var y = 96;
+  doc.setTextColor(13,45,94);
+  doc.setFont('helvetica','bold'); doc.setFontSize(13);
+  doc.text(empName, 40, y);
+  doc.setFont('helvetica','normal'); doc.setFontSize(10);
+  doc.setTextColor(100,100,100);
+  y += 16;
+  doc.text('Pay Period: ' + periodLabel, 40, y);
+  y += 14;
+  doc.text('Pay Type: ' + t.payType + (t.rate ? '  •  Rate: $' + t.rate.toFixed(2) + '/hr' : ''), 40, y);
+  y += 14;
+  doc.text('Approved by: ' + approverName + '  •  ' + new Date(approvedAt).toLocaleString(), 40, y);
+  y += 20;
+
+  // Summary card
+  doc.setFillColor(248, 249, 252);
+  doc.rect(40, y, pageW - 80, 70, 'F');
+  doc.setDrawColor(220,225,235);
+  doc.rect(40, y, pageW - 80, 70);
+
+  var colW = (pageW - 80) / 4;
+  var cells = [
+    { label: 'Total Hours', value: t.totalHrs.toFixed(2) },
+    { label: 'Regular', value: t.regHrs.toFixed(2) },
+    { label: 'Overtime', value: t.otHrs.toFixed(2) },
+    { label: 'Gross Pay', value: '$' + t.gross.toFixed(2) }
+  ];
+  cells.forEach(function(c, i) {
+    doc.setFont('helvetica','normal'); doc.setFontSize(8);
+    doc.setTextColor(120,120,135);
+    doc.text(c.label.toUpperCase(), 40 + i*colW + 12, y + 22);
+    doc.setFont('helvetica','bold'); doc.setFontSize(16);
+    doc.setTextColor(13,45,94);
+    if (c.label === 'Overtime' && t.otHrs > 0) doc.setTextColor(232, 93, 4);
+    doc.text(c.value, 40 + i*colW + 12, y + 48);
+  });
+  y += 90;
+
+  // Entry detail table
+  var body = t.entries.map(function(e) {
+    var breaks = ST.breaks.filter(function(b){ return b.entry_id === e.id; });
+    var actual = e.duration_minutes || 0;
+    var bill = billableMins(e, breaks);
+    var bkMins = breaks.reduce(function(s,b){ return s + (b.duration_minutes||0); }, 0);
+    var fmtDt = function(iso) { var d=new Date(iso); return d.toLocaleDateString('en-US',{month:'numeric',day:'numeric',year:'2-digit'}); };
+    var fmtTm = function(iso) { if(!iso) return '-'; var d=new Date(iso); var h=d.getHours()%12||12; var m=d.getMinutes(); var ap=d.getHours()>=12?'PM':'AM'; return h+':'+(m<10?'0':'')+m+' '+ap; };
+    var fmtHM = function(mins) { return Math.floor(mins/60)+'h '+(mins%60)+'m'; };
+    return [
+      fmtDt(e.clock_in),
+      fmtTm(e.clock_in),
+      fmtTm(e.clock_out),
+      fmtHM(actual),
+      bkMins ? fmtHM(bkMins) : '-',
+      fmtHM(bill),
+      (e.job_name || '-').substring(0, 30),
+      e.self_verified ? '✓' : ''
+    ];
+  });
+
+  doc.autoTable({
+    startY: y,
+    head: [['Date','Clock In','Clock Out','Actual','Break','Billable','Job','Verified']],
+    body: body,
+    theme: 'grid',
+    styles: { fontSize: 8, cellPadding: 4 },
+    headStyles: { fillColor: [13, 45, 94], textColor: 255, fontStyle: 'bold' },
+    alternateRowStyles: { fillColor: [248, 249, 252] },
+    margin: { left: 40, right: 40 }
+  });
+
+  // Footer
+  var finalY = doc.lastAutoTable.finalY + 20;
+  doc.setFont('helvetica','italic'); doc.setFontSize(8);
+  doc.setTextColor(130,130,145);
+  doc.text('This document represents an approved and locked timecard. Any changes require admin unlock before edits can be made.', 40, finalY, { maxWidth: pageW - 80 });
+  doc.text('Generated ' + new Date().toLocaleString() + ' by ' + getApprovedBy(), 40, finalY + 14);
+
+  return doc;
+}
+
+async function snapshotTimecardToArchive(empName, periodLabel, totals, pdfBase64) {
+  var emp = ST.employees.find(function(x){ return x.name === empName; });
+  var payload = {
+    employee_name: empName,
+    employee_id: emp ? emp.id : null,
+    period_label: periodLabel,
+    approved_by: getApprovedBy(),
+    approved_at: new Date().toISOString(),
+    total_hours: totals.totalHrs,
+    reg_hours: totals.regHrs,
+    ot_hours: totals.otHrs,
+    gross_pay: totals.gross,
+    pay_type: totals.payType,
+    rate: typeof totals.rate === 'number' ? totals.rate : null,
+    entry_count: totals.entries.length,
+    entry_snapshot: JSON.stringify(totals.entries.map(function(e){
+      return {
+        id: e.id, clock_in: e.clock_in, clock_out: e.clock_out,
+        duration_minutes: e.duration_minutes, job_name: e.job_name,
+        self_verified: !!e.self_verified
+      };
+    }))
+  };
+  try {
+    await fetch(SB_URL + '/rest/v1/timecard_archive', {
+      method: 'POST',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+  } catch(e) { console.warn('Archive snapshot failed:', e.message); }
+}
+
+// Trigger download of PDF + archive snapshot (called from approveTimecard)
+async function generateAndArchiveTimecard(empName, periodLabel, approverName, approvedAt) {
+  var doc = generateTimecardPDF(empName, periodLabel, approverName, approvedAt);
+  if (!doc) return;
+  var periods = getPayPeriods(ST.payPeriod.type, ST.payPeriod.start, 80);
+  var period = periods.find(function(p){ return p.label === periodLabel; });
+  var totals = _computeTimecardTotals(empName, period.start, period.end);
+
+  // Filename: LastName_FirstName_PeriodStart.pdf — sortable
+  var nameSlug = empName.replace(/[^a-z0-9]+/gi, '_');
+  var dateSlug = period.start.toISOString().split('T')[0];
+  var filename = nameSlug + '_' + dateSlug + '.pdf';
+  doc.save(filename);
+
+  // Fire snapshot to Supabase archive
+  await snapshotTimecardToArchive(empName, periodLabel, totals);
+}
+
 // ── APPROVAL FUNCTIONS ───────────────────────────────────────────────────
 function getApprovalKey(periodLabel, empName) {
   return periodLabel + '|' + empName;
@@ -1017,6 +1237,12 @@ async function approveTimecard(periodLabel, empName) {
 
   toast('✓ Timecard approved for ' + empName);
   logActivity('Timecard Approved', empName + ' — ' + periodLabel + ' (approved by ' + approver + ')', 'time_clock', empName);
+
+  // Generate PDF download + snapshot to archive
+  try {
+    await generateAndArchiveTimecard(empName, periodLabel, approver, nowIso);
+  } catch(err) { console.warn('PDF/archive failed:', err.message); }
+
   render();
 }
 
@@ -1291,9 +1517,19 @@ function renderTimesheets() {
     }
     function fmtHM(mins){ var h2=Math.floor(mins/60),m2=Math.round(mins%60); return h2+'h '+(m2<10?'0':'')+m2+'m'; }
 
-    // Employee summary cards
-    h += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px;margin-bottom:16px;">';
-    Object.entries(byEmp).forEach(function(kv){
+    // Split into pending vs approved
+    var pendingEmps = {}, approvedEmps = {};
+    Object.entries(byEmp).forEach(function(kv) {
+      if (getApprovalStatus(selPeriod, kv[0]) === 'approved') approvedEmps[kv[0]] = kv[1];
+      else pendingEmps[kv[0]] = kv[1];
+    });
+
+    // Employee summary cards (PENDING ONLY — approved collapsed to separate section below)
+    var pendingKeys = Object.keys(pendingEmps);
+    if (pendingKeys.length) {
+      h += '<div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:10px;">⏳ Pending Review ('+pendingKeys.length+')</div>';
+      h += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px;margin-bottom:16px;">';
+      Object.entries(pendingEmps).forEach(function(kv){
       var nm=kv[0], d=kv[1];
       var emp=ST.employees.find(function(e){return e.name===nm;});
       var isSalary = emp && emp.pay_type==='salary';
@@ -1355,8 +1591,83 @@ function renderTimesheets() {
       h += '</div>';
     });
     h += '</div>';
+    } // end if pendingKeys.length
 
-    // Period summary bar
+    // ─── APPROVED & ARCHIVED SECTION (collapsed) ───
+    var approvedKeys = Object.keys(approvedEmps);
+    if (approvedKeys.length) {
+      h += '<div style="margin-top:20px;margin-bottom:20px;background:rgba(46,125,50,.04);border:1px solid rgba(46,125,50,.2);border-radius:10px;padding:14px 18px;">';
+      h += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;cursor:pointer;" onclick="_tcToggleApproved()">';
+      h += '<div style="font-size:11px;font-weight:700;color:#2e7d32;text-transform:uppercase;letter-spacing:.06em;">🔒 Approved & Archived ('+approvedKeys.length+')</div>';
+      h += '<div id="approved-toggle-icon" style="font-size:14px;color:#2e7d32;">▼</div></div>';
+
+      h += '<div id="approved-section" style="display:block;">';
+
+      // Compact table layout for approved
+      h += '<table class="tc-table" style="margin:0;background:#fff;border-radius:8px;overflow:hidden;">';
+      h += '<thead><tr><th>Employee</th><th style="text-align:right;">Total Hrs</th><th style="text-align:right;">Reg</th><th style="text-align:right;">OT</th><th style="text-align:right;">Gross</th><th>Approved By</th><th>Approved At</th><th></th></tr></thead><tbody>';
+
+      Object.entries(approvedEmps).forEach(function(kv) {
+        var nm3 = kv[0], d3 = kv[1];
+        var emp3 = ST.employees.find(function(e){ return e.name === nm3; });
+        var rate3 = emp3 ? parseFloat(emp3.hourly_rate||0) : 0;
+        var ot4 = calcOT(d3.entries);
+        var regP3 = 0, otP3 = 0, tot3 = 0;
+        if (emp3 && emp3.pay_type==='salary' && emp3.annual_salary) {
+          var annSal3 = parseFloat(emp3.annual_salary);
+          var periodPay3 = annSal3/(ST.payPeriod.type==='weekly'?52:ST.payPeriod.type==='biweekly'?26:24);
+          var pd3 = ST.payPeriod.type==='weekly'?5:10;
+          var wd3 = new Set(d3.entries.map(function(e){return e.clock_in.split('T')[0];})).size;
+          var md3 = Math.max(0, pd3-wd3);
+          regP3 = periodPay3-md3*(periodPay3/pd3); tot3 = regP3;
+        } else if (rate3) {
+          regP3 = rate3*(ot4.regMins/60); otP3 = rate3*1.5*(ot4.otMins/60); tot3 = regP3+otP3;
+        }
+        var approvalInfo3 = ST.approvals[getApprovalKey(selPeriod, nm3)] || {};
+        var totalHrsStr = Math.floor((ot4.regMins+ot4.otMins)/60)+'h '+(((ot4.regMins+ot4.otMins)%60))+'m';
+        var regStr = Math.floor(ot4.regMins/60)+'h '+(ot4.regMins%60)+'m';
+        var otStr = ot4.otMins > 0 ? Math.floor(ot4.otMins/60)+'h '+(ot4.otMins%60)+'m' : '—';
+        var empIdx3 = Object.keys(byEmp).indexOf(nm3);
+        h += '<tr>';
+        h += '<td><strong style="color:var(--navy);">'+nm3+'</strong></td>';
+        h += '<td style="text-align:right;font-weight:700;">'+totalHrsStr+'</td>';
+        h += '<td style="text-align:right;">'+regStr+'</td>';
+        h += '<td style="text-align:right;color:'+(ot4.otMins>0?'#c62828':'var(--muted)')+';">'+otStr+'</td>';
+        h += '<td style="text-align:right;font-weight:700;color:#2e7d32;">$'+tot3.toFixed(2)+'</td>';
+        h += '<td style="font-size:11px;">'+(approvalInfo3.approved_by||'—')+'</td>';
+        h += '<td style="font-size:11px;color:var(--muted);">'+(approvalInfo3.approved_at?new Date(approvalInfo3.approved_at).toLocaleDateString():'—')+'</td>';
+        h += '<td style="white-space:nowrap;"><button class="btn btn-sm" onclick="_tcRedownloadPDF('+empIdx3+')" title="Re-download PDF">📄 PDF</button> ';
+        if (isAdmin()) h += '<button class="btn btn-sm" onclick="_tcUnlock('+empIdx3+')" title="Unlock for edits">🔓</button>';
+        h += '</td>';
+        h += '</tr>';
+      });
+      h += '</tbody></table>';
+
+      // Totals row for approved
+      var appRegMins=0, appOtMins=0, appGross=0;
+      Object.entries(approvedEmps).forEach(function(kv){
+        var d4 = kv[1]; var emp4 = ST.employees.find(function(e){ return e.name === kv[0]; });
+        var ot5 = calcOT(d4.entries);
+        appRegMins += ot5.regMins; appOtMins += ot5.otMins;
+        var rate4 = emp4 ? parseFloat(emp4.hourly_rate||0) : 0;
+        if (emp4 && emp4.pay_type==='salary' && emp4.annual_salary) {
+          var pp5 = parseFloat(emp4.annual_salary)/(ST.payPeriod.type==='weekly'?52:ST.payPeriod.type==='biweekly'?26:24);
+          var pd5 = ST.payPeriod.type==='weekly'?5:10;
+          var wd5 = new Set(d4.entries.map(function(e){return e.clock_in.split('T')[0];})).size;
+          var md5 = Math.max(0, pd5-wd5);
+          appGross += pp5-md5*(pp5/pd5);
+        } else if (rate4) {
+          appGross += rate4*(ot5.regMins/60) + rate4*1.5*(ot5.otMins/60);
+        }
+      });
+      h += '<div style="margin-top:10px;padding:10px 14px;background:#fff;border-radius:8px;display:flex;gap:24px;align-items:center;font-size:12px;">';
+      h += '<div><span style="color:var(--muted);">Approved Total:</span> <strong>'+(Math.floor((appRegMins+appOtMins)/60))+'h '+((appRegMins+appOtMins)%60)+'m</strong></div>';
+      h += '<div><span style="color:var(--muted);">Approved Gross:</span> <strong style="color:#2e7d32;">$'+appGross.toFixed(2)+'</strong></div>';
+      h += '</div>';
+
+      h += '</div>';  // #approved-section
+      h += '</div>';  // outer container
+    }
     var periodRegMins=0, periodOtMins=0, periodTotalPay=0;
     Object.entries(byEmp).forEach(function(kv){
       var nm2=kv[0], d2=kv[1];
@@ -1410,11 +1721,15 @@ function renderTimesheets() {
     h += '<button class="btn btn-primary" onclick="_tcPayrollReport()">📥 Paychex Export</button>';
     h += '</div></div>';
 
-    // Detail table
-    h += '<div class="card"><div class="card-hdr"><div class="card-title">Time Entries — '+selPeriod+'</div></div>';
-    h += '<table class="tc-table"><thead><tr><th>Employee</th><th>Date</th><th>Clock In</th><th>Clock Out</th><th>Actual</th><th>Billable</th><th>Break</th><th>Job</th><th>Verified</th><th>Flags</th><th></th></tr></thead><tbody>';
-    filtered.sort(function(a,b){return new Date(a.clock_in)-new Date(b.clock_in);});
-    filtered.forEach(function(e){
+    // Detail table (hide entries for employees whose timecards are approved — they show in Approved section above)
+    var pendingFiltered = filtered.filter(function(e) {
+      return getApprovalStatus(selPeriod, e.employee_name) !== 'approved';
+    });
+    if (pendingFiltered.length) {
+      h += '<div class="card"><div class="card-hdr"><div class="card-title">Time Entries — '+selPeriod+' <span style="font-size:11px;font-weight:400;color:var(--muted);">(approved entries hidden above)</span></div></div>';
+      h += '<table class="tc-table"><thead><tr><th>Employee</th><th>Date</th><th>Clock In</th><th>Clock Out</th><th>Actual</th><th>Billable</th><th>Break</th><th>Job</th><th>Verified</th><th>Flags</th><th></th></tr></thead><tbody>';
+      pendingFiltered.sort(function(a,b){return new Date(a.clock_in)-new Date(b.clock_in);});
+      pendingFiltered.forEach(function(e){
       var breaks=ST.breaks.filter(function(b){return b.entry_id===e.id;});
       var actual=e.duration_minutes||durMins(e);
       var bill=billableMins(e,breaks);
@@ -1453,7 +1768,8 @@ function renderTimesheets() {
       }
       h += '</tr>';
     });
-    h += '</tbody></table>';
+      h += '</tbody></table></div>';
+    } // end if pendingFiltered.length
 
     // Absence records
     var periodAbsences=ST.absences.filter(function(a){
