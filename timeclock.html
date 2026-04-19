@@ -1027,35 +1027,7 @@ async function initApp(u) {
   startClock();
   await loadAll();
 
-  // Celebrations — re-fetch employee fresh to guarantee birthday/start_date
-  setTimeout(async function() {
-    try {
-      var cr = await fetch(SB_URL + '/rest/v1/employees?email=eq.' + encodeURIComponent(u.email) + '&select=name,birthday,start_date', {
-        headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
-      });
-      if (cr.ok) {
-        var cd = await cr.json();
-        if (cd && cd[0]) {
-          var today = new Date();
-          // Birthday check
-          if (cd[0].birthday) {
-            var bp = cd[0].birthday.split('-');
-            if (parseInt(bp[1])-1 === today.getMonth() && parseInt(bp[2]) === today.getDate()) {
-              showBirthdayCelebration(cd[0].name);
-            }
-          }
-          // Anniversary check
-          if (cd[0].start_date) {
-            var sp = cd[0].start_date.split('-');
-            var yrs = today.getFullYear() - parseInt(sp[0]);
-            if (yrs > 0 && parseInt(sp[1])-1 === today.getMonth() && parseInt(sp[2]) === today.getDate()) {
-              setTimeout(function(){ showAnniversaryCelebration(cd[0].name, yrs); }, 1500);
-            }
-          }
-        }
-      }
-    } catch(e) {}
-  }, 2500);
+  // Celebrations fire on first clock-in on/after birthday or anniversary (see clockIn())
   loadNotifications();
   initRealtimeSync();
 
@@ -1473,6 +1445,53 @@ async function handleMainBtn() {
   }
 }
 
+async function checkClockInCelebration(u) {
+  try {
+    var today = new Date();
+    var todayStr = today.toISOString().split('T')[0];
+    // Already celebrated this year?
+    var bdayKey = 'jg_bday_celebrated_' + today.getFullYear();
+    var annKey  = 'jg_ann_celebrated_'  + today.getFullYear();
+    var email   = u ? u.email : (TC.user ? TC.user.email : '');
+    if (!email) return;
+
+    var cr = await fetch(SB_URL + '/rest/v1/employees?email=eq.' + encodeURIComponent(email) + '&select=name,birthday,start_date', {
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+    });
+    if (!cr.ok) return;
+    var cd = await cr.json();
+    if (!cd || !cd[0]) return;
+    var emp = cd[0];
+
+    // Birthday — fire if today >= birthday month/day and not yet celebrated this year
+    if (emp.birthday && !localStorage.getItem(bdayKey)) {
+      var bp = emp.birthday.split('-');
+      var bMonth = parseInt(bp[1]) - 1;
+      var bDay   = parseInt(bp[2]);
+      var bdayThisYear = new Date(today.getFullYear(), bMonth, bDay);
+      if (today >= bdayThisYear && today <= new Date(today.getFullYear(), bMonth, bDay + 7)) {
+        localStorage.setItem(bdayKey, todayStr);
+        setTimeout(function(){ showBirthdayCelebration(emp.name); }, 800);
+      }
+    }
+
+    // Anniversary — fire if today >= anniversary month/day and not yet celebrated this year
+    if (emp.start_date && !localStorage.getItem(annKey)) {
+      var sp = emp.start_date.split('-');
+      var sMonth = parseInt(sp[1]) - 1;
+      var sDay   = parseInt(sp[2]);
+      var yrs    = today.getFullYear() - parseInt(sp[0]);
+      if (yrs > 0) {
+        var annThisYear = new Date(today.getFullYear(), sMonth, sDay);
+        if (today >= annThisYear && today <= new Date(today.getFullYear(), sMonth, sDay + 7)) {
+          localStorage.setItem(annKey, todayStr);
+          setTimeout(function(){ showAnniversaryCelebration(emp.name, yrs); }, 2000);
+        }
+      }
+    }
+  } catch(e) {}
+}
+
 async function clockIn() {
   if (!TC.employee || !TC.employee.id) { toast('Employee record not found'); return; }
   if (!TC.selectedJobId) { toast('Select a job number to clock in'); return; }
@@ -1513,6 +1532,8 @@ async function clockIn() {
     TC.entries.push(result[0]);
     startPinging();
     logActivity('Clock In', 'Clocked in — Job: ' + (TC.selectedJob ? TC.selectedJob.name : 'None'), 'time_clock');
+    // Birthday & anniversary — fire on first clock-in on or after the date
+    checkClockInCelebration(u);
 
     // 7:30 rule check
     var nowDt = new Date();
