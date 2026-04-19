@@ -2897,10 +2897,12 @@ function renderEmployees() {
   var h = '';
 
   // Employee list header with invite button
-  h += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">';
+  h += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px;">';
   h += '<div style="font-size:13px;font-weight:700;color:var(--navy);">Employees ('+ST.employees.length+')</div>';
+  h += '<div style="display:flex;gap:8px;">';
+  h += '<button class="btn" onclick="openInviteEmployee()" style="background:var(--orange);color:#fff;border-color:var(--orange);">📲 Invite Employee</button>';
   h += '<button class="btn btn-primary" onclick="openAddEmployee()">+ Add Employee</button>';
-  h += '</div>';
+  h += '</div></div>';
 
   // Collapsible invite form (hidden by default)
   h += '<div id="invite-form-wrap" style="display:none;background:var(--surface);border:1.5px solid var(--orange);border-radius:10px;padding:16px;margin-bottom:16px;">';
@@ -5493,6 +5495,224 @@ function _renderJobSearchResults() {
 }
 
 // ── EMPLOYEE EDIT ─────────────────────────────────────────────────────────
+// ── INVITE EMPLOYEE FLOW ─────────────────────────────────────────────────
+function openInviteEmployee() {
+  if (!isAdmin()) { toast('Admin only'); return; }
+  var body = '';
+  body += '<div style="font-size:12px;color:var(--muted);margin-bottom:14px;line-height:1.5;">Send a self-service invite via SMS or email. The new hire clicks a secure link to complete their own onboarding, sign policies, and get pointed to the apps they need.</div>';
+
+  body += '<div class="form-row">';
+  body += '<div><label class="form-label">Full Name *</label><input type="text" id="inv-name" class="form-input" placeholder="Firstname Lastname" autofocus></div>';
+  body += '<div><label class="form-label">Role *</label><select id="inv-role" class="form-select">';
+  ['Technician','Project Manager','Estimator','Office','Admin'].forEach(function(r){
+    body += '<option value="'+r+'">'+r+'</option>';
+  });
+  body += '</select></div></div>';
+
+  body += '<div class="form-row">';
+  body += '<div><label class="form-label">Market *</label><select id="inv-market" class="form-select">';
+  ['Appleton','Stevens Point'].forEach(function(m){
+    body += '<option value="'+m+'">'+m+'</option>';
+  });
+  body += '</select></div>';
+  body += '<div><label class="form-label">Pay Type</label><select id="inv-paytype" class="form-select">';
+  body += '<option value="hourly">Hourly</option><option value="salary">Salary</option>';
+  body += '</select></div></div>';
+
+  body += '<div class="form-row">';
+  body += '<div><label class="form-label">Personal Email *</label><input type="email" id="inv-email" class="form-input" placeholder="kristina@example.com"></div>';
+  body += '<div><label class="form-label">Mobile Phone</label><input type="tel" id="inv-phone" class="form-input" placeholder="(920) 555-1234"></div></div>';
+
+  body += '<div style="font-size:11px;color:var(--muted);padding:8px 12px;background:rgba(13,45,94,.04);border-radius:6px;margin-bottom:12px;line-height:1.5;">💡 Use their <strong>personal email</strong> to start. They\'ll sign in with it, complete onboarding, and we\'ll upgrade them to their @jg-restoration.com account once IT provisions one.</div>';
+
+  body += '<div style="background:rgba(232,93,4,.04);border:1px solid rgba(232,93,4,.2);border-radius:8px;padding:12px;margin-bottom:14px;">';
+  body += '<div style="font-size:11px;font-weight:700;color:var(--orange);text-transform:uppercase;margin-bottom:8px;">📲 How should we send the invite?</div>';
+  body += '<div style="display:flex;gap:8px;flex-wrap:wrap;">';
+  body += '<label style="flex:1;min-width:120px;padding:10px 12px;border:1.5px solid var(--border);border-radius:6px;cursor:pointer;display:flex;align-items:center;gap:8px;"><input type="radio" name="inv-channel" value="sms" checked style="accent-color:var(--orange);"><span style="font-size:13px;font-weight:600;">📱 Text only</span></label>';
+  body += '<label style="flex:1;min-width:120px;padding:10px 12px;border:1.5px solid var(--border);border-radius:6px;cursor:pointer;display:flex;align-items:center;gap:8px;"><input type="radio" name="inv-channel" value="email" style="accent-color:var(--orange);"><span style="font-size:13px;font-weight:600;">📧 Email only</span></label>';
+  body += '<label style="flex:1;min-width:120px;padding:10px 12px;border:1.5px solid var(--border);border-radius:6px;cursor:pointer;display:flex;align-items:center;gap:8px;"><input type="radio" name="inv-channel" value="both" style="accent-color:var(--orange);"><span style="font-size:13px;font-weight:600;">📱📧 Both</span></label>';
+  body += '<label style="flex:1;min-width:120px;padding:10px 12px;border:1.5px solid var(--border);border-radius:6px;cursor:pointer;display:flex;align-items:center;gap:8px;"><input type="radio" name="inv-channel" value="link" style="accent-color:var(--orange);"><span style="font-size:13px;font-weight:600;">🔗 Just give me link</span></label>';
+  body += '</div></div>';
+
+  showModal('📲 Invite New Employee', body, '_submitInvite()');
+}
+
+async function _submitInvite() {
+  var name = (document.getElementById('inv-name')||{}).value.trim();
+  var email = (document.getElementById('inv-email')||{}).value.trim().toLowerCase();
+  var phone = (document.getElementById('inv-phone')||{}).value.trim();
+  var role = (document.getElementById('inv-role')||{}).value;
+  var market = (document.getElementById('inv-market')||{}).value;
+  var payType = (document.getElementById('inv-paytype')||{}).value;
+  var channelEl = document.querySelector('input[name="inv-channel"]:checked');
+  var channel = channelEl ? channelEl.value : 'link';
+
+  if (!name) { alert('Name is required'); return; }
+  if (!email) { alert('Email is required'); return; }
+  if (channel === 'sms' && !phone) { alert('Phone is required for SMS invite'); return; }
+  if (channel === 'both' && !phone) { alert('Phone is required for SMS + email'); return; }
+
+  // Check for dupes
+  var existingEmp = (ST.employees||[]).find(function(e) {
+    return (e.email||'').toLowerCase() === email || (e.name||'').toLowerCase() === name.toLowerCase();
+  });
+  if (existingEmp) {
+    if (!confirm('An employee with this name or email already exists ('+existingEmp.name+'). Send them a new invite anyway? This will re-link their record.')) return;
+  }
+
+  // Generate secure token
+  var token = _generateInviteToken();
+
+  try {
+    // 1. Create employee record (if new)
+    var empId;
+    if (existingEmp) {
+      empId = existingEmp.id;
+      // Update their info to match
+      await fetch(SB_URL + '/rest/v1/employees?id=eq.' + empId, {
+        method: 'PATCH',
+        headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: name, email: email, phone: phone || null, role: role, market: market, pay_type: payType })
+      });
+    } else {
+      var createR = await fetch(SB_URL + '/rest/v1/employees', {
+        method: 'POST',
+        headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=representation' },
+        body: JSON.stringify({
+          name: name,
+          email: email,
+          phone: phone || null,
+          role: role,
+          market: market,
+          pay_type: payType,
+          active: true,
+          invite_pending: true
+        })
+      });
+      if (!createR.ok) throw new Error('Failed to create employee record');
+      var created = await createR.json();
+      empId = created[0].id;
+    }
+
+    // 2. Create invite record
+    var expiresAt = new Date(Date.now() + 7*24*60*60*1000).toISOString();  // 7 days
+    var inviteR = await fetch(SB_URL + '/rest/v1/employee_invites', {
+      method: 'POST',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
+      body: JSON.stringify({
+        token: token,
+        employee_id: empId,
+        employee_name: name,
+        sent_to_phone: phone || null,
+        sent_to_email: email,
+        channel: channel,
+        status: 'pending',
+        sent_at: new Date().toISOString(),
+        expires_at: expiresAt,
+        sent_by: getApprovedBy()
+      })
+    });
+    if (!inviteR.ok) throw new Error('Failed to create invite');
+
+    // 3. Build the invite URL
+    var inviteUrl = window.location.origin + window.location.pathname.replace(/[^\/]+$/, '') + 'onboarding.html?invite=' + token;
+
+    // 4. Fire SMS / email via Zapier
+    var messages = [];
+    var smsBody = 'Hi '+name.split(' ')[0]+'! Welcome to JG Restoration. Complete your onboarding here (link expires in 7 days): '+inviteUrl+' — Questions? Text us at (920) 428-4200.';
+    var emailSubject = 'Welcome to JG Restoration — Finish Your Onboarding';
+    var emailBody = 'Hi '+name.split(' ')[0]+',\n\nWelcome to JG Restoration! We\'ve set up your account.\n\nTo finish your onboarding, click this link (expires in 7 days):\n'+inviteUrl+'\n\nYou\'ll confirm your info, review a few policies, and get access to the apps you need on the job. Takes about 5 minutes.\n\nQuestions? Reply to this email or call (920) 428-4200.\n\n— JG Restoration';
+
+    if (channel === 'sms' || channel === 'both') {
+      try {
+        await fetch(HOOKS.sms, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ type: 'invite_sms', to: phone, body: smsBody, employee_name: name })
+        });
+      } catch(e) { console.warn('SMS send failed:', e); }
+    }
+    if (channel === 'email' || channel === 'both') {
+      try {
+        await fetch(HOOKS.sms, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ type: 'invite_email', to: email, subject: emailSubject, body: emailBody, employee_name: name })
+        });
+      } catch(e) { console.warn('Email send failed:', e); }
+    }
+
+    // 5. Log activity
+    logActivity('Employee Invited', name + ' • ' + role + ' • ' + market + ' • via ' + channel, 'employees', name);
+
+    closeModal();
+
+    // 6. Show the link in a confirmation modal (so you can copy it)
+    _showInviteConfirmation(name, inviteUrl, channel);
+
+    // Refresh employee list
+    await loadAll();
+  } catch(err) {
+    alert('Invite failed: ' + err.message);
+    console.error(err);
+  }
+}
+
+function _showInviteConfirmation(name, url, channel) {
+  var body = '';
+  body += '<div style="text-align:center;margin-bottom:16px;">';
+  body += '<div style="font-size:40px;margin-bottom:8px;">✅</div>';
+  body += '<div style="font-size:18px;font-weight:700;color:var(--navy);margin-bottom:4px;">Invite Sent!</div>';
+  body += '<div style="font-size:13px;color:var(--muted);">'+name+' will receive their onboarding link via <strong>'+(channel==='both'?'SMS + email':channel==='sms'?'SMS':channel==='email'?'email':'link copy')+'</strong>.</div>';
+  body += '</div>';
+
+  body += '<div style="background:rgba(13,45,94,.04);border-radius:8px;padding:12px 14px;margin-bottom:12px;">';
+  body += '<div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px;">Onboarding Link</div>';
+  body += '<div style="font-size:11px;font-family:DM Mono,monospace;word-break:break-all;background:#fff;padding:8px 10px;border-radius:6px;border:1px solid var(--border);margin-bottom:8px;" id="invite-url-display">'+url+'</div>';
+  body += '<button class="btn btn-sm" onclick="_copyInviteLink(this)" data-url="'+url+'" style="background:var(--navy);color:#fff;border-color:var(--navy);">📋 Copy Link</button>';
+  body += '</div>';
+
+  body += '<div style="font-size:11px;color:var(--muted);padding:8px 12px;background:rgba(230,81,0,.04);border-radius:6px;line-height:1.5;">⏱ This link expires in <strong>7 days</strong>. If they don\'t accept by then, you\'ll need to re-invite.</div>';
+
+  showModal('Invite Details', body, null);
+}
+
+function _copyInviteLink(btn) {
+  var url = btn.getAttribute('data-url');
+  if (!url) return;
+  if (navigator.clipboard) {
+    navigator.clipboard.writeText(url).then(function(){
+      btn.textContent = '✓ Copied!';
+      setTimeout(function(){ btn.innerHTML = '📋 Copy Link'; }, 2000);
+    });
+  } else {
+    // Fallback: select the displayed URL
+    var tmp = document.createElement('input');
+    tmp.value = url;
+    document.body.appendChild(tmp);
+    tmp.select();
+    document.execCommand('copy');
+    tmp.remove();
+    btn.textContent = '✓ Copied!';
+    setTimeout(function(){ btn.innerHTML = '📋 Copy Link'; }, 2000);
+  }
+}
+
+function _generateInviteToken() {
+  // Generate a URL-safe random token (crypto-strong if available)
+  var arr = new Uint8Array(24);
+  if (window.crypto && window.crypto.getRandomValues) {
+    window.crypto.getRandomValues(arr);
+  } else {
+    for (var i=0; i<24; i++) arr[i] = Math.floor(Math.random()*256);
+  }
+  var token = '';
+  for (var j=0; j<arr.length; j++) {
+    token += ('0' + arr[j].toString(16)).slice(-2);
+  }
+  return token;
+}
+
 function openAddEmployee() {
   var html = buildEmpForm({});
   // Add invite section to the modal
