@@ -1,5 +1,5 @@
 // JG Sales PWA Service Worker
-const VERSION = '2025-04-16-v4';
+const VERSION = '2026-04-19-v1';
 const CACHE = 'jg-sales-' + VERSION;
 
 const PRECACHE = [
