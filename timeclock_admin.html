@@ -2945,6 +2945,7 @@ function renderEmployees() {
     h += '<button class="btn btn-sm" onclick="openEditEmployee(\''+emp.id+'\')">Edit</button>';
     h += '<button class="btn btn-sm" onclick="openEmployeeAbsences(\''+emp.name.replace(/\'/g,"\\'")+'\')">📅 Absences</button>';
     h += '<button class="btn btn-sm '+(emp.active?'btn-danger':'')+'" onclick="toggleEmployee(\''+emp.id+'\','+emp.active+')">'+(emp.active?'Deactivate':'Activate')+'</button>';
+    h += '<button class="btn btn-sm" onclick="attemptDeleteEmployee(\''+emp.id+'\')" style="background:transparent;color:#c62828;border:1px solid rgba(198,40,40,.3);" title="Permanently delete (only allowed if no historical data)">🗑</button>';
     h += '</td></tr>';
   });
   h += '</tbody></table></div>';
@@ -6000,6 +6001,159 @@ async function saveEmployee() {
   await loadAll();
 }
 
+
+// ── DELETE EMPLOYEE (with audit-safe blocking) ────────────────────────────
+// Only allows delete if employee has ZERO historical data that matters for the audit trail.
+async function attemptDeleteEmployee(empId) {
+  if (!isAdmin()) { toast('Admin only'); return; }
+  var emp = ST.employees.find(function(e){ return e.id === empId; });
+  if (!emp) { toast('Employee not found'); return; }
+
+  // Check for blocking data in parallel — faster than sequential
+  toast('Checking employee history...');
+  try {
+    var checks = await Promise.all([
+      // time entries by id OR by name (legacy entries may not have id)
+      sb('/rest/v1/time_entries?or=(employee_id.eq.'+empId+',employee_name.eq.'+encodeURIComponent(emp.name)+')&select=id&limit=1'),
+      // approved timecards (archived)
+      sb('/rest/v1/timecard_archive?employee_id=eq.'+empId+'&select=id&limit=1'),
+      // commissions
+      sb('/rest/v1/commissions?or=(employee_id.eq.'+empId+',employee_name.eq.'+encodeURIComponent(emp.name)+')&select=id&limit=1'),
+      // absences
+      sb('/rest/v1/absence_records?employee_name=eq.'+encodeURIComponent(emp.name)+'&select=id&limit=1'),
+      // vacation requests
+      sb('/rest/v1/vacation_requests?or=(employee_id.eq.'+empId+',employee_name.eq.'+encodeURIComponent(emp.name)+')&select=id&limit=1'),
+      // count full rows for the "breakdown" on block
+      sb('/rest/v1/time_entries?or=(employee_id.eq.'+empId+',employee_name.eq.'+encodeURIComponent(emp.name)+')&select=id'),
+      sb('/rest/v1/timecard_archive?employee_id=eq.'+empId+'&select=id'),
+      sb('/rest/v1/commissions?or=(employee_id.eq.'+empId+',employee_name.eq.'+encodeURIComponent(emp.name)+')&select=id'),
+      sb('/rest/v1/absence_records?employee_name=eq.'+encodeURIComponent(emp.name)+'&select=id'),
+      sb('/rest/v1/vacation_requests?or=(employee_id.eq.'+empId+',employee_name.eq.'+encodeURIComponent(emp.name)+')&select=id')
+    ]);
+
+    var counts = {
+      timeEntries: (checks[5] || []).length,
+      timecardArchives: (checks[6] || []).length,
+      commissions: (checks[7] || []).length,
+      absences: (checks[8] || []).length,
+      vacationRequests: (checks[9] || []).length,
+      signedOnboarding: emp.onboarding_signed_at ? 1 : 0
+    };
+
+    var hasHistory = counts.timeEntries > 0 || counts.timecardArchives > 0 ||
+                     counts.commissions > 0 || counts.absences > 0 ||
+                     counts.vacationRequests > 0 || counts.signedOnboarding > 0;
+
+    if (hasHistory) {
+      _showDeleteBlocked(emp, counts);
+    } else {
+      _showDeleteConfirm(emp);
+    }
+  } catch(err) {
+    console.error(err);
+    alert('Could not verify employee history. Refusing to delete.\n\nError: ' + err.message);
+  }
+}
+
+function _showDeleteBlocked(emp, counts) {
+  var body = '';
+  body += '<div style="text-align:center;margin-bottom:16px;">';
+  body += '<div style="font-size:40px;margin-bottom:8px;">🛡</div>';
+  body += '<div style="font-size:16px;font-weight:700;color:var(--navy);margin-bottom:6px;">Cannot Delete '+emp.name+'</div>';
+  body += '<div style="font-size:13px;color:var(--muted);line-height:1.5;">This employee has historical data that cannot be removed without corrupting the audit trail.</div>';
+  body += '</div>';
+
+  body += '<div style="background:rgba(198,40,40,.04);border:1px solid rgba(198,40,40,.2);border-radius:8px;padding:14px;margin-bottom:14px;">';
+  body += '<div style="font-size:11px;font-weight:700;color:#c62828;text-transform:uppercase;margin-bottom:8px;">Historical Data Found</div>';
+  var items = [];
+  if (counts.timeEntries > 0) items.push('<strong>'+counts.timeEntries+'</strong> time entr'+(counts.timeEntries!==1?'ies':'y'));
+  if (counts.timecardArchives > 0) items.push('<strong>'+counts.timecardArchives+'</strong> approved timecard'+(counts.timecardArchives!==1?'s':''));
+  if (counts.commissions > 0) items.push('<strong>'+counts.commissions+'</strong> commission entr'+(counts.commissions!==1?'ies':'y'));
+  if (counts.absences > 0) items.push('<strong>'+counts.absences+'</strong> absence record'+(counts.absences!==1?'s':''));
+  if (counts.vacationRequests > 0) items.push('<strong>'+counts.vacationRequests+'</strong> vacation request'+(counts.vacationRequests!==1?'s':''));
+  if (counts.signedOnboarding > 0) items.push('Signed onboarding acknowledgment');
+  items.forEach(function(item) {
+    body += '<div style="font-size:13px;color:var(--navy);padding:3px 0;">• ' + item + '</div>';
+  });
+  body += '</div>';
+
+  body += '<div style="background:rgba(13,45,94,.04);border-radius:8px;padding:12px 14px;margin-bottom:14px;">';
+  body += '<div style="font-size:12px;color:var(--navy);line-height:1.5;"><strong>Recommended:</strong> Use <strong style="color:var(--orange);">Deactivate</strong> instead. This hides them from active lists while preserving history — the industry-standard pattern used by Paychex, Workday, and every buyer\'s due-diligence expectation.</div>';
+  body += '</div>';
+
+  showModal('Delete Blocked', body, null);
+}
+
+function _showDeleteConfirm(emp) {
+  var body = '';
+  body += '<div style="text-align:center;margin-bottom:16px;">';
+  body += '<div style="font-size:40px;margin-bottom:8px;">🗑</div>';
+  body += '<div style="font-size:16px;font-weight:700;color:var(--navy);margin-bottom:6px;">Permanently Delete '+emp.name+'?</div>';
+  body += '<div style="font-size:13px;color:var(--muted);line-height:1.5;">This employee has no historical data, so deletion is safe. Their record will be permanently removed.</div>';
+  body += '</div>';
+
+  body += '<div style="background:rgba(46,125,50,.04);border:1px solid rgba(46,125,50,.2);border-radius:8px;padding:12px 14px;margin-bottom:14px;">';
+  body += '<div style="font-size:11px;font-weight:700;color:#2e7d32;text-transform:uppercase;margin-bottom:6px;">✓ Safe to Delete</div>';
+  body += '<div style="font-size:12px;color:var(--muted);line-height:1.5;">No time entries, timecards, commissions, or signed onboarding found.</div>';
+  body += '</div>';
+
+  body += '<div style="background:rgba(230,81,0,.04);border:1px solid rgba(230,81,0,.2);border-radius:8px;padding:12px 14px;margin-bottom:14px;">';
+  body += '<div style="font-size:12px;color:var(--navy);line-height:1.5;">📋 <strong>Pending invites</strong> for this employee will be marked <strong>revoked</strong> (preserved for audit trail, not deleted).</div>';
+  body += '</div>';
+
+  body += '<div class="form-row">';
+  body += '<label class="form-label">Type <strong style="color:#c62828;">'+emp.name+'</strong> to confirm:</label>';
+  body += '<input type="text" id="del-confirm-input" class="form-input" placeholder="Type the name exactly" oninput="_checkDelConfirm(\''+emp.name.replace(/\'/g,"\\'")+'\')" autofocus>';
+  body += '</div>';
+
+  body += '<button class="btn" id="del-confirm-btn" onclick="_executeDelete(\''+emp.id+'\',\''+emp.name.replace(/\'/g,"\\'")+'\')" disabled style="width:100%;background:#c62828;color:#fff;border-color:#c62828;padding:12px 16px;font-weight:700;opacity:.5;cursor:not-allowed;">Permanently Delete</button>';
+
+  showModal('Delete Employee', body, null);
+}
+
+function _checkDelConfirm(expectedName) {
+  var input = document.getElementById('del-confirm-input');
+  var btn = document.getElementById('del-confirm-btn');
+  if (!input || !btn) return;
+  var match = input.value.trim() === expectedName;
+  btn.disabled = !match;
+  btn.style.opacity = match ? '1' : '.5';
+  btn.style.cursor = match ? 'pointer' : 'not-allowed';
+}
+
+async function _executeDelete(empId, empName) {
+  var btn = document.getElementById('del-confirm-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Deleting...'; }
+
+  try {
+    // Mark any pending invites as revoked (keeps audit trail per your choice)
+    var pendingInvites = await sb('/rest/v1/employee_invites?employee_id=eq.'+empId+'&status=eq.pending&select=id');
+    if (pendingInvites && pendingInvites.length) {
+      await fetch(SB_URL + '/rest/v1/employee_invites?employee_id=eq.'+empId+'&status=eq.pending', {
+        method: 'PATCH',
+        headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'revoked', accepted_at: null })
+      });
+    }
+
+    // Delete the employee record
+    var r = await fetch(SB_URL + '/rest/v1/employees?id=eq.'+empId, {
+      method: 'DELETE',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+    });
+    if (!r.ok) throw new Error('Delete failed: ' + r.status);
+
+    // Log to activity
+    logActivity('Employee Deleted', empName + ' • no historical data, clean delete', 'employees', empName);
+
+    closeModal();
+    toast('✓ ' + empName + ' deleted');
+    await loadAll();
+  } catch(err) {
+    alert('Delete failed: ' + err.message);
+    if (btn) { btn.disabled = false; btn.textContent = 'Permanently Delete'; btn.style.opacity = '1'; }
+  }
+}
 
 async function toggleEmployee(id, isActive) {
   await fetch(SB_URL+'/rest/v1/employees?id=eq.'+id, {method:'PATCH', headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json'}, body:JSON.stringify({active:!isActive})});
