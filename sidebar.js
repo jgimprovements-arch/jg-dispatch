@@ -28,12 +28,11 @@
     { label: 'Dispatch',            icon: '📋',  url: 'index.html' },
 
     { section: 'TIME' },
-    { label: 'Time Admin',          icon: '⏱',  url: 'timeclock_admin.html' },
+    { label: 'Time Clock / Payroll',icon: '⏱',  url: 'timeclock_admin.html' },
     { label: 'Clock In/Out',        icon: '🕐',  url: 'timeclock.html' },
 
     { section: 'SALES' },
     { label: 'Sales Dashboard',     icon: '📈',  url: 'sales.html' },
-    { label: 'Sales Admin',         icon: '🔐',  url: 'sales_admin.html' },
 
     { section: 'AI TOOLS' },
     { label: 'QA Review',           icon: '🔍',  url: 'qa.html' },
@@ -43,8 +42,8 @@
     { section: 'INSIGHTS' },
     { label: 'Adjuster Intel',      icon: '🧠',  url: 'intelligence.html' },
 
-    { section: 'QUICK ACTIONS' },
-    { label: 'Request Time Off',    icon: '🏖',  url: 'timeclock.html?action=vacation' }
+    { section: 'ADMIN' },
+    { label: 'Admin Panel',         icon: '🛡',  url: 'admin.html' }
   ];
 
   // ── CSS ── scoped to #jg-sidebar, matches existing hub.html styling
@@ -126,7 +125,6 @@ body{padding-left:48px;box-sizing:border-box;}
   }
 
   // ── USER NAME POPULATION ──
-  // Reads from jg_platform_user (the actual localStorage key used by all pages)
   function tryPopulateUser() {
     var nmEl = document.getElementById('sb-nm');
     var avEl = document.getElementById('sb-av');
@@ -138,7 +136,6 @@ body{padding-left:48px;box-sizing:border-box;}
       if (cached) user = JSON.parse(cached);
     } catch(e) {}
 
-    // Fallback: in-memory globals set by page-specific auth
     if (!user) user = window.JG_USER || window._user;
 
     if (user && (user.name || user.email || user.given_name)) {
@@ -156,10 +153,8 @@ body{padding-left:48px;box-sizing:border-box;}
   function init() {
     injectSidebar();
     tryPopulateUser();
-    // Re-try user population after auth resolves async
     setTimeout(tryPopulateUser, 500);
     setTimeout(tryPopulateUser, 1500);
-    // Refresh when auth changes in another tab
     window.addEventListener('storage', function(e) {
       if (e.key === 'jg_platform_user') tryPopulateUser();
     });
