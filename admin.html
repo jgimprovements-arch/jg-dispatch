@@ -955,15 +955,29 @@ function ac_resetDefaults() {
 // ═══════════════════════════════════════════════════════════════════════════
 // PLATFORM USERS PANEL (prefix: pr_)
 // ═══════════════════════════════════════════════════════════════════════════
-var PR = { allEmployees: [], unsubscribe: null };
+var PR = { allEmployees: [], unsubscribe: null, loaded: false, loading: false, loadError: null };
 
 async function pr_loadEmployees(){
+  if (PR.loading) return;
+  PR.loading = true;
+  PR.loadError = null;
   try {
-    var r = await fetch(SB_URL + '/rest/v1/employees?active=eq.true&select=id,name,email,role,market,last_activity_at&order=name.asc', {
+    // Select only columns we know exist on the employees table
+    var r = await fetch(SB_URL + '/rest/v1/employees?active=eq.true&select=id,name,email,role,market&order=name.asc', {
       headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
     });
-    if (r.ok) PR.allEmployees = await r.json() || [];
-  } catch(e) { PR.allEmployees = []; }
+    if (r.ok) {
+      PR.allEmployees = await r.json() || [];
+    } else {
+      PR.loadError = 'Roster fetch returned ' + r.status;
+      PR.allEmployees = [];
+    }
+  } catch(e) {
+    PR.loadError = e.message || 'Network error';
+    PR.allEmployees = [];
+  }
+  PR.loaded = true;
+  PR.loading = false;
 }
 
 function pr_fmtSince(ts){
@@ -993,10 +1007,14 @@ function pr_render(){
     else { badge.style.display = 'none'; }
   }
 
-  // Load roster if not cached
-  if (!PR.allEmployees.length) {
+  // Load roster if not yet loaded
+  if (!PR.loaded) {
     app.innerHTML = '<div style="padding:40px;text-align:center;color:#6b7a96;">Loading roster…</div>';
     pr_loadEmployees().then(pr_render);
+    return;
+  }
+  if (PR.loadError) {
+    app.innerHTML = '<div style="padding:40px;text-align:center;color:#c02020;"><strong>Could not load roster</strong><br><span style="font-size:12px;color:#6b7a96;">' + PR.loadError + '</span><br><br><button onclick="PR.loaded=false;PR.loadError=null;pr_render()" style="background:#e85d04;color:#fff;border:none;padding:8px 16px;border-radius:6px;font-weight:700;cursor:pointer;">Retry</button></div>';
     return;
   }
 
@@ -1069,10 +1087,6 @@ function pr_render(){
       h += '<div style="font-size:12px;font-weight:600;color:#0d1f3c;">' + e.name + '</div>';
       h += '<div style="font-size:10px;color:#6b7a96;font-family:\'DM Mono\',monospace;">' + (e.role||'') + (e.market?' · '+e.market:'') + '</div>';
       h += '</div>';
-      var lastSeen = e.last_activity_at ? pr_fmtSince(new Date(e.last_activity_at).getTime()) : '';
-      if (lastSeen) {
-        h += '<div style="font-size:10px;color:#a0abbf;font-family:\'DM Mono\',monospace;flex-shrink:0;">last active ' + lastSeen + '</div>';
-      }
       h += '</div>';
     });
   }
