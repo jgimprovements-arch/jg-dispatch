@@ -196,6 +196,7 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;min
   <button class="tc-tab" id="tab-reports" onclick="showTab('reports',this)">📊 Reports</button>
   <button class="tc-tab" id="tab-routes" onclick="showTab('routes',this)">🗺 Routes & Live</button>
   <button class="tc-tab" id="tab-jobcost" onclick="showTab('jobcost',this)">💰 Job Costing</button>
+  <button class="tc-tab" id="tab-commissions" onclick="showTab('commissions',this)">💵 Commissions</button>
   <button class="tc-tab" id="tab-archive" onclick="showTab('archive',this)">🗄 Archive</button>
   <button class="tc-tab" id="tab-activity" onclick="showTab('activity',this)">📜 Activity</button>
   <button class="tc-tab" id="tab-access" onclick="showTab('access',this)">🔐 Access</button>
@@ -418,6 +419,10 @@ async function loadAll() {
     ST.approvals[a.period_label + '|' + a.employee_name] = a;
   });
 
+  // Load commissions (all rows; visibility filtered at render time)
+  var coms = await sb('/rest/v1/commissions?select=*&order=earned_date.desc&limit=2000');
+  ST.commissions = coms || [];
+
   render();
 }
 
@@ -458,6 +463,7 @@ function render() {
   else if (ST.tab === 'reports')   { if (isAdmin()) renderReports(); }
   else if (ST.tab === 'routes')   renderRoutes();
   else if (ST.tab === 'jobcost')  { renderJobCost(); }
+  else if (ST.tab === 'commissions') { renderCommissions(); }
   else if (ST.tab === 'archive')  { if (isAdmin()) renderArchive(); }
   else if (ST.tab === 'activity') { if (isAdmin()) renderActivity(); }
   else if (ST.tab === 'access')   { if (isAdmin()) renderAccess(); }
@@ -1916,6 +1922,27 @@ function exportPayrollReport(periodLabel, byEmp, curPer) {
         });
       }
     } catch(err) { console.warn('Absence export failed:', err.message); }
+
+    // Emit APPROVED (not yet paid) commissions/bonuses/referrals/spiffs earned this period
+    // Paychex earnings codes: COM=Commission, BON=Bonus (used for bonus/referral/spiff)
+    try {
+      var periodsForComm = getPayPeriods(ST.payPeriod.type, ST.payPeriod.start, 80);
+      var commPeriod = periodsForComm.find(function(p){ return p.label === periodLabel; });
+      if (commPeriod) {
+        var periodCommissions = (ST.commissions || []).filter(function(c) {
+          if (c.employee_name !== nm) return false;
+          if (c.status !== 'approved') return false;  // only approved-but-unpaid
+          var d = new Date(c.earned_date + 'T00:00:00');
+          return d >= commPeriod.start && d <= commPeriod.end;
+        });
+        periodCommissions.forEach(function(c) {
+          var earningsCode = c.type === 'commission' ? 'COM' : 'BON';
+          // For commissions/bonuses, Paychex wants dollar amount in "hours" column typically handled as flat dollar
+          // Format: [paychexId, date, code, amount-as-dollars, dept]
+          paychexRows.push([paychexId, c.earned_date, earningsCode, parseFloat(c.amount||0).toFixed(2), dept]);
+        });
+      }
+    } catch(err) { console.warn('Commission export failed:', err.message); }
   });
 
   // ─── Summary report (human-readable, audit trail) ───
@@ -1999,6 +2026,31 @@ function exportPayrollReport(periodLabel, byEmp, curPer) {
   var safeName = periodLabel.replace(/[^a-z0-9]+/gi, '_');
   download(toCsv(paychexRows), 'paychex_import_' + safeName + '.csv');
   setTimeout(function() { download(toCsv(summaryRows), 'payroll_summary_' + safeName + '.csv'); }, 300);
+
+  // Auto-mark approved commissions from this period as paid (they're now in the CSV)
+  try {
+    var pPeriods = getPayPeriods(ST.payPeriod.type, ST.payPeriod.start, 80);
+    var pMatch = pPeriods.find(function(p){ return p.label === periodLabel; });
+    if (pMatch) {
+      var toMarkPaid = (ST.commissions || []).filter(function(c) {
+        if (c.status !== 'approved') return false;
+        var d = new Date(c.earned_date + 'T00:00:00');
+        return d >= pMatch.start && d <= pMatch.end;
+      });
+      if (toMarkPaid.length) {
+        toMarkPaid.forEach(function(c) {
+          fetch(SB_URL + '/rest/v1/commissions?id=eq.' + c.id, {
+            method: 'PATCH',
+            headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ status: 'paid', paid_in_period: periodLabel })
+          });
+          c.status = 'paid';
+          c.paid_in_period = periodLabel;
+        });
+        logActivity('Commissions Auto-Paid', toMarkPaid.length + ' entries marked paid via Paychex export — ' + periodLabel, 'commissions', null);
+      }
+    }
+  } catch(err) { console.warn('Commission auto-mark-paid failed:', err.message); }
 
   logActivity('Payroll Export', periodLabel + ' — ' + Object.keys(byEmp).length + ' employees, $' + grandGross.toFixed(2) + ' gross' + (missingIds.length?' ('+missingIds.length+' missing IDs)':''), 'time_clock', null);
   toast('✓ Paychex import + summary downloaded');
@@ -2659,6 +2711,393 @@ async function logActivity(action, detail, category, employeeName) {
 // Dedicated archive browser: all approved timecards across all time, searchable/filterable
 var _archiveData = null;  // cached list of archive records
 var _archiveFilter = { employee: 'All', year: 'All', search: '' };
+
+// ── COMMISSIONS TAB ──────────────────────────────────────────────────────
+// Manual entry ledger for commissions, bonuses, referrals, and spiffs.
+// Visibility: everyone sees their own; admins see all.
+var _commFilter = { employee: 'All', type: 'All', status: 'All', period: 'all' };
+
+function _getCurrentUserName() {
+  try {
+    var u = JSON.parse(localStorage.getItem('jg_platform_user') || '{}');
+    return u.name || '';
+  } catch(e) { return ''; }
+}
+
+function _canSeeCommission(commission) {
+  if (isAdmin()) return true;
+  var myName = _getCurrentUserName();
+  return commission.employee_name === myName;
+}
+
+function _canEditCommissions() {
+  // Admin only can add/edit/approve. Office can also if you want to loosen later.
+  try {
+    var u = JSON.parse(localStorage.getItem('jg_platform_user') || '{}');
+    var myEmail = u.email || '';
+    var emp = ST.employees.find(function(e){ return e.email === myEmail; });
+    return emp && ['Admin','Office'].includes(emp.role);
+  } catch(e) { return false; }
+}
+
+async function renderCommissions() {
+  var body = document.getElementById('tc-body');
+  var isAdminUser = isAdmin();
+  var canEdit = _canEditCommissions();
+  var myName = _getCurrentUserName();
+
+  // Filter to what this user can see
+  var visible = (ST.commissions || []).filter(_canSeeCommission);
+
+  // Apply filters
+  var filtered = visible.slice();
+  if (_commFilter.employee !== 'All') filtered = filtered.filter(function(c){ return c.employee_name === _commFilter.employee; });
+  if (_commFilter.type !== 'All') filtered = filtered.filter(function(c){ return c.type === _commFilter.type; });
+  if (_commFilter.status !== 'All') filtered = filtered.filter(function(c){ return c.status === _commFilter.status; });
+  if (_commFilter.period === 'current') {
+    var cur = getCurrentPeriod();
+    if (cur) {
+      filtered = filtered.filter(function(c){
+        var d = new Date(c.earned_date + 'T00:00:00');
+        return d >= cur.start && d <= cur.end;
+      });
+    }
+  } else if (_commFilter.period === 'ytd') {
+    var yearStart = new Date(new Date().getFullYear(), 0, 1);
+    filtered = filtered.filter(function(c){ return new Date(c.earned_date+'T00:00:00') >= yearStart; });
+  }
+
+  // Stats
+  var pendingTotal = filtered.filter(function(c){ return c.status === 'pending'; }).reduce(function(s,c){ return s + parseFloat(c.amount||0); }, 0);
+  var approvedTotal = filtered.filter(function(c){ return c.status === 'approved'; }).reduce(function(s,c){ return s + parseFloat(c.amount||0); }, 0);
+  var paidTotal = filtered.filter(function(c){ return c.status === 'paid'; }).reduce(function(s,c){ return s + parseFloat(c.amount||0); }, 0);
+  var grandTotal = pendingTotal + approvedTotal + paidTotal;
+
+  var h = '';
+
+  // Header card
+  h += '<div class="card" style="margin-bottom:16px;">';
+  h += '<div class="card-hdr" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">';
+  h += '<div class="card-title">💵 Commissions & Bonuses' + (isAdminUser ? '' : ' — '+myName) + '</div>';
+  if (canEdit) {
+    h += '<button class="btn btn-primary" onclick="openCommissionModal()" style="background:var(--orange);border-color:var(--orange);">+ Add Entry</button>';
+  }
+  h += '</div>';
+
+  // Filter bar
+  h += '<div class="card-body">';
+  h += '<div class="filter-bar" style="gap:12px;flex-wrap:wrap;">';
+
+  // Employee filter (admin only — techs see only their own)
+  if (isAdminUser) {
+    var allEmps = [...new Set((ST.commissions||[]).map(function(c){ return c.employee_name; }).filter(Boolean))].sort();
+    h += '<div><label class="form-label">Employee</label><select class="form-select" onchange="_commFilter.employee=this.value;renderCommissions();">';
+    h += '<option value="All">All Employees</option>';
+    allEmps.forEach(function(e){ h += '<option value="'+e+'"'+(_commFilter.employee===e?' selected':'')+'>'+e+'</option>'; });
+    h += '</select></div>';
+  }
+
+  // Type filter
+  h += '<div><label class="form-label">Type</label><select class="form-select" onchange="_commFilter.type=this.value;renderCommissions();">';
+  ['All','commission','bonus','referral','spiff'].forEach(function(t){ h += '<option value="'+t+'"'+(_commFilter.type===t?' selected':'')+'>'+t.charAt(0).toUpperCase()+t.slice(1)+'</option>'; });
+  h += '</select></div>';
+
+  // Status filter
+  h += '<div><label class="form-label">Status</label><select class="form-select" onchange="_commFilter.status=this.value;renderCommissions();">';
+  ['All','pending','approved','paid'].forEach(function(s){ h += '<option value="'+s+'"'+(_commFilter.status===s?' selected':'')+'>'+s.charAt(0).toUpperCase()+s.slice(1)+'</option>'; });
+  h += '</select></div>';
+
+  // Period filter
+  h += '<div><label class="form-label">Period</label><select class="form-select" onchange="_commFilter.period=this.value;renderCommissions();">';
+  [['all','All Time'],['current','Current Pay Period'],['ytd','Year-to-Date']].forEach(function(p){ h += '<option value="'+p[0]+'"'+(_commFilter.period===p[0]?' selected':'')+'>'+p[1]+'</option>'; });
+  h += '</select></div>';
+
+  h += '</div></div></div>';
+
+  // Stat cards
+  h += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:16px;">';
+  h += '<div class="stat-card"><div class="stat-val">$'+grandTotal.toFixed(2)+'</div><div class="stat-lbl">Total Filtered</div></div>';
+  h += '<div class="stat-card"><div class="stat-val" style="color:var(--warn);">$'+pendingTotal.toFixed(2)+'</div><div class="stat-lbl">Pending</div></div>';
+  h += '<div class="stat-card"><div class="stat-val" style="color:#0d2d5e;">$'+approvedTotal.toFixed(2)+'</div><div class="stat-lbl">Approved (unpaid)</div></div>';
+  h += '<div class="stat-card"><div class="stat-val" style="color:#2e7d32;">$'+paidTotal.toFixed(2)+'</div><div class="stat-lbl">Paid</div></div>';
+  h += '</div>';
+
+  // Ledger table
+  if (!filtered.length) {
+    h += '<div class="card"><div class="empty" style="padding:40px;">No entries match the current filters.</div></div>';
+  } else {
+    h += '<div class="card"><div class="card-hdr"><div class="card-title">Entries ('+filtered.length+')</div></div>';
+    h += '<table class="tc-table">';
+    h += '<thead><tr>';
+    h += '<th>Date</th>';
+    if (isAdminUser) h += '<th>Employee</th>';
+    h += '<th>Type</th>';
+    h += '<th>Description</th>';
+    h += '<th style="text-align:right;">Amount</th>';
+    h += '<th>Status</th>';
+    if (canEdit) h += '<th></th>';
+    h += '</tr></thead><tbody>';
+
+    filtered.forEach(function(c, idx) {
+      var d = new Date(c.earned_date + 'T12:00:00');
+      var dateStr = d.toLocaleDateString('en-US', { month:'short', day:'numeric', year:'2-digit' });
+      var typeColor = {commission:'#0d2d5e', bonus:'#2e7d32', referral:'#e85d04', spiff:'#9c27b0'}[c.type] || 'var(--muted)';
+      var typeBadge = '<span style="font-size:10px;padding:2px 8px;background:'+typeColor+';color:#fff;border-radius:4px;font-weight:700;text-transform:uppercase;">'+c.type+'</span>';
+      var statusColor = {pending:'var(--warn)', approved:'#0d2d5e', paid:'#2e7d32'}[c.status] || 'var(--muted)';
+      var statusBadge = '<span style="font-size:10px;padding:2px 8px;background:rgba(0,0,0,.04);color:'+statusColor+';border:1px solid '+statusColor+';border-radius:4px;font-weight:700;text-transform:uppercase;">'+c.status+'</span>';
+
+      h += '<tr>';
+      h += '<td style="font-size:11px;white-space:nowrap;">'+dateStr+'</td>';
+      if (isAdminUser) h += '<td><strong>'+c.employee_name+'</strong></td>';
+      h += '<td>'+typeBadge+'</td>';
+      var descMain = c.description || '—';
+      var descSub = '';
+      if (c.job_name) descSub += c.job_name;
+      if (c.commission_rate && c.job_revenue) descSub += ' • '+c.commission_rate+'% of $'+parseFloat(c.job_revenue).toFixed(0);
+      h += '<td><div>'+descMain+'</div>' + (descSub ? '<div style="font-size:10px;color:var(--muted);">'+descSub+'</div>' : '') + '</td>';
+      h += '<td style="text-align:right;font-weight:700;color:'+statusColor+';">$'+parseFloat(c.amount||0).toFixed(2)+'</td>';
+      h += '<td>'+statusBadge+'</td>';
+      if (canEdit) {
+        h += '<td style="white-space:nowrap;">';
+        if (c.status === 'pending') {
+          h += '<button class="btn btn-sm" onclick="approveCommission(\''+c.id+'\')" style="background:#2e7d32;color:#fff;border-color:#2e7d32;font-size:10px;">✓ Approve</button> ';
+        }
+        if (c.status === 'approved') {
+          h += '<button class="btn btn-sm" onclick="markCommissionPaid(\''+c.id+'\')" style="background:#0d2d5e;color:#fff;border-color:#0d2d5e;font-size:10px;">💵 Paid</button> ';
+        }
+        h += '<button class="btn btn-sm" onclick="editCommission(\''+c.id+'\')" style="font-size:10px;">Edit</button> ';
+        h += '<button class="btn btn-sm" onclick="deleteCommission(\''+c.id+'\')" style="font-size:10px;color:#c62828;">✕</button>';
+        h += '</td>';
+      }
+      h += '</tr>';
+    });
+    h += '</tbody></table></div>';
+  }
+
+  body.innerHTML = h;
+}
+
+// Commission add/edit modal
+function openCommissionModal(editId) {
+  if (!_canEditCommissions()) { toast('Admin access required'); return; }
+  var existing = editId ? (ST.commissions||[]).find(function(c){ return c.id === editId; }) : null;
+
+  var activeEmps = ST.employees.filter(function(e){ return e.active; }).sort(function(a,b){ return a.name.localeCompare(b.name); });
+  var empOptions = '<option value="">-- Select --</option>';
+  activeEmps.forEach(function(e) {
+    var sel = existing && existing.employee_name === e.name ? ' selected' : '';
+    empOptions += '<option value="'+e.name+'"'+sel+'>'+e.name+'</option>';
+  });
+
+  var body = '';
+  body += '<div class="form-row">';
+  body += '<div><label class="form-label">Employee *</label><select class="form-select" id="comm-emp">'+empOptions+'</select></div>';
+  body += '<div><label class="form-label">Type *</label><select class="form-select" id="comm-type" onchange="_commTypeChanged()">';
+  ['commission','bonus','referral','spiff'].forEach(function(t){
+    var sel = existing && existing.type === t ? ' selected' : '';
+    body += '<option value="'+t+'"'+sel+'>'+t.charAt(0).toUpperCase()+t.slice(1)+'</option>';
+  });
+  body += '</select></div>';
+  body += '</div>';
+
+  body += '<div class="form-row">';
+  body += '<div><label class="form-label">Earned Date *</label><input type="date" class="form-input" id="comm-date" value="'+(existing ? existing.earned_date : new Date().toISOString().split('T')[0])+'"></div>';
+  body += '<div><label class="form-label">Status</label><select class="form-select" id="comm-status">';
+  ['pending','approved','paid'].forEach(function(s){
+    var sel = existing && existing.status === s ? ' selected' : (!existing && s==='pending' ? ' selected' : '');
+    body += '<option value="'+s+'"'+sel+'>'+s.charAt(0).toUpperCase()+s.slice(1)+'</option>';
+  });
+  body += '</select></div>';
+  body += '</div>';
+
+  // Commission calculator (shown only for type=commission)
+  body += '<div id="comm-calc-wrap" style="background:rgba(13,45,94,.04);border-radius:8px;padding:12px;margin-bottom:12px;'+(existing && existing.type!=='commission'?'display:none;':'')+'">';
+  body += '<div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:8px;">Commission Calculator <span style="font-weight:400;text-transform:none;">(pick an Albi job & rate to auto-fill amount)</span></div>';
+  body += '<div style="display:grid;grid-template-columns:2fr 1fr 1fr;gap:8px;margin-bottom:8px;">';
+  body += '<div style="position:relative;">';
+  body += '<input type="text" class="form-input" id="comm-job-search" placeholder="Search Albi job..." value="'+(existing && existing.job_name ? existing.job_name : '')+'" oninput="_filterCommJobs(this.value)" autocomplete="off">';
+  body += '<div id="comm-job-dropdown" style="display:none;position:absolute;top:100%;left:0;right:0;background:#fff;border:1.5px solid var(--border);border-radius:8px;max-height:200px;overflow-y:auto;z-index:100;box-shadow:0 4px 16px rgba(0,0,0,.15);"></div>';
+  body += '<input type="hidden" id="comm-job-id" value="'+(existing && existing.job_id ? existing.job_id : '')+'">';
+  body += '<input type="hidden" id="comm-job-name" value="'+(existing && existing.job_name ? existing.job_name : '')+'">';
+  body += '</div>';
+  body += '<input type="number" class="form-input" id="comm-revenue" placeholder="Revenue $" step="0.01" value="'+(existing && existing.job_revenue ? existing.job_revenue : '')+'" oninput="_commCalcAmount()">';
+  body += '<input type="number" class="form-input" id="comm-rate" placeholder="Rate %" step="0.1" value="'+(existing && existing.commission_rate ? existing.commission_rate : '')+'" oninput="_commCalcAmount()">';
+  body += '</div>';
+  body += '</div>';
+
+  body += '<div class="form-row">';
+  body += '<div><label class="form-label">Amount ($) *</label><input type="number" class="form-input" id="comm-amount" step="0.01" value="'+(existing ? existing.amount : '')+'" placeholder="0.00"></div>';
+  body += '<div><label class="form-label">Description</label><input type="text" class="form-input" id="comm-desc" placeholder="e.g. Q4 performance bonus" value="'+(existing && existing.description ? existing.description.replace(/"/g,'&quot;') : '')+'"></div>';
+  body += '</div>';
+
+  body += '<div><label class="form-label">Notes (internal)</label><input type="text" class="form-input" id="comm-notes" placeholder="Optional internal notes" value="'+(existing && existing.notes ? existing.notes.replace(/"/g,'&quot;') : '')+'"></div>';
+
+  showModal(existing ? '✏️ Edit Entry' : '💵 Add Commission / Bonus / Spiff', body, 'saveCommission('+(existing ? "'"+existing.id+"'" : 'null')+')');
+
+  // Pre-load Albi jobs for the search
+  ensureAlbiJobsLoaded();
+}
+
+function _commTypeChanged() {
+  var type = (document.getElementById('comm-type')||{}).value;
+  var wrap = document.getElementById('comm-calc-wrap');
+  if (wrap) wrap.style.display = type === 'commission' ? 'block' : 'none';
+}
+
+function _commCalcAmount() {
+  var rev = parseFloat((document.getElementById('comm-revenue')||{}).value) || 0;
+  var rate = parseFloat((document.getElementById('comm-rate')||{}).value) || 0;
+  if (rev > 0 && rate > 0) {
+    var amt = (rev * rate / 100);
+    var amtEl = document.getElementById('comm-amount');
+    if (amtEl) amtEl.value = amt.toFixed(2);
+  }
+}
+
+function _filterCommJobs(q) {
+  var dropdown = document.getElementById('comm-job-dropdown');
+  if (!dropdown) return;
+  if (!q || q.length < 2 || !_albiJobs) { dropdown.style.display = 'none'; return; }
+  var matches = _albiJobs.filter(function(j){ return j.name.toLowerCase().indexOf(q.toLowerCase()) !== -1; }).slice(0, 10);
+  if (!matches.length) { dropdown.style.display = 'none'; return; }
+  var html = '';
+  matches.forEach(function(j) {
+    html += '<div onclick="_pickCommJob(\''+j.id+'\',\''+j.name.replace(/\'/g,"\\'")+'\')" style="padding:8px 12px;cursor:pointer;border-bottom:1px solid var(--border);font-size:12px;" onmouseover="this.style.background=\'rgba(13,45,94,.05)\'" onmouseout="this.style.background=\'transparent\'">';
+    html += '<strong>'+j.name+'</strong> <span style="color:var(--muted);font-size:10px;">'+j.market+'</span>';
+    html += '</div>';
+  });
+  dropdown.innerHTML = html;
+  dropdown.style.display = 'block';
+}
+
+function _pickCommJob(id, name) {
+  document.getElementById('comm-job-id').value = id;
+  document.getElementById('comm-job-name').value = name;
+  document.getElementById('comm-job-search').value = name;
+  document.getElementById('comm-job-dropdown').style.display = 'none';
+}
+
+async function saveCommission(existingId) {
+  if (!_canEditCommissions()) { toast('Admin access required'); return; }
+  var empName = (document.getElementById('comm-emp')||{}).value;
+  var type = (document.getElementById('comm-type')||{}).value;
+  var earnedDate = (document.getElementById('comm-date')||{}).value;
+  var status = (document.getElementById('comm-status')||{}).value || 'pending';
+  var amount = parseFloat((document.getElementById('comm-amount')||{}).value) || 0;
+  var desc = ((document.getElementById('comm-desc')||{}).value || '').trim();
+  var notes = ((document.getElementById('comm-notes')||{}).value || '').trim();
+  var jobId = (document.getElementById('comm-job-id')||{}).value || null;
+  var jobName = (document.getElementById('comm-job-name')||{}).value || null;
+  var revenue = parseFloat((document.getElementById('comm-revenue')||{}).value) || null;
+  var rate = parseFloat((document.getElementById('comm-rate')||{}).value) || null;
+
+  if (!empName) { alert('Select an employee'); return; }
+  if (!earnedDate) { alert('Enter an earned date'); return; }
+  if (!amount || amount <= 0) { alert('Enter a positive amount'); return; }
+
+  var emp = ST.employees.find(function(e){ return e.name === empName; });
+  var payload = {
+    employee_name: empName,
+    employee_id: emp ? emp.id : null,
+    type: type,
+    amount: amount,
+    description: desc || null,
+    earned_date: earnedDate,
+    status: status,
+    job_id: jobId,
+    job_name: jobName,
+    job_revenue: revenue,
+    commission_rate: rate,
+    notes: notes || null,
+    created_by: getApprovedBy()
+  };
+
+  // If status is approved or paid, stamp approved_by + approved_at
+  if (status === 'approved' || status === 'paid') {
+    payload.approved_by = getApprovedBy();
+    payload.approved_at = new Date().toISOString();
+  }
+
+  var r;
+  if (existingId) {
+    r = await fetch(SB_URL + '/rest/v1/commissions?id=eq.' + existingId, {
+      method: 'PATCH',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+  } else {
+    r = await fetch(SB_URL + '/rest/v1/commissions', {
+      method: 'POST',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
+      body: JSON.stringify(payload)
+    });
+  }
+  if (!r.ok) { toast('Save failed — check console'); console.warn('Commission save failed:', r.status); return; }
+
+  toast('✓ ' + type.charAt(0).toUpperCase()+type.slice(1) + ' saved: $' + amount.toFixed(2) + ' for ' + empName);
+  logActivity(existingId ? 'Commission Edited' : 'Commission Added', empName + ' • ' + type + ' • $' + amount.toFixed(2) + (desc?' — '+desc:''), 'commissions', empName);
+  closeModal();
+  await loadAll();
+  renderCommissions();
+}
+
+function editCommission(id) {
+  openCommissionModal(id);
+}
+
+async function approveCommission(id) {
+  if (!_canEditCommissions()) { toast('Admin access required'); return; }
+  var c = (ST.commissions||[]).find(function(x){ return x.id === id; });
+  if (!c) return;
+  var approver = getApprovedBy();
+  var r = await fetch(SB_URL + '/rest/v1/commissions?id=eq.' + id, {
+    method: 'PATCH',
+    headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status: 'approved', approved_by: approver, approved_at: new Date().toISOString() })
+  });
+  if (r.ok) {
+    toast('✓ Approved $' + parseFloat(c.amount).toFixed(2) + ' for ' + c.employee_name);
+    logActivity('Commission Approved', c.employee_name + ' • ' + c.type + ' • $' + parseFloat(c.amount).toFixed(2), 'commissions', c.employee_name);
+    await loadAll();
+    renderCommissions();
+  } else { toast('Approval failed'); }
+}
+
+async function markCommissionPaid(id) {
+  if (!_canEditCommissions()) { toast('Admin access required'); return; }
+  var c = (ST.commissions||[]).find(function(x){ return x.id === id; });
+  if (!c) return;
+  var curPer = getCurrentPeriod();
+  var periodLabel = curPer ? curPer.label : '';
+  var r = await fetch(SB_URL + '/rest/v1/commissions?id=eq.' + id, {
+    method: 'PATCH',
+    headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status: 'paid', paid_in_period: periodLabel })
+  });
+  if (r.ok) {
+    toast('✓ Marked paid ($' + parseFloat(c.amount).toFixed(2) + ' for ' + c.employee_name + ')');
+    logActivity('Commission Marked Paid', c.employee_name + ' • ' + c.type + ' • $' + parseFloat(c.amount).toFixed(2) + ' in ' + periodLabel, 'commissions', c.employee_name);
+    await loadAll();
+    renderCommissions();
+  } else { toast('Update failed'); }
+}
+
+async function deleteCommission(id) {
+  if (!_canEditCommissions()) { toast('Admin access required'); return; }
+  var c = (ST.commissions||[]).find(function(x){ return x.id === id; });
+  if (!c) return;
+  if (!confirm('Delete this entry? This cannot be undone.\n\n' + c.type + ' • $' + parseFloat(c.amount).toFixed(2) + ' for ' + c.employee_name)) return;
+  var r = await fetch(SB_URL + '/rest/v1/commissions?id=eq.' + id, {
+    method: 'DELETE',
+    headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+  });
+  if (r.ok) {
+    toast('✓ Entry deleted');
+    logActivity('Commission Deleted', c.employee_name + ' • ' + c.type + ' • $' + parseFloat(c.amount).toFixed(2), 'commissions', c.employee_name);
+    await loadAll();
+    renderCommissions();
+  } else { toast('Delete failed'); }
+}
 
 async function renderArchive() {
   var body = document.getElementById('tc-body');
