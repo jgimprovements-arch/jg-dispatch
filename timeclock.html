@@ -432,7 +432,7 @@ body {
 
 <!-- LOGIN -->
 <div id="login-screen">
-  <div class="login-mark">JG</div>
+  <img src="https://jgimprovements-arch.github.io/jg-dispatch/logo.png" alt="JG Restoration" style="width:90px;height:90px;object-fit:contain;border-radius:18px;margin-bottom:14px;filter:drop-shadow(0 4px 20px rgba(0,0,0,.3));">
   <div class="login-title">JG Time Clock</div>
 
   <!-- Email/password form (default) -->
@@ -989,30 +989,36 @@ async function initApp(u) {
   document.getElementById('dd-name').textContent = u.name;
   document.getElementById('dd-email').textContent = u.email;
 
- // Lookup or create employee record
-  var emp = await sb('/rest/v1/employees?email=eq.' + encodeURIComponent(u.email) + '&select=*');
-  // If fetch failed due to network, retry once after 2s
-  if (!emp || !emp.length) {
-    await new Promise(function(r){ setTimeout(r, 2000); });
-    emp = await sb('/rest/v1/employees?email=eq.' + encodeURIComponent(u.email) + '&select=*');
-  }
-  if (emp && emp.length) {
-    TC.employee = emp[0];
-    if (!TC.employee.active) {
-      document.getElementById('login-screen').style.display = 'flex';
-      document.getElementById('app').style.display = 'none';
-      document.getElementById('login-err').textContent = 'Your account is inactive. Contact your manager.';
-      return;
-    }
-  } else {
-  // Auto-create employee on first sign-in
-    var newEmp = await sb('/rest/v1/employees', {
-      method: 'POST',
-      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=representation' },
-      body: JSON.stringify({ name: u.name, email: u.email, role: 'Technician', market: 'Appleton', active: true })
+ // Lookup employee record — direct fetch for reliability
+  TC.employee = { name: u.name, email: u.email }; // bare fallback
+  try {
+    var empR = await fetch(SB_URL + '/rest/v1/employees?email=eq.' + encodeURIComponent(u.email) + '&select=*', {
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
     });
-    TC.employee = newEmp && newEmp[0] ? newEmp[0] : { name: u.name, email: u.email };
-  }
+    if (empR.ok) {
+      var empData = await empR.json();
+      if (empData && empData.length) {
+        TC.employee = empData[0];
+        if (!TC.employee.active) {
+          document.getElementById('login-screen').style.display = 'flex';
+          document.getElementById('app').style.display = 'none';
+          document.getElementById('login-err').textContent = 'Your account is inactive. Contact your manager.';
+          return;
+        }
+      } else {
+        // Not found — auto-create
+        var createR = await fetch(SB_URL + '/rest/v1/employees', {
+          method: 'POST',
+          headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=representation' },
+          body: JSON.stringify({ name: u.name, email: u.email, role: 'Technician', market: 'Appleton', active: true })
+        });
+        if (createR.ok) {
+          var created = await createR.json();
+          if (created && created[0]) TC.employee = created[0];
+        }
+      }
+    }
+  } catch(e) { console.warn('Employee fetch failed:', e.message); }
 
  // Show/hide admin button
   if (!isAdmin()) {
