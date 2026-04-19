@@ -991,6 +991,11 @@ async function initApp(u) {
 
  // Lookup or create employee record
   var emp = await sb('/rest/v1/employees?email=eq.' + encodeURIComponent(u.email) + '&select=*');
+  // If fetch failed due to network, retry once after 2s
+  if (!emp || !emp.length) {
+    await new Promise(function(r){ setTimeout(r, 2000); });
+    emp = await sb('/rest/v1/employees?email=eq.' + encodeURIComponent(u.email) + '&select=*');
+  }
   if (emp && emp.length) {
     TC.employee = emp[0];
     if (!TC.employee.active) {
@@ -1018,15 +1023,13 @@ async function initApp(u) {
   startClock();
   await loadAll();
 
-  // Celebrations & alerts
-  var _dbg = document.createElement('div');
-  _dbg.style.cssText = 'position:fixed;top:60px;left:0;right:0;background:#0d2d5e;color:#fff;padding:12px 16px;font-size:13px;z-index:99999;font-family:monospace;line-height:1.6;';
-  _dbg.innerHTML = 'emp: ' + (TC.employee ? TC.employee.name : 'NULL') + '<br>birthday: ' + (TC.employee ? (TC.employee.birthday||'none') : 'N/A') + '<br>start_date: ' + (TC.employee ? (TC.employee.start_date||'none') : 'N/A') + '<br><button onclick="this.parentNode.remove()" style="margin-top:6px;padding:4px 12px;background:#e85d04;border:none;border-radius:6px;color:#fff;cursor:pointer;">Close</button>';
-  document.body.appendChild(_dbg);
-  if (TC.employee) {
-    checkBirthday(TC.employee);
-    checkWorkAnniversary(TC.employee);
-  }
+  // Celebrations fire after app fully loads
+  setTimeout(function() {
+    if (TC.employee) {
+      checkBirthday(TC.employee);
+      checkWorkAnniversary(TC.employee);
+    }
+  }, 2500);
   loadNotifications();
   initRealtimeSync();
 
@@ -1484,6 +1487,7 @@ async function clockIn() {
     TC.entries.push(result[0]);
     startPinging();
     logActivity('Clock In', 'Clocked in — Job: ' + (TC.selectedJob ? TC.selectedJob.name : 'None'), 'time_clock');
+
     // 7:30 rule check
     var nowDt = new Date();
     var isEarly = nowDt.getHours() < 7 || (nowDt.getHours() === 7 && nowDt.getMinutes() < 30);
@@ -2560,14 +2564,11 @@ function onRealtimeChange(table, payload) {
 
 // ── BIRTHDAY CELEBRATION ──────────────────────────────────────────────────
 function checkBirthday(employee) {
-  var _bdInfo = 'BD: ' + (employee ? employee.birthday : 'none');
-  toast(_bdInfo);
   if (!employee || !employee.birthday) return;
   var today = new Date();
   var parts = employee.birthday.split('-');
   var bMonth = parseInt(parts[1]) - 1;
   var bDay   = parseInt(parts[2]);
-  toast('BD check: today=' + today.getMonth() + '/' + today.getDate() + ' bday=' + bMonth + '/' + bDay);
   if (bMonth === today.getMonth() && bDay === today.getDate()) {
     setTimeout(function(){ showBirthdayCelebration(employee.name); }, 1200);
   }
@@ -2623,8 +2624,6 @@ function showBirthdayCelebration(name) {
 
 // ── WORK ANNIVERSARY CELEBRATION ─────────────────────────────────────────
 function checkWorkAnniversary(employee) {
-  var _annInfo = 'Ann: ' + (employee ? employee.start_date : 'none');
-  toast(_annInfo);
   if (!employee || !employee.start_date) return;
   var today = new Date();
   var parts = employee.start_date.split('-');
@@ -2632,7 +2631,6 @@ function checkWorkAnniversary(employee) {
   var sDay   = parseInt(parts[2]);
   var sYear  = parseInt(parts[0]);
   var years  = today.getFullYear() - sYear;
-  toast('Ann check: today=' + today.getMonth() + '/' + today.getDate() + ' start=' + sMonth + '/' + sDay + ' years=' + years);
   if (years <= 0) return;
   if (sMonth === today.getMonth() && sDay === today.getDate()) {
     setTimeout(function(){ showAnniversaryCelebration(employee.name, years); }, 2000);
