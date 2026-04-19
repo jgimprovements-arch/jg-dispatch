@@ -5840,19 +5840,24 @@ async function openEmployeeFile(empId) {
   var loadingBody = '<div style="text-align:center;padding:40px;color:var(--muted);">Loading employee file...</div>';
   showModal('📄 Employee File — ' + emp.name, loadingBody, null);
 
-  // Fetch the invite record (for acknowledgments / signature details)
+  // Fetch invite + non-compete signature records in parallel
   var inviteData = null;
+  var ncSignatureData = null;
   try {
-    var invites = await sb('/rest/v1/employee_invites?employee_id=eq.' + empId + '&order=sent_at.desc&limit=1');
-    if (invites && invites.length) inviteData = invites[0];
-  } catch(e) { console.warn('Could not fetch invite:', e); }
+    var results = await Promise.all([
+      sb('/rest/v1/employee_invites?employee_id=eq.' + empId + '&order=sent_at.desc&limit=1'),
+      sb('/rest/v1/noncompete_signatures?employee_id=eq.' + empId + '&order=signed_at.desc&limit=1')
+    ]);
+    if (results[0] && results[0].length) inviteData = results[0][0];
+    if (results[1] && results[1].length) ncSignatureData = results[1][0];
+  } catch(e) { console.warn('Could not fetch employee records:', e); }
 
   // Build the file view
-  var body = _buildEmployeeFileBody(emp, inviteData);
+  var body = _buildEmployeeFileBody(emp, inviteData, ncSignatureData);
   showModal('📄 Employee File — ' + emp.name, body, null);
 }
 
-function _buildEmployeeFileBody(emp, invite) {
+function _buildEmployeeFileBody(emp, invite, ncSig) {
   var h = '';
   var fmtD = function(iso) { if (!iso) return '—'; var d = new Date(iso); return d.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}); };
   var fmtDT = function(iso) { if (!iso) return '—'; var d = new Date(iso); return d.toLocaleString('en-US',{month:'short',day:'numeric',year:'numeric',hour:'numeric',minute:'2-digit'}); };
@@ -6021,6 +6026,54 @@ function _buildEmployeeFileBody(emp, invite) {
   }
   h += '</div>';
 
+  // ── NON-COMPETE AGREEMENT ──
+  h += '<div style="background:#fff;border:1px solid var(--border);border-radius:10px;padding:16px 18px;margin-bottom:16px;">';
+  h += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">';
+  h += '<div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;">📑 Non-Competition Agreement</div>';
+  if (ncSig || emp.noncompete_signed_at) {
+    h += '<span style="padding:3px 10px;background:rgba(46,125,50,.1);color:#2e7d32;border-radius:4px;font-size:11px;font-weight:700;">✓ SIGNED</span>';
+  } else {
+    h += '<span style="padding:3px 10px;background:rgba(192,32,32,.08);color:#c62828;border-radius:4px;font-size:11px;font-weight:700;">✗ NOT SIGNED</span>';
+  }
+  h += '</div>';
+
+  if (ncSig) {
+    h += '<div style="background:rgba(46,125,50,.04);border:1px solid rgba(46,125,50,.2);border-radius:8px;padding:12px 14px;margin-bottom:10px;">';
+    h += '<div style="font-size:13px;font-weight:700;color:var(--navy);margin-bottom:8px;">Signed on ' + fmtDT(ncSig.signed_at) + ' by "' + (ncSig.signature || emp.name) + '"</div>';
+
+    // Key terms reminder
+    h += '<div style="font-size:11px;color:var(--navy);margin-bottom:10px;padding:8px 10px;background:#fff;border-radius:6px;line-height:1.6;">';
+    h += '<strong>Agreement binds:</strong> 12-month non-compete · 50-mile radius · non-solicitation of customers + employees · confidentiality obligations · binds successor purchasers of JG Restoration';
+    h += '</div>';
+
+    // Download signed PDF button
+    if (ncSig.signed_pdf_url) {
+      h += '<a href="'+ncSig.signed_pdf_url+'" target="_blank" class="btn btn-sm" style="display:inline-block;background:var(--navy);color:#fff;border-color:var(--navy);text-decoration:none;margin-bottom:10px;">📑 Download Signed PDF</a> ';
+      h += '<span style="font-size:10px;color:var(--muted);">'+(ncSig.signed_pdf_filename||'signed_noncompete.pdf')+'</span>';
+    }
+
+    // Signature block
+    h += '<div style="background:#fff;border:1px solid rgba(46,125,50,.3);border-radius:6px;padding:10px 12px;font-family:DM Mono,monospace;margin-top:10px;">';
+    h += '<div style="font-size:10px;color:var(--muted);margin-bottom:4px;">TYPED SIGNATURE</div>';
+    h += '<div style="font-size:17px;font-weight:700;font-style:italic;color:var(--navy);border-bottom:1px solid var(--navy);padding-bottom:4px;margin-bottom:8px;font-family:cursive;">'+ncSig.signature+'</div>';
+    h += '<div style="font-size:10px;color:var(--muted);">Signed at: '+fmtDT(ncSig.signed_at)+'</div>';
+    if (ncSig.viewed_at) h += '<div style="font-size:10px;color:var(--muted);">Opened template at: '+fmtDT(ncSig.viewed_at)+'</div>';
+    if (ncSig.user_agent) h += '<div style="font-size:9px;color:var(--muted);margin-top:2px;word-break:break-all;">Device: '+ncSig.user_agent.substring(0,100)+(ncSig.user_agent.length>100?'...':'')+'</div>';
+    h += '<div style="font-size:10px;color:var(--muted);margin-top:4px;">Source: '+(ncSig.source||'onboarding')+'</div>';
+    h += '</div>';
+    h += '</div>';
+
+    h += '<div style="background:rgba(13,45,94,.04);border-radius:6px;padding:10px 12px;font-size:11px;color:var(--navy);line-height:1.5;">📋 <strong>Audit record:</strong> This employee electronically signed the JG Non-Competition Agreement. A filled and signed PDF copy with their typed signature, name, and date has been generated and stored in Supabase Storage. The signature is legally equivalent to a handwritten signature under Wisconsin\'s Uniform Electronic Transactions Act (Wis. Stat. § 137.15).</div>';
+  } else {
+    h += '<div style="padding:14px;background:rgba(192,32,32,.04);border-radius:8px;text-align:center;">';
+    h += '<div style="font-size:13px;color:#c62828;margin-bottom:6px;"><strong>No signed non-compete on file</strong></div>';
+    h += '<div style="font-size:11px;color:var(--muted);margin-bottom:8px;">This employee has not yet signed the Non-Competition Agreement.</div>';
+    h += '<button class="btn btn-sm" onclick="requestNoncompeteSignature(\''+emp.id+'\')" style="background:var(--orange);color:#fff;border-color:var(--orange);">📑 Request Signature</button>';
+    h += '<div style="font-size:10px;color:var(--muted);margin-top:6px;font-style:italic;">(Retroactive signing flow coming next session)</div>';
+    h += '</div>';
+  }
+  h += '</div>';
+
   // Invite History
   if (invite) {
     h += '<div style="background:#fff;border:1px solid var(--border);border-radius:10px;padding:14px 16px;margin-bottom:12px;">';
@@ -6041,6 +6094,13 @@ function _fileRow(label, value) {
     '<span style="color:var(--muted);min-width:90px;flex-shrink:0;">'+label+'</span>' +
     '<span style="text-align:right;color:var(--navy);font-weight:500;">'+value+'</span>' +
     '</div>';
+}
+
+// Stub — full retroactive non-compete request flow coming in next session
+function requestNoncompeteSignature(empId) {
+  var emp = ST.employees.find(function(e){ return e.id === empId; });
+  if (!emp) { toast('Employee not found'); return; }
+  alert('Retroactive non-compete signing is coming in the next build.\n\nFor now: you can manually send this employee a signing link via invite re-send, or have them sign during their next in-person visit.\n\nEmployee: ' + emp.name + '\nEmail: ' + (emp.email||'—'));
 }
 
 function openEditEmployee(id) {
