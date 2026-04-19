@@ -1466,8 +1466,8 @@ async function checkClockInCelebration(u) {
   try {
     var today = new Date();
     var todayStr = today.toISOString().split('T')[0];
-    var bdayKey = 'jg_bday_celebrated_' + today.getFullYear();
-    var annKey  = 'jg_ann_celebrated_'  + today.getFullYear();
+    var bdayKey = 'jg_bday_celebrated_' + today.getFullYear() + '_' + (parseInt(emp.birthday.split('-')[1])) + '_' + parseInt(emp.birthday.split('-')[2]);
+    var annKey  = 'jg_ann_celebrated_' + today.getFullYear() + '_' + (parseInt(emp.start_date.split('-')[1])) + '_' + parseInt(emp.start_date.split('-')[2]);
 
     // Use TC.employee if available, otherwise fetch
     var emp = null;
@@ -2044,18 +2044,118 @@ async function logActivity(action, detail, category, employeeName) {
 var _switchJobId   = null;
 var _switchJobName = '';
 
-function openSwitchJob() {
+async function openSwitchJob() {
   var cur = document.getElementById('switch-current-job');
-  if (cur) cur.textContent = 'Current: ' + (TC.selectedJobName || TC.selectedJobId || 'Unknown job');
+  if (cur) cur.textContent = '📋 Currently on: ' + (TC.selectedJobName || TC.selectedJobId || 'Unknown job');
   var inp = document.getElementById('switch-job-input');
   if (inp) inp.value = '';
-  var res = document.getElementById('switch-job-results');
-  if (res) res.style.display = 'none';
   var sel = document.getElementById('switch-job-selected');
   if (sel) sel.style.display = 'none';
   _switchJobId = null; _switchJobName = '';
   var sheet = document.getElementById('switch-job-sheet');
   if (sheet) sheet.classList.add('open');
+
+  // Load available jobs immediately
+  var res = document.getElementById('switch-job-results');
+  if (!res) return;
+  res.style.display = 'block';
+  res.innerHTML = '<div style="padding:14px;text-align:center;color:var(--muted);font-size:13px;">Loading jobs...</div>';
+
+  try {
+    var techName = TC.employee ? TC.employee.name : '';
+    var market   = TC.employee ? (TC.employee.market || 'Appleton') : 'Appleton';
+    var locId    = market.toLowerCase().includes('point') ? 1477 : 222;
+
+    // Pull today's dispatch board state to get assigned jobs
+    var myJobs    = [];
+    var otherJobs = [];
+
+    var br = await fetch(SB_URL + '/rest/v1/board_state?select=state&limit=1&order=updated_at.desc', {
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+    });
+    if (br.ok) {
+      var brows = await br.json();
+      var boardState = brows && brows[0] && brows[0].state ? brows[0].state : {};
+      // board_state stores {techName: [{jobId, jobName, ...}, ...]}
+      Object.entries(boardState).forEach(function(kv) {
+        var tname = kv[0], tjobs = kv[1] || [];
+        tjobs.forEach(function(j) {
+          var entry = { id: j.jobId || j.id, name: j.jobName || j.name || j.jobId, number: j.jobNumber || '' };
+          if (tname.toLowerCase() === techName.toLowerCase()) {
+            myJobs.push(entry);
+          } else {
+            otherJobs.push(entry);
+          }
+        });
+      });
+    }
+
+    // Fallback: pull all active Albi jobs if board state empty
+    if (!myJobs.length && !otherJobs.length) {
+      var ar = await fetch('https://jg-proxy-v2.vercel.app/api/albi', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'get_projects', locationId: locId, limit: 50, status: 'active' })
+      });
+      if (ar.ok) {
+        var ad = await ar.json();
+        otherJobs = (ad.projects || ad.data || []).map(function(j){
+          return { id: j.id || j.projectId, name: j.name || j.projectName, number: j.projectNumber || '' };
+        });
+      }
+    }
+
+    if (!myJobs.length && !otherJobs.length) {
+      res.innerHTML = '<div style="padding:14px;text-align:center;color:var(--muted);font-size:13px;">No active jobs found</div>';
+      return;
+    }
+
+    // My jobs first, then others
+    _switchAllJobs = myJobs.concat(otherJobs);
+    _switchMyJobCount = myJobs.length;
+    renderSwitchJobs(_switchAllJobs);
+  } catch(e) {
+    res.innerHTML = '<div style="padding:14px;text-align:center;color:var(--muted);font-size:13px;">Could not load jobs</div>';
+  }
+}
+
+var _switchAllJobs = [];
+var _switchMyJobCount = 0;
+
+function renderSwitchJobs(jobs) {
+  var res = document.getElementById('switch-job-results');
+  if (!res) return;
+  if (!jobs.length) {
+    res.innerHTML = '<div style="padding:14px;text-align:center;color:var(--muted);font-size:13px;">No jobs match</div>';
+    return;
+  }
+  var html = '';
+  var isFiltered = jobs.length !== _switchAllJobs.length;
+  jobs.forEach(function(j, i) {
+    var jid   = String(j.id || j.projectId || '');
+    var jname = j.name || j.projectName || jid;
+    var jnum  = j.number || j.projectNumber || '';
+    var safeId   = jid.replace(/"/g,'&quot;');
+    var safeName = jname.replace(/"/g,'&quot;');
+    var isCurrent = jid === String(TC.selectedJobId);
+    // Section headers when not filtered
+    if (!isFiltered) {
+      if (i === 0 && _switchMyJobCount > 0) {
+        html += '<div style="padding:6px 14px;font-size:10px;font-weight:700;color:#1565c0;text-transform:uppercase;letter-spacing:.05em;background:rgba(21,101,192,.06);">📋 My Jobs Today</div>';
+      } else if (i === _switchMyJobCount && _switchMyJobCount > 0) {
+        html += '<div style="padding:6px 14px;font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;background:rgba(0,0,0,.03);">All Active Jobs</div>';
+      }
+    }
+    html += '<div onclick="selectSwitchJob(\"' + safeId + '\",\"' + safeName + '\")" style="padding:11px 14px;border-bottom:1px solid var(--border);cursor:pointer;display:flex;align-items:center;gap:10px;' + (isCurrent ? 'background:rgba(13,45,94,.05);' : '') + (i < _switchMyJobCount && !isFiltered ? 'border-left:3px solid #1565c0;' : '') + '">' +
+      '<div style="flex:1;">' +
+        '<div style="font-size:13px;font-weight:600;color:var(--navy);">' + jname + '</div>' +
+        (jnum ? '<div style="font-size:11px;color:var(--muted);">#' + jnum + '</div>' : '') +
+      '</div>' +
+      (isCurrent ? '<span style="font-size:10px;color:var(--muted);">current</span>' : '') +
+    '</div>';
+  });
+  res.innerHTML = html;
+  res.style.display = 'block';
 }
 
 function closeSwitchJob() {
@@ -2063,39 +2163,15 @@ function closeSwitchJob() {
   if (sheet) sheet.classList.remove('open');
 }
 
-async function switchJobSearch() {
-  var q = (document.getElementById('switch-job-input') || {}).value || '';
-  var res = document.getElementById('switch-job-results');
-  if (!res) return;
-  if (q.length < 2) { res.style.display = 'none'; return; }
-
-  try {
-    var r = await fetch(SB_URL + '/rest/v1/rpc/search_jobs', {
-      method: 'POST',
-      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ q: q })
-    });
-    // Fallback: use Albi proxy
-    var jobs = [];
-    var ar = await fetch('https://jg-proxy-v2.vercel.app/api/albi', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'get_projects', search: q, limit: 10 })
-    });
-    if (ar.ok) {
-      var ad = await ar.json();
-      jobs = (ad.projects || ad.data || []).slice(0, 8);
-    }
-    if (!jobs.length) { res.style.display = 'none'; return; }
-    res.innerHTML = jobs.map(function(j) {
-      var jid = j.id || j.projectId || '';
-      var jname = j.name || j.projectName || jid;
-      var safeId2 = jid.replace(/"/g,'&quot;');
-      var safeName2 = jname.replace(/"/g,'&quot;');
-      return '<div onclick="selectSwitchJob(\"'+safeId2+'\",\"'+safeName2+'\")" style="padding:12px 14px;border-bottom:1px solid var(--border);cursor:pointer;font-size:13px;font-weight:600;color:var(--navy);">' + jname + '</div>';
-    }).join('');
-    res.style.display = 'block';
-  } catch(e) { res.style.display = 'none'; }
+function switchJobSearch() {
+  var q = ((document.getElementById('switch-job-input') || {}).value || '').toLowerCase().trim();
+  if (!q) { renderSwitchJobs(_switchAllJobs); return; }
+  var filtered = _switchAllJobs.filter(function(j) {
+    var name = (j.name || j.projectName || '').toLowerCase();
+    var num  = String(j.projectNumber || j.number || '').toLowerCase();
+    return name.includes(q) || num.includes(q);
+  });
+  renderSwitchJobs(filtered);
 }
 
 function selectSwitchJob(id, name) {
