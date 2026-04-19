@@ -841,10 +841,34 @@ async function renderHub(role) {
 
   var allowed = Object.keys(APP_CONFIG).filter(isAllowed);
 
+  // Read pending approval counts from localStorage (populated by timeclock_admin)
+  var pendingCounts = null;
+  try {
+    var raw = localStorage.getItem('jg_pending_counts');
+    if (raw) {
+      var parsed = JSON.parse(raw);
+      // Only use if updated in the last 6 hours
+      if (parsed.updatedAt && (Date.now() - new Date(parsed.updatedAt).getTime()) < 6*60*60*1000) {
+        pendingCounts = parsed.counts;
+      }
+    }
+  } catch(e) {}
+
   grid.innerHTML = allowed.map(function(key) {
     var app = APP_CONFIG[key];
     if (!app) return '';
-    return '<a href="' + app.url + '" class="app-card" style="--card-accent:' + app.color + ';text-decoration:none;">' +
+    // Show badge on timeclock_admin tile if there are pending items
+    var badgeHtml = '';
+    if (key === 'timeclock_admin' && pendingCounts && pendingCounts.total > 0) {
+      var parts = [];
+      if (pendingCounts.timecards) parts.push(pendingCounts.timecards + ' timecard' + (pendingCounts.timecards!==1?'s':''));
+      if (pendingCounts.timeoff) parts.push(pendingCounts.timeoff + ' time off');
+      if (pendingCounts.commissions) parts.push(pendingCounts.commissions + ' commission' + (pendingCounts.commissions!==1?'s':''));
+      var title = 'Pending: ' + parts.join(', ');
+      badgeHtml = '<div title="' + title + '" style="position:absolute;top:-6px;right:-6px;background:#c62828;color:#fff;font-size:12px;font-weight:700;padding:4px 10px;border-radius:14px;min-width:26px;text-align:center;box-shadow:0 2px 6px rgba(198,40,40,.4);font-family:DM Sans,sans-serif;z-index:5;">' + (pendingCounts.total > 99 ? '99+' : pendingCounts.total) + '</div>';
+    }
+    return '<a href="' + app.url + '" class="app-card" style="--card-accent:' + app.color + ';text-decoration:none;position:relative;">' +
+      badgeHtml +
       '<div class="app-card-header">' +
         '<div class="app-icon" style="background:rgba(0,0,0,.06);font-size:24px;width:48px;height:48px;border-radius:12px;display:flex;align-items:center;justify-content:center;">' + app.icon + '</div>' +
         '<div class="app-status live">Live</div>' +

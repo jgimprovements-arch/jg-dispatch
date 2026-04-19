@@ -493,6 +493,13 @@ async function loadAll() {
   var coms = await sb('/rest/v1/commissions?select=*&order=earned_date.desc&limit=2000');
   ST.commissions = coms || [];
 
+  // Preload pending vacation requests for accurate badge count (full refresh happens on Time Off tab visit)
+  try {
+    var pendingTo = await sb('/rest/v1/vacation_requests?status=eq.pending&select=*&order=submitted_at.desc&limit=500');
+    // Merge into _toData if not already loaded; otherwise just update the cache
+    if (!_toData) _toData = pendingTo || [];
+  } catch(e) {}
+
   render();
 }
 
@@ -516,6 +523,85 @@ function showTab(tab, el) {
   document.querySelectorAll('.tc-tab').forEach(function(t) { t.classList.remove('active'); });
   if (el) el.classList.add('active');
   render();
+}
+
+// ── PENDING APPROVAL COUNTERS (in-app badges) ─────────────────────────────
+// Single source of truth for "what needs my attention" across all UI surfaces
+function getPendingApprovalCounts() {
+  var counts = { timecards: 0, timeoff: 0, commissions: 0, total: 0 };
+
+  // Timecards: look at most recent 2 pay periods, count unapproved employees
+  try {
+    var periods = getPayPeriods(ST.payPeriod.type, ST.payPeriod.start, 6);
+    var today = new Date();
+    // Recent periods that have ended (end < today)
+    var closedPeriods = periods.filter(function(p){ return p.end < today; }).slice(0, 2);
+
+    var empNamesWithEntries = new Set();
+    closedPeriods.forEach(function(p) {
+      ST.entries.forEach(function(e) {
+        if (!e.clock_in) return;
+        var d = new Date(e.clock_in);
+        if (d >= p.start && d <= p.end) {
+          empNamesWithEntries.add(p.label + '|' + e.employee_name);
+        }
+      });
+    });
+
+    empNamesWithEntries.forEach(function(key) {
+      var parts = key.split('|');
+      var status = getApprovalStatus(parts[0], parts[1]);
+      if (status !== 'approved') counts.timecards++;
+    });
+  } catch(e) {}
+
+  // Time off: count pending vacation_requests
+  try {
+    // _toData is populated on Time Off tab visit; fallback: check if we have it loaded
+    if (Array.isArray(_toData)) {
+      counts.timeoff = _toData.filter(function(r){ return r.status === 'pending'; }).length;
+    }
+  } catch(e) {}
+
+  // Commissions: count pending (awaiting admin approval before export)
+  try {
+    counts.commissions = (ST.commissions || []).filter(function(c){ return c.status === 'pending'; }).length;
+  } catch(e) {}
+
+  counts.total = counts.timecards + counts.timeoff + counts.commissions;
+  return counts;
+}
+
+function paintBadges() {
+  var c = getPendingApprovalCounts();
+
+  function badge(tabId, n, title) {
+    var btn = document.getElementById(tabId);
+    if (!btn) return;
+    // Remove old badge
+    var old = btn.querySelector('.tab-badge');
+    if (old) old.remove();
+    if (n > 0) {
+      var b = document.createElement('span');
+      b.className = 'tab-badge';
+      b.textContent = n > 99 ? '99+' : String(n);
+      b.title = title || (n + ' pending');
+      b.style.cssText = 'display:inline-block;margin-left:6px;background:#c62828;color:#fff;font-size:10px;font-weight:700;padding:1px 6px;border-radius:10px;min-width:16px;text-align:center;line-height:14px;font-family:DM Sans,sans-serif;';
+      btn.appendChild(b);
+    }
+  }
+
+  badge('tab-timesheets', c.timecards, c.timecards + ' timecard(s) awaiting approval');
+  badge('tab-timeoff', c.timeoff, c.timeoff + ' time off request(s) pending');
+  badge('tab-commissions', c.commissions, c.commissions + ' commission(s) pending approval');
+
+  // Broadcast to other pages via localStorage (hub picks this up)
+  try {
+    localStorage.setItem('jg_pending_counts', JSON.stringify({
+      counts: c,
+      updatedAt: new Date().toISOString()
+    }));
+  } catch(e) {}
 }
 
 function render() {
@@ -545,6 +631,9 @@ function render() {
   else if (ST.tab === 'archive')  { if (isAdmin()) renderArchive(); }
   else if (ST.tab === 'activity') { if (isAdmin()) renderActivity(); }
   else if (ST.tab === 'access')   { if (isAdmin()) renderAccess(); }
+
+  // Refresh in-app badges after any render
+  try { paintBadges(); } catch(e) {}
 }
 
 // ── LIVE TAB ──────────────────────────────────────────────────────────────
@@ -1381,6 +1470,38 @@ function generateTimecardPDF(empName, periodLabel, approverName, approvedAt) {
 
 async function snapshotTimecardToArchive(empName, periodLabel, totals, pdfBase64) {
   var emp = ST.employees.find(function(x){ return x.name === empName; });
+
+  // Compute commissions earned in this period (pending + approved + paid-in-this-period)
+  var periods = getPayPeriods(ST.payPeriod.type, ST.payPeriod.start, 80);
+  var period = periods.find(function(p){ return p.label === periodLabel; });
+  var commSnapshot = [];
+  var commTotal = 0;
+  if (period) {
+    var empComms = (ST.commissions || []).filter(function(c) {
+      if (c.employee_name !== empName) return false;
+      var d = new Date((c.earned_date||'') + 'T00:00:00');
+      return d >= period.start && d <= period.end;
+    });
+    commSnapshot = empComms.map(function(c) {
+      return {
+        id: c.id,
+        type: c.type,
+        amount: parseFloat(c.amount||0),
+        description: c.description || '',
+        job_id: c.job_id || null,
+        job_name: c.job_name || null,
+        job_revenue: c.job_revenue ? parseFloat(c.job_revenue) : null,
+        commission_rate: c.commission_rate ? parseFloat(c.commission_rate) : null,
+        earned_date: c.earned_date,
+        status: c.status,
+        approved_by: c.approved_by || null,
+        approved_at: c.approved_at || null,
+        paid_in_period: c.paid_in_period || null
+      };
+    });
+    commTotal = commSnapshot.reduce(function(s,c){return s+c.amount;}, 0);
+  }
+
   var payload = {
     employee_name: empName,
     employee_id: emp ? emp.id : null,
@@ -1400,7 +1521,10 @@ async function snapshotTimecardToArchive(empName, periodLabel, totals, pdfBase64
         duration_minutes: e.duration_minutes, job_name: e.job_name,
         self_verified: !!e.self_verified
       };
-    }))
+    })),
+    commission_snapshot: JSON.stringify(commSnapshot),
+    commission_total: commTotal,
+    commission_count: commSnapshot.length
   };
   try {
     await fetch(SB_URL + '/rest/v1/timecard_archive', {
@@ -2289,6 +2413,14 @@ function renderTimesheets() {
         h += '<div style="border-top:1px solid var(--border);padding-top:10px;">';
         h += '<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;"><span style="color:var(--muted);">Salary — $'+Number(emp.annual_salary).toLocaleString()+'/yr</span><span style="font-weight:600;">$'+pp3.toFixed(2)+'/period</span></div>';
         h += '<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;"><span style="color:var(--muted);">Days worked: '+wd3+' / '+pd3+'</span>'+(md3>0?'<span style="color:#c62828;">-$'+(md3*(pp3/pd3)).toFixed(2)+' deducted</span>':'<span style="color:#2e7d32;">Full period</span>')+'</div>';
+        // Commissions for this employee in this period
+        var commData = periodCommissionsByEmp[nm];
+        if (commData) {
+          totalPay += commData.total;
+          var pendingCount = commData.items.filter(function(c){return c.status==='pending';}).length;
+          var approvedCount = commData.items.filter(function(c){return c.status==='approved';}).length;
+          h += '<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;"><span style="color:#6a1b9a;">💵 Commissions ('+commData.items.length+' item'+(commData.items.length!==1?'s':'')+(pendingCount>0?', '+pendingCount+' pending':'')+')</span><span style="font-weight:600;color:#6a1b9a;">$'+commData.total.toFixed(2)+'</span></div>';
+        }
         h += '<div style="display:flex;justify-content:space-between;font-size:14px;font-weight:700;border-top:1px solid var(--border);padding-top:6px;margin-top:6px;"><span>Est. Gross Pay</span><span style="color:#2e7d32;">$'+totalPay.toFixed(2)+'</span></div>';
         h += '</div>';
       } else if(rate){
@@ -2301,10 +2433,25 @@ function renderTimesheets() {
         if (trainingPayForCard > 0) {
           h += '<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;"><span style="color:var(--navy);">Training ('+absBrk.regularPaidHours.toFixed(1)+'h @ $'+rate.toFixed(2)+')</span><span style="font-weight:600;">$'+trainingPayForCard.toFixed(2)+'</span></div>';
         }
+        // Commissions for this employee in this period
+        var commData2 = periodCommissionsByEmp[nm];
+        if (commData2) {
+          totalPay += commData2.total;
+          var pendingCount2 = commData2.items.filter(function(c){return c.status==='pending';}).length;
+          h += '<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;"><span style="color:#6a1b9a;">💵 Commissions ('+commData2.items.length+' item'+(commData2.items.length!==1?'s':'')+(pendingCount2>0?', '+pendingCount2+' pending':'')+')</span><span style="font-weight:600;color:#6a1b9a;">$'+commData2.total.toFixed(2)+'</span></div>';
+        }
         h += '<div style="display:flex;justify-content:space-between;font-size:14px;font-weight:700;border-top:1px solid var(--border);padding-top:6px;margin-top:6px;"><span>Est. Gross Pay</span><span style="color:#2e7d32;">$'+totalPay.toFixed(2)+'</span></div>';
         h += '</div>';
       } else {
-        h += '<div style="font-size:11px;color:var(--muted);font-style:italic;">No rate set</div>';
+        // No rate set — but show commissions if any
+        var commData3 = periodCommissionsByEmp[nm];
+        if (commData3) {
+          h += '<div style="border-top:1px solid var(--border);padding-top:10px;">';
+          h += '<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;"><span style="color:#6a1b9a;">💵 Commissions</span><span style="font-weight:600;color:#6a1b9a;">$'+commData3.total.toFixed(2)+'</span></div>';
+          h += '</div>';
+        } else {
+          h += '<div style="font-size:11px;color:var(--muted);font-style:italic;">No rate set</div>';
+        }
       }
       if(d.earlyFlags) h += '<div style="font-size:11px;color:#c62828;margin-top:8px;">&#9888; '+d.earlyFlags+' early clock-in(s)</div>';
 
@@ -2429,6 +2576,8 @@ function renderTimesheets() {
       h += '</div>';  // outer container
     }
     var periodRegMins=0, periodOtMins=0, periodPtoHrs=0, periodTrainHrs=0, periodTotalPay=0;
+    var periodCommissionTotal = 0;
+    var periodCommissionsByEmp = {};
     Object.entries(byEmp).forEach(function(kv){
       var nm2=kv[0], d2=kv[1];
       var emp2=ST.employees.find(function(e){return e.name===nm2;});
@@ -2444,6 +2593,20 @@ function renderTimesheets() {
       } else if(rate2){
         periodTotalPay+=rate2*(ot3.regMins/60)+rate2*1.5*(ot3.otMins/60)+rate2*absBrk2.ptoPaidHours+rate2*absBrk2.regularPaidHours;
       }
+
+      // Compute commissions earned in this period (pending + approved but not yet paid)
+      var empComms = (ST.commissions || []).filter(function(c) {
+        if (c.employee_name !== nm2) return false;
+        if (c.status === 'paid') return false;  // already paid out previously
+        var d = new Date((c.earned_date||'') + 'T00:00:00');
+        return d >= curPer.start && d <= curPer.end;
+      });
+      var empCommTotal = empComms.reduce(function(s,c){return s+parseFloat(c.amount||0);},0);
+      if (empCommTotal > 0) {
+        periodCommissionsByEmp[nm2] = { total: empCommTotal, items: empComms };
+        periodCommissionTotal += empCommTotal;
+        periodTotalPay += empCommTotal;  // add to gross payroll
+      }
     });
 
     var totalAllMins = periodRegMins + periodOtMins + (periodPtoHrs*60) + (periodTrainHrs*60);
@@ -2458,14 +2621,23 @@ function renderTimesheets() {
     summaryBlock += '<div class="card" style="margin-bottom:16px;padding:0;overflow:hidden;">';
     summaryBlock += '<div style="background:var(--navy);padding:10px 18px;"><div style="font-size:11px;font-weight:700;color:rgba(255,255,255,.6);text-transform:uppercase;letter-spacing:.06em;">Pay Period Summary — '+selPeriod+'</div></div>';
     var hasPto = periodPtoHrs > 0 || periodTrainHrs > 0;
-    // grid: +1 column for labor burden
-    var gridCols = hasPto ? (periodTotalPay>0 ? '1fr 1fr 1fr 1fr 1fr 1fr' : '1fr 1fr 1fr 1fr 1fr') : (periodTotalPay>0 ? '1fr 1fr 1fr 1fr 1fr' : '1fr 1fr 1fr 1fr');
+    var hasComm = periodCommissionTotal > 0;
+    // Base cells: Total Hours, Regular, Overtime, Labor Burden = 4
+    // Optional: Commissions (+1), PTO (+1), Est Gross Payroll (+1)
+    var nCols = 4 + (hasComm?1:0) + (hasPto?1:0) + (periodTotalPay>0?1:0);
+    var gridCols = new Array(nCols).fill('1fr').join(' ');
     summaryBlock += '<div style="display:grid;grid-template-columns:'+gridCols+';">';
     summaryBlock += '<div style="padding:16px 18px;border-right:1px solid var(--border);"><div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">Total Hours</div><div style="font-size:24px;font-weight:700;color:var(--navy);line-height:1;">'+totalHrs2+'</div></div>';
     summaryBlock += '<div style="padding:16px 18px;border-right:1px solid var(--border);"><div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">Regular</div><div style="font-size:24px;font-weight:700;color:var(--navy);line-height:1;">'+regHrsStr2+'</div></div>';
     summaryBlock += '<div style="padding:16px 18px;border-right:1px solid var(--border);"><div style="font-size:10px;font-weight:700;color:'+(periodOtMins>0?'#c62828':'var(--muted)')+';text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">Overtime</div>';
     summaryBlock += '<div style="font-size:24px;font-weight:700;color:'+(periodOtMins>0?'#c62828':'var(--muted)')+';line-height:1;">'+otHrsStr2+'</div></div>';
     summaryBlock += '<div style="padding:16px 18px;border-right:1px solid var(--border);background:rgba(232,93,4,.05);"><div style="font-size:10px;font-weight:700;color:var(--orange);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">Labor Burden</div><div style="font-size:24px;font-weight:700;color:var(--orange);line-height:1;">'+fmtMoney(periodLaborBurden)+'</div><div style="font-size:9px;color:var(--muted);margin-top:2px;">@ $'+getLaborBurdenRate()+'/hr</div></div>';
+    if (periodCommissionTotal > 0) {
+      summaryBlock += '<div style="padding:16px 18px;border-right:1px solid var(--border);background:rgba(106,27,154,.05);">';
+      summaryBlock += '<div style="font-size:10px;font-weight:700;color:#6a1b9a;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">Commissions</div>';
+      summaryBlock += '<div style="font-size:24px;font-weight:700;color:#6a1b9a;line-height:1;">$'+periodCommissionTotal.toFixed(0)+'</div>';
+      summaryBlock += '<div style="font-size:9px;color:var(--muted);margin-top:2px;">'+Object.keys(periodCommissionsByEmp).length+' employee(s)</div></div>';
+    }
     if (hasPto) {
       summaryBlock += '<div style="padding:16px 18px;'+(periodTotalPay>0?'border-right:1px solid var(--border);':'')+'background:rgba(46,125,50,.04);">';
       summaryBlock += '<div style="font-size:10px;font-weight:700;color:#2e7d32;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">PTO / Training</div>';
@@ -2474,7 +2646,9 @@ function renderTimesheets() {
     if(periodTotalPay>0){
       summaryBlock += '<div style="padding:16px 18px;background:rgba(46,125,50,.08);">';
       summaryBlock += '<div style="font-size:10px;font-weight:700;color:#2e7d32;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">Est. Gross Payroll</div>';
-      summaryBlock += '<div style="font-size:24px;font-weight:700;color:#2e7d32;line-height:1;">$'+periodTotalPay.toFixed(2)+'</div></div>';
+      summaryBlock += '<div style="font-size:24px;font-weight:700;color:#2e7d32;line-height:1;">$'+periodTotalPay.toFixed(2)+'</div>';
+      if (periodCommissionTotal > 0) summaryBlock += '<div style="font-size:9px;color:var(--muted);margin-top:2px;">incl. commissions</div>';
+      summaryBlock += '</div>';
     }
     summaryBlock += '</div></div>';
     // Inject at the top (in place of our placeholder)
@@ -3942,6 +4116,54 @@ function _archiveGeneratePDFFromSnapshot(record) {
     y = doc.lastAutoTable.finalY + 20;
   }
 
+  // Commission snapshot section
+  var commSnap = [];
+  try { commSnap = typeof record.commission_snapshot === 'string' ? JSON.parse(record.commission_snapshot) : (record.commission_snapshot || []); }
+  catch(e) { commSnap = []; }
+
+  if (commSnap.length) {
+    // Header for commission block
+    if (y > 680) { doc.addPage(); y = 40; }
+    doc.setFillColor(106, 27, 154);
+    doc.rect(40, y, pageW - 80, 18, 'F');
+    doc.setTextColor(255,255,255); doc.setFontSize(10); doc.setFont('helvetica','bold');
+    doc.text('COMMISSIONS EARNED THIS PERIOD', 48, y + 12);
+    y += 24;
+
+    var commBody = commSnap.map(function(c) {
+      var jobLabel = c.job_name ? (c.job_name.length > 28 ? c.job_name.substring(0, 25)+'...' : c.job_name) : '-';
+      var rateLabel = c.commission_rate ? c.commission_rate+'%' : '-';
+      return [
+        c.type.charAt(0).toUpperCase() + c.type.slice(1),
+        jobLabel,
+        c.job_revenue ? '$'+Math.round(c.job_revenue).toLocaleString() : '-',
+        rateLabel,
+        '$'+parseFloat(c.amount).toFixed(2),
+        c.status.toUpperCase(),
+        c.approved_by || '-'
+      ];
+    });
+    var commTotal = commSnap.reduce(function(s,c){return s+parseFloat(c.amount);}, 0);
+    commBody.push([
+      { content: 'TOTAL', colSpan: 4, styles: { fontStyle: 'bold', halign: 'right' } },
+      { content: '$'+commTotal.toFixed(2), styles: { fontStyle: 'bold', textColor: [106,27,154] } },
+      '',
+      ''
+    ]);
+
+    doc.autoTable({
+      startY: y,
+      head: [['Type','Job','Job Revenue','Rate','Amount','Status','Approved By']],
+      body: commBody,
+      theme: 'grid',
+      styles: { fontSize: 8, cellPadding: 4 },
+      headStyles: { fillColor: [106, 27, 154], textColor: 255, fontStyle: 'bold' },
+      alternateRowStyles: { fillColor: [252, 249, 253] },
+      margin: { left: 40, right: 40 }
+    });
+    y = doc.lastAutoTable.finalY + 20;
+  }
+
   doc.setFont('helvetica','italic'); doc.setFontSize(8);
   doc.setTextColor(130,130,145);
   doc.text('Archived timecard — immutable snapshot from approval date. Regenerated ' + new Date().toLocaleString() + ' by ' + getApprovedBy(), 40, y, { maxWidth: pageW - 80 });
@@ -3987,6 +4209,44 @@ function _archiveViewSnapshot(idx) {
     });
     body += '</tbody></table></div>';
   }
+
+  // Commission snapshot section
+  var commSnap = [];
+  try { commSnap = typeof r.commission_snapshot === 'string' ? JSON.parse(r.commission_snapshot) : (r.commission_snapshot || []); }
+  catch(e) { commSnap = []; }
+
+  if (commSnap.length) {
+    var commTotal = commSnap.reduce(function(s,c){return s+parseFloat(c.amount||0);}, 0);
+    body += '<div style="margin-top:16px;">';
+    body += '<div style="font-size:11px;font-weight:700;color:#6a1b9a;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;">💵 Commissions ('+commSnap.length+' item'+(commSnap.length!==1?'s':'')+' · $'+commTotal.toFixed(2)+')</div>';
+    body += '<div style="border:1px solid rgba(106,27,154,.2);border-radius:8px;overflow:hidden;">';
+    body += '<table style="width:100%;border-collapse:collapse;font-size:11px;">';
+    body += '<thead style="background:rgba(106,27,154,.08);"><tr>';
+    body += '<th style="padding:8px;text-align:left;">Type</th>';
+    body += '<th style="padding:8px;text-align:left;">Job</th>';
+    body += '<th style="padding:8px;text-align:right;">Revenue</th>';
+    body += '<th style="padding:8px;text-align:center;">Rate</th>';
+    body += '<th style="padding:8px;text-align:right;">Amount</th>';
+    body += '<th style="padding:8px;text-align:left;">Status</th>';
+    body += '</tr></thead><tbody>';
+    commSnap.forEach(function(c) {
+      body += '<tr style="border-top:1px solid rgba(106,27,154,.1);">';
+      body += '<td style="padding:6px 8px;font-weight:600;">'+c.type.charAt(0).toUpperCase()+c.type.slice(1)+'</td>';
+      body += '<td style="padding:6px 8px;font-size:10px;">'+(c.job_name||'—')+'</td>';
+      body += '<td style="padding:6px 8px;text-align:right;font-family:DM Mono,monospace;">'+(c.job_revenue?'$'+Math.round(c.job_revenue).toLocaleString():'—')+'</td>';
+      body += '<td style="padding:6px 8px;text-align:center;">'+(c.commission_rate?c.commission_rate+'%':'—')+'</td>';
+      body += '<td style="padding:6px 8px;text-align:right;font-weight:700;color:#6a1b9a;">$'+parseFloat(c.amount).toFixed(2)+'</td>';
+      body += '<td style="padding:6px 8px;"><span style="font-size:9px;padding:2px 6px;border-radius:4px;background:rgba(106,27,154,.1);color:#6a1b9a;font-weight:700;text-transform:uppercase;">'+c.status+'</span></td>';
+      body += '</tr>';
+    });
+    body += '<tr style="background:rgba(106,27,154,.05);border-top:2px solid #6a1b9a;">';
+    body += '<td colspan="4" style="padding:8px;text-align:right;font-weight:700;">TOTAL</td>';
+    body += '<td style="padding:8px;text-align:right;font-weight:700;color:#6a1b9a;">$'+commTotal.toFixed(2)+'</td>';
+    body += '<td></td>';
+    body += '</tr>';
+    body += '</tbody></table></div></div>';
+  }
+
   showModal('Entry Snapshot', body, null);
 }
 
