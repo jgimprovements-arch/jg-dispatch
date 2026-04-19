@@ -5840,24 +5840,27 @@ async function openEmployeeFile(empId) {
   var loadingBody = '<div style="text-align:center;padding:40px;color:var(--muted);">Loading employee file...</div>';
   showModal('📄 Employee File — ' + emp.name, loadingBody, null);
 
-  // Fetch invite + non-compete signature records in parallel
+  // Fetch invite + non-compete signature + documents in parallel
   var inviteData = null;
   var ncSignatureData = null;
+  var documentsData = [];
   try {
     var results = await Promise.all([
       sb('/rest/v1/employee_invites?employee_id=eq.' + empId + '&order=sent_at.desc&limit=1'),
-      sb('/rest/v1/noncompete_signatures?employee_id=eq.' + empId + '&order=signed_at.desc&limit=1')
+      sb('/rest/v1/noncompete_signatures?employee_id=eq.' + empId + '&order=signed_at.desc&limit=1'),
+      sb('/rest/v1/employee_documents?employee_id=eq.' + empId + '&order=uploaded_at.desc')
     ]);
     if (results[0] && results[0].length) inviteData = results[0][0];
     if (results[1] && results[1].length) ncSignatureData = results[1][0];
+    if (results[2]) documentsData = results[2];
   } catch(e) { console.warn('Could not fetch employee records:', e); }
 
   // Build the file view
-  var body = _buildEmployeeFileBody(emp, inviteData, ncSignatureData);
+  var body = _buildEmployeeFileBody(emp, inviteData, ncSignatureData, documentsData);
   showModal('📄 Employee File — ' + emp.name, body, null);
 }
 
-function _buildEmployeeFileBody(emp, invite, ncSig) {
+function _buildEmployeeFileBody(emp, invite, ncSig, documents) {
   var h = '';
   var fmtD = function(iso) { if (!iso) return '—'; var d = new Date(iso); return d.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}); };
   var fmtDT = function(iso) { if (!iso) return '—'; var d = new Date(iso); return d.toLocaleString('en-US',{month:'short',day:'numeric',year:'numeric',hour:'numeric',minute:'2-digit'}); };
@@ -6073,7 +6076,66 @@ function _buildEmployeeFileBody(emp, invite, ncSig) {
   }
   h += '</div>';
 
-  // Invite History
+  // ── DOCUMENTS & CERTIFICATIONS ──
+  var docs = documents || [];
+  var now = Date.now();
+  var THIRTY_DAYS = 30*24*60*60*1000;
+  h += '<div style="background:#fff;border:1px solid var(--border);border-radius:10px;padding:16px 18px;margin-bottom:16px;">';
+  h += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">';
+  h += '<div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;">📎 Documents & Certifications</div>';
+  h += '<button class="btn btn-sm" onclick="openUploadDocument(\''+emp.id+'\')" style="background:var(--navy);color:#fff;border-color:var(--navy);">+ Upload</button>';
+  h += '</div>';
+
+  if (!docs.length) {
+    h += '<div style="padding:20px;text-align:center;font-size:12px;color:var(--muted);background:rgba(13,45,94,.02);border-radius:8px;">No documents uploaded yet. Click Upload to add driver\'s license, certifications, W-4, etc.</div>';
+  } else {
+    h += '<div style="display:flex;flex-direction:column;gap:8px;">';
+    docs.forEach(function(doc) {
+      var typeIcon = {
+        'drivers_license':'🪪','auto_insurance':'🚗','iicrc_cert':'🎓',
+        'osha_training':'🦺','w4_form':'📋','i9_form':'📋',
+        'background_check':'🔍','dot_medical':'⚕️','other':'📎'
+      }[doc.doc_type] || '📎';
+
+      var expiresSoon = false, expired = false, expiresLabel = '';
+      if (doc.expires_at) {
+        var exp = new Date(doc.expires_at + 'T00:00:00').getTime();
+        var daysTil = Math.floor((exp - now) / (24*60*60*1000));
+        if (daysTil < 0) { expired = true; expiresLabel = 'EXPIRED ' + Math.abs(daysTil) + ' days ago'; }
+        else if (daysTil <= 30) { expiresSoon = true; expiresLabel = 'Expires in ' + daysTil + ' day' + (daysTil!==1?'s':''); }
+        else { expiresLabel = 'Expires ' + new Date(doc.expires_at + 'T00:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}); }
+      }
+
+      var bgColor = expired ? 'rgba(192,32,32,.04)' : expiresSoon ? 'rgba(230,81,0,.04)' : '#fff';
+      var borderColor = expired ? 'rgba(192,32,32,.3)' : expiresSoon ? 'rgba(230,81,0,.3)' : 'var(--border)';
+
+      h += '<div style="border:1px solid '+borderColor+';background:'+bgColor+';border-radius:8px;padding:10px 12px;">';
+      h += '<div style="display:flex;align-items:center;gap:10px;">';
+      h += '<div style="font-size:22px;flex-shrink:0;">'+typeIcon+'</div>';
+      h += '<div style="flex:1;min-width:0;">';
+      h += '<div style="font-size:13px;font-weight:700;color:var(--navy);">'+(doc.label || _docTypeLabel(doc.doc_type))+'</div>';
+      h += '<div style="font-size:10px;color:var(--muted);margin-top:2px;">';
+      h += 'Uploaded '+ new Date(doc.uploaded_at).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});
+      if (doc.uploaded_by) h += ' by '+doc.uploaded_by;
+      if (expiresLabel) {
+        var expColor = expired ? '#c62828' : expiresSoon ? '#e65100' : 'var(--muted)';
+        h += ' · <span style="color:'+expColor+';font-weight:'+(expiresSoon||expired?'700':'500')+';">'+(expiresSoon||expired?'⚠ ':'')+expiresLabel+'</span>';
+      }
+      h += '</div>';
+      if (doc.notes) h += '<div style="font-size:11px;color:var(--navy);margin-top:4px;font-style:italic;">'+doc.notes+'</div>';
+      h += '</div>';
+      h += '<div style="display:flex;gap:4px;flex-shrink:0;">';
+      h += '<button class="btn btn-sm" onclick="viewEmployeeDocument(\''+doc.id+'\')" title="View document">👁 View</button>';
+      h += '<button class="btn btn-sm" onclick="deleteEmployeeDocument(\''+doc.id+'\',\''+(doc.label||doc.doc_type).replace(/\'/g,"\\'")+'\',\''+emp.id+'\')" title="Delete" style="color:#c62828;">🗑</button>';
+      h += '</div>';
+      h += '</div>';
+      h += '</div>';
+    });
+    h += '</div>';
+  }
+
+  h += '</div>';
+  // End Documents section
   if (invite) {
     h += '<div style="background:#fff;border:1px solid var(--border);border-radius:10px;padding:14px 16px;margin-bottom:12px;">';
     h += '<div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;">📲 Invite Record</div>';
@@ -6093,6 +6155,215 @@ function _fileRow(label, value) {
     '<span style="color:var(--muted);min-width:90px;flex-shrink:0;">'+label+'</span>' +
     '<span style="text-align:right;color:var(--navy);font-weight:500;">'+value+'</span>' +
     '</div>';
+}
+
+// ── EMPLOYEE DOCUMENT MANAGEMENT ──
+function _docTypeLabel(type) {
+  return {
+    'drivers_license':'Driver\'s License',
+    'auto_insurance':'Auto Insurance',
+    'iicrc_cert':'IICRC Certification',
+    'osha_training':'OSHA Training',
+    'w4_form':'W-4 Form',
+    'i9_form':'I-9 Form',
+    'background_check':'Background Check',
+    'dot_medical':'DOT Medical Card',
+    'other':'Other Document'
+  }[type] || 'Document';
+}
+
+function openUploadDocument(empId) {
+  if (!isAdmin()) { toast('Admin only'); return; }
+  var emp = ST.employees.find(function(e){ return e.id === empId; });
+  if (!emp) { toast('Employee not found'); return; }
+
+  var body = '';
+  body += '<div style="font-size:13px;color:var(--muted);margin-bottom:14px;line-height:1.5;">Uploading document for <strong>'+emp.name+'</strong>. Files are stored privately — only admins can view them.</div>';
+
+  body += '<div class="form-row">';
+  body += '<label class="form-label">Document Type *</label>';
+  body += '<select id="doc-type" class="form-select" onchange="_onDocTypeChange()">';
+  [
+    ['drivers_license',"🪪 Driver's License"],
+    ['auto_insurance','🚗 Auto Insurance'],
+    ['iicrc_cert','🎓 IICRC Certification'],
+    ['osha_training','🦺 OSHA Training'],
+    ['w4_form','📋 W-4 Form'],
+    ['i9_form','📋 I-9 Form'],
+    ['background_check','🔍 Background Check'],
+    ['dot_medical','⚕️ DOT Medical Card'],
+    ['other','📎 Other Document']
+  ].forEach(function(opt){ body += '<option value="'+opt[0]+'">'+opt[1]+'</option>'; });
+  body += '</select></div>';
+
+  body += '<div id="doc-custom-label-wrap" class="form-row" style="display:none;">';
+  body += '<label class="form-label">Custom Label *</label>';
+  body += '<input type="text" id="doc-custom-label" class="form-input" placeholder="e.g. CPR Certification">';
+  body += '</div>';
+
+  body += '<div class="form-row">';
+  body += '<label class="form-label">Choose File *</label>';
+  body += '<input type="file" id="doc-file" class="form-input" accept="image/*,application/pdf" style="padding:8px;">';
+  body += '<div style="font-size:10px;color:var(--muted);margin-top:4px;">PDF, JPEG, PNG, or HEIC. Max 10 MB.</div>';
+  body += '</div>';
+
+  body += '<div class="form-row">';
+  body += '<label class="form-label">Expiration Date <span style="font-weight:400;color:var(--muted);">(optional)</span></label>';
+  body += '<input type="date" id="doc-expires" class="form-input">';
+  body += '<div style="font-size:10px;color:var(--muted);margin-top:4px;">Leave blank if the document does not expire. Dashboard will warn 30 days before expiration.</div>';
+  body += '</div>';
+
+  body += '<div class="form-row">';
+  body += '<label class="form-label">Notes <span style="font-weight:400;color:var(--muted);">(optional)</span></label>';
+  body += '<input type="text" id="doc-notes" class="form-input" placeholder="e.g. WRT + ASD combined card">';
+  body += '</div>';
+
+  body += '<div style="background:rgba(13,45,94,.04);border-radius:6px;padding:10px 12px;font-size:11px;color:var(--navy);line-height:1.5;">🔒 <strong>Privacy:</strong> This file is uploaded to a private storage bucket. It cannot be accessed by URL. Only admins viewing the employee file can see it via time-limited signed links.</div>';
+
+  showModal('📎 Upload Document — '+emp.name, body, '_submitDocumentUpload(\''+empId+'\')');
+}
+
+function _onDocTypeChange() {
+  var typeEl = document.getElementById('doc-type');
+  var wrap = document.getElementById('doc-custom-label-wrap');
+  if (!typeEl || !wrap) return;
+  wrap.style.display = (typeEl.value === 'other') ? 'block' : 'none';
+}
+
+async function _submitDocumentUpload(empId) {
+  var emp = ST.employees.find(function(e){ return e.id === empId; });
+  if (!emp) { alert('Employee not found'); return; }
+
+  var docType = document.getElementById('doc-type').value;
+  var customLabel = (document.getElementById('doc-custom-label')||{}).value || '';
+  var file = document.getElementById('doc-file').files[0];
+  var expires = document.getElementById('doc-expires').value;
+  var notes = document.getElementById('doc-notes').value.trim();
+
+  if (!file) { alert('Please select a file to upload.'); return; }
+  if (file.size > 10 * 1024 * 1024) { alert('File is too large. Maximum 10 MB.'); return; }
+  if (docType === 'other' && !customLabel.trim()) { alert('Please provide a custom label for "Other" type.'); return; }
+
+  var label = docType === 'other' ? customLabel.trim() : _docTypeLabel(docType);
+
+  // Build safe filename
+  var ext = (file.name.split('.').pop() || 'bin').toLowerCase();
+  var safeName = emp.name.replace(/[^a-zA-Z0-9]/g, '_');
+  var safeType = docType.replace(/[^a-zA-Z0-9_-]/g, '');
+  var timestamp = Date.now();
+  var filename = safeName + '_' + safeType + '_' + timestamp + '.' + ext;
+  var storagePath = empId + '/' + filename;
+
+  try {
+    // 1. Upload to private bucket
+    var uploadR = await fetch(SB_URL + '/storage/v1/object/employee-documents/' + storagePath, {
+      method: 'POST',
+      headers: {
+        'apikey': SB_KEY,
+        'Authorization': 'Bearer ' + SB_KEY,
+        'Content-Type': file.type || 'application/octet-stream',
+        'x-upsert': 'true'
+      },
+      body: file
+    });
+    if (!uploadR.ok) {
+      var errTxt = await uploadR.text();
+      throw new Error('Upload failed ('+uploadR.status+'): ' + errTxt.substring(0,200));
+    }
+
+    // 2. Record in database
+    var recordR = await fetch(SB_URL + '/rest/v1/employee_documents', {
+      method: 'POST',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
+      body: JSON.stringify({
+        employee_id: empId,
+        employee_name: emp.name,
+        doc_type: docType,
+        label: label,
+        storage_path: storagePath,
+        original_filename: file.name,
+        file_size: file.size,
+        mime_type: file.type || 'application/octet-stream',
+        expires_at: expires || null,
+        notes: notes || null,
+        uploaded_by: getApprovedBy(),
+        uploaded_at: new Date().toISOString()
+      })
+    });
+    if (!recordR.ok) {
+      var recErr = await recordR.text();
+      throw new Error('Record save failed: ' + recErr.substring(0, 200));
+    }
+
+    logActivity('Document Uploaded', emp.name + ' · ' + label + (expires ? ' · expires '+expires : ''), 'employees', emp.name);
+
+    closeModal();
+    toast('✓ ' + label + ' uploaded for ' + emp.name);
+    // Reopen the employee file to show the new doc
+    setTimeout(function(){ openEmployeeFile(empId); }, 300);
+  } catch(err) {
+    console.error(err);
+    alert('Upload failed: ' + err.message);
+  }
+}
+
+async function viewEmployeeDocument(docId) {
+  if (!isAdmin()) { toast('Admin only'); return; }
+  try {
+    // Fetch document record
+    var docs = await sb('/rest/v1/employee_documents?id=eq.'+docId+'&select=*&limit=1');
+    if (!docs || !docs.length) { alert('Document not found'); return; }
+    var doc = docs[0];
+
+    // Generate signed URL (1 hour expiry)
+    var signR = await fetch(SB_URL + '/storage/v1/object/sign/employee-documents/' + doc.storage_path, {
+      method: 'POST',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ expiresIn: 3600 })
+    });
+    if (!signR.ok) throw new Error('Could not generate view URL');
+    var signData = await signR.json();
+    var signedUrl = SB_URL + '/storage/v1' + signData.signedURL;
+
+    // Open in new tab
+    window.open(signedUrl, '_blank');
+    logActivity('Document Viewed', doc.employee_name + ' · ' + (doc.label||doc.doc_type), 'employees', doc.employee_name);
+  } catch(err) {
+    console.error(err);
+    alert('Could not view document: ' + err.message);
+  }
+}
+
+async function deleteEmployeeDocument(docId, docLabel, empId) {
+  if (!isAdmin()) { toast('Admin only'); return; }
+  if (!confirm('Permanently delete "'+docLabel+'"?\n\nThis removes both the file and the database record. This cannot be undone.')) return;
+
+  try {
+    // Fetch doc record to get storage_path
+    var docs = await sb('/rest/v1/employee_documents?id=eq.'+docId+'&select=*&limit=1');
+    if (!docs || !docs.length) { alert('Document not found'); return; }
+    var doc = docs[0];
+
+    // Delete the file from storage
+    await fetch(SB_URL + '/storage/v1/object/employee-documents/' + doc.storage_path, {
+      method: 'DELETE',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+    });
+
+    // Delete the database record
+    await fetch(SB_URL + '/rest/v1/employee_documents?id=eq.'+docId, {
+      method: 'DELETE',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+    });
+
+    logActivity('Document Deleted', doc.employee_name + ' · ' + docLabel, 'employees', doc.employee_name);
+    toast('✓ Document deleted');
+    // Reopen employee file
+    setTimeout(function(){ openEmployeeFile(empId); }, 300);
+  } catch(err) {
+    console.error(err);
+    alert('Delete failed: ' + err.message);
+  }
 }
 
 // Build full non-compete request flow — sends signing link to existing employees
