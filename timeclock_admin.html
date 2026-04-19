@@ -4629,10 +4629,36 @@ async function loadRouteMap() {
 }
 
 
+// ── REPORTS TAB ────────────────────────────────────────────────────────
+// State: which sections are open (persist across re-renders)
+var _rptSectionsOpen = {
+  essentials: true,   // open by default
+  strategic: false,
+  diligence: false
+};
+
+function _rptToggleSection(key) {
+  _rptSectionsOpen[key] = !_rptSectionsOpen[key];
+  renderReports();
+}
+
+function _rptSectionHeader(key, label, desc) {
+  var isOpen = _rptSectionsOpen[key];
+  var h = '<div onclick="_rptToggleSection(\''+key+'\')" style="cursor:pointer;margin-top:18px;margin-bottom:10px;padding:10px 14px;background:var(--navy);color:#fff;border-radius:8px 8px '+(isOpen?'0 0':'8px 8px')+';display:flex;align-items:center;justify-content:space-between;user-select:none;">';
+  h += '<div>';
+  h += '<div style="font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;">'+label+'</div>';
+  if (desc) h += '<div style="font-size:10px;color:rgba(255,255,255,.6);margin-top:2px;font-weight:400;">'+desc+'</div>';
+  h += '</div>';
+  h += '<div style="font-size:16px;opacity:.7;">'+(isOpen?'▼':'▶')+'</div>';
+  h += '</div>';
+  return h;
+}
+
 function renderReports() {
   var fmtDur = function(mins){ return Math.floor(mins/60)+'h '+(mins%60)+'m'; };
   var durMins = function(e){ var out=e.clock_out?new Date(e.clock_out):new Date(); return Math.floor((out-new Date(e.clock_in))/60000); };
 
+  // ═══ COMPUTE SHARED DATA ══════════════════════════════════════════════
   var byEmp = {};
   ST.entries.forEach(function(e) {
     if (!byEmp[e.employee_name]) byEmp[e.employee_name] = { mins: 0, days: new Set(), ot: 0 };
@@ -4640,7 +4666,6 @@ function renderReports() {
     byEmp[e.employee_name].mins += m;
     byEmp[e.employee_name].days.add(e.clock_in.split('T')[0]);
   });
-
   Object.values(byEmp).forEach(function(d){
     var hrs = d.mins / 60;
     d.ot = Math.max(0, hrs - 40);
@@ -4648,32 +4673,17 @@ function renderReports() {
 
   var totalMins = Object.values(byEmp).reduce(function(s,d){return s+d.mins;},0);
   var totalOT = Object.values(byEmp).reduce(function(s,d){return s+d.ot;},0);
+  var burdenTotal = laborBurdenCost(totalMins);
 
   var h = '';
 
-  // ─── JOB SEARCH CARD ──────────────────────────────────────────────────
-  h += '<div class="card" style="margin-bottom:16px;padding:0;overflow:hidden;">';
-  h += '<div class="card-hdr" style="background:var(--navy);"><div class="card-title" style="color:#fff;">🔍 Search Hours by Job</div></div>';
-  h += '<div style="padding:16px;">';
-  h += '<div style="position:relative;margin-bottom:12px;">';
-  h += '<input type="text" id="job-search-input" class="form-input" placeholder="Type to search Albi jobs..." value="'+(ST.jobSearchName||'')+'" oninput="_filterJobSearch(this.value)" autocomplete="off" style="font-size:14px;padding:12px 14px;">';
-  h += '<div id="job-search-dropdown" style="display:none;position:absolute;top:100%;left:0;right:0;background:#fff;border:1.5px solid var(--border);border-radius:8px;max-height:250px;overflow-y:auto;z-index:100;box-shadow:0 4px 16px rgba(0,0,0,.15);margin-top:4px;"></div>';
+  // ─── HEADER BAR ────────────────────────────────────────────────────────
+  h += '<div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;align-items:center;">';
+  h += '<div style="font-size:13px;color:var(--muted);"><strong style="color:var(--navy);">Reports</strong> · '+Object.keys(byEmp).length+' employees · '+ST.entries.length+' entries · window: '+(ST.filterDate||'last 60 days')+' to '+(ST.filterDateEnd||'today')+'</div>';
+  h += '<button class="btn btn-sm" onclick="openLaborBurdenSettings()" style="margin-left:auto;background:var(--surface);color:var(--muted);" title="Configure labor burden rate">⚙️ Burden: $'+getLaborBurdenRate()+'/hr</button>';
   h += '</div>';
 
-  if (ST.jobSearchId) {
-    h += '<div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;">';
-    h += '<button class="btn btn-sm" onclick="_clearJobSearch()" style="background:var(--surface);color:var(--muted);">✕ Clear</button>';
-    h += '<span style="font-size:11px;color:var(--muted);">Showing all clock-in entries for <strong style="color:var(--navy);">'+ST.jobSearchName+'</strong></span>';
-    h += '</div>';
-    h += _renderJobSearchResults();
-  } else {
-    h += '<div style="padding:20px;text-align:center;color:var(--muted);font-size:12px;">Pick an Albi job above to see total hours, which techs worked it, and when.</div>';
-  }
-
-  h += '</div></div>';
-
-  // ─── OVERALL STATS (existing) ─────────────────────────────────────────
-  var burdenTotal = laborBurdenCost(totalMins);
+  // ─── AT-A-GLANCE STAT STRIP (always visible) ──────────────────────────
   h += '<div class="stat-grid">';
   h += '<div class="stat-card"><div class="stat-val">'+fmtDur(totalMins)+'</div><div class="stat-lbl">Total Hours</div></div>';
   h += '<div class="stat-card" style="border-left:3px solid var(--orange);"><div class="stat-val" style="color:var(--orange);">'+fmtMoney(burdenTotal)+'</div><div class="stat-lbl">Labor Cost (@ $'+getLaborBurdenRate()+'/hr)</div></div>';
@@ -4682,43 +4692,427 @@ function renderReports() {
   h += '<div class="stat-card"><div class="stat-val">'+ST.entries.length+'</div><div class="stat-lbl">Total Entries</div></div>';
   h += '</div>';
 
-  h += '<div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;align-items:center;">';
-  h += '<button class="btn" onclick="openAbsenceModal()" style="background:var(--orange);color:#fff;border-color:var(--orange);">+ Log Absence</button>';
-  h += '<button class="btn btn-sm" onclick="openLaborBurdenSettings()" style="margin-left:auto;background:var(--surface);color:var(--muted);" title="Configure labor burden rate">⚙️ Burden: $'+getLaborBurdenRate()+'/hr</button>';
-  h += '</div>';
+  // ═══ SECTION 1: ESSENTIALS ════════════════════════════════════════════
+  h += _rptSectionHeader('essentials', '📊 Essentials', 'Daily operational reports');
+  if (_rptSectionsOpen.essentials) {
+    // Job Search card
+    h += '<div class="card" style="margin-bottom:12px;padding:0;overflow:hidden;">';
+    h += '<div class="card-hdr"><div class="card-title">🔍 Search Hours by Job</div></div>';
+    h += '<div style="padding:16px;">';
+    h += '<div style="position:relative;margin-bottom:12px;">';
+    h += '<input type="text" id="job-search-input" class="form-input" placeholder="Type to search Albi jobs..." value="'+(ST.jobSearchName||'')+'" oninput="_filterJobSearch(this.value)" autocomplete="off" style="font-size:14px;padding:12px 14px;">';
+    h += '<div id="job-search-dropdown" style="display:none;position:absolute;top:100%;left:0;right:0;background:#fff;border:1.5px solid var(--border);border-radius:8px;max-height:250px;overflow-y:auto;z-index:100;box-shadow:0 4px 16px rgba(0,0,0,.15);margin-top:4px;"></div>';
+    h += '</div>';
+    if (ST.jobSearchId) {
+      h += '<div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;">';
+      h += '<button class="btn btn-sm" onclick="_clearJobSearch()" style="background:var(--surface);color:var(--muted);">✕ Clear</button>';
+      h += '<span style="font-size:11px;color:var(--muted);">Showing all clock-in entries for <strong style="color:var(--navy);">'+ST.jobSearchName+'</strong></span>';
+      h += '</div>';
+      h += _renderJobSearchResults();
+    } else {
+      h += '<div style="padding:20px;text-align:center;color:var(--muted);font-size:12px;">Pick an Albi job above to see total hours, which techs worked it, and when.</div>';
+    }
+    h += '</div></div>';
 
-  h += '<div class="card"><div class="card-hdr"><div class="card-title">Hours by Employee</div></div>';
-  h += '<table class="tc-table"><thead><tr><th>Employee</th><th>Total Hours</th><th>Labor Cost</th><th>Days Worked</th><th>Avg/Day</th><th>OT Hours</th><th>vs 40h Week</th></tr></thead><tbody>';
-  Object.entries(byEmp).sort(function(a,b){return b[1].mins-a[1].mins;}).forEach(function(kv) {
-    var name=kv[0], d=kv[1];
-    var hrs = d.mins/60;
-    var days = d.days.size;
-    var avgDay = days ? (hrs/days).toFixed(1) : 0;
-    var vs40 = hrs - 40;
-    var empBurden = laborBurdenCost(d.mins);
-    h += '<tr>';
-    h += '<td><strong>'+name+'</strong></td>';
-    h += '<td><strong class="mono">'+fmtDur(d.mins)+'</strong></td>';
-    h += '<td class="mono" style="color:var(--orange);font-weight:700;">'+fmtMoney(empBurden)+'</td>';
-    h += '<td>'+days+'</td>';
-    h += '<td class="mono">'+avgDay+'h</td>';
-    h += '<td>'+(d.ot>0?'<strong style="color:var(--red);">'+d.ot.toFixed(1)+'h</strong>':'-')+'</td>';
-    h += '<td>'+(vs40>0?'<span class="badge badge-red">+'+vs40.toFixed(1)+'h OT</span>':'<span class="badge badge-green">'+Math.abs(vs40).toFixed(1)+'h left</span>')+'</td>';
+    // Hours by Employee table
+    h += '<div class="card"><div class="card-hdr"><div class="card-title">👥 Hours by Employee</div></div>';
+    h += '<table class="tc-table"><thead><tr><th>Employee</th><th>Total Hours</th><th>Labor Cost</th><th>Days Worked</th><th>Avg/Day</th><th>OT Hours</th><th>vs 40h Week</th></tr></thead><tbody>';
+    Object.entries(byEmp).sort(function(a,b){return b[1].mins-a[1].mins;}).forEach(function(kv) {
+      var name=kv[0], d=kv[1];
+      var hrs = d.mins/60;
+      var days = d.days.size;
+      var avgDay = days ? (hrs/days).toFixed(1) : 0;
+      var vs40 = hrs - 40;
+      var empBurden = laborBurdenCost(d.mins);
+      h += '<tr>';
+      h += '<td><strong>'+name+'</strong></td>';
+      h += '<td><strong class="mono">'+fmtDur(d.mins)+'</strong></td>';
+      h += '<td class="mono" style="color:var(--orange);font-weight:700;">'+fmtMoney(empBurden)+'</td>';
+      h += '<td>'+days+'</td>';
+      h += '<td class="mono">'+avgDay+'h</td>';
+      h += '<td>'+(d.ot>0?'<strong style="color:var(--red);">'+d.ot.toFixed(1)+'h</strong>':'-')+'</td>';
+      h += '<td>'+(vs40>0?'<span class="badge badge-red">+'+vs40.toFixed(1)+'h OT</span>':'<span class="badge badge-green">'+Math.abs(vs40).toFixed(1)+'h left</span>')+'</td>';
+      h += '</tr>';
+    });
+    h += '<tr style="background:rgba(13,45,94,.04);border-top:2px solid var(--navy);font-weight:700;">';
+    h += '<td style="font-weight:700;color:var(--navy);">TOTAL</td>';
+    h += '<td class="mono" style="font-weight:700;">'+fmtDur(totalMins)+'</td>';
+    h += '<td class="mono" style="color:var(--orange);font-weight:700;">'+fmtMoney(burdenTotal)+'</td>';
+    h += '<td colspan="4" style="color:var(--muted);font-size:11px;">@ $'+getLaborBurdenRate()+'/hr burden</td>';
     h += '</tr>';
-  });
-  // Total row
-  h += '<tr style="background:rgba(13,45,94,.04);border-top:2px solid var(--navy);font-weight:700;">';
-  h += '<td style="font-weight:700;color:var(--navy);">TOTAL</td>';
-  h += '<td class="mono" style="font-weight:700;">'+fmtDur(totalMins)+'</td>';
-  h += '<td class="mono" style="color:var(--orange);font-weight:700;">'+fmtMoney(burdenTotal)+'</td>';
-  h += '<td colspan="4" style="color:var(--muted);font-size:11px;">@ $'+getLaborBurdenRate()+'/hr burden</td>';
-  h += '</tr>';
-  h += '</tbody></table></div>';
+    h += '</tbody></table></div>';
+  }
+
+  // ═══ SECTION 2: STRATEGIC ═════════════════════════════════════════════
+  h += _rptSectionHeader('strategic', '🎯 Strategic', 'Cross-cut analyses for decisions');
+  if (_rptSectionsOpen.strategic) {
+    h += _rptLaborByMarket(byEmp);
+    h += _rptLaborByJobType();
+    h += _rptUtilization(byEmp);
+    h += _rptOTTrend();
+    h += _rptAbsenceSummary();
+  }
+
+  // ═══ SECTION 3: DILIGENCE (placeholder) ═══════════════════════════════
+  h += _rptSectionHeader('diligence', '📋 Diligence', 'Buyer-ready summaries (12-month views)');
+  if (_rptSectionsOpen.diligence) {
+    h += '<div class="card" style="padding:20px;text-align:center;color:var(--muted);font-size:13px;">';
+    h += '<div style="font-size:32px;margin-bottom:8px;">🚧</div>';
+    h += '<div style="font-weight:700;color:var(--navy);margin-bottom:6px;">Coming Next Build</div>';
+    h += '<div>12-Month Labor Summary and Employee Roster reports are being prepared for June 2026 diligence.</div>';
+    h += '</div>';
+  }
 
   document.getElementById('tc-body').innerHTML = h;
-
-  // Kick off Albi load for the job search autocomplete
   ensureAlbiJobsLoaded();
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// STRATEGIC REPORTS
+// ═══════════════════════════════════════════════════════════════════════
+
+// ─── Labor Cost by Market (Appleton vs Stevens Point) ──────────────────
+function _rptLaborByMarket(byEmp) {
+  var fmtDur = function(mins){ return Math.floor(mins/60)+'h '+(mins%60)+'m'; };
+  var durMins = function(e){ var out=e.clock_out?new Date(e.clock_out):new Date(); return Math.floor((out-new Date(e.clock_in))/60000); };
+
+  // Build employee → market lookup
+  var empMarket = {};
+  (ST.employees||[]).forEach(function(emp) {
+    empMarket[emp.name] = emp.market || 'Unassigned';
+  });
+
+  var byMarket = {};
+  ST.entries.forEach(function(e) {
+    var mkt = empMarket[e.employee_name] || 'Unassigned';
+    if (!byMarket[mkt]) byMarket[mkt] = { mins: 0, entries: 0, techs: new Set() };
+    byMarket[mkt].mins += e.duration_minutes || durMins(e);
+    byMarket[mkt].entries++;
+    byMarket[mkt].techs.add(e.employee_name);
+  });
+
+  var totalMins = Object.values(byMarket).reduce(function(s,d){return s+d.mins;},0);
+
+  var h = '<div class="card" style="margin-bottom:12px;">';
+  h += '<div class="card-hdr"><div class="card-title">🏢 Labor Cost by Market</div></div>';
+  h += '<div style="padding:16px;">';
+
+  if (!Object.keys(byMarket).length) {
+    h += '<div style="color:var(--muted);text-align:center;padding:20px;font-size:12px;">No data in this window.</div>';
+    h += '</div></div>';
+    return h;
+  }
+
+  // Horizontal bar chart
+  var marketColors = {'Appleton':'#e85d04','Stevens Point':'#1565c0','Unassigned':'#6b7a96'};
+  Object.entries(byMarket).sort(function(a,b){return b[1].mins - a[1].mins;}).forEach(function(kv) {
+    var mkt = kv[0], d = kv[1];
+    var pct = totalMins > 0 ? Math.round(d.mins/totalMins*100) : 0;
+    var cost = laborBurdenCost(d.mins);
+    var color = marketColors[mkt] || '#6b7a96';
+
+    h += '<div style="margin-bottom:14px;">';
+    h += '<div style="display:flex;justify-content:space-between;margin-bottom:6px;">';
+    h += '<div><strong style="color:var(--navy);">'+mkt+'</strong> <span style="font-size:11px;color:var(--muted);">· '+d.techs.size+' techs · '+d.entries+' entries</span></div>';
+    h += '<div style="font-family:DM Mono,monospace;font-weight:700;color:var(--navy);">'+fmtDur(d.mins)+' <span style="color:var(--orange);">'+fmtMoney(cost)+'</span> <span style="color:var(--muted);font-size:11px;font-weight:400;">('+pct+'%)</span></div>';
+    h += '</div>';
+    h += '<div style="height:14px;background:var(--border);border-radius:7px;overflow:hidden;">';
+    h += '<div style="height:100%;background:'+color+';width:'+pct+'%;border-radius:7px;transition:width .4s;"></div>';
+    h += '</div></div>';
+  });
+
+  h += '</div></div>';
+  return h;
+}
+
+// ─── Labor Cost by Job Type (from Albi projectType) ────────────────────
+function _rptLaborByJobType() {
+  var fmtDur = function(mins){ return Math.floor(mins/60)+'h '+(mins%60)+'m'; };
+  var durMins = function(e){ var out=e.clock_out?new Date(e.clock_out):new Date(); return Math.floor((out-new Date(e.clock_in))/60000); };
+
+  // Build job_id → project type lookup from Albi
+  var jobTypeMap = {};
+  (_albiJobs||[]).forEach(function(j) {
+    if (j.id && j.projectType) jobTypeMap[j.id] = j.projectType;
+  });
+
+  var byType = {};
+  var untaggedMins = 0;
+  ST.entries.forEach(function(e) {
+    var mins = e.duration_minutes || durMins(e);
+    if (e.job_id && jobTypeMap[e.job_id]) {
+      var type = jobTypeMap[e.job_id];
+      if (!byType[type]) byType[type] = { mins: 0, entries: 0 };
+      byType[type].mins += mins;
+      byType[type].entries++;
+    } else {
+      untaggedMins += mins;
+    }
+  });
+
+  var totalMins = Object.values(byType).reduce(function(s,d){return s+d.mins;},0) + untaggedMins;
+
+  var h = '<div class="card" style="margin-bottom:12px;">';
+  h += '<div class="card-hdr"><div class="card-title">🔧 Labor Cost by Job Type</div></div>';
+  h += '<div style="padding:16px;">';
+
+  if (!Object.keys(byType).length && !untaggedMins) {
+    h += '<div style="color:var(--muted);text-align:center;padding:20px;font-size:12px;">No data in this window.</div>';
+    h += '</div></div>';
+    return h;
+  }
+
+  var typeColors = {'Water Mitigation':'#1565c0','Reconstruction':'#e85d04','Mold':'#2e7d32','Fire Mitigation':'#c62828','Contents':'#6a1b9a','CAT3':'#00838f','Board Up':'#5d4037','General Clean':'#546e7a'};
+
+  Object.entries(byType).sort(function(a,b){return b[1].mins - a[1].mins;}).forEach(function(kv) {
+    var type = kv[0], d = kv[1];
+    var pct = totalMins > 0 ? Math.round(d.mins/totalMins*100) : 0;
+    var cost = laborBurdenCost(d.mins);
+    var color = typeColors[type] || '#6b7a96';
+
+    h += '<div style="margin-bottom:12px;">';
+    h += '<div style="display:flex;justify-content:space-between;margin-bottom:4px;">';
+    h += '<div><strong style="color:var(--navy);">'+type+'</strong> <span style="font-size:11px;color:var(--muted);">· '+d.entries+' entries</span></div>';
+    h += '<div style="font-family:DM Mono,monospace;font-weight:700;color:var(--navy);">'+fmtDur(d.mins)+' <span style="color:var(--orange);">'+fmtMoney(cost)+'</span> <span style="color:var(--muted);font-size:11px;font-weight:400;">('+pct+'%)</span></div>';
+    h += '</div>';
+    h += '<div style="height:10px;background:var(--border);border-radius:5px;overflow:hidden;">';
+    h += '<div style="height:100%;background:'+color+';width:'+pct+'%;border-radius:5px;"></div>';
+    h += '</div></div>';
+  });
+
+  if (untaggedMins > 0) {
+    var pct = totalMins > 0 ? Math.round(untaggedMins/totalMins*100) : 0;
+    h += '<div style="margin-bottom:12px;padding-top:10px;border-top:1px dashed var(--border);">';
+    h += '<div style="display:flex;justify-content:space-between;margin-bottom:4px;">';
+    h += '<div><span style="color:var(--muted);font-style:italic;">⚠ Untagged (no job_id or not in Albi)</span></div>';
+    h += '<div style="font-family:DM Mono,monospace;color:var(--muted);">'+fmtDur(untaggedMins)+' <span style="color:var(--orange);">'+fmtMoney(laborBurdenCost(untaggedMins))+'</span> ('+pct+'%)</div>';
+    h += '</div></div>';
+  }
+
+  if (!_albiJobs || !_albiJobs.length) {
+    h += '<div style="margin-top:8px;padding:8px 12px;background:rgba(230,81,0,.06);border-radius:6px;font-size:11px;color:#e65100;">⚠ Albi job list hasn\'t loaded yet. This report is limited until it does.</div>';
+  }
+
+  h += '</div></div>';
+  return h;
+}
+
+// ─── Utilization Rate ──────────────────────────────────────────────────
+function _rptUtilization(byEmp) {
+  // Compute workdays in the filter window
+  var since = new Date(ST.filterDate || new Date(Date.now() - 60*86400000));
+  var until = new Date(ST.filterDateEnd || new Date());
+  var workdays = 0;
+  var cur = new Date(since);
+  while (cur <= until) {
+    var dow = cur.getDay();
+    if (dow !== 0 && dow !== 6) workdays++;
+    cur.setDate(cur.getDate() + 1);
+  }
+  var expectedHoursPerEmp = workdays * 8;
+
+  var h = '<div class="card" style="margin-bottom:12px;">';
+  h += '<div class="card-hdr"><div class="card-title">⏱ Utilization Rate</div></div>';
+  h += '<div style="padding:16px;">';
+  h += '<div style="font-size:11px;color:var(--muted);margin-bottom:12px;padding:8px 12px;background:rgba(13,45,94,.04);border-radius:6px;">Assumes <strong>8 hrs/workday × '+workdays+' workdays</strong> ('+expectedHoursPerEmp+'h) baseline per full-time employee. Actual utilization = clocked hours ÷ baseline.</div>';
+
+  if (!Object.keys(byEmp).length) {
+    h += '<div style="color:var(--muted);text-align:center;padding:20px;font-size:12px;">No data in this window.</div>';
+    h += '</div></div>';
+    return h;
+  }
+
+  // Only count active employees
+  var activeEmps = (ST.employees||[]).filter(function(e){ return e.active; });
+
+  h += '<table class="tc-table" style="font-size:12px;"><thead><tr><th>Employee</th><th style="text-align:right;">Hours Clocked</th><th style="text-align:right;">Baseline</th><th style="text-align:center;">Utilization</th><th></th></tr></thead><tbody>';
+
+  activeEmps.sort(function(a,b) {
+    var am = (byEmp[a.name]||{mins:0}).mins;
+    var bm = (byEmp[b.name]||{mins:0}).mins;
+    return bm - am;
+  }).forEach(function(emp) {
+    var d = byEmp[emp.name] || { mins: 0 };
+    var clockedHrs = d.mins / 60;
+    var utilRate = expectedHoursPerEmp > 0 ? (clockedHrs / expectedHoursPerEmp * 100) : 0;
+
+    var color = utilRate >= 90 ? '#2e7d32' : utilRate >= 70 ? '#e65100' : '#c62828';
+    var status = utilRate >= 90 ? 'High' : utilRate >= 70 ? 'Normal' : 'Low';
+
+    h += '<tr>';
+    h += '<td><strong>'+emp.name+'</strong> <span style="font-size:10px;color:var(--muted);">'+(emp.role||'Tech')+'</span></td>';
+    h += '<td style="text-align:right;font-family:DM Mono,monospace;font-weight:700;">'+clockedHrs.toFixed(1)+'h</td>';
+    h += '<td style="text-align:right;font-family:DM Mono,monospace;color:var(--muted);">'+expectedHoursPerEmp+'h</td>';
+    h += '<td style="text-align:center;"><strong style="color:'+color+';font-size:14px;">'+utilRate.toFixed(0)+'%</strong></td>';
+    h += '<td><div style="width:80px;height:6px;background:var(--border);border-radius:3px;overflow:hidden;"><div style="height:100%;background:'+color+';width:'+Math.min(100,utilRate)+'%;"></div></div></td>';
+    h += '</tr>';
+  });
+
+  h += '</tbody></table>';
+  h += '<div style="font-size:10px;color:var(--muted);margin-top:10px;"><strong>Legend:</strong> <span style="color:#2e7d32;">●</span> 90%+ High · <span style="color:#e65100;">●</span> 70-89% Normal · <span style="color:#c62828;">●</span> <70% Low (possible PTO, slow period, or tracking gap)</div>';
+  h += '</div></div>';
+  return h;
+}
+
+// ─── OT Trend (by pay period) ──────────────────────────────────────────
+function _rptOTTrend() {
+  var fmtDur = function(mins){ return Math.floor(mins/60)+'h '+(mins%60)+'m'; };
+  var durMins = function(e){ var out=e.clock_out?new Date(e.clock_out):new Date(); return Math.floor((out-new Date(e.clock_in))/60000); };
+
+  // Group entries into weeks (Sun-Sat), compute per-employee OT per week
+  var weekMap = {};  // weekStart ISO date → { totalMins, regMins, otMins, empCount }
+  var empWeekMap = {};  // "weekStart|emp" → mins
+
+  ST.entries.forEach(function(e) {
+    if (!e.clock_in) return;
+    var inDate = new Date(e.clock_in);
+    var weekStart = new Date(inDate);
+    weekStart.setDate(inDate.getDate() - inDate.getDay());
+    weekStart.setHours(0,0,0,0);
+    var wsKey = weekStart.toISOString().split('T')[0];
+    var empKey = wsKey + '|' + e.employee_name;
+    if (!empWeekMap[empKey]) empWeekMap[empKey] = 0;
+    empWeekMap[empKey] += e.duration_minutes || durMins(e);
+  });
+
+  // Now sum per week, tracking OT (hours > 40h per employee per week)
+  Object.entries(empWeekMap).forEach(function(kv) {
+    var parts = kv[0].split('|');
+    var wsKey = parts[0];
+    var mins = kv[1];
+    if (!weekMap[wsKey]) weekMap[wsKey] = { totalMins: 0, otMins: 0, regMins: 0, empCount: 0 };
+    var hrs = mins / 60;
+    var otHrs = Math.max(0, hrs - 40);
+    var regHrs = hrs - otHrs;
+    weekMap[wsKey].totalMins += mins;
+    weekMap[wsKey].otMins += otHrs * 60;
+    weekMap[wsKey].regMins += regHrs * 60;
+    weekMap[wsKey].empCount++;
+  });
+
+  var weeks = Object.entries(weekMap).sort(function(a,b){ return a[0].localeCompare(b[0]); });
+
+  var h = '<div class="card" style="margin-bottom:12px;">';
+  h += '<div class="card-hdr"><div class="card-title">📈 Overtime Trend</div></div>';
+  h += '<div style="padding:16px;">';
+
+  if (!weeks.length) {
+    h += '<div style="color:var(--muted);text-align:center;padding:20px;font-size:12px;">No data in this window.</div>';
+    h += '</div></div>';
+    return h;
+  }
+
+  // Totals
+  var totalOTMins = weeks.reduce(function(s,w){return s + w[1].otMins;}, 0);
+  var totalRegMins = weeks.reduce(function(s,w){return s + w[1].regMins;}, 0);
+  var otPct = (totalOTMins + totalRegMins) > 0 ? totalOTMins / (totalOTMins + totalRegMins) * 100 : 0;
+  var otCost = laborBurdenCost(totalOTMins) * 1.5;  // OT is typically 1.5x labor rate
+  var otCostVsReg = laborBurdenCost(totalOTMins);   // if paid at reg rate, for comparison
+
+  h += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:14px;">';
+  h += '<div style="background:rgba(13,45,94,.04);border-radius:8px;padding:10px 12px;"><div style="font-size:20px;font-weight:700;color:var(--navy);">'+fmtDur(totalOTMins)+'</div><div style="font-size:10px;color:var(--muted);text-transform:uppercase;font-weight:700;margin-top:2px;">Total OT Hours</div></div>';
+  h += '<div style="background:rgba(198,40,40,.06);border-radius:8px;padding:10px 12px;border:1px solid rgba(198,40,40,.2);"><div style="font-size:20px;font-weight:700;color:#c62828;">'+otPct.toFixed(1)+'%</div><div style="font-size:10px;color:var(--muted);text-transform:uppercase;font-weight:700;margin-top:2px;">OT as % of Total</div></div>';
+  h += '<div style="background:rgba(232,93,4,.06);border-radius:8px;padding:10px 12px;border:1px solid rgba(232,93,4,.2);"><div style="font-size:20px;font-weight:700;color:var(--orange);">'+fmtMoney(otCost)+'</div><div style="font-size:10px;color:var(--muted);text-transform:uppercase;font-weight:700;margin-top:2px;">OT Cost (@ 1.5x)</div></div>';
+  h += '</div>';
+
+  // Weekly bars
+  var maxOT = Math.max.apply(null, weeks.map(function(w){ return w[1].otMins; }).concat([1]));
+  h += '<div style="font-size:11px;color:var(--muted);margin-bottom:6px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;">Weekly Breakdown</div>';
+  weeks.forEach(function(kv) {
+    var ws = kv[0], d = kv[1];
+    var wsDate = new Date(ws+'T12:00:00');
+    var label = wsDate.toLocaleDateString('en-US',{month:'numeric',day:'numeric'});
+    var otHrs = d.otMins / 60;
+    var regHrs = d.regMins / 60;
+    var pct = maxOT > 0 ? (d.otMins / maxOT * 100) : 0;
+    h += '<div style="display:flex;align-items:center;gap:10px;margin-bottom:5px;">';
+    h += '<div style="min-width:70px;font-size:11px;color:var(--muted);">Wk of '+label+'</div>';
+    h += '<div style="flex:1;height:14px;background:var(--border);border-radius:7px;overflow:hidden;position:relative;">';
+    if (otHrs > 0) h += '<div style="height:100%;background:#c62828;width:'+pct+'%;border-radius:7px;"></div>';
+    h += '</div>';
+    h += '<div style="min-width:120px;text-align:right;font-size:11px;font-family:DM Mono,monospace;">'+regHrs.toFixed(1)+'h reg + <strong style="color:'+(otHrs>0?'#c62828':'var(--muted)')+';">'+otHrs.toFixed(1)+'h OT</strong></div>';
+    h += '</div>';
+  });
+
+  h += '</div></div>';
+  return h;
+}
+
+// ─── Absence Summary ───────────────────────────────────────────────────
+function _rptAbsenceSummary() {
+  var h = '<div class="card" style="margin-bottom:12px;">';
+  h += '<div class="card-hdr"><div class="card-title">🏖 Absence Summary</div></div>';
+  h += '<div style="padding:16px;">';
+
+  var absences = ST.absences || [];
+
+  // Apply date filter
+  var since = ST.filterDate || new Date(Date.now() - 60*86400000).toISOString().split('T')[0];
+  var until = ST.filterDateEnd || new Date().toISOString().split('T')[0];
+  var filtered = absences.filter(function(a) {
+    return a.date >= since && a.date <= until;
+  });
+
+  if (!filtered.length) {
+    h += '<div style="color:var(--muted);text-align:center;padding:20px;font-size:12px;">No absences logged in this window.</div>';
+    h += '</div></div>';
+    return h;
+  }
+
+  // By reason
+  var byReason = {};
+  filtered.forEach(function(a) {
+    var r = a.reason || 'Unknown';
+    if (!byReason[r]) byReason[r] = 0;
+    byReason[r]++;
+  });
+
+  // By employee
+  var byEmp = {};
+  filtered.forEach(function(a) {
+    var n = a.employee_name || 'Unknown';
+    if (!byEmp[n]) byEmp[n] = { total: 0, reasons: {} };
+    byEmp[n].total++;
+    var r = a.reason || 'Unknown';
+    byEmp[n].reasons[r] = (byEmp[n].reasons[r]||0) + 1;
+  });
+
+  // By reason chart
+  var reasonColors = {'PTO':'#2e7d32','Sick':'#e65100','Personal Day':'#1565c0','Bereavement':'#546e7a','Jury Duty':'#6a1b9a','Training':'#00838f','Injured':'#c62828','No Call No Show':'#c62828','Missed On-Call':'#e65100'};
+
+  h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">';
+
+  // Left: by reason
+  h += '<div>';
+  h += '<div style="font-size:11px;color:var(--muted);margin-bottom:8px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;">By Reason</div>';
+  var maxReason = Math.max.apply(null, Object.values(byReason).concat([1]));
+  Object.entries(byReason).sort(function(a,b){return b[1]-a[1];}).forEach(function(kv) {
+    var pct = Math.round(kv[1]/maxReason*100);
+    var color = reasonColors[kv[0]] || '#6b7a96';
+    h += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:5px;">';
+    h += '<div style="min-width:110px;font-size:12px;color:var(--navy);">'+kv[0]+'</div>';
+    h += '<div style="flex:1;height:10px;background:var(--border);border-radius:5px;overflow:hidden;"><div style="height:100%;background:'+color+';width:'+pct+'%;border-radius:5px;"></div></div>';
+    h += '<div style="min-width:30px;text-align:right;font-size:12px;font-weight:700;">'+kv[1]+'</div>';
+    h += '</div>';
+  });
+  h += '</div>';
+
+  // Right: by employee
+  h += '<div>';
+  h += '<div style="font-size:11px;color:var(--muted);margin-bottom:8px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;">By Employee</div>';
+  Object.entries(byEmp).sort(function(a,b){return b[1].total - a[1].total;}).forEach(function(kv) {
+    var reasonDetail = Object.entries(kv[1].reasons).map(function(r){ return r[1]+'× '+r[0]; }).join(', ');
+    h += '<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--border);font-size:12px;">';
+    h += '<div><strong>'+kv[0]+'</strong><div style="font-size:10px;color:var(--muted);">'+reasonDetail+'</div></div>';
+    h += '<div style="font-weight:700;color:var(--navy);">'+kv[1].total+'</div>';
+    h += '</div>';
+  });
+  h += '</div>';
+
+  h += '</div>';
+  h += '<div style="margin-top:14px;font-size:11px;color:var(--muted);padding:8px 12px;background:rgba(13,45,94,.04);border-radius:6px;">Total: <strong style="color:var(--navy);">'+filtered.length+' absences</strong> across <strong style="color:var(--navy);">'+Object.keys(byEmp).length+' employees</strong> in this window.</div>';
+  h += '</div></div>';
+  return h;
 }
 
 // ── JOB SEARCH (on Reports tab) ──────────────────────────────────────────
