@@ -432,7 +432,7 @@ body {
 
 <!-- LOGIN -->
 <div id="login-screen">
-  <img src="https://jgimprovements-arch.github.io/jg-dispatch/logo.png" alt="JG Restoration" style="width:135px;height:135px;object-fit:contain;border-radius:24px;margin-bottom:16px;filter:drop-shadow(0 4px 20px rgba(0,0,0,.3));">
+  <img src="https://jgimprovements-arch.github.io/jg-dispatch/logo.png" alt="JG Restoration" style="width:200px;height:200px;object-fit:contain;border-radius:32px;margin-bottom:16px;filter:drop-shadow(0 4px 20px rgba(0,0,0,.3));">
   <div class="login-title">JG Time Clock</div>
 
   <!-- Email/password form (default) -->
@@ -482,8 +482,6 @@ body {
     </div>
     <button class="dd-item" onclick="showAdmin();toggleDD()">🔐 Admin Panel</button>
     <button class="dd-item" onclick="showInstallHelp();toggleDD()">📲 Add to Home Screen</button>
-    <button class="dd-item" onclick="showBirthdayCelebration(TC.employee?TC.employee.name:'You');toggleDD()">🎂 Test Birthday</button>
-    <button class="dd-item" onclick="showAnniversaryCelebration(TC.employee?TC.employee.name:'You',3);toggleDD()">🏆 Test Anniversary</button>
     <button class="dd-item" onclick="signOut()">👋 Sign Out</button>
   </div>
 
@@ -1029,16 +1027,34 @@ async function initApp(u) {
   startClock();
   await loadAll();
 
-  // Celebrations fire after app fully loads — capture employee at this moment
-  var _celebEmp = TC.employee;
-  setTimeout(function() {
-    var empToCheck = _celebEmp || TC.employee;
-    if (empToCheck && empToCheck.birthday) {
-      checkBirthday(empToCheck);
-    }
-    if (empToCheck && empToCheck.start_date) {
-      checkWorkAnniversary(empToCheck);
-    }
+  // Celebrations — re-fetch employee fresh to guarantee birthday/start_date
+  setTimeout(async function() {
+    try {
+      var cr = await fetch(SB_URL + '/rest/v1/employees?email=eq.' + encodeURIComponent(u.email) + '&select=name,birthday,start_date', {
+        headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+      });
+      if (cr.ok) {
+        var cd = await cr.json();
+        if (cd && cd[0]) {
+          var today = new Date();
+          // Birthday check
+          if (cd[0].birthday) {
+            var bp = cd[0].birthday.split('-');
+            if (parseInt(bp[1])-1 === today.getMonth() && parseInt(bp[2]) === today.getDate()) {
+              showBirthdayCelebration(cd[0].name);
+            }
+          }
+          // Anniversary check
+          if (cd[0].start_date) {
+            var sp = cd[0].start_date.split('-');
+            var yrs = today.getFullYear() - parseInt(sp[0]);
+            if (yrs > 0 && parseInt(sp[1])-1 === today.getMonth() && parseInt(sp[2]) === today.getDate()) {
+              setTimeout(function(){ showAnniversaryCelebration(cd[0].name, yrs); }, 1500);
+            }
+          }
+        }
+      }
+    } catch(e) {}
   }, 2500);
   loadNotifications();
   initRealtimeSync();
