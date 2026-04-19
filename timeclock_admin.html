@@ -1339,6 +1339,33 @@ async function approveTimecard(periodLabel, empName) {
   toast('✓ Timecard approved for ' + empName);
   logActivity('Timecard Approved', empName + ' — ' + periodLabel + ' (approved by ' + approver + ')', 'time_clock', empName);
 
+  // Auto-verify any unverified entries in this period — admin approval is a stronger signal than tech self-verify
+  try {
+    var periods = getPayPeriods(ST.payPeriod.type, ST.payPeriod.start, 80);
+    var period = periods.find(function(p){ return p.label === periodLabel; });
+    if (period) {
+      var perStart = period.start.toISOString();
+      var perEnd = new Date(period.end); perEnd.setHours(23,59,59,999);
+      var toVerify = ST.entries.filter(function(e) {
+        return e.employee_name === empName
+          && e.clock_out
+          && !e.self_verified
+          && new Date(e.clock_in) >= period.start
+          && new Date(e.clock_in) <= perEnd;
+      });
+      for (var i = 0; i < toVerify.length; i++) {
+        var entry = toVerify[i];
+        await fetch(SB_URL + '/rest/v1/time_entries?id=eq.' + entry.id, {
+          method: 'PATCH',
+          headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ self_verified: true, self_verified_at: nowIso })
+        });
+        entry.self_verified = true;
+        entry.self_verified_at = nowIso;
+      }
+    }
+  } catch(err) { console.warn('Auto-verify failed:', err.message); }
+
   // Generate PDF download + snapshot to archive
   try {
     await generateAndArchiveTimecard(empName, periodLabel, approver, nowIso);
@@ -1376,6 +1403,32 @@ async function unlockTimecard(periodLabel, empName) {
   toast('🔓 Timecard unlocked for ' + empName);
   logActivity('Timecard Unlocked', empName + ' — ' + periodLabel + ' (unlocked by ' + getApprovedBy() + ')', 'time_clock', empName);
   render();
+}
+
+// Admin manual verify/unverify — used for legacy entries or cleanup
+async function toggleVerified(entryId, newState) {
+  if (!isAdmin()) { toast('Admin access required'); return; }
+  var entry = ST.entries.find(function(x){ return x.id === entryId; });
+  if (!entry) return;
+  var nowIso = new Date().toISOString();
+  var body = { self_verified: !!newState };
+  if (newState) body.self_verified_at = nowIso;
+  else body.self_verified_at = null;
+
+  var r = await fetch(SB_URL + '/rest/v1/time_entries?id=eq.' + entryId, {
+    method: 'PATCH',
+    headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  if (r.ok) {
+    entry.self_verified = !!newState;
+    entry.self_verified_at = newState ? nowIso : null;
+    toast(newState ? '✓ Marked verified' : 'Verification removed');
+    logActivity(newState ? 'Entry Verified (admin)' : 'Entry Unverified (admin)', entry.employee_name + ' — ' + new Date(entry.clock_in).toLocaleString(), 'time_clock', entry.employee_name);
+    render();
+  } else {
+    toast('Update failed');
+  }
 }
 
 function exportPayrollReport(periodLabel, byEmp, curPer) {
@@ -1846,10 +1899,17 @@ function renderTimesheets() {
       }
       else if(early&&!e.approved_early) flagCell='<span style="color:#c62828;font-size:11px;font-weight:700;">Early<br><button class="btn btn-sm" onclick="approveEarly(\''+e.id+'\')">Approve</button></span>';
       else if(early&&e.approved_early) flagCell='<span style="color:#2e7d32;font-size:11px;">Early OK</span>';
-      // Verified indicator
-      var verifiedCell = e.self_verified
-        ? '<span title="Tech self-verified on clock-out" style="color:#2e7d32;font-size:16px;font-weight:700;">&#10003;</span>'
-        : (active ? '<span style="color:var(--muted);font-size:11px;">—</span>' : '<span title="Not self-verified" style="color:#c62828;font-size:11px;">unverified</span>');
+      // Verified indicator — admin can manually toggle for cleanup of legacy data
+      var verifiedCell;
+      if (e.self_verified) {
+        verifiedCell = '<span title="Verified — click to unverify" style="color:#2e7d32;font-size:16px;font-weight:700;cursor:pointer;" onclick="toggleVerified(\''+e.id+'\',false)">&#10003;</span>';
+      } else if (active) {
+        verifiedCell = '<span style="color:var(--muted);font-size:11px;">—</span>';
+      } else {
+        verifiedCell = isAdmin()
+          ? '<button title="Mark as verified" onclick="toggleVerified(\''+e.id+'\',true)" style="padding:2px 8px;border:1px solid #c62828;background:transparent;color:#c62828;border-radius:4px;font-size:10px;font-weight:700;cursor:pointer;font-family:inherit;">unverified</button>'
+          : '<span title="Not self-verified" style="color:#c62828;font-size:11px;">unverified</span>';
+      }
       var rowBg = missedCO ? 'background:rgba(198,40,40,.08);' : (early&&!e.approved_early?'background:rgba(198,40,40,.04);':'');
       h += '<tr style="'+rowBg+'">';
       h += '<td><strong>'+e.employee_name+'</strong></td>';
