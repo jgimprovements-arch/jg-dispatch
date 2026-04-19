@@ -2070,40 +2070,54 @@ async function openSwitchJob() {
     var myJobs    = [];
     var otherJobs = [];
 
-    var br = await fetch(SB_URL + '/rest/v1/board_state?select=state&limit=1&order=updated_at.desc', {
-      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
-    });
-    if (br.ok) {
-      var brows = await br.json();
-      var boardState = brows && brows[0] && brows[0].state ? brows[0].state : {};
-      // board_state stores {techName: [{jobId, jobName, ...}, ...]}
-      Object.entries(boardState).forEach(function(kv) {
-        var tname = kv[0], tjobs = kv[1] || [];
-        tjobs.forEach(function(j) {
-          var entry = { id: j.jobId || j.id, name: j.jobName || j.name || j.jobId, number: j.jobNumber || '' };
-          if (tname.toLowerCase() === techName.toLowerCase()) {
-            myJobs.push(entry);
-          } else {
-            otherJobs.push(entry);
-          }
-        });
+    // Try board_state first for today's assigned jobs
+    try {
+      var br = await fetch(SB_URL + '/rest/v1/board_state?id=eq.current&select=state', {
+        headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
       });
-    }
+      if (br.ok) {
+        var brows = await br.json();
+        var boardState = brows && brows[0] && brows[0].state ? brows[0].state : {};
+        var assignments = boardState.assignments || {};
+        var jobNames    = boardState.jobNames    || {};
+        // assignments: { locKey: { techName: [jobId, ...] } }
+        Object.values(assignments).forEach(function(locObj) {
+          Object.entries(locObj).forEach(function(kv) {
+            var tname = kv[0], jids = kv[1] || [];
+            jids.forEach(function(jid) {
+              var entry = { id: String(jid), name: jobNames[jid] || String(jid), number: '' };
+              if (techName && tname.toLowerCase().includes(techName.split(' ')[0].toLowerCase())) {
+                myJobs.push(entry);
+              } else {
+                if (!otherJobs.some(function(o){ return o.id === entry.id; })) otherJobs.push(entry);
+              }
+            });
+          });
+        });
+      }
+    } catch(e) {}
 
-    // Fallback: pull all active Albi jobs if board state empty
-    if (!myJobs.length && !otherJobs.length) {
+    // Always also pull Albi jobs as the full list
+    try {
       var ar = await fetch('https://jg-proxy-v2.vercel.app/api/albi', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'get_projects', locationId: locId, limit: 50, status: 'active' })
+        body: JSON.stringify({ action: 'get_projects', locationId: locId, limit: 50 })
       });
       if (ar.ok) {
         var ad = await ar.json();
-        otherJobs = (ad.projects || ad.data || []).map(function(j){
-          return { id: j.id || j.projectId, name: j.name || j.projectName, number: j.projectNumber || '' };
+        var albiJobs = (ad.projects || ad.data || []).map(function(j){
+          return { id: String(j.id || j.projectId || ''), name: j.name || j.projectName || '', number: j.projectNumber || '' };
+        });
+        // Add Albi jobs not already in myJobs/otherJobs
+        albiJobs.forEach(function(j) {
+          if (!myJobs.some(function(m){ return m.id === j.id; }) &&
+              !otherJobs.some(function(o){ return o.id === j.id; })) {
+            otherJobs.push(j);
+          }
         });
       }
-    }
+    } catch(e) {}
 
     if (!myJobs.length && !otherJobs.length) {
       res.innerHTML = '<div style="padding:14px;text-align:center;color:var(--muted);font-size:13px;">No active jobs found</div>';
