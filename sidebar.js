@@ -44,8 +44,7 @@
     { label: 'Adjuster Intel',      icon: '🧠',  url: 'intelligence.html' },
 
     { section: 'QUICK ACTIONS' },
-    // Request Time Off opens on the hub — when clicked, goes to hub with ?action=time-off
-    { label: 'Request Time Off',    icon: '🏖',  url: 'hub.html?action=time-off' }
+    { label: 'Request Time Off',    icon: '🏖',  url: 'timeclock.html?action=vacation' }
   ];
 
   // ── CSS ── scoped to #jg-sidebar, matches existing hub.html styling
