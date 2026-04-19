@@ -212,10 +212,12 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;min
 var SB_URL = 'https://nuykvchgecpiuikoerze.supabase.co';
 var SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im51eWt2Y2hnZWNwaXVpa29lcnplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYyNjM3ODYsImV4cCI6MjA5MTgzOTc4Nn0.39hZ8DdjT_0iFJXPeAL2FXUSLw8FZBirDVzxZTO1W9s';
 
-// Zapier SMS webhook — routes to Twilio via Paths based on `type` field
-// REPLACE THIS URL with your actual Zapier Catch Hook URL
+// Zapier webhooks — different URLs for different concerns
+// sms:        operational alerts (missed clock-out, on-call texts)
+// onboarding: new hire invites (welcome SMS + email)
 var HOOKS = {
-  sms: 'https://hooks.zapier.com/hooks/catch/12653197/ujr6r82/'
+  sms: 'https://hooks.zapier.com/hooks/catch/12653197/ujr6r82/',
+  onboarding: 'https://hooks.zapier.com/hooks/catch/12653197/ujrrx83/'
 };
 
 // Cooldown cache so we don't spam the same person repeatedly
@@ -5553,12 +5555,24 @@ async function _submitInvite() {
   if (channel === 'sms' && !phone) { alert('Phone is required for SMS invite'); return; }
   if (channel === 'both' && !phone) { alert('Phone is required for SMS + email'); return; }
 
-  // Check for dupes
+  // Check for dupes — local cache first
   var existingEmp = (ST.employees||[]).find(function(e) {
     return (e.email||'').toLowerCase() === email || (e.name||'').toLowerCase() === name.toLowerCase();
   });
+
+  // Live check against Supabase (catches inactive employees or stale cache)
+  if (!existingEmp) {
+    try {
+      var liveCheck = await sb('/rest/v1/employees?email=eq.' + encodeURIComponent(email) + '&select=id,name,active&limit=1');
+      if (liveCheck && liveCheck.length) {
+        existingEmp = liveCheck[0];
+      }
+    } catch(e) { /* non-fatal — continue */ }
+  }
+
   if (existingEmp) {
-    if (!confirm('An employee with this name or email already exists ('+existingEmp.name+'). Send them a new invite anyway? This will re-link their record.')) return;
+    var activeMsg = (existingEmp.active === false) ? ' (currently INACTIVE)' : '';
+    if (!confirm('An employee with this email or name already exists: '+existingEmp.name+activeMsg+'\n\nSend them a new invite anyway? This will re-link their existing record.')) return;
   }
 
   // Generate secure token
@@ -5590,7 +5604,17 @@ async function _submitInvite() {
           invite_pending: true
         })
       });
-      if (!createR.ok) throw new Error('Failed to create employee record');
+      if (!createR.ok) {
+        var errText = await createR.text().catch(function(){ return ''; });
+        // Parse Supabase error for clearer message
+        var errMsg = 'Failed to create employee record (HTTP '+createR.status+')';
+        if (createR.status === 409) {
+          errMsg = 'An employee with this email already exists.\n\nThe email "'+email+'" is in use, but wasn\'t detected in the duplicate check (possibly because it\'s inactive, or has a case mismatch).\n\nTo fix: Check Employees tab for this email — if the record is there, edit it instead of creating new.';
+        } else if (errText) {
+          errMsg += '\n\nDetails: ' + errText.substring(0, 300);
+        }
+        throw new Error(errMsg);
+      }
       var created = await createR.json();
       empId = created[0].id;
     }
@@ -5613,7 +5637,16 @@ async function _submitInvite() {
         sent_by: getApprovedBy()
       })
     });
-    if (!inviteR.ok) throw new Error('Failed to create invite');
+    if (!inviteR.ok) {
+      var inviteErrText = await inviteR.text().catch(function(){ return ''; });
+      var inviteErrMsg = 'Failed to create invite record (HTTP '+inviteR.status+')';
+      if (inviteR.status === 404 || (inviteErrText && inviteErrText.indexOf('does not exist') !== -1) || (inviteErrText && inviteErrText.indexOf('relation') !== -1)) {
+        inviteErrMsg = 'The employee_invites table doesn\'t exist in Supabase yet.\n\nRun this SQL in your Supabase SQL editor:\n\nCREATE TABLE IF NOT EXISTS employee_invites (\n  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),\n  token text UNIQUE NOT NULL,\n  employee_id uuid,\n  employee_name text,\n  sent_to_phone text,\n  sent_to_email text,\n  channel text NOT NULL,\n  status text NOT NULL DEFAULT \'pending\',\n  sent_at timestamptz DEFAULT now(),\n  accepted_at timestamptz,\n  expires_at timestamptz,\n  sent_by text,\n  acknowledgments jsonb\n);';
+      } else if (inviteErrText) {
+        inviteErrMsg += '\n\nDetails: ' + inviteErrText.substring(0, 300);
+      }
+      throw new Error(inviteErrMsg);
+    }
 
     // 3. Build the invite URL
     var inviteUrl = window.location.origin + window.location.pathname.replace(/[^\/]+$/, '') + 'onboarding.html?invite=' + token;
@@ -5626,7 +5659,7 @@ async function _submitInvite() {
 
     if (channel === 'sms' || channel === 'both') {
       try {
-        await fetch(HOOKS.sms, {
+        await fetch(HOOKS.onboarding, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ type: 'invite_sms', to: phone, body: smsBody, employee_name: name })
@@ -5635,7 +5668,7 @@ async function _submitInvite() {
     }
     if (channel === 'email' || channel === 'both') {
       try {
-        await fetch(HOOKS.sms, {
+        await fetch(HOOKS.onboarding, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ type: 'invite_email', to: email, subject: emailSubject, body: emailBody, employee_name: name })
