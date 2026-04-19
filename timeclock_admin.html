@@ -773,8 +773,50 @@ async function addAbsence() {
 }
 
 // ── ABSENCE POPUP ─────────────────────────────────────────────────────────
+
+// Find the most recent workday the employee is missing an entry for (within current pay period)
+function _guessAbsenceDate(empName) {
+  if (!empName) return new Date().toISOString().split('T')[0];
+  var curPer = getCurrentPeriod();
+  if (!curPer) return new Date().toISOString().split('T')[0];
+
+  // Build a set of dates the employee DID clock in within the period
+  var workedDates = new Set();
+  ST.entries.forEach(function(e) {
+    if (e.employee_name !== empName) return;
+    var d = new Date(e.clock_in);
+    if (d < curPer.start || d > curPer.end) return;
+    workedDates.add(e.clock_in.split('T')[0]);
+  });
+
+  // Also exclude dates already logged as absences
+  var absenceDates = new Set();
+  (ST.absences || []).forEach(function(a) {
+    if (a.employee_name === empName) absenceDates.add(a.date);
+  });
+
+  // Walk backwards from yesterday to period start, find first workday with no entry and no absence
+  var today = new Date(); today.setHours(0,0,0,0);
+  var yesterday = new Date(today); yesterday.setDate(today.getDate() - 1);
+  var cursor = new Date(Math.min(yesterday.getTime(), curPer.end.getTime()));
+
+  while (cursor >= curPer.start) {
+    var dayOfWeek = cursor.getDay();
+    if (dayOfWeek !== 0 && dayOfWeek !== 6) {  // skip Sat/Sun
+      var dateStr = cursor.toISOString().split('T')[0];
+      if (!workedDates.has(dateStr) && !absenceDates.has(dateStr)) {
+        return dateStr;
+      }
+    }
+    cursor.setDate(cursor.getDate() - 1);
+  }
+
+  // No missing workday found — default to today
+  return new Date().toISOString().split('T')[0];
+}
+
 function openAbsenceModal(presetName, presetDate) {
-  var today = presetDate || new Date().toISOString().split('T')[0];
+  var smartDate = presetDate || _guessAbsenceDate(presetName);
   var activeEmps = ST.employees.filter(function(e){ return e.active; });
   var empOptions = '<option value="">-- Select --</option>';
   activeEmps.forEach(function(e) {
@@ -783,8 +825,10 @@ function openAbsenceModal(presetName, presetDate) {
 
   var body = '<p style="font-size:12px;color:var(--muted);margin-bottom:14px;line-height:1.5;">Manually log an employee absence. This will appear in timesheets for the pay period.</p>';
   body += '<div class="form-row">';
-  body += '<div><label class="form-label">Employee *</label><select class="form-select" id="abs-name">'+empOptions+'</select></div>';
-  body += '<div><label class="form-label">Date *</label><input type="date" class="form-input" id="abs-date" value="'+today+'"></div>';
+  body += '<div><label class="form-label">Employee *</label><select class="form-select" id="abs-name" onchange="_absEmpChanged()">'+empOptions+'</select></div>';
+  body += '<div><label class="form-label">Date *</label><input type="date" class="form-input" id="abs-date" value="'+smartDate+'">';
+  body += '<div id="abs-date-hint" style="font-size:11px;color:var(--muted);margin-top:4px;font-style:italic;">' + (presetName && smartDate !== new Date().toISOString().split('T')[0] ? '✨ Suggested: first missing workday' : '') + '</div>';
+  body += '</div>';
   body += '</div>';
   body += '<div class="form-row">';
   body += '<div><label class="form-label">Reason</label><select class="form-select" id="abs-reason"><option>Sick</option><option>PTO</option><option>Personal Day</option><option>No Call No Show</option><option>Injured</option><option>Training</option><option>Shop Time</option><option>Jury Duty</option><option>Bereavement</option><option>Other</option></select></div>';
@@ -793,6 +837,36 @@ function openAbsenceModal(presetName, presetDate) {
   body += '<div><label class="form-label">Notes (optional)</label><input type="text" class="form-input" id="abs-notes" placeholder="e.g. Called in sick at 6am..."></div>';
 
   showModal('📋 Log Absence / Out of Office', body, 'addAbsence()');
+}
+
+// Fires when employee is picked in the absence modal — re-guesses the date
+function _absEmpChanged() {
+  var nameEl = document.getElementById('abs-name');
+  var dateEl = document.getElementById('abs-date');
+  var hintEl = document.getElementById('abs-date-hint');
+  if (!nameEl || !dateEl) return;
+  var nm = nameEl.value;
+  if (!nm) { if (hintEl) hintEl.textContent = ''; return; }
+
+  var guess = _guessAbsenceDate(nm);
+  var today = new Date().toISOString().split('T')[0];
+  // Also pre-fill market based on employee's home market
+  var emp = ST.employees.find(function(e){ return e.name === nm; });
+  if (emp && emp.market) {
+    var mktEl = document.getElementById('abs-market');
+    if (mktEl) mktEl.value = emp.market;
+  }
+
+  dateEl.value = guess;
+  if (hintEl) {
+    if (guess !== today) {
+      var d = new Date(guess + 'T12:00:00');
+      var label = d.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
+      hintEl.innerHTML = '✨ <strong>' + label + '</strong> — first missing workday for ' + nm.split(' ')[0];
+    } else {
+      hintEl.textContent = '';
+    }
+  }
 }
 
 function exportPayPeriodCSV() {
