@@ -5659,18 +5659,24 @@ async function _submitInvite() {
 
     if (channel === 'sms' || channel === 'both') {
       try {
-        // Use URL-encoded form data (not JSON) to bypass CORS preflight
-        var smsParams = new URLSearchParams({
-          type: 'invite_sms',
-          to: phone,
-          body: smsBody,
-          employee_name: name
-        });
-        await fetch(HOOKS.onboarding, {
-          method: 'POST',
-          body: smsParams.toString(),
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
-        });
+        // Normalize phone to E.164 format (+1XXXXXXXXXX) so Twilio accepts it
+        var normalizedPhone = _normalizePhoneE164(phone);
+        if (!normalizedPhone) {
+          console.warn('Invalid phone format — skipping SMS:', phone);
+        } else {
+          // Use URL-encoded form data (not JSON) to bypass CORS preflight
+          var smsParams = new URLSearchParams({
+            type: 'invite_sms',
+            to: normalizedPhone,
+            body: smsBody,
+            employee_name: name
+          });
+          await fetch(HOOKS.onboarding, {
+            method: 'POST',
+            body: smsParams.toString(),
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+          });
+        }
       } catch(e) { console.warn('SMS send failed:', e); }
     }
     if (channel === 'email' || channel === 'both') {
@@ -5744,6 +5750,22 @@ function _copyInviteLink(btn) {
     btn.textContent = '✓ Copied!';
     setTimeout(function(){ btn.innerHTML = '📋 Copy Link'; }, 2000);
   }
+}
+
+// Normalize any US phone number into E.164 format (+1XXXXXXXXXX) for Twilio.
+// Accepts any input: "(920) 215-1767", "920-215-1767", "920.215.1767",
+// "9202151767", "19202151767", "+19202151767", etc. Returns null if invalid.
+function _normalizePhoneE164(raw) {
+  if (!raw) return null;
+  // Strip everything except digits
+  var digits = String(raw).replace(/\D/g, '');
+  if (!digits) return null;
+  // 10 digits → assume US, prepend 1
+  if (digits.length === 10) return '+1' + digits;
+  // 11 digits starting with 1 → US with country code
+  if (digits.length === 11 && digits.charAt(0) === '1') return '+' + digits;
+  // Anything else is ambiguous — refuse rather than send garbage to Twilio
+  return null;
 }
 
 function _generateInviteToken() {
