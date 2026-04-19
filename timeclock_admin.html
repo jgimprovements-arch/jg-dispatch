@@ -767,12 +767,45 @@ async function addAbsence() {
   var notes  = (document.getElementById('abs-notes')  || {}).value || '';
   var market = (document.getElementById('abs-market') || {}).value || 'Appleton';
   if (!name || !date) { toast('Name and date required'); return; }
+
+  // Store hours on the absence record (default 8, future: allow custom)
+  var payload = {
+    employee_name: name,
+    date: date,
+    reason: reason,
+    notes: notes,
+    market: market,
+    logged_by: 'admin',
+    hours: ABSENCE_FULL_DAY
+  };
+
   await fetch(SB_URL + '/rest/v1/absence_records', {
     method: 'POST',
     headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
-    body: JSON.stringify({ employee_name: name, date: date, reason: reason, notes: notes, market: market, logged_by: 'admin' })
+    body: JSON.stringify(payload)
   });
-  toast('Absence recorded for ' + name);
+
+  // If this is a PTO-paid absence and employee has balance, deduct from PTO
+  var emp = ST.employees.find(function(e){ return e.name === name; });
+  if (emp && PAID_PTO_REASONS.indexOf(reason) !== -1) {
+    var avail = parseFloat(emp.pto_hours_available || 0);
+    if (avail > 0) {
+      var deduct = Math.min(ABSENCE_FULL_DAY, avail);
+      var newAvail = Math.max(0, avail - deduct);
+      var newUsed = parseFloat(emp.pto_hours_used || 0) + deduct;
+      await fetch(SB_URL + '/rest/v1/employees?id=eq.' + emp.id, {
+        method: 'PATCH',
+        headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pto_hours_available: newAvail, pto_hours_used: newUsed })
+      });
+      toast('✓ Absence recorded • ' + deduct.toFixed(0) + 'hr deducted from PTO (' + newAvail.toFixed(1) + 'hr remaining)');
+    } else {
+      toast('Absence recorded for ' + name + ' (unpaid — no PTO balance)');
+    }
+  } else {
+    toast('Absence recorded for ' + name);
+  }
+
   closeModal();
   await loadAll();
   render();
@@ -1121,26 +1154,35 @@ function _computeTimecardTotals(empName, periodStart, periodEnd) {
   var payType = emp ? (emp.pay_type || 'hourly') : 'hourly';
   var regHrs = ot.regMins / 60;
   var otHrs = ot.otMins / 60;
-  var totalHrs = regHrs + otHrs;
-  var regPay = 0, otPay = 0, gross = 0;
+
+  // Absence hours (PTO, sick, training, etc.)
+  var absenceBreakdown = getAbsenceHoursForPeriod(empName, periodStart, periodEnd);
+  var ptoHrs = absenceBreakdown.ptoPaidHours;
+  var trainingHrs = absenceBreakdown.regularPaidHours;
+
+  var totalHrs = regHrs + otHrs + ptoHrs + trainingHrs;
+  var regPay = 0, otPay = 0, ptoPay = 0, trainingPay = 0, gross = 0;
 
   if (payType === 'salary' && emp && emp.annual_salary) {
     var perPeriod = parseFloat(emp.annual_salary) / (ST.payPeriod.type==='weekly'?52:ST.payPeriod.type==='biweekly'?26:24);
-    var pd = ST.payPeriod.type==='weekly'?5:10;
-    var wd = new Set(entries.map(function(e){ return e.clock_in.split('T')[0]; })).size;
-    var md = Math.max(0, pd - wd);
-    gross = perPeriod - md*(perPeriod/pd);
+    // Salary: paid period amount regardless. Absences tracked but don't reduce pay.
+    gross = perPeriod;
     regPay = gross;
   } else if (rate) {
     regPay = rate * regHrs;
     otPay = rate * 1.5 * otHrs;
-    gross = regPay + otPay;
+    ptoPay = rate * ptoHrs;
+    trainingPay = rate * trainingHrs;
+    gross = regPay + otPay + ptoPay + trainingPay;
   }
 
   return {
     entries: entries, employee: emp, rate: rate, payType: payType,
-    regHrs: regHrs, otHrs: otHrs, totalHrs: totalHrs,
-    regPay: regPay, otPay: otPay, gross: gross
+    regHrs: regHrs, otHrs: otHrs, ptoHrs: ptoHrs, trainingHrs: trainingHrs,
+    totalHrs: totalHrs,
+    regPay: regPay, otPay: otPay, ptoPay: ptoPay, trainingPay: trainingPay,
+    gross: gross,
+    absenceBreakdown: absenceBreakdown
   };
 }
 
@@ -1298,6 +1340,236 @@ async function generateAndArchiveTimecard(empName, periodLabel, approverName, ap
 
   // Fire snapshot to Supabase archive
   await snapshotTimecardToArchive(empName, periodLabel, totals);
+}
+
+// ── EMPLOYEE ABSENCE HISTORY MODAL ───────────────────────────────────────
+function openEmployeeAbsences(empName) {
+  var emp = ST.employees.find(function(e){ return e.name === empName; });
+  if (!emp) { toast('Employee not found'); return; }
+
+  var thisYear = new Date().getFullYear();
+  var empAbsences = (ST.absences || []).filter(function(a){ return a.employee_name === empName; });
+  var ytdAbsences = empAbsences.filter(function(a){ return new Date(a.date).getFullYear() === thisYear; });
+
+  // Tallies by reason (YTD)
+  var byReason = {};
+  ytdAbsences.forEach(function(a) {
+    var r = a.reason || 'Other';
+    if (!byReason[r]) byReason[r] = 0;
+    byReason[r]++;
+  });
+  var sortedReasons = Object.entries(byReason).sort(function(a,b){ return b[1] - a[1]; });
+
+  var ptoAvail = parseFloat(emp.pto_hours_available || 0);
+  var ptoUsed = parseFloat(emp.pto_hours_used || 0);
+  var ptoTotal = ptoAvail + ptoUsed;
+  var sickLimit = parseInt(emp.sick_day_limit || 3);
+  var sickCount = byReason['Sick'] || 0;
+
+  var body = '';
+
+  // Header block
+  body += '<div style="background:linear-gradient(135deg,#0d2d5e,#1a4480);color:#fff;border-radius:10px;padding:16px;margin-bottom:14px;">';
+  body += '<div style="font-size:11px;font-weight:700;color:rgba(255,255,255,.6);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">Absence History</div>';
+  body += '<div style="font-size:18px;font-weight:700;">'+empName+'</div>';
+  body += '<div style="font-size:11px;color:rgba(255,255,255,.7);">'+(emp.role||'Technician')+' • '+(emp.market||'Appleton')+'</div>';
+  body += '</div>';
+
+  // YTD stat cards
+  body += '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:14px;">';
+  body += '<div style="background:#f8f9fc;border-radius:8px;padding:10px;"><div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;">'+thisYear+' Total</div><div style="font-size:20px;font-weight:700;color:var(--navy);">'+ytdAbsences.length+'</div></div>';
+  var sickColor = sickCount >= sickLimit ? '#c62828' : sickCount >= sickLimit-1 ? '#e65100' : 'var(--navy)';
+  body += '<div style="background:#f8f9fc;border-radius:8px;padding:10px;"><div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;">Sick YTD</div><div style="font-size:20px;font-weight:700;color:'+sickColor+';">'+sickCount+'<span style="font-size:11px;color:var(--muted);">/'+sickLimit+'</span></div></div>';
+  var ptoColor = ptoAvail <= 8 ? '#c62828' : ptoAvail <= 24 ? '#e65100' : '#2e7d32';
+  body += '<div style="background:#f8f9fc;border-radius:8px;padding:10px;"><div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;">PTO Left</div><div style="font-size:20px;font-weight:700;color:'+ptoColor+';">'+ptoAvail.toFixed(1)+'h</div></div>';
+  body += '</div>';
+
+  // Warning if over sick limit
+  if (sickCount >= sickLimit) {
+    body += '<div style="background:rgba(198,40,40,.06);border:1px solid rgba(198,40,40,.4);border-radius:8px;padding:10px 12px;margin-bottom:14px;font-size:12px;color:#c62828;"><strong>⚠ Exceeded sick day limit</strong> — '+sickCount+' sick days taken vs policy limit of '+sickLimit+'. Consider discussion or policy review.</div>';
+  }
+
+  // Breakdown by reason (YTD)
+  if (sortedReasons.length) {
+    body += '<div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px;">'+thisYear+' Breakdown by Reason</div>';
+    body += '<div style="background:#f8f9fc;border-radius:8px;padding:10px;margin-bottom:14px;">';
+    sortedReasons.forEach(function(r) {
+      var pct = Math.round(r[1] / ytdAbsences.length * 100);
+      var isPaidPto = PAID_PTO_REASONS.indexOf(r[0]) !== -1;
+      var isUnpaid = UNPAID_REASONS.indexOf(r[0]) !== -1;
+      var typeBadge = isPaidPto ? '<span style="font-size:9px;padding:2px 6px;background:rgba(46,125,50,.12);color:#2e7d32;border-radius:3px;margin-left:6px;font-weight:700;">PAID</span>'
+        : isUnpaid ? '<span style="font-size:9px;padding:2px 6px;background:rgba(198,40,40,.12);color:#c62828;border-radius:3px;margin-left:6px;font-weight:700;">UNPAID</span>'
+        : '';
+      body += '<div style="display:flex;align-items:center;justify-content:space-between;padding:4px 0;font-size:12px;">';
+      body += '<div>'+r[0]+typeBadge+'</div>';
+      body += '<div><strong>'+r[1]+'</strong> <span style="color:var(--muted);font-size:10px;">('+pct+'%)</span></div>';
+      body += '</div>';
+    });
+    body += '</div>';
+  }
+
+  // Full absence list (reverse chronological)
+  body += '<div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px;">All Absences ('+empAbsences.length+')</div>';
+
+  if (!empAbsences.length) {
+    body += '<div style="background:#f8f9fc;border-radius:8px;padding:20px;text-align:center;color:var(--muted);font-size:12px;">No absences on record.</div>';
+  } else {
+    body += '<div style="max-height:300px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;">';
+    body += '<table style="width:100%;border-collapse:collapse;font-size:11px;">';
+    body += '<thead style="background:rgba(13,45,94,.04);position:sticky;top:0;"><tr>';
+    body += '<th style="padding:8px;text-align:left;">Date</th>';
+    body += '<th style="padding:8px;text-align:left;">Reason</th>';
+    body += '<th style="padding:8px;text-align:right;">Hrs</th>';
+    body += '<th style="padding:8px;text-align:left;">Notes</th>';
+    body += '<th style="padding:8px;"></th>';
+    body += '</tr></thead><tbody>';
+    empAbsences.sort(function(a,b){ return b.date.localeCompare(a.date); }).forEach(function(a) {
+      var d = new Date(a.date + 'T12:00:00');
+      var dateStr = d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
+      var hrs = parseFloat(a.hours) || ABSENCE_FULL_DAY;
+      var c = classifyAbsence(a, emp);
+      var paidBadge = c.category === 'pto_paid' ? '<span style="font-size:9px;padding:1px 5px;background:rgba(46,125,50,.15);color:#2e7d32;border-radius:3px;margin-left:4px;font-weight:700;">PTO</span>'
+        : c.category === 'regular_paid' ? '<span style="font-size:9px;padding:1px 5px;background:rgba(13,45,94,.15);color:var(--navy);border-radius:3px;margin-left:4px;font-weight:700;">PAID</span>'
+        : '<span style="font-size:9px;padding:1px 5px;background:rgba(198,40,40,.12);color:#c62828;border-radius:3px;margin-left:4px;font-weight:700;">UNPAID</span>';
+      body += '<tr style="border-top:1px solid var(--border);">';
+      body += '<td style="padding:6px 8px;white-space:nowrap;">'+dateStr+'</td>';
+      body += '<td style="padding:6px 8px;">'+(a.reason||'-')+paidBadge+'</td>';
+      body += '<td style="padding:6px 8px;text-align:right;font-weight:700;">'+hrs.toFixed(0)+'h</td>';
+      body += '<td style="padding:6px 8px;color:var(--muted);font-size:10px;">'+(a.notes||'')+'</td>';
+      body += '<td style="padding:6px 8px;text-align:right;"><button class="btn btn-sm" onclick="removeAbsenceFromHistory(\''+a.id+'\',\''+empName.replace(/\'/g,"\\'")+'\')" title="Remove this absence" style="font-size:10px;padding:2px 6px;">✕</button></td>';
+      body += '</tr>';
+    });
+    body += '</tbody></table></div>';
+  }
+
+  // Footer actions
+  body += '<div style="margin-top:12px;display:flex;gap:8px;">';
+  body += '<button class="btn btn-primary" onclick="openAbsenceModal(\''+empName.replace(/\'/g,"\\'")+'\')" style="background:var(--orange);border-color:var(--orange);">+ Log Absence</button>';
+  body += '<button class="btn" onclick="_exportEmployeeAbsences(\''+empName.replace(/\'/g,"\\'")+'\')">📥 Export CSV</button>';
+  body += '</div>';
+
+  showModal('📅 Absence History — '+empName, body, null);
+}
+
+async function removeAbsenceFromHistory(absenceId, empName) {
+  if (!confirm('Remove this absence? If it was PTO-paid, the balance will be restored.')) return;
+  var absence = (ST.absences || []).find(function(a){ return a.id === absenceId; });
+  if (!absence) return;
+
+  await fetch(SB_URL + '/rest/v1/absence_records?id=eq.' + absenceId, {
+    method: 'DELETE',
+    headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+  });
+
+  // If it was PTO-paid, refund the balance
+  var emp = ST.employees.find(function(e){ return e.name === absence.employee_name; });
+  if (emp && PAID_PTO_REASONS.indexOf(absence.reason) !== -1) {
+    var c = classifyAbsence(absence, emp);
+    if (c.category === 'pto_paid' && c.paidHours > 0) {
+      var newAvail = parseFloat(emp.pto_hours_available || 0) + c.paidHours;
+      var newUsed = Math.max(0, parseFloat(emp.pto_hours_used || 0) - c.paidHours);
+      await fetch(SB_URL + '/rest/v1/employees?id=eq.' + emp.id, {
+        method: 'PATCH',
+        headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pto_hours_available: newAvail, pto_hours_used: newUsed })
+      });
+      toast('✓ Absence removed • '+c.paidHours+'hr returned to PTO balance');
+    } else {
+      toast('✓ Absence removed');
+    }
+  } else {
+    toast('✓ Absence removed');
+  }
+
+  logActivity('Absence Removed', empName + ' — ' + absence.date + ' ' + absence.reason, 'time_clock', empName);
+  closeModal();
+  await loadAll();
+  openEmployeeAbsences(empName);  // re-open with fresh data
+}
+
+function _exportEmployeeAbsences(empName) {
+  var empAbsences = (ST.absences || []).filter(function(a){ return a.employee_name === empName; });
+  if (!empAbsences.length) { toast('No absences to export'); return; }
+  var emp = ST.employees.find(function(e){ return e.name === empName; });
+  var rows = [['Date','Day','Reason','Hours','Category','Notes','Logged By']];
+  empAbsences.sort(function(a,b){ return b.date.localeCompare(a.date); }).forEach(function(a) {
+    var d = new Date(a.date + 'T12:00:00');
+    var c = classifyAbsence(a, emp);
+    rows.push([
+      a.date,
+      d.toLocaleDateString('en-US',{weekday:'long'}),
+      a.reason || '',
+      (parseFloat(a.hours) || ABSENCE_FULL_DAY).toFixed(1),
+      c.category,
+      a.notes || '',
+      a.logged_by || ''
+    ]);
+  });
+  var csv = rows.map(function(r){
+    return r.map(function(c){ var s=String(c==null?'':c).split('"').join('""'); return '"'+s+'"'; }).join(',');
+  }).join('\n');
+  var blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement('a');
+  a.href = url;
+  a.download = empName.replace(/[^a-z0-9]+/gi, '_') + '_absences_' + new Date().toISOString().split('T')[0] + '.csv';
+  a.click();
+  URL.revokeObjectURL(url);
+  toast('✓ Export downloaded');
+}
+
+// ── ABSENCE CLASSIFICATION ────────────────────────────────────────────────
+// Returns { paidHours, earningsCode } for how an absence should be treated on the timecard.
+// PAID types (Sick, PTO, Personal Day, Bereavement, Jury Duty) deduct from PTO balance if available.
+// UNPAID types (No Call No Show, Injured, Missed On-Call) are tracked but add 0 hours.
+// TRAINING/SHOP TIME are paid as regular hours (not PTO).
+var ABSENCE_FULL_DAY = 8;  // standard full-day hours
+var PAID_PTO_REASONS = ['Sick', 'PTO', 'Personal Day', 'Bereavement', 'Jury Duty'];
+var PAID_REGULAR_REASONS = ['Training', 'Shop Time'];
+var UNPAID_REASONS = ['No Call No Show', 'Injured', 'Missed On-Call'];
+
+function classifyAbsence(absence, emp) {
+  var reason = (absence.reason || '').trim();
+  var hrs = absence.hours != null ? parseFloat(absence.hours) : ABSENCE_FULL_DAY;
+
+  if (PAID_REGULAR_REASONS.indexOf(reason) !== -1) {
+    // Training / Shop Time — paid as regular hours, no PTO impact
+    return { paidHours: hrs, earningsCode: 'REG', category: 'regular_paid' };
+  }
+  if (PAID_PTO_REASONS.indexOf(reason) !== -1) {
+    // Sick / PTO / Personal Day / etc — only paid if employee has PTO balance
+    var ptoAvail = emp ? parseFloat(emp.pto_hours_available || 0) : 0;
+    if (ptoAvail > 0) {
+      var used = Math.min(hrs, ptoAvail);
+      // Paychex earnings codes
+      var code = reason === 'Sick' ? 'SIC' : (reason === 'PTO' ? 'VAC' : 'PTO');
+      return { paidHours: used, earningsCode: code, category: 'pto_paid' };
+    }
+    return { paidHours: 0, earningsCode: null, category: 'unpaid_tracked' };
+  }
+  // Unpaid / everything else
+  return { paidHours: 0, earningsCode: null, category: 'unpaid_tracked' };
+}
+
+// Sum absence hours for an employee in a pay period, returning breakdown
+function getAbsenceHoursForPeriod(empName, periodStart, periodEnd) {
+  var emp = ST.employees.find(function(e){ return e.name === empName; });
+  var pStart = new Date(periodStart); pStart.setHours(0,0,0,0);
+  var pEnd = new Date(periodEnd); pEnd.setHours(23,59,59,999);
+  var breakdown = { ptoPaidHours: 0, regularPaidHours: 0, unpaidDays: 0, records: [] };
+
+  (ST.absences || []).forEach(function(a) {
+    if (a.employee_name !== empName) return;
+    var d = new Date(a.date + 'T00:00:00');
+    if (d < pStart || d > pEnd) return;
+    var c = classifyAbsence(a, emp);
+    if (c.category === 'pto_paid') breakdown.ptoPaidHours += c.paidHours;
+    else if (c.category === 'regular_paid') breakdown.regularPaidHours += c.paidHours;
+    else breakdown.unpaidDays += 1;
+    breakdown.records.push({ absence: a, classification: c });
+  });
+
+  return breakdown;
 }
 
 // ── APPROVAL FUNCTIONS ───────────────────────────────────────────────────
@@ -1512,6 +1784,24 @@ function exportPayrollReport(periodLabel, byEmp, curPer) {
         runningTotal = weekAfter;
       });
     });
+
+    // Emit absence rows for this employee in this period
+    try {
+      var periodsForAbs = getPayPeriods(ST.payPeriod.type, ST.payPeriod.start, 80);
+      var periodMatch = periodsForAbs.find(function(p){ return p.label === periodLabel; });
+      if (periodMatch) {
+        var emp = ST.employees.find(function(x){ return x.name === nm; });
+        (ST.absences || []).forEach(function(a) {
+          if (a.employee_name !== nm) return;
+          var ad = new Date(a.date + 'T00:00:00');
+          if (ad < periodMatch.start || ad > periodMatch.end) return;
+          var c = classifyAbsence(a, emp);
+          if (c.paidHours > 0 && c.earningsCode) {
+            paychexRows.push([paychexId, a.date, c.earningsCode, c.paidHours.toFixed(2), dept]);
+          }
+        });
+      }
+    } catch(err) { console.warn('Absence export failed:', err.message); }
   });
 
   // ─── Summary report (human-readable, audit trail) ───
@@ -1714,12 +2004,37 @@ function renderTimesheets() {
       } else {
         regPay=rate*(ot.regMins/60); otPay=rate*1.5*(ot.otMins/60); totalPay=regPay+otPay;
       }
+
+      // PTO / absence hours breakdown for this employee in this period
+      var absBrk = getAbsenceHoursForPeriod(nm, curPer.start, curPer.end);
+      var ptoPayForCard = 0, trainingPayForCard = 0;
+      if (!isSalary && rate) {
+        ptoPayForCard = rate * absBrk.ptoPaidHours;
+        trainingPayForCard = rate * absBrk.regularPaidHours;
+        totalPay += ptoPayForCard + trainingPayForCard;
+      }
+
       h += '<div class="card" style="padding:16px;margin:0;">';
       h += '<div style="font-size:13px;font-weight:700;color:var(--navy);margin-bottom:10px;">'+nm+'</div>';
       h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:10px;">';
       h += '<div style="background:rgba(13,45,94,.04);border-radius:8px;padding:8px;text-align:center;"><div style="font-size:16px;font-weight:700;color:var(--navy);">'+fmtHM(ot.regMins)+'</div><div style="font-size:10px;color:var(--muted);font-weight:600;">REG HRS</div></div>';
       h += '<div style="background:'+(ot.otMins>0?'rgba(198,40,40,.06)':'rgba(13,45,94,.04)')+'";border-radius:8px;padding:8px;text-align:center;"><div style="font-size:16px;font-weight:700;color:'+(ot.otMins>0?'#c62828':'var(--muted)')+';">'+fmtHM(ot.otMins)+'</div><div style="font-size:10px;color:var(--muted);font-weight:600;">OT HRS</div></div>';
       h += '</div>';
+
+      // PTO / training / unpaid breakdown row — only show if any absences in period
+      if (absBrk.ptoPaidHours > 0 || absBrk.regularPaidHours > 0 || absBrk.unpaidDays > 0) {
+        h += '<div style="background:rgba(46,125,50,.04);border:1px solid rgba(46,125,50,.2);border-radius:8px;padding:8px;margin-bottom:10px;font-size:11px;">';
+        if (absBrk.ptoPaidHours > 0) {
+          h += '<div style="display:flex;justify-content:space-between;"><span style="color:#2e7d32;">🏖 PTO / Sick paid</span><strong>'+absBrk.ptoPaidHours.toFixed(1)+'h</strong></div>';
+        }
+        if (absBrk.regularPaidHours > 0) {
+          h += '<div style="display:flex;justify-content:space-between;"><span style="color:var(--navy);">📚 Training / Shop</span><strong>'+absBrk.regularPaidHours.toFixed(1)+'h</strong></div>';
+        }
+        if (absBrk.unpaidDays > 0) {
+          h += '<div style="display:flex;justify-content:space-between;"><span style="color:#c62828;">⚠ Unpaid days</span><strong>'+absBrk.unpaidDays+'</strong></div>';
+        }
+        h += '</div>';
+      }
       if(isSalary&&emp.annual_salary){
         var pp3=parseFloat(emp.annual_salary)/(ST.payPeriod.type==='weekly'?52:ST.payPeriod.type==='biweekly'?26:24);
         var wd3=new Set(d.entries.map(function(e){return e.clock_in.split('T')[0];})).size;
@@ -1734,6 +2049,12 @@ function renderTimesheets() {
         h += '<div style="border-top:1px solid var(--border);padding-top:10px;">';
         h += '<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;"><span style="color:var(--muted);">Regular ('+fmtHM(ot.regMins)+' @ $'+rate.toFixed(2)+'/hr)</span><span style="font-weight:600;">$'+regPay.toFixed(2)+'</span></div>';
         if(ot.otMins>0){h += '<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;"><span style="color:#c62828;">Overtime ('+fmtHM(ot.otMins)+' @ $'+(rate*1.5).toFixed(2)+'/hr)</span><span style="font-weight:600;color:#c62828;">$'+otPay.toFixed(2)+'</span></div>';}
+        if (ptoPayForCard > 0) {
+          h += '<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;"><span style="color:#2e7d32;">PTO / Sick ('+absBrk.ptoPaidHours.toFixed(1)+'h @ $'+rate.toFixed(2)+')</span><span style="font-weight:600;color:#2e7d32;">$'+ptoPayForCard.toFixed(2)+'</span></div>';
+        }
+        if (trainingPayForCard > 0) {
+          h += '<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;"><span style="color:var(--navy);">Training ('+absBrk.regularPaidHours.toFixed(1)+'h @ $'+rate.toFixed(2)+')</span><span style="font-weight:600;">$'+trainingPayForCard.toFixed(2)+'</span></div>';
+        }
         h += '<div style="display:flex;justify-content:space-between;font-size:14px;font-weight:700;border-top:1px solid var(--border);padding-top:6px;margin-top:6px;"><span>Est. Gross Pay</span><span style="color:#2e7d32;">$'+totalPay.toFixed(2)+'</span></div>';
         h += '</div>';
       } else {
@@ -1836,35 +2157,45 @@ function renderTimesheets() {
       h += '</div>';  // #approved-section
       h += '</div>';  // outer container
     }
-    var periodRegMins=0, periodOtMins=0, periodTotalPay=0;
+    var periodRegMins=0, periodOtMins=0, periodPtoHrs=0, periodTrainHrs=0, periodTotalPay=0;
     Object.entries(byEmp).forEach(function(kv){
       var nm2=kv[0], d2=kv[1];
       var emp2=ST.employees.find(function(e){return e.name===nm2;});
       var rate2=emp2?parseFloat(emp2.hourly_rate||0):0;
       var ot3=calcOT(d2.entries);
       periodRegMins+=ot3.regMins; periodOtMins+=ot3.otMins;
+      var absBrk2 = getAbsenceHoursForPeriod(nm2, curPer.start, curPer.end);
+      periodPtoHrs += absBrk2.ptoPaidHours;
+      periodTrainHrs += absBrk2.regularPaidHours;
       if(emp2&&emp2.pay_type==='salary'&&emp2.annual_salary){
         var pp4=parseFloat(emp2.annual_salary)/(ST.payPeriod.type==='weekly'?52:ST.payPeriod.type==='biweekly'?26:24);
-        var pd4=ST.payPeriod.type==='weekly'?5:10;
-        var wd4=new Set(d2.entries.map(function(e){return e.clock_in.split('T')[0];})).size;
-        var md4=Math.max(0,pd4-wd4);
-        periodTotalPay+=pp4-md4*(pp4/pd4);
-      } else if(rate2){ periodTotalPay+=rate2*(ot3.regMins/60)+rate2*1.5*(ot3.otMins/60); }
+        periodTotalPay+=pp4;  // salary: full period pay regardless of absences
+      } else if(rate2){
+        periodTotalPay+=rate2*(ot3.regMins/60)+rate2*1.5*(ot3.otMins/60)+rate2*absBrk2.ptoPaidHours+rate2*absBrk2.regularPaidHours;
+      }
     });
 
-    var totalHrs2=Math.floor((periodRegMins+periodOtMins)/60)+'h '+Math.round((periodRegMins+periodOtMins)%60)+'m';
+    var totalAllMins = periodRegMins + periodOtMins + (periodPtoHrs*60) + (periodTrainHrs*60);
+    var totalHrs2=Math.floor(totalAllMins/60)+'h '+Math.round(totalAllMins%60)+'m';
     var regHrsStr2=Math.floor(periodRegMins/60)+'h '+Math.round(periodRegMins%60)+'m';
     var otHrsStr2=Math.floor(periodOtMins/60)+'h '+Math.round(periodOtMins%60)+'m';
+    var ptoHrsStr = periodPtoHrs.toFixed(1)+'h';
     h += '<div class="card" style="margin-bottom:16px;padding:0;overflow:hidden;">';
     h += '<div style="background:var(--navy);padding:10px 18px;"><div style="font-size:11px;font-weight:700;color:rgba(255,255,255,.6);text-transform:uppercase;letter-spacing:.06em;">Pay Period Summary</div></div>';
-    h += '<div style="display:grid;grid-template-columns:1fr 1fr 1fr'+(periodTotalPay>0?' 1fr':'')+';">';
+    var hasPto = periodPtoHrs > 0 || periodTrainHrs > 0;
+    var gridCols = hasPto ? (periodTotalPay>0 ? '1fr 1fr 1fr 1fr 1fr' : '1fr 1fr 1fr 1fr') : (periodTotalPay>0 ? '1fr 1fr 1fr 1fr' : '1fr 1fr 1fr');
+    h += '<div style="display:grid;grid-template-columns:'+gridCols+';">';
     h += '<div style="padding:16px 18px;border-right:1px solid var(--border);"><div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">Total Hours</div><div style="font-size:24px;font-weight:700;color:var(--navy);line-height:1;">'+totalHrs2+'</div></div>';
     h += '<div style="padding:16px 18px;border-right:1px solid var(--border);"><div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">Regular</div><div style="font-size:24px;font-weight:700;color:var(--navy);line-height:1;">'+regHrsStr2+'</div></div>';
-    h += '<div style="padding:16px 18px;'+(periodTotalPay>0?'border-right:1px solid var(--border);':'')+'">';
-    h += '<div style="font-size:10px;font-weight:700;color:'+(periodOtMins>0?'#c62828':'var(--muted)')+';text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">Overtime</div>';
+    h += '<div style="padding:16px 18px;border-right:1px solid var(--border);"><div style="font-size:10px;font-weight:700;color:'+(periodOtMins>0?'#c62828':'var(--muted)')+';text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">Overtime</div>';
     h += '<div style="font-size:24px;font-weight:700;color:'+(periodOtMins>0?'#c62828':'var(--muted)')+';line-height:1;">'+otHrsStr2+'</div></div>';
+    if (hasPto) {
+      h += '<div style="padding:16px 18px;'+(periodTotalPay>0?'border-right:1px solid var(--border);':'')+'background:rgba(46,125,50,.04);">';
+      h += '<div style="font-size:10px;font-weight:700;color:#2e7d32;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">PTO / Training</div>';
+      h += '<div style="font-size:24px;font-weight:700;color:#2e7d32;line-height:1;">'+ptoHrsStr+'</div></div>';
+    }
     if(periodTotalPay>0){
-      h += '<div style="padding:16px 18px;background:rgba(46,125,50,.04);">';
+      h += '<div style="padding:16px 18px;background:rgba(46,125,50,.08);">';
       h += '<div style="font-size:10px;font-weight:700;color:#2e7d32;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">Est. Gross Payroll</div>';
       h += '<div style="font-size:24px;font-weight:700;color:#2e7d32;line-height:1;">$'+periodTotalPay.toFixed(2)+'</div></div>';
     }
@@ -2150,8 +2481,9 @@ function renderEmployees() {
     h += '<td>'+(onDispatch?'<span class="badge badge-green">Yes</span>':'<span class="badge badge-gray">No</span>')+'</td>';
     h += '<td>'+(emp.active?'<span class="badge badge-green">Active</span>':'<span class="badge badge-gray">Inactive</span>')+'</td>';
     h += '<td style="font-size:11px;color:var(--muted);">'+new Date(emp.created_at).toLocaleDateString()+'</td>';
-    h += '<td style="display:flex;gap:4px;">';
+    h += '<td style="display:flex;gap:4px;flex-wrap:wrap;">';
     h += '<button class="btn btn-sm" onclick="openEditEmployee(\''+emp.id+'\')">Edit</button>';
+    h += '<button class="btn btn-sm" onclick="openEmployeeAbsences(\''+emp.name.replace(/\'/g,"\\'")+'\')">📅 Absences</button>';
     h += '<button class="btn btn-sm '+(emp.active?'btn-danger':'')+'" onclick="toggleEmployee(\''+emp.id+'\','+emp.active+')">'+(emp.active?'Deactivate':'Activate')+'</button>';
     h += '</td></tr>';
   });
