@@ -213,6 +213,7 @@ var ST = {
   employees: [],
   entries: [],
   breaks: [],
+  approvals: {},   // keyed by "periodLabel|employeeName" → {status, approved_by, approved_at, id}
   filterEmp: 'All',
   filterDate: '',
   filterDateEnd: '',
@@ -248,6 +249,15 @@ function getCurrentPeriod() {
   var periods = getPayPeriods(ST.payPeriod.type, ST.payPeriod.start, 40);
   var today = new Date(); today.setHours(0,0,0,0);
   return periods.find(function(p){ return today >= p.start && today <= p.end; }) || periods[0];
+}
+
+// Given any date (ISO string or Date), return the pay period label it falls in
+function periodLabelFor(dateInput) {
+  if (!dateInput) return null;
+  var d = new Date(dateInput); d.setHours(0,0,0,0);
+  var periods = getPayPeriods(ST.payPeriod.type, ST.payPeriod.start, 80);
+  var match = periods.find(function(p){ return d >= p.start && d <= p.end; });
+  return match ? match.label : null;
 }
 
 function billableStart(clockInISO, approvedEarly) {
@@ -336,6 +346,13 @@ async function loadAll() {
 
   var abs = await sb('/rest/v1/absence_records?date=gte.' + since + '&order=date.desc&limit=200&select=*');
   ST.absences = abs || [];
+
+  // Load timecard approvals (keyed by period|employee)
+  var aps = await sb('/rest/v1/timecard_approvals?select=*&order=approved_at.desc&limit=500');
+  ST.approvals = {};
+  (aps || []).forEach(function(a) {
+    ST.approvals[a.period_label + '|' + a.employee_name] = a;
+  });
 
   render();
 }
@@ -743,6 +760,190 @@ var _tcByEmp = {}, _tcCurPer = null;
 function _tcPayrollReport() {
   var period = _tcEmpKeys[0] ? _tcEmpKeys[0][0] : '';
   exportPayrollReport(period, _tcByEmp, _tcCurPer);
+}
+
+// Top-level OT helpers (also defined locally inside renderTimesheets — kept for module scope access)
+function _getWeekKey(iso) {
+  var d = new Date(iso); var day = d.getDay();
+  var diff = d.getDate() - day + (day === 0 ? -6 : 1);
+  var mon = new Date(d); mon.setDate(diff); mon.setHours(0,0,0,0);
+  return mon.toISOString().split('T')[0];
+}
+function _calcOT(entries) {
+  var weeks = {};
+  entries.forEach(function(e){ var wk = _getWeekKey(e.clock_in); if (!weeks[wk]) weeks[wk] = []; weeks[wk].push(e); });
+  var regMins = 0, otMins = 0;
+  Object.values(weeks).forEach(function(wkE) {
+    var wkMins = 0;
+    wkE.forEach(function(e){ var eb = ST.breaks.filter(function(b){ return b.entry_id === e.id; }); wkMins += billableMins(e, eb); });
+    if (wkMins > 2400) { regMins += 2400; otMins += (wkMins - 2400); } else { regMins += wkMins; }
+  });
+  return { regMins: regMins, otMins: otMins };
+}
+
+// ── APPROVAL FUNCTIONS ───────────────────────────────────────────────────
+function getApprovalKey(periodLabel, empName) {
+  return periodLabel + '|' + empName;
+}
+
+function getApprovalStatus(periodLabel, empName) {
+  var rec = ST.approvals[getApprovalKey(periodLabel, empName)];
+  return rec ? rec.status : 'pending';
+}
+
+function getApprovedBy() {
+  try {
+    var u = JSON.parse(localStorage.getItem('jg_platform_user') || '{}');
+    return u.name || u.email || 'Admin';
+  } catch (e) { return 'Admin'; }
+}
+
+async function approveTimecard(periodLabel, empName) {
+  if (!isAdmin()) { toast('Admin access required'); return; }
+  var key = getApprovalKey(periodLabel, empName);
+  var existing = ST.approvals[key];
+  var nowIso = new Date().toISOString();
+  var approver = getApprovedBy();
+
+  var payload = {
+    period_label: periodLabel,
+    employee_name: empName,
+    status: 'approved',
+    approved_by: approver,
+    approved_at: nowIso
+  };
+
+  if (existing && existing.id) {
+    // Update existing record
+    var r = await sb('/rest/v1/timecard_approvals?id=eq.' + existing.id, {
+      method: 'PATCH',
+      headers: { 'Prefer': 'return=representation' },
+      body: JSON.stringify(payload)
+    });
+    if (r && r[0]) ST.approvals[key] = r[0];
+  } else {
+    // Insert new record
+    var r2 = await sb('/rest/v1/timecard_approvals', {
+      method: 'POST',
+      headers: { 'Prefer': 'return=representation' },
+      body: JSON.stringify(payload)
+    });
+    if (r2 && r2[0]) ST.approvals[key] = r2[0];
+  }
+
+  toast('✓ Timecard approved for ' + empName);
+  logActivity('Timecard Approved', empName + ' — ' + periodLabel + ' (approved by ' + approver + ')', 'time_clock', empName);
+  render();
+}
+
+async function approveAllTimecards(periodLabel, empNames) {
+  if (!isAdmin()) { toast('Admin access required'); return; }
+  if (!empNames || !empNames.length) return;
+  if (!confirm('Approve ALL ' + empNames.length + ' timecards for ' + periodLabel + '? This locks entries from further edits.')) return;
+
+  toast('Approving ' + empNames.length + ' timecards...');
+  for (var i = 0; i < empNames.length; i++) {
+    var nm = empNames[i];
+    if (getApprovalStatus(periodLabel, nm) !== 'approved') {
+      await approveTimecard(periodLabel, nm);
+    }
+  }
+  toast('✓ All timecards approved & locked');
+}
+
+async function unlockTimecard(periodLabel, empName) {
+  if (!isAdmin()) { toast('Admin access required'); return; }
+  if (!confirm('Unlock ' + empName + "'s timecard for " + periodLabel + '? This reopens entries for edit.')) return;
+  var key = getApprovalKey(periodLabel, empName);
+  var existing = ST.approvals[key];
+  if (!existing || !existing.id) { toast('No approval record found'); return; }
+
+  var r = await sb('/rest/v1/timecard_approvals?id=eq.' + existing.id, {
+    method: 'DELETE'
+  });
+  delete ST.approvals[key];
+  toast('🔓 Timecard unlocked for ' + empName);
+  logActivity('Timecard Unlocked', empName + ' — ' + periodLabel + ' (unlocked by ' + getApprovedBy() + ')', 'time_clock', empName);
+  render();
+}
+
+function exportPayrollReport(periodLabel, byEmp, curPer) {
+  if (!byEmp || !Object.keys(byEmp).length) { toast('No data to export'); return; }
+
+  var rows = [];
+  rows.push(['JG Restoration — Payroll Report']);
+  rows.push(['Pay Period', periodLabel]);
+  rows.push(['Generated', new Date().toLocaleString()]);
+  rows.push(['Generated By', getApprovedBy()]);
+  rows.push([]);
+  rows.push(['Employee', 'Pay Type', 'Rate', 'Reg Hrs', 'OT Hrs', 'Total Hrs', 'Reg Pay', 'OT Pay', 'Gross', 'Status', 'Approved By', 'Approved At']);
+
+  var grandTotal = 0, grandReg = 0, grandOT = 0, grandGross = 0;
+
+  Object.entries(byEmp).forEach(function(kv) {
+    var nm = kv[0], d = kv[1];
+    var emp = ST.employees.find(function(e){ return e.name === nm; });
+    var rate = emp ? parseFloat(emp.hourly_rate || 0) : 0;
+    var payType = emp ? (emp.pay_type || 'hourly') : 'hourly';
+    var ot = _calcOT(d.entries);
+    var regHrs = ot.regMins / 60;
+    var otHrs = ot.otMins / 60;
+    var totalHrs = regHrs + otHrs;
+    var regPay = 0, otPay = 0, gross = 0;
+
+    if (payType === 'salary' && emp && emp.annual_salary) {
+      var pp = parseFloat(emp.annual_salary) / (ST.payPeriod.type === 'weekly' ? 52 : ST.payPeriod.type === 'biweekly' ? 26 : 24);
+      var pd = ST.payPeriod.type === 'weekly' ? 5 : 10;
+      var wd = new Set(d.entries.map(function(e){ return e.clock_in.split('T')[0]; })).size;
+      var md = Math.max(0, pd - wd);
+      gross = pp - md * (pp / pd);
+      regPay = gross;
+      rate = emp.annual_salary + '/yr';
+    } else if (rate) {
+      regPay = rate * regHrs;
+      otPay = rate * 1.5 * otHrs;
+      gross = regPay + otPay;
+    }
+
+    grandReg += regHrs; grandOT += otHrs; grandTotal += totalHrs; grandGross += gross;
+
+    var approvalKey = getApprovalKey(periodLabel, nm);
+    var approval = ST.approvals[approvalKey] || {};
+    var status = approval.status || 'pending';
+
+    rows.push([
+      nm,
+      payType,
+      (typeof rate === 'number' ? '$' + rate.toFixed(2) + '/hr' : rate),
+      regHrs.toFixed(2),
+      otHrs.toFixed(2),
+      totalHrs.toFixed(2),
+      '$' + regPay.toFixed(2),
+      '$' + otPay.toFixed(2),
+      '$' + gross.toFixed(2),
+      status,
+      approval.approved_by || '',
+      approval.approved_at ? new Date(approval.approved_at).toLocaleString() : ''
+    ]);
+  });
+
+  rows.push([]);
+  rows.push(['TOTALS', '', '', grandReg.toFixed(2), grandOT.toFixed(2), grandTotal.toFixed(2), '', '', '$' + grandGross.toFixed(2)]);
+
+  var csv = rows.map(function(r){
+    return r.map(function(c){ var s = String(c == null ? '' : c).split('"').join('""'); return '"' + s + '"'; }).join(',');
+  }).join('\n');
+
+  var blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement('a');
+  a.href = url;
+  a.download = 'payroll_' + periodLabel.replace(/[^a-z0-9]+/gi, '_') + '.csv';
+  a.click();
+  URL.revokeObjectURL(url);
+
+  logActivity('Payroll Report Exported', periodLabel + ' — ' + Object.keys(byEmp).length + ' employees, $' + grandGross.toFixed(2) + ' gross', 'time_clock', null);
+  toast('✓ Payroll report downloaded');
 }
 
 function renderTimesheets() {
@@ -2266,6 +2467,14 @@ function viewEntry(id) {
 async function editEntry(id) {
   var e = ST.entries.find(function(x){ return x.id===id; });
   if (!e) return;
+
+  // Check if this entry's pay period is approved/locked
+  var entryPeriod = periodLabelFor(e.clock_in);
+  if (entryPeriod && getApprovalStatus(entryPeriod, e.employee_name) === 'approved') {
+    if (!confirm('⚠ This timecard has been APPROVED and locked for ' + e.employee_name + ' (' + entryPeriod + ').\n\nEditing requires unlocking the timecard first. Unlock now?')) return;
+    await unlockTimecard(entryPeriod, e.employee_name);
+  }
+
   var toLocal = function(iso){ if(!iso)return ''; var d=new Date(iso); var pad=function(n){return String(n).padStart(2,'0');}; return d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate())+'T'+pad(d.getHours())+':'+pad(d.getMinutes()); };
 
   // Build job select with loading state first
