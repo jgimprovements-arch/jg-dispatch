@@ -197,6 +197,7 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;min
   <button class="tc-tab" id="tab-routes" onclick="showTab('routes',this)">🗺 Routes & Live</button>
   <button class="tc-tab" id="tab-jobcost" onclick="showTab('jobcost',this)">💰 Job Costing</button>
   <button class="tc-tab" id="tab-commissions" onclick="showTab('commissions',this)">💵 Commissions</button>
+  <button class="tc-tab" id="tab-timeoff" onclick="showTab('timeoff',this)">🏖 Time Off</button>
   <button class="tc-tab" id="tab-archive" onclick="showTab('archive',this)">🗄 Archive</button>
   <button class="tc-tab" id="tab-activity" onclick="showTab('activity',this)">📜 Activity</button>
   <button class="tc-tab" id="tab-access" onclick="showTab('access',this)">🔐 Access</button>
@@ -428,7 +429,7 @@ async function loadAll() {
 
 // ── TABS ──────────────────────────────────────────────────────────────────
 function showTab(tab, el) {
-  var adminOnly = ['employees', 'reports', 'archive'];
+  var adminOnly = ['employees', 'reports', 'archive', 'timeoff'];
   var mapTabs = ['routes'];
   if (adminOnly.includes(tab) && !isAdmin()) {
     toast('Admin access required');
@@ -454,11 +455,13 @@ function render() {
   var routeTab    = document.getElementById('tab-routes');
   var activityTab = document.getElementById('tab-activity');
   var commTab     = document.getElementById('tab-commissions');
+  var timeoffTab  = document.getElementById('tab-timeoff');
   if (empTab)      empTab.style.display      = isAdmin() ? '' : 'none';
   if (rptTab)      rptTab.style.display      = isAdmin() ? '' : 'none';
   if (routeTab)    routeTab.style.display    = canViewMaps() ? '' : 'none';
   if (activityTab) activityTab.style.display = isAdmin() ? '' : 'none';
   if (commTab)     commTab.style.display     = _canViewCommissionsTab() ? '' : 'none';
+  if (timeoffTab)  timeoffTab.style.display  = isAdmin() ? '' : 'none';
   var liveTab = document.getElementById('tab-live');
   if (liveTab) liveTab.style.display = 'none';
   var accessTab = document.getElementById('tab-access');
@@ -470,6 +473,7 @@ function render() {
   else if (ST.tab === 'routes')   renderRoutes();
   else if (ST.tab === 'jobcost')  { renderJobCost(); }
   else if (ST.tab === 'commissions') { if (_canViewCommissionsTab()) renderCommissions(); else { ST.tab = 'timesheets'; renderTimesheets(); } }
+  else if (ST.tab === 'timeoff')  { if (isAdmin()) renderTimeOff(); }
   else if (ST.tab === 'archive')  { if (isAdmin()) renderArchive(); }
   else if (ST.tab === 'activity') { if (isAdmin()) renderActivity(); }
   else if (ST.tab === 'access')   { if (isAdmin()) renderAccess(); }
@@ -3355,6 +3359,289 @@ async function deleteCommission(id) {
     await loadAll();
     renderCommissions();
   } else { toast('Delete failed'); }
+}
+
+// ── TIME OFF REQUESTS (admin approval) ────────────────────────────────────
+var _toData = null;
+var _toFilter = { status: 'pending' };
+
+async function renderTimeOff() {
+  var body = document.getElementById('tc-body');
+  if (!_toData) {
+    body.innerHTML = '<div class="card"><div class="empty" style="padding:40px;">Loading time off requests...</div></div>';
+    _toData = await sb('/rest/v1/vacation_requests?select=*&order=submitted_at.desc&limit=500') || [];
+  }
+
+  var data = _toData.slice();
+  if (_toFilter.status !== 'all') {
+    data = data.filter(function(r){ return r.status === _toFilter.status; });
+  }
+
+  var pendingCount = _toData.filter(function(r){ return r.status === 'pending'; }).length;
+  var approvedCount = _toData.filter(function(r){ return r.status === 'approved'; }).length;
+  var deniedCount = _toData.filter(function(r){ return r.status === 'denied'; }).length;
+
+  var h = '';
+
+  // Header card
+  h += '<div class="card" style="margin-bottom:16px;">';
+  h += '<div class="card-hdr" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">';
+  h += '<div class="card-title">🏖 Time Off Requests</div>';
+  h += '<button class="btn btn-sm" onclick="_toData=null;renderTimeOff();">↻ Refresh</button>';
+  h += '</div>';
+
+  h += '<div class="card-body">';
+  h += '<div style="display:flex;gap:8px;flex-wrap:wrap;">';
+  var statuses = [
+    {key:'pending', label:'⏳ Pending', count:pendingCount, color:'#e65100'},
+    {key:'approved', label:'✓ Approved', count:approvedCount, color:'#2e7d32'},
+    {key:'denied', label:'✕ Denied', count:deniedCount, color:'#c62828'},
+    {key:'all', label:'All', count:_toData.length, color:'#0d2d5e'}
+  ];
+  statuses.forEach(function(s) {
+    var isActive = _toFilter.status === s.key;
+    h += '<button onclick="_toFilter.status=\''+s.key+'\';renderTimeOff();" style="padding:8px 14px;border-radius:8px;border:1.5px solid '+(isActive?s.color:'var(--border)')+';background:'+(isActive?'rgba(0,0,0,.04)':'var(--surface)')+';color:'+(isActive?s.color:'var(--muted)')+';font-size:12px;font-weight:'+(isActive?'700':'500')+';cursor:pointer;font-family:DM Sans,sans-serif;">';
+    h += s.label + ' <span style="font-size:11px;margin-left:4px;">('+s.count+')</span></button>';
+  });
+  h += '</div></div></div>';
+
+  // Warning banner if there are pending requests
+  if (pendingCount > 0 && _toFilter.status !== 'pending') {
+    h += '<div style="background:rgba(230,81,0,.06);border:1px solid rgba(230,81,0,.3);border-left:4px solid #e65100;border-radius:8px;padding:10px 14px;margin-bottom:16px;font-size:12px;color:#e65100;">';
+    h += '<strong>⏳ '+pendingCount+' pending request'+(pendingCount!==1?'s':'')+'</strong> — click "⏳ Pending" above to review';
+    h += '</div>';
+  }
+
+  // Request cards
+  if (!data.length) {
+    h += '<div class="card"><div class="empty" style="padding:40px;">No '+(_toFilter.status==='all'?'':_toFilter.status+' ')+'requests found.</div></div>';
+  } else {
+    data.forEach(function(r, idx) {
+      h += _toRenderCard(r, idx);
+    });
+  }
+
+  window._toFiltered = data;
+  body.innerHTML = h;
+}
+
+function _toRenderCard(r, idx) {
+  var startD = new Date(r.start_date+'T12:00:00');
+  var endD = new Date(r.end_date+'T12:00:00');
+  var startLabel = startD.toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric',year:'numeric'});
+  var endLabel = endD.toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric',year:'numeric'});
+
+  var statusColor = {pending:'#e65100', approved:'#2e7d32', denied:'#c62828'}[r.status] || 'var(--muted)';
+  var statusBg = {pending:'rgba(230,81,0,.05)', approved:'rgba(46,125,50,.05)', denied:'rgba(198,40,40,.05)'}[r.status] || 'transparent';
+  var statusIcon = {pending:'⏳', approved:'✓', denied:'✕'}[r.status] || '';
+
+  var daysSinceSubmit = Math.round((new Date() - new Date(r.submitted_at)) / (24*60*60*1000));
+  var submitLabel = daysSinceSubmit === 0 ? 'today' : daysSinceSubmit + 'd ago';
+
+  // Check employee PTO balance
+  var emp = ST.employees.find(function(e){ return e.name === r.employee_name; });
+  var ptoAvail = emp ? parseFloat(emp.pto_hours_available || 0) : 0;
+  var hoursRequested = parseFloat(r.hours_requested || 0);
+  var ptoDeficit = hoursRequested - ptoAvail;
+
+  var h = '';
+  h += '<div class="card" style="margin-bottom:12px;padding:0;overflow:hidden;border-left:4px solid '+statusColor+';">';
+  h += '<div style="padding:14px 18px;background:'+statusBg+';">';
+
+  // Top row: employee name + status badge
+  h += '<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:10px;">';
+  h += '<div style="display:flex;align-items:center;gap:10px;">';
+  h += '<div style="width:36px;height:36px;border-radius:50%;background:var(--navy);color:#fff;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:700;">'+(r.employee_name||'?')[0]+'</div>';
+  h += '<div>';
+  h += '<div style="font-size:14px;font-weight:700;color:var(--navy);">'+r.employee_name+'</div>';
+  h += '<div style="font-size:11px;color:var(--muted);">Submitted '+submitLabel+'</div>';
+  h += '</div></div>';
+  h += '<div style="font-size:11px;font-weight:700;padding:4px 12px;border-radius:6px;background:'+statusColor+';color:#fff;text-transform:uppercase;letter-spacing:.04em;">'+statusIcon+' '+r.status+'</div>';
+  h += '</div>';
+
+  // Date range + details
+  h += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin-bottom:10px;">';
+  h += '<div><div style="font-size:10px;color:var(--muted);text-transform:uppercase;font-weight:700;">Start</div><div style="font-size:13px;font-weight:600;color:var(--navy);">'+startLabel+'</div></div>';
+  h += '<div><div style="font-size:10px;color:var(--muted);text-transform:uppercase;font-weight:700;">End</div><div style="font-size:13px;font-weight:600;color:var(--navy);">'+endLabel+'</div></div>';
+  h += '<div><div style="font-size:10px;color:var(--muted);text-transform:uppercase;font-weight:700;">Days</div><div style="font-size:13px;font-weight:700;color:var(--navy);">'+r.days_requested+' ('+r.hours_requested+'h)</div></div>';
+  h += '<div><div style="font-size:10px;color:var(--muted);text-transform:uppercase;font-weight:700;">Reason</div><div style="font-size:13px;font-weight:600;color:var(--navy);">'+r.reason+'</div></div>';
+  h += '</div>';
+
+  // Flags row
+  var flags = [];
+  if (r.notice_met === false) {
+    flags.push('<span style="display:inline-flex;align-items:center;gap:4px;padding:3px 8px;border-radius:4px;background:rgba(198,40,40,.1);color:#c62828;font-size:10px;font-weight:700;">⚠ Late notice ('+(r.notice_days||0)+'d of 30)</span>');
+  } else if (r.notice_met === true && r.days_requested > 1 && r.reason !== 'Medical' && r.reason !== 'Family') {
+    flags.push('<span style="display:inline-flex;align-items:center;gap:4px;padding:3px 8px;border-radius:4px;background:rgba(46,125,50,.1);color:#2e7d32;font-size:10px;font-weight:700;">✓ '+(r.notice_days||0)+' day notice</span>');
+  }
+  if (r.reason === 'Medical' || r.reason === 'Family') {
+    flags.push('<span style="display:inline-flex;align-items:center;gap:4px;padding:3px 8px;border-radius:4px;background:rgba(13,45,94,.1);color:var(--navy);font-size:10px;font-weight:700;">🛡 Emergency reason (exempt)</span>');
+  }
+  if (ptoDeficit > 0 && r.status === 'pending') {
+    flags.push('<span style="display:inline-flex;align-items:center;gap:4px;padding:3px 8px;border-radius:4px;background:rgba(198,40,40,.1);color:#c62828;font-size:10px;font-weight:700;">⚠ Over PTO by '+ptoDeficit.toFixed(1)+'h</span>');
+  }
+  if (r.status === 'pending') {
+    flags.push('<span style="display:inline-flex;align-items:center;gap:4px;padding:3px 8px;border-radius:4px;background:rgba(13,45,94,.08);color:var(--navy);font-size:10px;font-weight:700;">Balance: '+ptoAvail.toFixed(1)+'h</span>');
+  }
+  if (flags.length) {
+    h += '<div style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:10px;">'+flags.join('')+'</div>';
+  }
+
+  // Notes from employee
+  if (r.notes) {
+    h += '<div style="background:#fff;border-radius:6px;padding:8px 12px;margin-bottom:10px;font-size:11px;color:var(--muted);border-left:3px solid var(--border);"><strong style="color:var(--navy);">Employee note:</strong> '+r.notes+'</div>';
+  }
+
+  // Review notes (if already reviewed)
+  if (r.status !== 'pending' && (r.reviewed_by || r.review_notes)) {
+    h += '<div style="background:#fff;border-radius:6px;padding:8px 12px;margin-bottom:10px;font-size:11px;color:var(--muted);">';
+    h += '<strong style="color:var(--navy);">Reviewed by '+(r.reviewed_by||'Admin')+'</strong>';
+    if (r.reviewed_at) h += ' • '+new Date(r.reviewed_at).toLocaleDateString();
+    if (r.review_notes) h += '<br><em>"'+r.review_notes+'"</em>';
+    h += '</div>';
+  }
+
+  // Action buttons (pending only)
+  if (r.status === 'pending') {
+    h += '<div style="display:flex;gap:8px;flex-wrap:wrap;">';
+    h += '<button onclick="_toApprove(\''+r.id+'\')" style="padding:8px 16px;background:#2e7d32;color:#fff;border:none;border-radius:6px;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit;">✓ Approve</button>';
+    h += '<button onclick="_toDeny(\''+r.id+'\')" style="padding:8px 16px;background:#c62828;color:#fff;border:none;border-radius:6px;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit;">✕ Deny</button>';
+    h += '</div>';
+  }
+
+  h += '</div></div>';
+  return h;
+}
+
+async function _toApprove(requestId) {
+  if (!isAdmin()) { toast('Admin only'); return; }
+  var r = (_toData||[]).find(function(x){ return x.id === requestId; });
+  if (!r) return;
+
+  var emp = ST.employees.find(function(e){ return e.name === r.employee_name; });
+  var ptoAvail = emp ? parseFloat(emp.pto_hours_available || 0) : 0;
+  var hoursRequested = parseFloat(r.hours_requested || 0);
+
+  var confirmMsg = 'Approve ' + r.days_requested + ' day' + (r.days_requested!==1?'s':'') + ' time off for ' + r.employee_name + '?\n\n';
+  confirmMsg += 'Dates: ' + r.start_date + ' → ' + r.end_date + '\n';
+  confirmMsg += 'Hours: ' + hoursRequested + 'h\n';
+  confirmMsg += 'Current PTO balance: ' + ptoAvail.toFixed(1) + 'h\n';
+  if (hoursRequested > ptoAvail) {
+    confirmMsg += '\n⚠ This exceeds their PTO balance by ' + (hoursRequested - ptoAvail).toFixed(1) + 'h.';
+    confirmMsg += '\nOnly ' + Math.min(hoursRequested, ptoAvail).toFixed(1) + 'h will be deducted.';
+  }
+  confirmMsg += '\n\nAbsence records will be auto-created for each workday. Continue?';
+
+  if (!confirm(confirmMsg)) return;
+
+  var approver = getApprovedBy();
+  var nowIso = new Date().toISOString();
+
+  // 1. Mark request approved
+  var absenceIds = [];
+  try {
+    // 2. Create absence_records for each workday in range
+    var cur = new Date(r.start_date + 'T00:00:00');
+    var endDate = new Date(r.end_date + 'T00:00:00');
+    var createdCount = 0;
+    while (cur <= endDate) {
+      var dow = cur.getDay();
+      if (dow !== 0 && dow !== 6) {
+        var dateStr = cur.toISOString().split('T')[0];
+        var absReason = r.reason === 'Medical' ? 'Sick' : (r.reason === 'Family' ? 'Bereavement' : 'PTO');
+        var absPayload = {
+          employee_name: r.employee_name,
+          date: dateStr,
+          reason: absReason,
+          notes: 'Time off request approved by ' + approver + (r.notes ? ' • '+r.notes : ''),
+          market: emp ? (emp.market||'Appleton') : 'Appleton',
+          logged_by: approver,
+          hours: 8,
+          paid: true
+        };
+        var absR = await fetch(SB_URL + '/rest/v1/absence_records', {
+          method: 'POST',
+          headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=representation' },
+          body: JSON.stringify(absPayload)
+        });
+        if (absR.ok) {
+          var absData = await absR.json();
+          if (absData && absData[0] && absData[0].id) absenceIds.push(absData[0].id);
+          createdCount++;
+        }
+      }
+      cur.setDate(cur.getDate() + 1);
+    }
+
+    // 3. Deduct PTO balance from employee (only what's available)
+    if (emp && ptoAvail > 0) {
+      var deduct = Math.min(hoursRequested, ptoAvail);
+      var newAvail = Math.max(0, ptoAvail - deduct);
+      var newUsed = parseFloat(emp.pto_hours_used || 0) + deduct;
+      await fetch(SB_URL + '/rest/v1/employees?id=eq.' + emp.id, {
+        method: 'PATCH',
+        headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pto_hours_available: newAvail, pto_hours_used: newUsed })
+      });
+      emp.pto_hours_available = newAvail;
+      emp.pto_hours_used = newUsed;
+    }
+
+    // 4. Update vacation_requests status
+    await fetch(SB_URL + '/rest/v1/vacation_requests?id=eq.' + requestId, {
+      method: 'PATCH',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        status: 'approved',
+        reviewed_by: approver,
+        reviewed_at: nowIso,
+        created_absence_ids: absenceIds
+      })
+    });
+
+    // 5. Log to activity feed
+    logActivity('Time Off Approved', r.employee_name + ' • ' + r.days_requested + ' days ' + r.start_date + ' → ' + r.end_date + ' (' + r.reason + ')', 'time_clock', r.employee_name);
+
+    toast('✓ Approved — ' + createdCount + ' absence days created, PTO deducted');
+    _toData = null;
+    await loadAll();
+    renderTimeOff();
+  } catch(err) {
+    alert('Approval failed: ' + err.message + '\n\nPartial changes may have been saved. Please refresh and verify.');
+    console.error(err);
+  }
+}
+
+async function _toDeny(requestId) {
+  if (!isAdmin()) { toast('Admin only'); return; }
+  var r = (_toData||[]).find(function(x){ return x.id === requestId; });
+  if (!r) return;
+
+  var reason = prompt('Why is this request being denied? (shown to employee)\n\nExamples:\n• Staffing conflict that week\n• Not enough PTO balance\n• Less than 30 days notice', '');
+  if (reason === null) return;  // cancelled
+  if (!reason.trim()) { alert('A reason is required for denial.'); return; }
+
+  var approver = getApprovedBy();
+  var nowIso = new Date().toISOString();
+
+  try {
+    await fetch(SB_URL + '/rest/v1/vacation_requests?id=eq.' + requestId, {
+      method: 'PATCH',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        status: 'denied',
+        reviewed_by: approver,
+        reviewed_at: nowIso,
+        review_notes: reason.trim()
+      })
+    });
+    logActivity('Time Off Denied', r.employee_name + ' • ' + r.start_date + ' → ' + r.end_date + ' — ' + reason.trim(), 'time_clock', r.employee_name);
+    toast('✓ Request denied');
+    _toData = null;
+    renderTimeOff();
+  } catch(err) {
+    alert('Denial failed: ' + err.message);
+  }
 }
 
 async function renderArchive() {
