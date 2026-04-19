@@ -427,6 +427,43 @@ body {
   flex: 1;
   overflow: hidden;
 }
+
+/* ── CONTACTS PANEL (native-app list) ── */
+.tc-contacts-group-head {
+  font-size: 11px; font-weight: 700; color: var(--navy);
+  text-transform: uppercase; letter-spacing: .06em;
+  font-family: 'DM Mono', monospace;
+  padding: 12px 4px 6px; display: flex; align-items: center; gap: 8px;
+}
+.tc-contacts-group-count {
+  background: rgba(13,45,94,.06); color: var(--navy);
+  font-size: 10px; padding: 1px 7px; border-radius: 8px;
+}
+.c-row {
+  background: var(--surface); border-radius: 14px;
+  padding: 12px 14px; margin-bottom: 8px;
+  border: 1px solid var(--border);
+  display: flex; align-items: center; gap: 12px;
+  cursor: pointer; box-shadow: 0 1px 4px rgba(13,45,94,.05);
+  transition: transform .1s;
+}
+.c-row:active { transform: scale(.98); }
+.c-av {
+  width: 42px; height: 42px; border-radius: 50%;
+  background: var(--navy); color: #fff;
+  display: flex; align-items: center; justify-content: center;
+  font-weight: 700; font-size: 13px; font-family: 'DM Mono', monospace;
+  flex-shrink: 0;
+}
+.c-av.pm { background: #1565c0; }
+.c-av.admin { background: var(--orange); }
+.c-av.office { background: #7c3aed; }
+.c-av.tech { background: #2e7d32; }
+.c-info { flex: 1; min-width: 0; }
+.c-name { font-size: 15px; font-weight: 600; color: var(--text); line-height: 1.2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.c-meta { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; font-family: 'DM Mono', monospace; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.c-meta .sep { opacity: .4; margin: 0 5px; }
+.c-chev { color: #c0c5ce; font-size: 18px; flex-shrink: 0; }
 </style>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
@@ -483,7 +520,7 @@ body {
       <div class="dd-email" id="dd-email">—</div>
     </div>
     <button class="dd-item" onclick="showAdmin();toggleDD()">🔐 Admin Panel</button>
-    <button class="dd-item" onclick="window.location.href='contacts.html'">📇 Contacts</button>
+    <button class="dd-item" onclick="switchTab('contacts');toggleDD();">📇 Contacts</button>
     <button class="dd-item" onclick="showInstallHelp();toggleDD()">📲 Add to Home Screen</button>
     <button class="dd-item" onclick="signOut()">👋 Sign Out</button>
   </div>
@@ -824,6 +861,26 @@ body {
   </div>
 </div>
 
+<!-- CONTACTS PANEL (accessed via header dropdown, not bottom nav) -->
+<div id="contacts-panel" style="display:none;">
+  <div class="body">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">
+      <button onclick="switchTab('clock','right')" style="background:rgba(13,45,94,.08);border:none;width:38px;height:38px;border-radius:50%;font-size:18px;cursor:pointer;color:var(--navy);display:flex;align-items:center;justify-content:center;flex-shrink:0;padding:0;">←</button>
+      <div style="flex:1;min-width:0;">
+        <div style="font-size:18px;font-weight:700;color:var(--navy);line-height:1.1;">Contacts</div>
+        <div id="tc-contacts-subtitle" style="font-size:11px;color:var(--muted);margin-top:2px;font-family:'DM Mono',monospace;">Loading…</div>
+      </div>
+    </div>
+
+    <div class="team-card" style="padding:4px 10px;margin-bottom:12px;display:flex;align-items:center;gap:8px;">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#6b7a96" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+      <input type="text" id="tc-contacts-search" placeholder="Search contacts…" oninput="filterContactsTC(this.value)" autocomplete="off" autocapitalize="off" autocorrect="off" style="flex:1;border:none;outline:none;padding:10px 0;font-size:15px;font-family:'DM Sans',sans-serif;background:transparent;color:var(--text);">
+    </div>
+
+    <div id="tc-contacts-list"><div class="empty" style="padding:30px 0;">Loading contacts…</div></div>
+  </div>
+</div>
+
 <!-- INSTALL BANNER -->
 <div class="install-banner" id="install-banner">
   <div class="install-banner-text">
@@ -859,7 +916,10 @@ var TC = {
   entries: [],
   clockInTime: null,
   durationTimer: null,
-  payPeriodConfig: { type: 'biweekly', start: '2025-01-06' }  // default; overridden by app_settings.pay_period_config
+  payPeriodConfig: { type: 'biweekly', start: '2025-01-06' },  // default; overridden by app_settings.pay_period_config
+  contacts: [],
+  contactsLoaded: false,
+  contactsSearch: ''
 };
 
 // AUTH -
@@ -2726,7 +2786,7 @@ function tcSwipeEnd(e) {
 }
 
 function getPanel(tab) {
-  var map = { clock:'app', team:'team-panel', hours:'hours-panel', oncall:'oncall-panel-app' };
+  var map = { clock:'app', team:'team-panel', hours:'hours-panel', oncall:'oncall-panel-app', contacts:'contacts-panel' };
   return document.getElementById(map[tab]);
 }
 
@@ -2789,7 +2849,7 @@ function switchTab(tab, direction) {
   // Cleanup after animation
   setTimeout(function() {
     // Reset all panels
-    ['app','team-panel','hours-panel','oncall-panel-app'].forEach(function(id) {
+    ['app','team-panel','hours-panel','oncall-panel-app','contacts-panel'].forEach(function(id) {
       var el = document.getElementById(id);
       if (!el) return;
       var isActive = el === inEl;
@@ -2805,9 +2865,10 @@ function switchTab(tab, direction) {
     });
 
     // Load content
-    if (tab === 'team')   loadTeamData();
-    if (tab === 'hours')  loadMyHours();
-    if (tab === 'oncall') loadOCApp();
+    if (tab === 'team')     loadTeamData();
+    if (tab === 'hours')    loadMyHours();
+    if (tab === 'oncall')   loadOCApp();
+    if (tab === 'contacts') loadContactsTC();
   }, 300);
 }
 
@@ -3205,6 +3266,250 @@ async function loadPayPeriodConfig() {
       TC.payPeriodConfig = { type: rows[0].value.type, start: rows[0].value.start };
     }
   } catch(e) { /* fall back to default */ }
+}
+
+// ── CONTACTS (inline, native-app feel — mirrors sales_app pattern) ───────
+var TC_CONTACT_ROLE_ORDER = ['Admin','Project Manager','Office','Estimator','Sales','Technician'];
+
+function tcContactInitials(n) {
+  var p = (n||'').trim().split(/\s+/);
+  return (((p[0]||'')[0]||'') + ((p[1]||'')[0]||'')).toUpperCase() || '?';
+}
+function tcContactRoleClass(r) {
+  if (!r) return 'tech';
+  var s = r.toLowerCase();
+  if (s === 'admin') return 'admin';
+  if (s === 'project manager') return 'pm';
+  if (s === 'office') return 'office';
+  return 'tech';
+}
+function tcContactFmtPhone(p) {
+  if (!p) return '';
+  var d = String(p).replace(/\D/g,'');
+  if (d.length === 10) return '(' + d.slice(0,3) + ') ' + d.slice(3,6) + '-' + d.slice(6);
+  if (d.length === 11 && d[0] === '1') return '(' + d.slice(1,4) + ') ' + d.slice(4,7) + '-' + d.slice(7);
+  return p;
+}
+function tcContactEsc(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
+function tcContactAttrEsc(s) { return String(s||'').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
+
+async function loadContactsTC(force) {
+  if (TC.contactsLoaded && !force) { renderContactsTC(); return; }
+  try {
+    var r = await fetch(SB_URL + '/rest/v1/employees?active=eq.true&select=id,name,email,personal_email,phone,role,market&order=role.asc,name.asc', {
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+    });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    TC.contacts = await r.json();
+    TC.contactsLoaded = true;
+    renderContactsTC();
+  } catch(e) {
+    var el = document.getElementById('tc-contacts-list');
+    if (el) el.innerHTML = '<div class="empty" style="padding:40px 0;color:#c02020;">Could not load contacts</div>';
+  }
+}
+
+function filterContactsTC(v) {
+  TC.contactsSearch = v || '';
+  renderContactsTC();
+}
+
+function renderContactsTC() {
+  var list = document.getElementById('tc-contacts-list');
+  var sub = document.getElementById('tc-contacts-subtitle');
+  if (!list) return;
+
+  if (!TC.contactsLoaded) {
+    list.innerHTML = '<div class="empty" style="padding:30px 0;">Loading contacts…</div>';
+    if (sub) sub.textContent = 'Loading…';
+    return;
+  }
+
+  var q = (TC.contactsSearch||'').toLowerCase().trim();
+  var filtered = q
+    ? TC.contacts.filter(function(e){
+        return (e.name||'').toLowerCase().indexOf(q) !== -1
+          || (e.role||'').toLowerCase().indexOf(q) !== -1
+          || (e.market||'').toLowerCase().indexOf(q) !== -1
+          || (e.email||'').toLowerCase().indexOf(q) !== -1
+          || (e.personal_email||'').toLowerCase().indexOf(q) !== -1
+          || (e.phone||'').toLowerCase().indexOf(q) !== -1;
+      })
+    : TC.contacts;
+
+  if (sub) sub.textContent = TC.contacts.length + ' active · tap to connect';
+
+  if (!filtered.length) {
+    list.innerHTML = '<div class="empty" style="padding:40px 0;">' + (q ? 'No matching contacts' : 'No employees found') + '</div>';
+    return;
+  }
+
+  var groups = {};
+  filtered.forEach(function(e){
+    var role = e.role || '(No Role)';
+    if (!groups[role]) groups[role] = [];
+    groups[role].push(e);
+  });
+  var sortedRoles = Object.keys(groups).sort(function(a,b){
+    var ai = TC_CONTACT_ROLE_ORDER.indexOf(a); if (ai === -1) ai = 99;
+    var bi = TC_CONTACT_ROLE_ORDER.indexOf(b); if (bi === -1) bi = 99;
+    return ai - bi;
+  });
+
+  var html = '';
+  sortedRoles.forEach(function(role){
+    var items = groups[role];
+    html += '<div class="tc-contacts-group-head">';
+    html += '<span>' + tcContactEsc(role) + '</span>';
+    html += '<span class="tc-contacts-group-count">' + items.length + '</span>';
+    html += '</div>';
+    items.forEach(function(e){ html += renderContactRowTC(e); });
+  });
+  list.innerHTML = html;
+}
+
+function renderContactRowTC(e) {
+  var name = e.name || '(No name)';
+  var phone = e.phone || '';
+  var email = e.email || '';
+  var personalEmail = e.personal_email || '';
+  var market = e.market || '';
+  var onclickStr = "openContactSheetTC('" + tcContactAttrEsc(name) + "','" + tcContactAttrEsc(phone) + "','" + tcContactAttrEsc(email) + "','" + tcContactAttrEsc(personalEmail) + "')";
+
+  var h = '<div class="c-row" onclick="' + onclickStr + '">';
+  h += '<div class="c-av ' + tcContactRoleClass(e.role) + '">' + tcContactEsc(tcContactInitials(name)) + '</div>';
+  h += '<div class="c-info">';
+  h += '<div class="c-name">' + tcContactEsc(name) + '</div>';
+  h += '<div class="c-meta">' + tcContactEsc(e.role||'—') + (market ? '<span class="sep">·</span>' + tcContactEsc(market) : '') + '</div>';
+  h += '</div>';
+  h += '<div class="c-chev">›</div>';
+  h += '</div>';
+  return h;
+}
+
+async function tcContactCopy(text) {
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch(e) {}
+  try {
+    var ta = document.createElement('textarea');
+    ta.value = text; ta.style.position='fixed'; ta.style.opacity='0';
+    document.body.appendChild(ta); ta.select();
+    var ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    return ok;
+  } catch(e) { return false; }
+}
+
+// Action sheet using timeclock's existing .sheet-overlay / .sheet pattern
+function openContactSheetTC(name, phone, email, personalEmail) {
+  if (navigator.vibrate) { try { navigator.vibrate(10); } catch(e){} }
+
+  var phoneFmt = phone ? tcContactFmtPhone(phone) : '';
+  var opts = [];
+
+  if (phone) {
+    opts.push({
+      icon: '📞', label: 'Call', detail: phoneFmt,
+      action: function(){
+        tcContactCopy(phone);
+        window.location.href = 'tel:+1' + phone.replace(/\D/g,'');
+      }
+    });
+    opts.push({
+      icon: '💬', label: 'Text', detail: phoneFmt,
+      action: function(){
+        tcContactCopy(phone);
+        window.location.href = 'sms:+1' + phone.replace(/\D/g,'');
+      }
+    });
+    opts.push({
+      icon: '📋', label: 'Copy number', detail: phoneFmt,
+      action: async function(){ await tcContactCopy(phone); toast('📋 Copied ' + phoneFmt); }
+    });
+  }
+  if (email) {
+    opts.push({
+      icon: '✉️', label: 'Email (work)', detail: email,
+      action: function(){
+        tcContactCopy(email);
+        window.location.href = 'mailto:' + email;
+      }
+    });
+    opts.push({
+      icon: '📋', label: 'Copy work email', detail: email,
+      action: async function(){ await tcContactCopy(email); toast('📋 Copied ' + email); }
+    });
+  }
+  if (personalEmail && personalEmail !== email) {
+    opts.push({
+      icon: '✉️', label: 'Email (personal)', detail: personalEmail,
+      action: function(){
+        tcContactCopy(personalEmail);
+        window.location.href = 'mailto:' + personalEmail;
+      }
+    });
+    opts.push({
+      icon: '📋', label: 'Copy personal email', detail: personalEmail,
+      action: async function(){ await tcContactCopy(personalEmail); toast('📋 Copied ' + personalEmail); }
+    });
+  }
+
+  if (!opts.length) {
+    toast('No contact info on file');
+    return;
+  }
+
+  var overlay = document.createElement('div');
+  overlay.className = 'sheet-overlay';
+  overlay.style.zIndex = '600';
+  var sheet = document.createElement('div');
+  sheet.className = 'sheet';
+
+  var html = '<div class="sheet-handle"></div>';
+  html += '<div style="padding:0 4px 12px;margin-bottom:8px;border-bottom:1px solid var(--border);">';
+  html += '<div style="font-size:17px;font-weight:700;color:var(--navy);">' + tcContactEsc(name) + '</div>';
+  html += '</div>';
+
+  opts.forEach(function(opt, i){
+    html += '<button class="tcca-opt" data-idx="' + i + '" style="display:flex;align-items:center;gap:14px;width:100%;padding:14px 4px;background:none;border:none;border-bottom:1px solid #f0f2f6;font-family:inherit;cursor:pointer;text-align:left;">';
+    html += '<span style="font-size:20px;width:32px;text-align:center;flex-shrink:0;">' + opt.icon + '</span>';
+    html += '<div style="flex:1;min-width:0;">';
+    html += '<div style="font-size:15px;font-weight:600;color:var(--text);">' + tcContactEsc(opt.label) + '</div>';
+    if (opt.detail) html += '<div style="font-size:12px;color:var(--muted);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + tcContactEsc(opt.detail) + '</div>';
+    html += '</div>';
+    html += '</button>';
+  });
+
+  html += '<button class="tcca-cancel" style="display:block;width:100%;margin-top:12px;padding:14px;font-size:16px;font-weight:700;background:rgba(13,45,94,.06);border:none;border-radius:12px;color:var(--navy);font-family:inherit;cursor:pointer;">Cancel</button>';
+
+  sheet.innerHTML = html;
+  overlay.appendChild(sheet);
+  document.body.appendChild(overlay);
+
+  // Force layout, then open
+  overlay.offsetHeight;
+  overlay.classList.add('open');
+
+  var close = function(){
+    overlay.classList.remove('open');
+    setTimeout(function(){ if (overlay.parentNode) overlay.remove(); }, 320);
+  };
+  overlay.addEventListener('click', function(e){ if (e.target === overlay) close(); });
+  sheet.querySelector('.tcca-cancel').addEventListener('click', close);
+  sheet.querySelectorAll('.tcca-opt').forEach(function(btn){
+    btn.addEventListener('touchstart', function(){ btn.style.background='#f5f5f7'; }, {passive:true});
+    btn.addEventListener('touchend', function(){ btn.style.background=''; }, {passive:true});
+    btn.addEventListener('click', function(){
+      if (navigator.vibrate) { try { navigator.vibrate(10); } catch(e){} }
+      var idx = parseInt(btn.dataset.idx,10);
+      close();
+      setTimeout(function(){ opts[idx].action(); }, 80);
+    });
+  });
 }
 
 async function loadMyHours() {
