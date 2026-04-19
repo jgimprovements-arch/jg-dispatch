@@ -194,6 +194,7 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;min
   <button class="tc-tab" id="tab-employees" onclick="showTab('employees',this)">👥 Employees</button>
   <button class="tc-tab" id="tab-reports" onclick="showTab('reports',this)">📊 Reports</button>
   <button class="tc-tab" id="tab-routes" onclick="showTab('routes',this)">🗺 Routes</button>
+  <button class="tc-tab" id="tab-jobcost" onclick="showTab('jobcost',this)">💰 Job Costing</button>
   <button class="tc-tab" id="tab-activity" onclick="showTab('activity',this)">📜 Activity</button>
   <button class="tc-tab" id="tab-access" onclick="showTab('access',this)">🔐 Access</button>
 </div>
@@ -375,6 +376,7 @@ function render() {
   else if (ST.tab === 'employees') { if (isAdmin()) renderEmployees(); }
   else if (ST.tab === 'reports')   { if (isAdmin()) renderReports(); }
   else if (ST.tab === 'routes')   renderRoutes();
+  else if (ST.tab === 'jobcost')  { renderJobCost(); }
   else if (ST.tab === 'activity') { if (isAdmin()) renderActivity(); }
   else if (ST.tab === 'access')   { if (isAdmin()) renderAccess(); }
 }
@@ -1627,6 +1629,295 @@ async function loadRouteMap() {
   else { _routeMap.setView([44.26, -88.41], 11); }
   // Force tile render
   setTimeout(function(){ if (_routeMap) _routeMap.invalidateSize(); }, 300);
+}
+
+function renderJobCost() {
+  var fmtDur = function(mins){ return Math.floor(mins/60)+'h '+(mins%60)+'m'; };
+  var durMins = function(e){ var out=e.clock_out?new Date(e.clock_out):new Date(); return Math.floor((out-new Date(e.clock_in))/60000); };
+
+  // Filter controls
+  var h = '';
+  h += '<div class="filter-bar" style="margin-bottom:16px;">';
+  h += '<select onchange="ST.filterEmp=this.value;renderJobCost();" style="min-width:160px;">';
+  h += '<option value="All">All Employees</option>';
+  var empNames = [...new Set(ST.entries.map(function(e){return e.employee_name;}))].sort();
+  empNames.forEach(function(n){ h += '<option value="'+n+'"'+(ST.filterEmp===n?' selected':'')+'>'+n+'</option>'; });
+  h += '</select>';
+  h += '<input type="date" id="jc-from" class="form-input" style="max-width:150px;" value="'+(ST.filterDate||new Date(Date.now()-30*86400000).toISOString().split('T')[0])+'" onchange="ST.filterDate=this.value;loadAll().then(renderJobCost)">';
+  h += '<span style="font-size:12px;color:var(--muted);align-self:center;">to</span>';
+  h += '<input type="date" id="jc-to" class="form-input" style="max-width:150px;" value="'+(ST.filterDateEnd||new Date().toISOString().split('T')[0])+'" onchange="ST.filterDateEnd=this.value;loadAll().then(renderJobCost)">';
+  h += '<button class="btn btn-primary" onclick="exportJobCostCSV()" style="margin-left:auto;">Export CSV</button>';
+  h += '</div>';
+
+  var filtered = ST.entries.filter(function(e){
+    return ST.filterEmp === 'All' || e.employee_name === ST.filterEmp;
+  });
+
+  if (!filtered.length) {
+    h += '<div class="card"><div class="empty">No entries for this filter</div></div>';
+    document.getElementById('tc-body').innerHTML = h;
+    return;
+  }
+
+  // Group by job
+  var byJob = {};
+  filtered.forEach(function(e) {
+    var jobKey = e.job_name || 'No Job Assigned';
+    var jobId  = e.job_id || '';
+    if (!byJob[jobKey]) byJob[jobKey] = { jobId: jobId, entries: [], totalMins: 0, employees: {} };
+    var breaks = ST.breaks.filter(function(b){ return b.entry_id === e.id; });
+    var mins = e.duration_minutes || durMins(e);
+    byJob[jobKey].entries.push(e);
+    byJob[jobKey].totalMins += mins;
+    if (!byJob[jobKey].employees[e.employee_name]) byJob[jobKey].employees[e.employee_name] = 0;
+    byJob[jobKey].employees[e.employee_name] += mins;
+  });
+
+  // Sort by total mins descending
+  var sortedJobs = Object.entries(byJob).sort(function(a,b){ return b[1].totalMins - a[1].totalMins; });
+  var grandTotal = sortedJobs.reduce(function(s,kv){ return s + kv[1].totalMins; }, 0);
+
+  // Summary cards
+  h += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:20px;">';
+  h += '<div class="stat-card"><div class="stat-val">'+sortedJobs.length+'</div><div class="stat-lbl">Jobs</div></div>';
+  h += '<div class="stat-card"><div class="stat-val">'+fmtDur(grandTotal)+'</div><div class="stat-lbl">Total Hours</div></div>';
+  h += '<div class="stat-card"><div class="stat-val">'+filtered.length+'</div><div class="stat-lbl">Entries</div></div>';
+  var uniqueEmps = new Set(filtered.map(function(e){return e.employee_name;})).size;
+  h += '<div class="stat-card"><div class="stat-val">'+uniqueEmps+'</div><div class="stat-lbl">Employees</div></div>';
+  h += '</div>';
+
+  // Job breakdown table
+  h += '<div class="card"><div class="card-hdr"><div class="card-title">💰 Hours by Job</div></div>';
+  h += '<table class="tc-table"><thead><tr><th>Job</th><th>Entries</th><th>Total Hours</th><th>% of Period</th><th>Employees</th><th>Labor Cost Est.</th></tr></thead><tbody>';
+
+  sortedJobs.forEach(function(kv) {
+    var jobName = kv[0], jd = kv[1];
+    var pct = grandTotal > 0 ? Math.round(jd.totalMins / grandTotal * 100) : 0;
+    var empList = Object.entries(jd.employees).sort(function(a,b){return b[1]-a[1];});
+
+    // Calculate labor cost
+    var laborCost = 0;
+    jd.entries.forEach(function(e) {
+      var emp = ST.employees.find(function(x){ return x.name === e.employee_name; });
+      var rate = emp ? parseFloat(emp.hourly_rate || 0) : 0;
+      var mins = e.duration_minutes || durMins(e);
+      laborCost += rate * mins / 60;
+    });
+
+    var empHtml = empList.map(function(ev) {
+      return '<div style="font-size:11px;margin-bottom:2px;"><strong>'+ev[0].split(' ')[0]+'</strong>: '+fmtDur(ev[1])+'</div>';
+    }).join('');
+
+    h += '<tr>';
+    h += '<td><div style="font-weight:700;color:var(--navy);">'+(jobName==='No Job Assigned'?'<span style="color:var(--muted);font-style:italic;">'+jobName+'</span>':jobName)+'</div>';
+    if (jd.jobId) h += '<div style="font-size:10px;color:var(--muted);">ID: '+jd.jobId+'</div>';
+    h += '</td>';
+    h += '<td>'+jd.entries.length+'</td>';
+    h += '<td><strong class="mono">'+fmtDur(jd.totalMins)+'</strong>';
+    h += '<div class="prog-bar"><div class="prog-fill" style="width:'+pct+'%;background:var(--orange);"></div></div></td>';
+    h += '<td><strong>'+pct+'%</strong></td>';
+    h += '<td>'+empHtml+'</td>';
+    h += '<td>'+(laborCost>0?'<strong style="color:#2e7d32;">$'+laborCost.toFixed(2)+'</strong>':'<span style="color:var(--muted);">No rate set</span>')+'</td>';
+    h += '</tr>';
+  });
+  h += '</tbody></table></div>';
+
+  // Employee breakdown per job (detailed view)
+  h += '<div class="card" style="margin-top:16px;"><div class="card-hdr"><div class="card-title">👤 Employee Time by Job — Detail</div></div>';
+  h += '<table class="tc-table"><thead><tr><th>Employee</th><th>Job</th><th>Date</th><th>Duration</th><th>Clock In</th><th>Clock Out</th><th>Est. Cost</th></tr></thead><tbody>';
+
+  var fmt = function(iso){ if(!iso)return ''; var d=new Date(iso),h2=d.getHours()%12||12,m=d.getMinutes(),ap=d.getHours()>=12?'PM':'AM'; return h2+':'+(m<10?'0':'')+m+' '+ap; };
+
+  // Sort by employee then job then date
+  var sortedEntries = filtered.slice().sort(function(a,b){
+    if (a.employee_name !== b.employee_name) return a.employee_name.localeCompare(b.employee_name);
+    return (a.job_name||'').localeCompare(b.job_name||'');
+  });
+
+  var prevEmp = null, prevJob = null;
+  sortedEntries.forEach(function(e) {
+    var emp = ST.employees.find(function(x){ return x.name === e.employee_name; });
+    var rate = emp ? parseFloat(emp.hourly_rate || 0) : 0;
+    var mins = e.duration_minutes || durMins(e);
+    var cost = rate * mins / 60;
+    var isNewEmp = e.employee_name !== prevEmp;
+    var isNewJob = e.job_name !== prevJob || isNewEmp;
+
+    h += '<tr'+(isNewEmp?' style="border-top:2px solid var(--border);"':'')+' >';
+    h += '<td>'+(isNewEmp?'<strong>'+e.employee_name+'</strong>':'')+'</td>';
+    h += '<td>'+(isNewJob?'<span style="font-weight:600;color:var(--navy);">'+(e.job_name||'<em style="color:var(--muted);">No Job</em>')+'</span>':'')+'</td>';
+    h += '<td style="font-size:11px;">'+fmtD(new Date(e.clock_in))+'</td>';
+    h += '<td><strong>'+fmtDur(mins)+'</strong></td>';
+    h += '<td class="mono" style="font-size:11px;">'+fmt(e.clock_in)+'</td>';
+    h += '<td class="mono" style="font-size:11px;">'+(e.clock_out?fmt(e.clock_out):'<span class="badge badge-green">Active</span>')+'</td>';
+    h += '<td style="font-size:11px;">'+(cost>0?'$'+cost.toFixed(2):'-')+'</td>';
+    h += '</tr>';
+
+    prevEmp = e.employee_name;
+    prevJob = e.job_name;
+  });
+  h += '</tbody></table></div>';
+
+  document.getElementById('tc-body').innerHTML = h;
+}
+
+function exportJobCostCSV() {
+  var fmtDur = function(mins){ return (mins/60).toFixed(2); };
+  var durMins = function(e){ var out=e.clock_out?new Date(e.clock_out):new Date(); return Math.floor((out-new Date(e.clock_in))/60000); };
+  var fmt = function(iso){ if(!iso)return ''; var d=new Date(iso),h=d.getHours()%12||12,m=d.getMinutes(),ap=d.getHours()>=12?'PM':'AM'; return h+':'+(m<10?'0':'')+m+' '+ap; };
+
+  var filtered = ST.entries.filter(function(e){
+    return ST.filterEmp === 'All' || e.employee_name === ST.filterEmp;
+  });
+
+  var rows = [['Employee','Job','Job ID','Date','Clock In','Clock Out','Hours','Hourly Rate','Labor Cost']];
+  filtered.forEach(function(e) {
+    var emp = ST.employees.find(function(x){ return x.name === e.employee_name; });
+    var rate = emp ? parseFloat(emp.hourly_rate||0) : 0;
+    var mins = e.duration_minutes || durMins(e);
+    var cost = rate * mins / 60;
+    rows.push([e.employee_name, e.job_name||'No Job', e.job_id||'', fmtD(new Date(e.clock_in)), fmt(e.clock_in), fmt(e.clock_out), fmtDur(mins), rate?'$'+rate.toFixed(2):'', cost?'$'+cost.toFixed(2):'']);
+  });
+
+  var csv = rows.map(function(r){ return r.map(function(c){ var s=String(c).split('"').join('""'); return '"'+s+'"'; }).join(','); }).join('\n');
+  var a = document.createElement('a');
+  a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
+  a.download = 'jg_job_cost_' + new Date().toISOString().split('T')[0] + '.csv';
+  a.click();
+}
+
+function renderJobCost() {
+  var fmtDur = function(mins){ return Math.floor(mins/60)+'h '+(mins%60)+'m'; };
+  var durMins = function(e){ var out=e.clock_out?new Date(e.clock_out):new Date(); return Math.floor((out-new Date(e.clock_in))/60000); };
+
+  var h = '';
+  h += '<div class="filter-bar" style="margin-bottom:16px;">';
+  h += '<select onchange="ST.filterEmp=this.value;renderJobCost();" style="min-width:160px;">';
+  h += '<option value="All">All Employees</option>';
+  var empNames = [...new Set(ST.entries.map(function(e){return e.employee_name;}))].sort();
+  empNames.forEach(function(n){ h += '<option value="'+n+'"'+(ST.filterEmp===n?' selected':'')+'>'+n+'</option>'; });
+  h += '</select>';
+  h += '<input type="date" class="form-input" style="max-width:150px;" value="'+(ST.filterDate||new Date(Date.now()-30*86400000).toISOString().split('T')[0])+'" onchange="ST.filterDate=this.value;loadAll().then(renderJobCost)">';
+  h += '<span style="font-size:12px;color:var(--muted);align-self:center;">to</span>';
+  h += '<input type="date" class="form-input" style="max-width:150px;" value="'+(ST.filterDateEnd||new Date().toISOString().split('T')[0])+'" onchange="ST.filterDateEnd=this.value;loadAll().then(renderJobCost)">';
+  h += '<button class="btn btn-primary" onclick="exportJobCostCSV()" style="margin-left:auto;">Export CSV</button>';
+  h += '</div>';
+
+  var filtered = ST.entries.filter(function(e){
+    return ST.filterEmp === 'All' || e.employee_name === ST.filterEmp;
+  });
+
+  if (!filtered.length) {
+    h += '<div class="card"><div class="empty">No entries for this filter</div></div>';
+    document.getElementById('tc-body').innerHTML = h;
+    return;
+  }
+
+  // Group by job
+  var byJob = {};
+  filtered.forEach(function(e) {
+    var jobKey = e.job_name || 'No Job Assigned';
+    if (!byJob[jobKey]) byJob[jobKey] = { jobId: e.job_id||'', entries: [], totalMins: 0, employees: {} };
+    var mins = e.duration_minutes || durMins(e);
+    byJob[jobKey].entries.push(e);
+    byJob[jobKey].totalMins += mins;
+    if (!byJob[jobKey].employees[e.employee_name]) byJob[jobKey].employees[e.employee_name] = 0;
+    byJob[jobKey].employees[e.employee_name] += mins;
+  });
+
+  var sortedJobs = Object.entries(byJob).sort(function(a,b){ return b[1].totalMins - a[1].totalMins; });
+  var grandTotal = sortedJobs.reduce(function(s,kv){ return s + kv[1].totalMins; }, 0);
+
+  // Summary cards
+  var uniqueEmps = new Set(filtered.map(function(e){return e.employee_name;})).size;
+  h += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:20px;">';
+  h += '<div class="stat-card"><div class="stat-val">'+sortedJobs.length+'</div><div class="stat-lbl">Jobs</div></div>';
+  h += '<div class="stat-card"><div class="stat-val">'+fmtDur(grandTotal)+'</div><div class="stat-lbl">Total Hours</div></div>';
+  h += '<div class="stat-card"><div class="stat-val">'+filtered.length+'</div><div class="stat-lbl">Entries</div></div>';
+  h += '<div class="stat-card"><div class="stat-val">'+uniqueEmps+'</div><div class="stat-lbl">Employees</div></div>';
+  h += '</div>';
+
+  // Hours by job table
+  h += '<div class="card"><div class="card-hdr"><div class="card-title">💰 Hours by Job</div></div>';
+  h += '<table class="tc-table"><thead><tr><th>Job</th><th>Entries</th><th>Total Hours</th><th>% of Period</th><th>Employees</th><th>Est. Labor Cost</th></tr></thead><tbody>';
+
+  sortedJobs.forEach(function(kv) {
+    var jobName = kv[0], jd = kv[1];
+    var pct = grandTotal > 0 ? Math.round(jd.totalMins / grandTotal * 100) : 0;
+    var empList = Object.entries(jd.employees).sort(function(a,b){return b[1]-a[1];});
+    var laborCost = 0;
+    jd.entries.forEach(function(e) {
+      var emp = ST.employees.find(function(x){ return x.name === e.employee_name; });
+      var rate = emp ? parseFloat(emp.hourly_rate || 0) : 0;
+      laborCost += rate * (e.duration_minutes || durMins(e)) / 60;
+    });
+    var isNoJob = jobName === 'No Job Assigned';
+    h += '<tr>';
+    h += '<td><div style="font-weight:700;color:'+(isNoJob?'var(--muted)':'var(--navy)');+'font-style:'+(isNoJob?'italic':'normal')+';">'+(isNoJob?'<em>'+jobName+'</em>':jobName)+'</div>';
+    if (jd.jobId) h += '<div style="font-size:10px;color:var(--muted);">ID: '+jd.jobId+'</div>';
+    h += '</td>';
+    h += '<td>'+jd.entries.length+'</td>';
+    h += '<td><strong class="mono">'+fmtDur(jd.totalMins)+'</strong><div class="prog-bar"><div class="prog-fill" style="width:'+pct+'%;background:var(--orange);"></div></div></td>';
+    h += '<td><strong>'+pct+'%</strong></td>';
+    h += '<td>'+empList.map(function(ev){ return '<div style="font-size:11px;"><strong>'+ev[0].split(' ')[0]+'</strong>: '+fmtDur(ev[1])+'</div>'; }).join('')+'</td>';
+    h += '<td>'+(laborCost>0?'<strong style="color:#2e7d32;">$'+laborCost.toFixed(2)+'</strong>':'<span style="color:var(--muted);font-size:11px;">No rate set</span>')+'</td>';
+    h += '</tr>';
+  });
+  h += '</tbody></table></div>';
+
+  // Detailed entry breakdown
+  h += '<div class="card" style="margin-top:16px;"><div class="card-hdr"><div class="card-title">👤 Employee Time by Job — Detail</div></div>';
+  h += '<table class="tc-table"><thead><tr><th>Employee</th><th>Job</th><th>Date</th><th>Duration</th><th>In</th><th>Out</th><th>Est. Cost</th></tr></thead><tbody>';
+
+  var fmt = function(iso){ if(!iso)return ''; var d=new Date(iso),h2=d.getHours()%12||12,m=d.getMinutes(),ap=d.getHours()>=12?'PM':'AM'; return h2+':'+(m<10?'0':'')+m+' '+ap; };
+  var sortedEntries = filtered.slice().sort(function(a,b){
+    if (a.employee_name !== b.employee_name) return a.employee_name.localeCompare(b.employee_name);
+    return (a.job_name||'').localeCompare(b.job_name||'');
+  });
+
+  var prevEmp = null, prevJob = null;
+  sortedEntries.forEach(function(e) {
+    var emp = ST.employees.find(function(x){ return x.name === e.employee_name; });
+    var rate = emp ? parseFloat(emp.hourly_rate || 0) : 0;
+    var mins = e.duration_minutes || durMins(e);
+    var cost = rate * mins / 60;
+    var isNewEmp = e.employee_name !== prevEmp;
+    var isNewJob = e.job_name !== prevJob || isNewEmp;
+    h += '<tr'+(isNewEmp?' style="border-top:2px solid var(--border);"':'')+'>';
+    h += '<td>'+(isNewEmp?'<strong>'+e.employee_name+'</strong>':'')+'</td>';
+    h += '<td>'+(isNewJob?'<span style="font-weight:600;color:var(--navy);">'+(e.job_name||'<em style="color:var(--muted);">No Job</em>')+'</span>':'')+'</td>';
+    h += '<td style="font-size:11px;">'+fmtD(new Date(e.clock_in))+'</td>';
+    h += '<td><strong>'+fmtDur(mins)+'</strong></td>';
+    h += '<td class="mono" style="font-size:11px;">'+fmt(e.clock_in)+'</td>';
+    h += '<td class="mono" style="font-size:11px;">'+(e.clock_out?fmt(e.clock_out):'<span class="badge badge-green">Active</span>')+'</td>';
+    h += '<td style="font-size:11px;">'+(cost>0?'$'+cost.toFixed(2):'-')+'</td>';
+    h += '</tr>';
+    prevEmp = e.employee_name;
+    prevJob = e.job_name;
+  });
+  h += '</tbody></table></div>';
+
+  document.getElementById('tc-body').innerHTML = h;
+}
+
+function exportJobCostCSV() {
+  var fmtDur = function(mins){ return (mins/60).toFixed(2); };
+  var durMins = function(e){ var out=e.clock_out?new Date(e.clock_out):new Date(); return Math.floor((out-new Date(e.clock_in))/60000); };
+  var fmt = function(iso){ if(!iso)return ''; var d=new Date(iso),h=d.getHours()%12||12,m=d.getMinutes(),ap=d.getHours()>=12?'PM':'AM'; return h+':'+(m<10?'0':'')+m+' '+ap; };
+  var filtered = ST.entries.filter(function(e){ return ST.filterEmp === 'All' || e.employee_name === ST.filterEmp; });
+  var rows = [['Employee','Job','Job ID','Date','Clock In','Clock Out','Hours','Hourly Rate','Labor Cost']];
+  filtered.forEach(function(e) {
+    var emp = ST.employees.find(function(x){ return x.name === e.employee_name; });
+    var rate = emp ? parseFloat(emp.hourly_rate||0) : 0;
+    var mins = e.duration_minutes || durMins(e);
+    var cost = rate * mins / 60;
+    rows.push([e.employee_name, e.job_name||'No Job', e.job_id||'', fmtD(new Date(e.clock_in)), fmt(e.clock_in), fmt(e.clock_out), fmtDur(mins), rate?'$'+rate.toFixed(2):'', cost?'$'+cost.toFixed(2):'']);
+  });
+  var csv = rows.map(function(r){ return r.map(function(c){ return '"'+String(c).replace(/"/g,'""')+'"'; }).join(','); }).join('\n');
+  var a = document.createElement('a');
+  a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
+  a.download = 'jg_job_cost_' + new Date().toISOString().split('T')[0] + '.csv';
+  a.click();
 }
 
 function renderReports() {
