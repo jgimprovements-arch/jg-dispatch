@@ -60,7 +60,10 @@
     market: 'appleton',       // active tab within dispatch
     dragJob: null,
     dragSource: null,         // { market, tech }  or  { market, pool: true }
-    lastLoad: null
+    lastLoad: null,
+    searchQuery: '',          // pool search filter (lowercase)
+    albiResults: null,        // Array of {id,name} from Albi search, or null
+    albiSearching: false      // true while Albi search is in flight
   };
 
   // ── CSS ──────────────────────────────────
@@ -132,6 +135,17 @@
     '.tcd-job-handle{color:#a0abbf;font-size:14px;cursor:grab;flex-shrink:0;}',
     '.tcd-job-reassign{background:none;border:1px solid rgba(13,45,94,.2);color:#0d2d5e;padding:4px 8px;border-radius:5px;font-size:10px;cursor:pointer;font-weight:700;flex-shrink:0;}',
     '.tcd-job-reassign:hover{background:#0d2d5e;color:#fff;}',
+    /* Pool search */
+    '.tcd-search-wrap{position:relative;padding:8px 12px 4px;}',
+    '.tcd-search-input{width:100%;padding:10px 32px 10px 12px;font-size:14px;border:1px solid rgba(13,45,94,.15);border-radius:8px;background:#fff;color:#0d2d5e;font-family:"DM Sans",sans-serif;box-sizing:border-box;}',
+    '.tcd-search-input:focus{outline:none;border-color:#e85d04;box-shadow:0 0 0 2px rgba(232,93,4,.15);}',
+    '.tcd-search-clear{position:absolute;right:18px;top:50%;transform:translateY(-50%);background:none;border:none;color:#6b7a96;font-size:16px;cursor:pointer;width:24px;height:24px;border-radius:50%;display:flex;align-items:center;justify-content:center;}',
+    '.tcd-search-clear:hover{background:rgba(13,45,94,.08);color:#0d2d5e;}',
+    '.tcd-albi-btn{display:block;width:calc(100% - 24px);margin:8px 12px;padding:12px;background:#1565c0;color:#fff;border:none;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer;font-family:"DM Sans",sans-serif;}',
+    '.tcd-albi-btn:active{background:#0d4a94;}',
+    '.tcd-job-albi{background:rgba(21,101,192,.04);border-left:3px solid #1565c0;}',
+    '.tcd-job-albi .tcd-job-handle{color:#1565c0;font-weight:700;}',
+    '.tcd-job-albi .tcd-job-reassign{background:#1565c0;color:#fff;border-color:#1565c0;}',
 
     /* Unassigned pool */
     '.tcd-pool{background:#fff;border:2px dashed rgba(232,93,4,.4);border-radius:10px;margin-bottom:10px;}',
@@ -532,14 +546,65 @@
     html += '<div class="tcd-stat"><div class="tcd-stat-val">' + techs.length + '</div><div class="tcd-stat-lbl">Techs</div></div>';
     html += '</div>';
 
-    // Unassigned pool (always visible at top)
+    // Unassigned pool with search
+    var q = (D.searchQuery || '').toLowerCase().trim();
+    var filteredUnassigned = unassigned;
+    if (q) {
+      filteredUnassigned = unassigned.filter(function(jid){
+        var name = (D.state.jobNames[jid] || jid).toLowerCase();
+        return name.indexOf(q) !== -1 || String(jid).toLowerCase().indexOf(q) !== -1;
+      });
+    }
+
     html += '<div class="tcd-pool">';
-    html += '<div class="tcd-pool-head"><span class="tcd-pool-title">🚨 Unassigned · ' + unassigned.length + '</span>' + (unassigned.length ? '<span style="font-size:10px;color:#6b7a96;">Tap to assign</span>' : '') + '</div>';
+    html += '<div class="tcd-pool-head">';
+    html += '<span class="tcd-pool-title">🚨 Unassigned · ' + unassigned.length + '</span>';
+    html += (unassigned.length && !q ? '<span style="font-size:10px;color:#6b7a96;">Tap to assign</span>' : '');
+    html += '</div>';
+    // Search input
+    html += '<div class="tcd-search-wrap">';
+    html += '<input type="text" class="tcd-search-input" id="tcd-search" placeholder="Search jobs..." value="' + esc(D.searchQuery||'') + '" oninput="TCDispatch._search(this.value)" autocomplete="off" autocapitalize="off">';
+    if (q) html += '<button class="tcd-search-clear" onclick="TCDispatch._clearSearch()">✕</button>';
+    html += '</div>';
+
     html += '<div class="tcd-pool-body" data-market="' + m + '" data-pool="1">';
-    if (!unassigned.length) {
+    if (!unassigned.length && !q) {
       html += '<div class="tcd-lane-body empty">All jobs assigned ✓</div>';
+    } else if (!filteredUnassigned.length && q) {
+      // No matches in pool — offer Albi search
+      html += '<div style="padding:12px;text-align:center;font-size:12px;color:#6b7a96;">';
+      html += 'No matching jobs in the pool.';
+      html += '</div>';
+      if (D.albiSearching) {
+        html += '<div style="padding:10px;text-align:center;font-size:11px;color:#6b7a96;">Searching Albi…</div>';
+      } else if (D.albiResults === null) {
+        html += '<button class="tcd-albi-btn" onclick="TCDispatch._searchAlbi()">🔍 Search Albi for "' + esc(q) + '"</button>';
+      } else if (D.albiResults.length === 0) {
+        html += '<div style="padding:10px;text-align:center;font-size:11px;color:#c02020;">No Albi jobs matched "' + esc(q) + '"</div>';
+      } else {
+        html += '<div style="padding:8px 12px 4px;font-size:10px;font-weight:700;color:#1565c0;text-transform:uppercase;letter-spacing:.05em;">From Albi · ' + D.albiResults.length + ' result(s)</div>';
+        D.albiResults.forEach(function(aj){
+          var ajid = String(aj.id);
+          var ajname = aj.name || ajid;
+          // Skip if already on the board (any market)
+          var allMarkets = Object.keys(D.state.assignments || {});
+          var alreadyAssigned = allMarkets.some(function(mk){
+            var techs = D.state.assignments[mk] || {};
+            return Object.values(techs).some(function(jids){ return (jids||[]).indexOf(ajid) !== -1; });
+          });
+          var alreadyInPool = allMarkets.some(function(mk){ return (D.state.unassigned[mk]||[]).indexOf(ajid) !== -1; });
+          var status = '';
+          if (alreadyAssigned) status = '<span style="font-size:10px;color:#2e7d32;margin-left:6px;">(already assigned)</span>';
+          else if (alreadyInPool) status = '<span style="font-size:10px;color:#e85d04;margin-left:6px;">(in pool)</span>';
+          html += '<div class="tcd-job tcd-job-albi" onclick="TCDispatch._addFromAlbi(\'' + ajid.replace(/'/g,"\\'") + '\',\'' + esc(ajname).replace(/'/g,"\\'") + '\')">';
+          html += '<span class="tcd-job-handle">+</span>';
+          html += '<span class="tcd-job-name">' + esc(ajname) + status + '</span>';
+          html += '<button class="tcd-job-reassign">Add + Assign</button>';
+          html += '</div>';
+        });
+      }
     } else {
-      unassigned.forEach(function(jid) {
+      filteredUnassigned.forEach(function(jid) {
         var name = D.state.jobNames[jid] || jid;
         html += '<div class="tcd-job" data-job-id="' + esc(jid) + '" data-from-pool="1">';
         html += '<span class="tcd-job-handle">⠿</span>';
@@ -584,6 +649,89 @@
     }
 
     body.innerHTML = html;
+    // Keep focus in the search input if it was being typed in
+    if (D._searchFocused) {
+      var searchEl = document.getElementById('tcd-search');
+      if (searchEl) {
+        searchEl.focus();
+        // Restore cursor position to end of value
+        var v = searchEl.value;
+        searchEl.setSelectionRange(v.length, v.length);
+      }
+    }
+  }
+
+  // ── POOL SEARCH ──────────────────────────
+  var _searchDebounce = null;
+  function doSearch(query) {
+    D.searchQuery = query || '';
+    D.albiResults = null; // reset Albi results when query changes
+    D._searchFocused = true;
+    clearTimeout(_searchDebounce);
+    // Debounce render slightly so typing is smooth
+    _searchDebounce = setTimeout(function(){
+      render();
+    }, 60);
+  }
+  function clearSearch() {
+    D.searchQuery = '';
+    D.albiResults = null;
+    D._searchFocused = false;
+    render();
+  }
+  async function searchAlbi() {
+    var q = (D.searchQuery||'').trim();
+    if (!q) return;
+    D.albiSearching = true;
+    D.albiResults = null;
+    render();
+    try {
+      var locId = D.market === 'stevens_point' ? 1477 : 222;
+      var res = await fetch('https://jg-proxy-v2.vercel.app/api/albi', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'get_projects', locationId: locId, limit: 100 })
+      });
+      if (!res.ok) throw new Error('Albi HTTP ' + res.status);
+      var data = await res.json();
+      var all = (data.projects || data.data || []).map(function(j){
+        return { id: String(j.id || j.projectId || ''), name: j.name || j.projectName || '' };
+      });
+      var qLower = q.toLowerCase();
+      D.albiResults = all.filter(function(j){
+        return j.id && (j.name.toLowerCase().indexOf(qLower) !== -1 || j.id.toLowerCase().indexOf(qLower) !== -1);
+      }).slice(0, 15);
+    } catch(err) {
+      console.warn('Albi search failed:', err);
+      D.albiResults = [];
+      toast('Albi search failed — try again');
+    }
+    D.albiSearching = false;
+    render();
+  }
+  async function addFromAlbi(jobId, jobName) {
+    var m = D.market;
+    // Check if already anywhere on the board
+    var allMarkets = Object.keys(D.state.assignments || {});
+    var already = allMarkets.some(function(mk){
+      var techs = D.state.assignments[mk] || {};
+      if (Object.values(techs).some(function(jids){ return (jids||[]).indexOf(jobId) !== -1; })) return true;
+      return (D.state.unassigned[mk]||[]).indexOf(jobId) !== -1;
+    });
+    if (!already) {
+      // Add to pool + set name
+      D.state.unassigned[m] = D.state.unassigned[m] || [];
+      D.state.unassigned[m].push(jobId);
+      D.state.jobNames = D.state.jobNames || {};
+      D.state.jobNames[jobId] = jobName;
+      await saveState();
+    }
+    // Clear search and open the existing reassign sheet so PM can pick a tech
+    D.searchQuery = '';
+    D.albiResults = null;
+    D._searchFocused = false;
+    render();
+    openReassign(m, jobId);
   }
 
   // ── PUBLIC API ───────────────────────────
@@ -598,10 +746,14 @@
       if (el) el.classList.remove('open');
     },
     refresh: load,
-    _setMarket: function(m) { D.market = m; render(); },
+    _setMarket: function(m) { D.market = m; D.searchQuery=''; D.albiResults=null; render(); },
     _open: openReassign,
     _pick: pick,
     _selectJob: selectJobFromList,
+    _search: doSearch,
+    _clearSearch: clearSearch,
+    _searchAlbi: searchAlbi,
+    _addFromAlbi: addFromAlbi,
     _state: function() { return D; }
   };
 
