@@ -23,6 +23,7 @@
   var SIDEBAR_MENU = [
     { section: 'PLATFORM' },
     { label: 'Hub',                 icon: '🏠',  url: 'hub.html' },
+    { label: 'Contacts',            icon: '📇',  url: 'contacts.html' },
 
     { section: 'OPERATIONS' },
     { label: 'Dispatch',            icon: '📋',  url: 'index.html' },
