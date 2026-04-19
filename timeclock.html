@@ -1179,7 +1179,9 @@ async function loadJobs() {
       items.forEach(function(p) {
         var jid = String(p.uniqueNumber || p.id || '');
         if (!jid || jobMap[jid]) return;
-        var name = p.name || p.projectName || jid;
+        var name = p.name || p.projectName || '';
+        // Skip jobs without a real name — prevents raw IDs from being stored as job_name
+        if (!name || !/[a-zA-Z]/.test(name)) return;
         // Determine market from location field
         var loc = (p.location || p.locationId || '').toString().toLowerCase();
         var market = (loc.includes('stevens') || loc.includes('point')) ? 'Stevens Point' : 'Appleton';
@@ -1549,6 +1551,15 @@ async function checkClockInCelebration(u) {
 async function clockIn() {
   if (!TC.employee || !TC.employee.id) { toast('Employee record not found'); return; }
   if (!TC.selectedJobId) { toast('Select a job number to clock in'); return; }
+
+  // Block clock-in if there's an abandoned entry from a prior day — force resolution first
+  if (TC.abandonedEntries && TC.abandonedEntries.length) {
+    if (confirm('⚠ You have an unresolved open shift from a previous day.\n\nYou need to fix that before clocking in to a new job. Open the correction form now?')) {
+      showAbandonedEntryPrompt();
+    }
+    return;
+  }
+
   var btn = document.getElementById('main-btn');
   if (btn) { btn.style.opacity = '.6'; btn.style.pointerEvents = 'none'; }
   toast('Getting location...');
@@ -1704,6 +1715,17 @@ function reviewFix() {
 
 async function clockOut(selfVerified) {
   if (!TC.activeEntry) return;
+
+  // Guard against accidental tap — if clocking out under 2 minutes after clock-in,
+  // require explicit confirmation to prevent zero-duration noise
+  var sessionMins = Math.floor((Date.now() - TC.clockInTime) / 60000);
+  if (sessionMins < 2) {
+    var sessionSecs = Math.floor((Date.now() - TC.clockInTime) / 1000);
+    if (!confirm('You just clocked in ' + sessionSecs + ' seconds ago. Clock out anyway?\n\n(This usually means an accidental tap.)')) {
+      return;
+    }
+  }
+
   var btn = document.getElementById('main-btn');
   btn.style.opacity = '.6'; btn.style.pointerEvents = 'none';
   toast('Getting location...');
