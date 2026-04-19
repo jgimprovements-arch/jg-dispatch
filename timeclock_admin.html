@@ -2533,6 +2533,9 @@ async function renderJobCost() {
   }
   await ensureAlbiJobsLoaded();
 
+  // Default hide-junk to ON (zero-duration + no-job entries are data noise)
+  if (typeof ST.hideJunkEntries === 'undefined') ST.hideJunkEntries = true;
+
   var h = '';
   h += '<div class="filter-bar" style="margin-bottom:16px;">';
   h += '<select onchange="ST.filterEmp=this.value;renderJobCost();" style="min-width:160px;">';
@@ -2543,12 +2546,39 @@ async function renderJobCost() {
   h += '<input type="date" class="form-input" style="max-width:150px;" value="'+(ST.filterDate||new Date(Date.now()-30*86400000).toISOString().split('T')[0])+'" onchange="ST.filterDate=this.value;loadAll().then(renderJobCost)">';
   h += '<span style="font-size:12px;color:var(--muted);align-self:center;">to</span>';
   h += '<input type="date" class="form-input" style="max-width:150px;" value="'+(ST.filterDateEnd||new Date().toISOString().split('T')[0])+'" onchange="ST.filterDateEnd=this.value;loadAll().then(renderJobCost)">';
+  h += '<label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);cursor:pointer;margin-left:12px;"><input type="checkbox" '+(ST.hideJunkEntries?'checked':'')+' onchange="ST.hideJunkEntries=this.checked;renderJobCost();" style="accent-color:var(--orange);">Hide 0-min & no-job entries</label>';
   h += '<button class="btn btn-primary" onclick="exportJobCostCSV()" style="margin-left:auto;">Export CSV</button>';
   h += '</div>';
 
-  var filtered = ST.entries.filter(function(e){
+  // Base filter by employee
+  var rawFiltered = ST.entries.filter(function(e){
     return ST.filterEmp === 'All' || e.employee_name === ST.filterEmp;
   });
+
+  // Data hygiene filter
+  var junkCount = 0, zeroMinCount = 0, noJobCount = 0;
+  var filtered = rawFiltered.filter(function(e) {
+    var mins = e.duration_minutes || durMins(e);
+    var resolvedName = resolveJobName(e.job_id, e.job_name);
+    var isZero = mins === 0;
+    var isNoJob = !resolvedName || resolvedName === 'No Job Assigned' || resolvedName.indexOf('ID: ') === 0 && !e.job_name;
+    if (isZero) zeroMinCount++;
+    if (isNoJob) noJobCount++;
+    if (isZero || isNoJob) junkCount++;
+    if (ST.hideJunkEntries && (isZero || isNoJob)) return false;
+    return true;
+  });
+
+  // Data quality stat banner
+  if (junkCount > 0) {
+    h += '<div style="background:rgba(245,166,35,.06);border:1px solid rgba(245,166,35,.4);border-radius:10px;padding:10px 14px;margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;gap:12px;">';
+    h += '<div style="font-size:12px;color:var(--navy);">';
+    h += '<strong style="color:#c85e00;">⚠ '+junkCount+' data quality issue(s):</strong> ';
+    h += zeroMinCount + ' zero-duration, ' + noJobCount + ' missing job' + (ST.hideJunkEntries?'. These are hidden below.':'. Shown in red below.');
+    h += '</div>';
+    h += '<button class="btn btn-sm" onclick="showDataQualityReport()" style="white-space:nowrap;">View Details</button>';
+    h += '</div>';
+  }
 
   if (!filtered.length) {
     h += '<div class="card"><div class="empty">No entries for this filter</div></div>';
@@ -3151,6 +3181,55 @@ async function loadAlbiJobsForModal() {
   filterJobOptions(document.getElementById('entry-job-search') ? document.getElementById('entry-job-search').value : '');
 }
 
+function showDataQualityReport() {
+  var durMins = function(e){ var out=e.clock_out?new Date(e.clock_out):new Date(); return Math.floor((out-new Date(e.clock_in))/60000); };
+  var fmt = function(iso){ if(!iso)return ''; var d=new Date(iso),h=d.getHours()%12||12,m=d.getMinutes(),ap=d.getHours()>=12?'PM':'AM'; return h+':'+(m<10?'0':'')+m+' '+ap; };
+
+  var rawFiltered = ST.entries.filter(function(e){
+    return ST.filterEmp === 'All' || e.employee_name === ST.filterEmp;
+  });
+
+  var issues = rawFiltered.map(function(e){
+    var mins = e.duration_minutes || durMins(e);
+    var resolvedName = resolveJobName(e.job_id, e.job_name);
+    var problems = [];
+    if (mins === 0 && e.clock_out) problems.push('0 min duration');
+    if (!resolvedName || resolvedName === 'No Job Assigned' || (resolvedName.indexOf('ID: ') === 0 && !e.job_name)) problems.push('no job');
+    if (!e.clock_out && ((Date.now() - new Date(e.clock_in).getTime()) > 12*60*60*1000)) problems.push('missed clock-out');
+    return problems.length ? { e: e, problems: problems, mins: mins, resolvedName: resolvedName } : null;
+  }).filter(Boolean);
+
+  if (!issues.length) {
+    showModal('Data Quality', '<div style="padding:20px;text-align:center;color:#2e7d32;font-weight:700;">✓ No data quality issues in current view.</div>', null);
+    return;
+  }
+
+  var body = '<div style="font-size:12px;color:var(--muted);margin-bottom:12px;">' + issues.length + ' entries with data issues. Click Fix to open and correct.</div>';
+  body += '<div style="max-height:440px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;">';
+  body += '<table style="width:100%;border-collapse:collapse;font-size:12px;">';
+  body += '<thead style="background:rgba(13,45,94,.04);position:sticky;top:0;"><tr>';
+  body += '<th style="padding:8px;text-align:left;">Employee</th>';
+  body += '<th style="padding:8px;text-align:left;">Date</th>';
+  body += '<th style="padding:8px;text-align:left;">Issues</th>';
+  body += '<th style="padding:8px;text-align:left;">Job</th>';
+  body += '<th style="padding:8px;"></th>';
+  body += '</tr></thead><tbody>';
+  issues.forEach(function(iss) {
+    var e = iss.e;
+    var dt = new Date(e.clock_in);
+    var dtStr = (dt.getMonth()+1) + '/' + dt.getDate() + ' ' + fmt(e.clock_in);
+    body += '<tr style="border-top:1px solid var(--border);">';
+    body += '<td style="padding:8px;"><strong>'+e.employee_name+'</strong></td>';
+    body += '<td style="padding:8px;">'+dtStr+'</td>';
+    body += '<td style="padding:8px;color:#c62828;font-weight:700;font-size:11px;">'+iss.problems.join(', ')+'</td>';
+    body += '<td style="padding:8px;color:var(--muted);font-size:11px;">'+iss.resolvedName+'</td>';
+    body += '<td style="padding:8px;"><button class="btn btn-sm" onclick="closeModal();editEntry(\''+e.id+'\')">Fix</button></td>';
+    body += '</tr>';
+  });
+  body += '</tbody></table></div>';
+  showModal('Data Quality Issues ('+issues.length+')', body, null);
+}
+
 function filterJobOptions(q) {
   var dropdown = document.getElementById('entry-job-dropdown');
   var search = document.getElementById('entry-job-search');
@@ -3203,6 +3282,17 @@ async function saveEntry(id) {
   var jobId   = (document.getElementById('entry-job-id')   || {}).value || '';
   var jobVal = jobName;
   var notesVal = document.getElementById('entry-notes').value;
+
+  // Validation — prevent blank jobs or zero-duration entries from being saved
+  if (!jobId && !jobName.trim()) {
+    alert('⚠ A job must be selected. Search for an Albi project in the Job field.');
+    return;
+  }
+  if (inVal && outVal && new Date(outVal) <= new Date(inVal)) {
+    alert('⚠ Clock-out time must be AFTER clock-in time.');
+    return;
+  }
+
   var inISO = inVal ? new Date(inVal).toISOString() : null;
   var outISO = outVal ? new Date(outVal).toISOString() : null;
   var dur = (inISO && outISO) ? Math.floor((new Date(outISO)-new Date(inISO))/60000) : null;
