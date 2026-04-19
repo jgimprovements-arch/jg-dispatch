@@ -785,9 +785,10 @@ async function addAbsence() {
     body: JSON.stringify(payload)
   });
 
-  // If this is a PTO-paid absence and employee has balance, deduct from PTO
+  // If this is a PTO-paid absence by default AND employee has balance, deduct from PTO
+  // Note: Sick days default to unpaid — they get the toggle in the admin view if you want to pay
   var emp = ST.employees.find(function(e){ return e.name === name; });
-  if (emp && PAID_PTO_REASONS.indexOf(reason) !== -1) {
+  if (emp && DEFAULT_PAID_PTO_REASONS.indexOf(reason) !== -1) {
     var avail = parseFloat(emp.pto_hours_available || 0);
     if (avail > 0) {
       var deduct = Math.min(ABSENCE_FULL_DAY, avail);
@@ -802,6 +803,8 @@ async function addAbsence() {
     } else {
       toast('Absence recorded for ' + name + ' (unpaid — no PTO balance)');
     }
+  } else if (reason === 'Sick') {
+    toast('Absence recorded for ' + name + ' (Sick — unpaid by default; toggle to paid in absence history)');
   } else {
     toast('Absence recorded for ' + name);
   }
@@ -1395,10 +1398,11 @@ function openEmployeeAbsences(empName) {
     body += '<div style="background:#f8f9fc;border-radius:8px;padding:10px;margin-bottom:14px;">';
     sortedReasons.forEach(function(r) {
       var pct = Math.round(r[1] / ytdAbsences.length * 100);
-      var isPaidPto = PAID_PTO_REASONS.indexOf(r[0]) !== -1;
-      var isUnpaid = UNPAID_REASONS.indexOf(r[0]) !== -1;
-      var typeBadge = isPaidPto ? '<span style="font-size:9px;padding:2px 6px;background:rgba(46,125,50,.12);color:#2e7d32;border-radius:3px;margin-left:6px;font-weight:700;">PAID</span>'
-        : isUnpaid ? '<span style="font-size:9px;padding:2px 6px;background:rgba(198,40,40,.12);color:#c62828;border-radius:3px;margin-left:6px;font-weight:700;">UNPAID</span>'
+      var isPaidPto = DEFAULT_PAID_PTO_REASONS.indexOf(r[0]) !== -1;
+      var isPaidReg = PAID_REGULAR_REASONS.indexOf(r[0]) !== -1;
+      var isUnpaid = DEFAULT_UNPAID_REASONS.indexOf(r[0]) !== -1 || DEFAULT_UNPAID_WITH_OPTION.indexOf(r[0]) !== -1;
+      var typeBadge = (isPaidPto || isPaidReg) ? '<span style="font-size:9px;padding:2px 6px;background:rgba(46,125,50,.12);color:#2e7d32;border-radius:3px;margin-left:6px;font-weight:700;">PAID</span>'
+        : isUnpaid ? '<span style="font-size:9px;padding:2px 6px;background:rgba(198,40,40,.12);color:#c62828;border-radius:3px;margin-left:6px;font-weight:700;">UNPAID DEFAULT</span>'
         : '';
       body += '<div style="display:flex;align-items:center;justify-content:space-between;padding:4px 0;font-size:12px;">';
       body += '<div>'+r[0]+typeBadge+'</div>';
@@ -1420,6 +1424,7 @@ function openEmployeeAbsences(empName) {
     body += '<th style="padding:8px;text-align:left;">Date</th>';
     body += '<th style="padding:8px;text-align:left;">Reason</th>';
     body += '<th style="padding:8px;text-align:right;">Hrs</th>';
+    body += '<th style="padding:8px;text-align:center;">Paid?</th>';
     body += '<th style="padding:8px;text-align:left;">Notes</th>';
     body += '<th style="padding:8px;"></th>';
     body += '</tr></thead><tbody>';
@@ -1431,10 +1436,23 @@ function openEmployeeAbsences(empName) {
       var paidBadge = c.category === 'pto_paid' ? '<span style="font-size:9px;padding:1px 5px;background:rgba(46,125,50,.15);color:#2e7d32;border-radius:3px;margin-left:4px;font-weight:700;">PTO</span>'
         : c.category === 'regular_paid' ? '<span style="font-size:9px;padding:1px 5px;background:rgba(13,45,94,.15);color:var(--navy);border-radius:3px;margin-left:4px;font-weight:700;">PAID</span>'
         : '<span style="font-size:9px;padding:1px 5px;background:rgba(198,40,40,.12);color:#c62828;border-radius:3px;margin-left:4px;font-weight:700;">UNPAID</span>';
+
+      // Paid toggle — only shown for reasons where it makes sense to override
+      var paidCell = '<span style="color:var(--muted);font-size:10px;">N/A</span>';
+      if (c.category !== 'regular_paid') {  // Training/Shop are always paid, no toggle needed
+        var isCurrentlyPaid = (c.category === 'pto_paid');
+        var emoji = isCurrentlyPaid ? '✅' : '❌';
+        var label = isCurrentlyPaid ? 'Paid' : 'Unpaid';
+        var color = isCurrentlyPaid ? '#2e7d32' : '#c62828';
+        var nextState = isCurrentlyPaid ? 'false' : 'true';
+        paidCell = '<button onclick="toggleAbsencePaid(\''+a.id+'\','+nextState+',\''+empName.replace(/\'/g,"\\'")+'\')" style="padding:2px 8px;border:1px solid '+color+';background:transparent;color:'+color+';border-radius:4px;font-size:10px;font-weight:700;cursor:pointer;font-family:inherit;" title="Click to toggle">'+emoji+' '+label+'</button>';
+      }
+
       body += '<tr style="border-top:1px solid var(--border);">';
       body += '<td style="padding:6px 8px;white-space:nowrap;">'+dateStr+'</td>';
       body += '<td style="padding:6px 8px;">'+(a.reason||'-')+paidBadge+'</td>';
       body += '<td style="padding:6px 8px;text-align:right;font-weight:700;">'+hrs.toFixed(0)+'h</td>';
+      body += '<td style="padding:6px 8px;text-align:center;">'+paidCell+'</td>';
       body += '<td style="padding:6px 8px;color:var(--muted);font-size:10px;">'+(a.notes||'')+'</td>';
       body += '<td style="padding:6px 8px;text-align:right;"><button class="btn btn-sm" onclick="removeAbsenceFromHistory(\''+a.id+'\',\''+empName.replace(/\'/g,"\\'")+'\')" title="Remove this absence" style="font-size:10px;padding:2px 6px;">✕</button></td>';
       body += '</tr>';
@@ -1450,6 +1468,75 @@ function openEmployeeAbsences(empName) {
   showModal('📅 Absence History — '+empName, body, null);
 }
 
+// Toggle an absence between paid (PTO-deducted) and unpaid
+async function toggleAbsencePaid(absenceId, newPaidState, empName) {
+  if (!isAdmin()) { toast('Admin access required'); return; }
+  var absence = (ST.absences || []).find(function(a){ return a.id === absenceId; });
+  if (!absence) return;
+  var emp = ST.employees.find(function(e){ return e.name === absence.employee_name; });
+  if (!emp) return;
+
+  // Compute current classification BEFORE the flip (to know if PTO was already deducted)
+  var oldClass = classifyAbsence(absence, emp);
+  var wasPaidFromPto = (oldClass.category === 'pto_paid');
+
+  // Save the flag to Supabase
+  var r = await fetch(SB_URL + '/rest/v1/absence_records?id=eq.' + absenceId, {
+    method: 'PATCH',
+    headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ paid: newPaidState })
+  });
+  if (!r.ok) { toast('Update failed'); return; }
+
+  absence.paid = newPaidState;
+
+  // Adjust PTO balance based on state change
+  var avail = parseFloat(emp.pto_hours_available || 0);
+  var used = parseFloat(emp.pto_hours_used || 0);
+  var hrs = parseFloat(absence.hours) || ABSENCE_FULL_DAY;
+
+  if (newPaidState && !wasPaidFromPto) {
+    // FLIPPED TO PAID — deduct PTO if balance allows, and only if reason is PTO-eligible
+    if (isReasonEligibleForPtoPayment(absence.reason)) {
+      var deduct = Math.min(hrs, avail);
+      if (deduct > 0) {
+        avail = Math.max(0, avail - deduct);
+        used = used + deduct;
+        await fetch(SB_URL + '/rest/v1/employees?id=eq.' + emp.id, {
+          method: 'PATCH',
+          headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pto_hours_available: avail, pto_hours_used: used })
+        });
+        emp.pto_hours_available = avail;
+        emp.pto_hours_used = used;
+        toast('✓ Marked paid • '+deduct.toFixed(0)+'hr deducted from PTO ('+avail.toFixed(1)+'hr left)');
+      } else {
+        toast('⚠ Marked paid, but no PTO balance to deduct — will pay as regular hours');
+      }
+    } else {
+      toast('✓ Marked paid — will pay as regular hours');
+    }
+  } else if (!newPaidState && wasPaidFromPto) {
+    // FLIPPED TO UNPAID — refund PTO
+    avail = avail + oldClass.paidHours;
+    used = Math.max(0, used - oldClass.paidHours);
+    await fetch(SB_URL + '/rest/v1/employees?id=eq.' + emp.id, {
+      method: 'PATCH',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pto_hours_available: avail, pto_hours_used: used })
+    });
+    emp.pto_hours_available = avail;
+    emp.pto_hours_used = used;
+    toast('✓ Marked unpaid • '+oldClass.paidHours.toFixed(0)+'hr returned to PTO');
+  } else {
+    toast('✓ Updated');
+  }
+
+  logActivity('Absence Paid Toggled', empName + ' — ' + absence.date + ' ' + absence.reason + ' → ' + (newPaidState?'PAID':'UNPAID'), 'time_clock', empName);
+  await loadAll();
+  openEmployeeAbsences(empName);  // re-open with fresh data
+}
+
 async function removeAbsenceFromHistory(absenceId, empName) {
   if (!confirm('Remove this absence? If it was PTO-paid, the balance will be restored.')) return;
   var absence = (ST.absences || []).find(function(a){ return a.id === absenceId; });
@@ -1460,9 +1547,9 @@ async function removeAbsenceFromHistory(absenceId, empName) {
     headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
   });
 
-  // If it was PTO-paid, refund the balance
+  // If this was a PTO-paid absence (default or via override), refund the balance
   var emp = ST.employees.find(function(e){ return e.name === absence.employee_name; });
-  if (emp && PAID_PTO_REASONS.indexOf(absence.reason) !== -1) {
+  if (emp && isReasonEligibleForPtoPayment(absence.reason)) {
     var c = classifyAbsence(absence, emp);
     if (c.category === 'pto_paid' && c.paidHours > 0) {
       var newAvail = parseFloat(emp.pto_hours_available || 0) + c.paidHours;
@@ -1518,35 +1605,63 @@ function _exportEmployeeAbsences(empName) {
 }
 
 // ── ABSENCE CLASSIFICATION ────────────────────────────────────────────────
-// Returns { paidHours, earningsCode } for how an absence should be treated on the timecard.
-// PAID types (Sick, PTO, Personal Day, Bereavement, Jury Duty) deduct from PTO balance if available.
-// UNPAID types (No Call No Show, Injured, Missed On-Call) are tracked but add 0 hours.
-// TRAINING/SHOP TIME are paid as regular hours (not PTO).
-var ABSENCE_FULL_DAY = 8;  // standard full-day hours
-var PAID_PTO_REASONS = ['Sick', 'PTO', 'Personal Day', 'Bereavement', 'Jury Duty'];
+// Defaults:
+//   PTO, Personal Day, Bereavement, Jury Duty  → paid from PTO balance
+//   Sick                                        → UNPAID by default (override with paid=true on record)
+//   Training, Shop Time                         → paid as regular hours
+//   No Call No Show, Injured, Missed On-Call    → unpaid
+// Any record can have `paid: true/false` to override the default. `paid: null` uses default.
+var ABSENCE_FULL_DAY = 8;
+var DEFAULT_PAID_PTO_REASONS = ['PTO', 'Personal Day', 'Bereavement', 'Jury Duty'];
+var DEFAULT_UNPAID_WITH_OPTION = ['Sick'];  // Unpaid by default but can be overridden
 var PAID_REGULAR_REASONS = ['Training', 'Shop Time'];
-var UNPAID_REASONS = ['No Call No Show', 'Injured', 'Missed On-Call'];
+var DEFAULT_UNPAID_REASONS = ['No Call No Show', 'Injured', 'Missed On-Call'];
+
+function isReasonEligibleForPtoPayment(reason) {
+  return DEFAULT_PAID_PTO_REASONS.indexOf(reason) !== -1
+      || DEFAULT_UNPAID_WITH_OPTION.indexOf(reason) !== -1;
+}
 
 function classifyAbsence(absence, emp) {
   var reason = (absence.reason || '').trim();
   var hrs = absence.hours != null ? parseFloat(absence.hours) : ABSENCE_FULL_DAY;
 
+  // Training / Shop Time — always paid as regular hours
   if (PAID_REGULAR_REASONS.indexOf(reason) !== -1) {
-    // Training / Shop Time — paid as regular hours, no PTO impact
     return { paidHours: hrs, earningsCode: 'REG', category: 'regular_paid' };
   }
-  if (PAID_PTO_REASONS.indexOf(reason) !== -1) {
-    // Sick / PTO / Personal Day / etc — only paid if employee has PTO balance
+
+  // Determine whether this absence is paid — explicit override wins over default
+  var explicitPaid = absence.paid;  // null/undefined = use default, true/false = override
+  var shouldBePaid;
+  if (explicitPaid === true) {
+    shouldBePaid = true;
+  } else if (explicitPaid === false) {
+    shouldBePaid = false;
+  } else {
+    // Use default rules
+    shouldBePaid = DEFAULT_PAID_PTO_REASONS.indexOf(reason) !== -1;
+  }
+
+  // If it's supposed to be paid AND employee has PTO balance, pay it
+  if (shouldBePaid && isReasonEligibleForPtoPayment(reason)) {
     var ptoAvail = emp ? parseFloat(emp.pto_hours_available || 0) : 0;
     if (ptoAvail > 0) {
       var used = Math.min(hrs, ptoAvail);
-      // Paychex earnings codes
       var code = reason === 'Sick' ? 'SIC' : (reason === 'PTO' ? 'VAC' : 'PTO');
       return { paidHours: used, earningsCode: code, category: 'pto_paid' };
     }
-    return { paidHours: 0, earningsCode: null, category: 'unpaid_tracked' };
+    // No PTO balance → forced unpaid (even if flagged paid, can't draw from empty balance)
+    return { paidHours: 0, earningsCode: null, category: 'unpaid_tracked', forcedUnpaid: true };
   }
-  // Unpaid / everything else
+
+  // Explicitly paid but not a PTO-eligible reason (e.g., paying a No Call No Show as goodwill)
+  // — pay as regular hours without touching PTO balance
+  if (shouldBePaid) {
+    return { paidHours: hrs, earningsCode: 'REG', category: 'regular_paid' };
+  }
+
+  // Unpaid / tracked only
   return { paidHours: 0, earningsCode: null, category: 'unpaid_tracked' };
 }
 
