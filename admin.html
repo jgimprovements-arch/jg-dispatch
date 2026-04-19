@@ -955,15 +955,15 @@ function ac_resetDefaults() {
 // ═══════════════════════════════════════════════════════════════════════════
 // PLATFORM USERS PANEL (prefix: pr_)
 // ═══════════════════════════════════════════════════════════════════════════
-var PR = { allEmployees: [], unsubscribe: null, loaded: false, loading: false, loadError: null };
+var PR = { allEmployees: [], unsubscribe: null, loaded: false, loading: false, loadError: null, showDisabled: true };
 
 async function pr_loadEmployees(){
   if (PR.loading) return;
   PR.loading = true;
   PR.loadError = null;
   try {
-    // Select only columns we know exist on the employees table
-    var r = await fetch(SB_URL + '/rest/v1/employees?active=eq.true&select=id,name,email,role,market&order=name.asc', {
+    // Fetch ALL employees (including disabled) so admins can re-enable them
+    var r = await fetch(SB_URL + '/rest/v1/employees?select=id,name,email,role,market,active,pending_approval&order=name.asc', {
       headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
     });
     if (r.ok) {
@@ -978,6 +978,81 @@ async function pr_loadEmployees(){
   }
   PR.loaded = true;
   PR.loading = false;
+}
+
+// Safety-check: don't let admins disable themselves or other admins by accident
+function pr_canModify(emp){
+  var me = JSON.parse(localStorage.getItem('jg_platform_user')||'null');
+  if (!me) return false;
+  var myEmail = (me.email||'').toLowerCase();
+  var theirEmail = (emp.email||'').toLowerCase();
+  // Can't modify yourself
+  if (myEmail === theirEmail) return false;
+  // Only Josh can modify other admins
+  var adminEmails = ['josh@jg-restoration.com','jgimprovements@gmail.com'];
+  if (adminEmails.indexOf(theirEmail) !== -1 && adminEmails.indexOf(myEmail) === -1) return false;
+  return true;
+}
+
+async function pr_toggleActive(empId, currentlyActive){
+  var emp = PR.allEmployees.filter(function(e){ return e.id === empId; })[0];
+  if (!emp) return;
+  if (!pr_canModify(emp)) { alert('You do not have permission to modify this user.'); return; }
+
+  var action = currentlyActive ? 'disable' : 'enable';
+  var warning = currentlyActive
+    ? 'Disable ' + emp.name + '?\n\nThey will be locked out on their next page load. Any active time clock entries will NOT be auto-closed.\n\nClick OK to confirm.'
+    : 'Re-enable ' + emp.name + '?\n\nThey will be able to sign back into the platform immediately.';
+  if (!confirm(warning)) return;
+
+  try {
+    var r = await fetch(SB_URL + '/rest/v1/employees?id=eq.' + empId, {
+      method: 'PATCH',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
+      body: JSON.stringify({ active: !currentlyActive, pending_approval: false })
+    });
+    if (!r.ok) { alert('Update failed: HTTP ' + r.status); return; }
+    // Log the action
+    try {
+      var me = JSON.parse(localStorage.getItem('jg_platform_user')||'{}');
+      await fetch(SB_URL + '/rest/v1/platform_activity', {
+        method: 'POST',
+        headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
+        body: JSON.stringify({
+          action: currentlyActive ? 'User Disabled' : 'User Re-enabled',
+          detail: emp.name + ' (' + emp.email + ') was ' + action + 'd',
+          category: 'admin',
+          employee_name: emp.name,
+          performed_by: me.name || 'Admin',
+          performed_by_email: (me.email||'').toLowerCase(),
+          ts: new Date().toISOString()
+        })
+      });
+    } catch(e) {}
+    // Refresh roster
+    PR.loaded = false;
+    await pr_loadEmployees();
+    pr_render();
+  } catch(e) {
+    alert('Update failed: ' + e.message);
+  }
+}
+
+async function pr_approvePending(empId){
+  var emp = PR.allEmployees.filter(function(e){ return e.id === empId; })[0];
+  if (!emp) return;
+  if (!confirm('Approve ' + emp.name + ' for platform access?')) return;
+  try {
+    var r = await fetch(SB_URL + '/rest/v1/employees?id=eq.' + empId, {
+      method: 'PATCH',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
+      body: JSON.stringify({ active: true, pending_approval: false })
+    });
+    if (!r.ok) { alert('Approval failed: HTTP ' + r.status); return; }
+    PR.loaded = false;
+    await pr_loadEmployees();
+    pr_render();
+  } catch(e) { alert('Approval failed: ' + e.message); }
 }
 
 function pr_fmtSince(ts){
@@ -1018,6 +1093,11 @@ function pr_render(){
     return;
   }
 
+  // Partition employees
+  var activeEmps = PR.allEmployees.filter(function(e){ return e.active !== false && !e.pending_approval; });
+  var disabledEmps = PR.allEmployees.filter(function(e){ return e.active === false && !e.pending_approval; });
+  var pendingEmps = PR.allEmployees.filter(function(e){ return e.pending_approval === true; });
+
   var h = '<div style="padding:16px;max-width:1000px;margin:0 auto;">';
 
   // Stats row
@@ -1027,12 +1107,18 @@ function pr_render(){
   h += '<div style="font-size:26px;font-weight:700;font-family:\'DM Mono\',monospace;color:#2e7d32;margin-top:4px;line-height:1;">' + online.length + '</div>';
   h += '</div>';
   h += '<div style="background:#fff;border:1px solid rgba(13,45,94,.1);border-radius:10px;padding:14px;">';
-  h += '<div style="font-size:10px;color:#6b7a96;font-weight:700;text-transform:uppercase;letter-spacing:.06em;font-family:\'DM Mono\',monospace;">Total Users</div>';
-  h += '<div style="font-size:26px;font-weight:700;font-family:\'DM Mono\',monospace;color:#0d2d5e;margin-top:4px;line-height:1;">' + PR.allEmployees.length + '</div>';
+  h += '<div style="font-size:10px;color:#6b7a96;font-weight:700;text-transform:uppercase;letter-spacing:.06em;font-family:\'DM Mono\',monospace;">Active Users</div>';
+  h += '<div style="font-size:26px;font-weight:700;font-family:\'DM Mono\',monospace;color:#0d2d5e;margin-top:4px;line-height:1;">' + activeEmps.length + '</div>';
   h += '</div>';
+  if (pendingEmps.length) {
+    h += '<div style="background:#fff;border:1px solid rgba(245,166,35,.3);border-radius:10px;padding:14px;">';
+    h += '<div style="font-size:10px;color:#b06a00;font-weight:700;text-transform:uppercase;letter-spacing:.06em;font-family:\'DM Mono\',monospace;">⏳ Pending</div>';
+    h += '<div style="font-size:26px;font-weight:700;font-family:\'DM Mono\',monospace;color:#b06a00;margin-top:4px;line-height:1;">' + pendingEmps.length + '</div>';
+    h += '</div>';
+  }
   h += '<div style="background:#fff;border:1px solid rgba(13,45,94,.1);border-radius:10px;padding:14px;">';
-  h += '<div style="font-size:10px;color:#6b7a96;font-weight:700;text-transform:uppercase;letter-spacing:.06em;font-family:\'DM Mono\',monospace;">Offline</div>';
-  h += '<div style="font-size:26px;font-weight:700;font-family:\'DM Mono\',monospace;color:#a0abbf;margin-top:4px;line-height:1;">' + Math.max(0, PR.allEmployees.length - online.length) + '</div>';
+  h += '<div style="font-size:10px;color:#6b7a96;font-weight:700;text-transform:uppercase;letter-spacing:.06em;font-family:\'DM Mono\',monospace;">Disabled</div>';
+  h += '<div style="font-size:26px;font-weight:700;font-family:\'DM Mono\',monospace;color:#a0abbf;margin-top:4px;line-height:1;">' + disabledEmps.length + '</div>';
   h += '</div>';
   h += '</div>';
   h += '<style>@keyframes prPulse{0%,100%{opacity:1}50%{opacity:.4}}</style>';
@@ -1067,33 +1153,78 @@ function pr_render(){
   }
   h += '</div>';
 
-  // Offline roster — grouped by role
-  var offline = PR.allEmployees.filter(function(e){
-    return !onlineEmails[(e.email||'').toLowerCase()];
-  });
-  h += '<div style="background:#fff;border:1px solid rgba(13,45,94,.1);border-radius:10px;overflow:hidden;">';
-  h += '<div style="padding:12px 16px;border-bottom:1px solid rgba(13,45,94,.08);background:rgba(107,122,150,.04);">';
-  h += '<span style="font-size:12px;font-weight:700;color:#6b7a96;font-family:\'DM Mono\',monospace;text-transform:uppercase;letter-spacing:.05em;">○ Offline — ' + offline.length + '</span>';
-  h += '</div>';
-  if (!offline.length) {
-    h += '<div style="padding:20px;text-align:center;color:#2e7d32;font-size:13px;">Everyone is online ✓</div>';
-  } else {
-    offline.forEach(function(e){
-      h += '<div style="padding:10px 16px;display:flex;align-items:center;gap:12px;border-bottom:1px solid rgba(13,45,94,.05);opacity:.75;">';
-      h += '<div style="width:32px;height:32px;border-radius:50%;background:#a0abbf;color:#fff;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;font-family:\'DM Mono\',monospace;flex-shrink:0;">';
-      h += pr_initials(e.name);
-      h += '</div>';
+  // Pending Approval section (only shown if there are any)
+  if (pendingEmps.length) {
+    h += '<div style="background:#fff;border:2px solid rgba(245,166,35,.4);border-radius:10px;overflow:hidden;margin-bottom:16px;">';
+    h += '<div style="padding:12px 16px;border-bottom:1px solid rgba(13,45,94,.08);background:rgba(245,166,35,.08);">';
+    h += '<span style="font-size:12px;font-weight:700;color:#b06a00;font-family:\'DM Mono\',monospace;text-transform:uppercase;letter-spacing:.05em;">⏳ Pending Approval — ' + pendingEmps.length + '</span>';
+    h += '</div>';
+    pendingEmps.forEach(function(e){
+      h += '<div style="padding:12px 16px;display:flex;align-items:center;gap:12px;border-bottom:1px solid rgba(13,45,94,.05);">';
+      h += '<div style="width:32px;height:32px;border-radius:50%;background:#b06a00;color:#fff;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;font-family:\'DM Mono\',monospace;flex-shrink:0;">';
+      h += pr_initials(e.name) + '</div>';
       h += '<div style="flex:1;min-width:0;">';
-      h += '<div style="font-size:12px;font-weight:600;color:#0d1f3c;">' + e.name + '</div>';
-      h += '<div style="font-size:10px;color:#6b7a96;font-family:\'DM Mono\',monospace;">' + (e.role||'') + (e.market?' · '+e.market:'') + '</div>';
+      h += '<div style="font-size:13px;font-weight:600;color:#0d1f3c;">' + e.name + '</div>';
+      h += '<div style="font-size:11px;color:#6b7a96;font-family:\'DM Mono\',monospace;">' + (e.role||'—') + (e.market?' · '+e.market:'') + ' · ' + (e.email||'') + '</div>';
       h += '</div>';
+      h += '<button onclick="pr_approvePending(\'' + e.id + '\')" style="background:#2e7d32;color:#fff;border:none;padding:8px 14px;border-radius:6px;font-size:12px;font-weight:700;cursor:pointer;flex-shrink:0;">✓ Approve</button>';
+      h += '</div>';
+    });
+    h += '</div>';
+  }
+
+  // Active roster
+  h += '<div style="background:#fff;border:1px solid rgba(13,45,94,.1);border-radius:10px;overflow:hidden;margin-bottom:16px;">';
+  h += '<div style="padding:12px 16px;border-bottom:1px solid rgba(13,45,94,.08);background:rgba(13,45,94,.03);">';
+  h += '<span style="font-size:12px;font-weight:700;color:#0d2d5e;font-family:\'DM Mono\',monospace;text-transform:uppercase;letter-spacing:.05em;">👥 Active Users — ' + activeEmps.length + '</span>';
+  h += '</div>';
+  if (!activeEmps.length) {
+    h += '<div style="padding:20px;text-align:center;color:#a0abbf;font-size:13px;">No active users</div>';
+  } else {
+    activeEmps.forEach(function(e){
+      var isOnline = !!onlineEmails[(e.email||'').toLowerCase()];
+      var canModify = pr_canModify(e);
+      h += '<div style="padding:10px 16px;display:flex;align-items:center;gap:12px;border-bottom:1px solid rgba(13,45,94,.05);' + (isOnline ? '' : 'opacity:.75;') + '">';
+      h += '<div style="width:32px;height:32px;border-radius:50%;background:' + (isOnline ? '#2e7d32' : '#a0abbf') + ';color:#fff;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;font-family:\'DM Mono\',monospace;flex-shrink:0;">';
+      h += pr_initials(e.name) + '</div>';
+      h += '<div style="flex:1;min-width:0;">';
+      h += '<div style="font-size:12px;font-weight:600;color:#0d1f3c;">' + e.name + (isOnline ? ' <span style="color:#2e7d32;font-size:10px;font-weight:700;">● LIVE</span>' : '') + '</div>';
+      h += '<div style="font-size:10px;color:#6b7a96;font-family:\'DM Mono\',monospace;">' + (e.role||'') + (e.market?' · '+e.market:'') + ' · ' + (e.email||'') + '</div>';
+      h += '</div>';
+      if (canModify) {
+        h += '<button onclick="pr_toggleActive(\'' + e.id + '\',true)" style="background:none;border:1px solid rgba(192,32,32,.3);color:#c02020;padding:6px 12px;border-radius:6px;font-size:11px;font-weight:700;cursor:pointer;flex-shrink:0;">🚫 Disable</button>';
+      } else {
+        h += '<span style="font-size:10px;color:#a0abbf;font-style:italic;padding:6px 10px;">you</span>';
+      }
       h += '</div>';
     });
   }
   h += '</div>';
 
+  // Disabled users
+  if (disabledEmps.length) {
+    h += '<div style="background:#fff;border:1px solid rgba(192,32,32,.2);border-radius:10px;overflow:hidden;margin-bottom:16px;">';
+    h += '<div style="padding:12px 16px;border-bottom:1px solid rgba(13,45,94,.08);background:rgba(192,32,32,.04);">';
+    h += '<span style="font-size:12px;font-weight:700;color:#c02020;font-family:\'DM Mono\',monospace;text-transform:uppercase;letter-spacing:.05em;">🚫 Disabled — ' + disabledEmps.length + '</span>';
+    h += '</div>';
+    disabledEmps.forEach(function(e){
+      h += '<div style="padding:10px 16px;display:flex;align-items:center;gap:12px;border-bottom:1px solid rgba(13,45,94,.05);opacity:.7;">';
+      h += '<div style="width:32px;height:32px;border-radius:50%;background:#a0abbf;color:#fff;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;font-family:\'DM Mono\',monospace;flex-shrink:0;text-decoration:line-through;">';
+      h += pr_initials(e.name) + '</div>';
+      h += '<div style="flex:1;min-width:0;">';
+      h += '<div style="font-size:12px;font-weight:600;color:#6b7a96;text-decoration:line-through;">' + e.name + '</div>';
+      h += '<div style="font-size:10px;color:#a0abbf;font-family:\'DM Mono\',monospace;">' + (e.role||'') + (e.market?' · '+e.market:'') + ' · ' + (e.email||'') + '</div>';
+      h += '</div>';
+      if (pr_canModify(e)) {
+        h += '<button onclick="pr_toggleActive(\'' + e.id + '\',false)" style="background:none;border:1px solid rgba(46,125,50,.3);color:#2e7d32;padding:6px 12px;border-radius:6px;font-size:11px;font-weight:700;cursor:pointer;flex-shrink:0;">↻ Re-enable</button>';
+      }
+      h += '</div>';
+    });
+    h += '</div>';
+  }
+
   h += '<div style="margin-top:14px;padding:10px 14px;background:rgba(13,45,94,.04);border-radius:8px;font-size:11px;color:#6b7a96;line-height:1.5;">';
-  h += '<strong>How this works:</strong> This list shows anyone who has a JG platform page open right now — signed in to any tab across the platform. Disconnects are detected within ~5 seconds of closing the tab.';
+  h += '<strong>Disable vs. Delete:</strong> Disabling a user locks them out on their next page load but preserves all their time clock entries, sales history, and other records. Disabled users can be re-enabled anytime. You cannot disable yourself or another admin.';
   h += '</div>';
 
   h += '</div>';
