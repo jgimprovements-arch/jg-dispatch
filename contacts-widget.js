@@ -2,13 +2,11 @@
  * JG Restoration — Shared Contacts Widget
  * ========================================
  * Adds a floating "📇 Contacts" button to any page.
- * Click → modal opens with live employee directory, grouped by role.
- * Phone numbers, text, and email are clickable.
+ * Click → slide-up panel with live employee directory, grouped by role.
+ * Each contact has Call / Text / Email action buttons (work on desktop + mobile).
  *
  * USAGE: Add this line to any HTML page's <head> or before </body>:
  *   <script src="contacts-widget.js"></script>
- *
- * Auto-loads data from Supabase, updates live via Realtime.
  */
 (function() {
   'use strict';
@@ -26,6 +24,7 @@
   };
 
   function esc(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
+  function attrEsc(s) { return String(s||'').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
 
   function initials(n) {
     var p = (n||'').trim().split(/\s+/);
@@ -49,7 +48,54 @@
     return p;
   }
 
-  // ── CSS ────────────────────────────────
+  async function copyToClipboard(text) {
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    } catch(e) {}
+    try {
+      var ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      var ok = document.execCommand('copy');
+      document.body.removeChild(ta);
+      return ok;
+    } catch(e) { return false; }
+  }
+
+  function showToast(msg) {
+    var t = document.getElementById('cw-toast');
+    if (!t) return;
+    t.textContent = msg;
+    t.classList.add('show');
+    clearTimeout(CW._toastTimer);
+    CW._toastTimer = setTimeout(function(){ t.classList.remove('show'); }, 1800);
+  }
+
+  // Public: triggered from onclick
+  window.cwHandleContact = async function(kind, value, label) {
+    if (!value) return;
+    await copyToClipboard(value);
+    var url = null;
+    if (kind === 'call')  url = 'tel:+1' + value.replace(/\D/g,'');
+    if (kind === 'sms')   url = 'sms:+1' + value.replace(/\D/g,'');
+    if (kind === 'email') url = 'mailto:' + value;
+    if (url) {
+      var a = document.createElement('a');
+      a.href = url;
+      a.style.display = 'none';
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(function(){ document.body.removeChild(a); }, 100);
+    }
+    showToast('📋 Copied ' + label + ': ' + value);
+  };
+
   var CSS = [
     '#cw-btn{position:fixed;bottom:20px;right:20px;width:52px;height:52px;border-radius:50%;background:#e85d04;color:#fff;border:none;box-shadow:0 4px 12px rgba(232,93,4,.35);cursor:pointer;font-size:22px;z-index:9000;display:flex;align-items:center;justify-content:center;transition:transform .15s;}',
     '#cw-btn:hover{transform:scale(1.08);}',
@@ -60,33 +106,37 @@
     '@keyframes cw-slide{from{transform:translateY(20px);opacity:0}to{transform:translateY(0);opacity:1}}',
     '#cw-panel{position:fixed;bottom:82px;right:20px;width:380px;max-width:calc(100vw - 40px);max-height:70vh;background:#fff;border-radius:12px;box-shadow:0 12px 48px rgba(0,0,0,.25);z-index:9001;display:none;flex-direction:column;overflow:hidden;animation:cw-slide .22s ease-out;}',
     '#cw-panel.open{display:flex;}',
-    '#cw-head{background:#0d2d5e;color:#fff;padding:14px 16px;display:flex;align-items:center;gap:10px;flex-shrink:0;}',
-    '#cw-head-title{font-size:14px;font-weight:700;}',
+    '#cw-head{background:#0d2d5e;color:#fff;padding:12px 14px;display:flex;align-items:center;gap:10px;flex-shrink:0;}',
+    '#cw-head-title{font-size:13px;font-weight:700;}',
     '#cw-head-sub{font-size:10px;color:rgba(255,255,255,.6);font-family:"DM Mono",monospace;}',
-    '#cw-close{margin-left:auto;background:rgba(255,255,255,.15);border:none;color:#fff;width:28px;height:28px;border-radius:50%;font-size:16px;cursor:pointer;}',
-    '#cw-search-wrap{padding:10px 12px;border-bottom:1px solid #e1e4ea;flex-shrink:0;}',
-    '#cw-search{width:100%;padding:8px 12px;font-size:13px;border:1px solid #e1e4ea;border-radius:6px;outline:none;font-family:inherit;box-sizing:border-box;}',
+    '#cw-close{margin-left:auto;background:rgba(255,255,255,.15);border:none;color:#fff;width:26px;height:26px;border-radius:50%;font-size:14px;cursor:pointer;}',
+    '#cw-search-wrap{padding:8px 10px;border-bottom:1px solid #e1e4ea;flex-shrink:0;}',
+    '#cw-search{width:100%;padding:7px 10px;font-size:13px;border:1px solid #e1e4ea;border-radius:5px;outline:none;font-family:inherit;box-sizing:border-box;}',
     '#cw-search:focus{border-color:#e85d04;}',
-    '#cw-body{overflow-y:auto;-webkit-overflow-scrolling:touch;flex:1;padding:8px 4px 14px;}',
-    '.cw-group{margin-top:10px;}',
-    '.cw-group-head{padding:4px 14px;font-size:10px;font-weight:700;color:#0d2d5e;text-transform:uppercase;letter-spacing:.06em;font-family:"DM Mono",monospace;display:flex;gap:6px;align-items:center;}',
-    '.cw-group-count{background:rgba(13,45,94,.08);color:#0d2d5e;font-size:9px;padding:1px 6px;border-radius:8px;}',
-    '.cw-contact{padding:10px 14px;display:flex;align-items:flex-start;gap:10px;border-bottom:1px solid #f0f2f6;}',
+    '#cw-body{overflow-y:auto;-webkit-overflow-scrolling:touch;flex:1;padding:6px 4px 10px;}',
+    '.cw-group{margin-top:6px;}',
+    '.cw-group-head{padding:4px 12px;font-size:9px;font-weight:700;color:#0d2d5e;text-transform:uppercase;letter-spacing:.06em;font-family:"DM Mono",monospace;display:flex;gap:6px;align-items:center;}',
+    '.cw-group-count{background:rgba(13,45,94,.08);color:#0d2d5e;font-size:9px;padding:1px 5px;border-radius:6px;}',
+    '.cw-contact{padding:8px 12px;display:flex;align-items:center;gap:10px;border-bottom:1px solid #f0f2f6;}',
     '.cw-contact:last-child{border-bottom:none;}',
-    '.cw-av{width:34px;height:34px;border-radius:50%;background:#0d2d5e;color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:11px;font-family:"DM Mono",monospace;flex-shrink:0;}',
+    '.cw-av{width:30px;height:30px;border-radius:50%;background:#0d2d5e;color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:10px;font-family:"DM Mono",monospace;flex-shrink:0;}',
     '.cw-av.pm{background:#1565c0;}',
     '.cw-av.admin{background:#e85d04;}',
     '.cw-av.office{background:#7c3aed;}',
     '.cw-av.tech{background:#2e7d32;}',
     '.cw-info{flex:1;min-width:0;}',
-    '.cw-name{font-size:13px;font-weight:700;color:#0d2d5e;line-height:1.2;}',
-    '.cw-meta{font-size:10px;color:#6b7a96;text-transform:uppercase;letter-spacing:.04em;margin:2px 0 6px;}',
-    '.cw-act{display:flex;flex-wrap:wrap;gap:6px;}',
-    '.cw-act a{display:inline-flex;align-items:center;gap:4px;padding:4px 8px;background:rgba(13,45,94,.05);border-radius:5px;color:#0d2d5e;text-decoration:none;font-size:11px;font-weight:600;}',
-    '.cw-act a:hover{background:#e85d04;color:#fff;}',
+    '.cw-name{font-size:12px;font-weight:700;color:#0d2d5e;line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
+    '.cw-meta{font-size:9px;color:#6b7a96;text-transform:uppercase;letter-spacing:.04em;margin-top:1px;font-family:"DM Mono",monospace;}',
+    '.cw-act{display:flex;gap:3px;flex-shrink:0;}',
+    '.cw-act button{display:flex;align-items:center;justify-content:center;width:28px;height:28px;background:rgba(13,45,94,.05);color:#0d2d5e;border:none;border-radius:5px;cursor:pointer;font-size:12px;padding:0;transition:all .12s;}',
+    '.cw-act button:hover{background:#e85d04;color:#fff;transform:scale(1.05);}',
+    '.cw-act button:active{transform:scale(0.95);}',
+    '.cw-act button.disabled{background:rgba(0,0,0,.03);color:#c0c5ce;cursor:not-allowed;pointer-events:none;}',
     '.cw-empty{padding:24px;text-align:center;color:#6b7a96;font-size:12px;}',
     '.cw-loading{padding:24px;text-align:center;color:#6b7a96;font-size:12px;}',
-    '@media(max-width:480px){#cw-panel{left:10px;right:10px;bottom:78px;width:auto;max-height:75vh;}}'
+    '#cw-toast{position:fixed;bottom:82px;left:50%;transform:translateX(-50%) translateY(10px);background:#0d2d5e;color:#fff;padding:8px 14px;border-radius:6px;font-size:12px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,.2);opacity:0;transition:all .2s;pointer-events:none;z-index:9999;}',
+    '#cw-toast.show{opacity:1;transform:translateX(-50%) translateY(0);}',
+    '@media(max-width:480px){#cw-panel{left:10px;right:10px;bottom:78px;width:auto;max-height:75vh;}#cw-toast{bottom:140px;}}'
   ].join('\n');
 
   function injectStyle() {
@@ -104,12 +154,13 @@
     html += '<div id="cw-panel" role="dialog" aria-label="Contacts">';
     html += '<div id="cw-head">';
     html += '<span style="font-size:16px;">📇</span>';
-    html += '<div><div id="cw-head-title">Contacts</div><div id="cw-head-sub" id="cw-head-sub-count"></div></div>';
+    html += '<div><div id="cw-head-title">Contacts</div><div id="cw-head-sub"></div></div>';
     html += '<button id="cw-close" onclick="ContactsWidget.close()">×</button>';
     html += '</div>';
     html += '<div id="cw-search-wrap"><input type="text" id="cw-search" placeholder="Search..." oninput="ContactsWidget._onSearch(this.value)"></div>';
     html += '<div id="cw-body" class="cw-loading">Loading…</div>';
     html += '</div>';
+    html += '<div id="cw-toast"></div>';
     var wrap = document.createElement('div');
     wrap.innerHTML = html;
     while (wrap.firstChild) document.body.appendChild(wrap.firstChild);
@@ -124,7 +175,6 @@
       CW.employees = await r.json();
       CW.loaded = true;
       if (CW.open) render();
-      // Update subtitle count
       var sub = document.getElementById('cw-head-sub');
       if (sub) sub.textContent = CW.employees.length + ' active';
     } catch(e) {
@@ -160,7 +210,6 @@
       return;
     }
 
-    // Group by role
     var groups = {};
     filtered.forEach(function(e){
       var role = e.role || '(No Role)';
@@ -178,9 +227,7 @@
       var items = groups[role];
       html += '<div class="cw-group">';
       html += '<div class="cw-group-head"><span>' + esc(role) + '</span><span class="cw-group-count">' + items.length + '</span></div>';
-      items.forEach(function(e){
-        html += renderContact(e);
-      });
+      items.forEach(function(e){ html += renderContact(e); });
       html += '</div>';
     });
     body.innerHTML = html;
@@ -188,28 +235,33 @@
 
   function renderContact(e) {
     var phone = e.phone || '';
-    var phoneDigits = phone ? String(phone).replace(/\D/g,'') : '';
+    var email = e.email || '';
     var h = '<div class="cw-contact">';
     h += '<div class="cw-av ' + roleClass(e.role) + '">' + esc(initials(e.name)) + '</div>';
     h += '<div class="cw-info">';
     h += '<div class="cw-name">' + esc(e.name || '(No name)') + '</div>';
     h += '<div class="cw-meta">' + esc(e.role||'—') + (e.market ? ' · ' + esc(e.market) : '') + '</div>';
+    h += '</div>';
     h += '<div class="cw-act">';
-    if (phoneDigits) {
-      h += '<a href="tel:+1' + esc(phoneDigits) + '" title="Call">📞 ' + esc(formatPhone(phone)) + '</a>';
-      h += '<a href="sms:+1' + esc(phoneDigits) + '" title="Text">💬 Text</a>';
+    if (phone) {
+      h += '<button title="Call" onclick="cwHandleContact(\'call\',\'' + attrEsc(phone) + '\',\'phone\')">📞</button>';
+      h += '<button title="Text" onclick="cwHandleContact(\'sms\',\'' + attrEsc(phone) + '\',\'phone\')">💬</button>';
+    } else {
+      h += '<button class="disabled" title="No phone on file">📞</button>';
+      h += '<button class="disabled" title="No phone on file">💬</button>';
     }
-    if (e.email) {
-      h += '<a href="mailto:' + esc(e.email) + '" title="Email">✉️</a>';
+    if (email) {
+      h += '<button title="Email" onclick="cwHandleContact(\'email\',\'' + attrEsc(email) + '\',\'email\')">✉️</button>';
+    } else {
+      h += '<button class="disabled" title="No email on file">✉️</button>';
     }
-    h += '</div></div></div>';
+    h += '</div></div>';
     return h;
   }
 
   function initRealtime() {
     if (CW.realtimeInit) return;
     CW.realtimeInit = true;
-    // Reuse existing Supabase client if page already has one
     if (window.JGSupabase && window.JGSupabase.client) {
       try {
         window.JGSupabase.client.channel('rt_contacts_widget')
@@ -217,7 +269,6 @@
           .subscribe();
       } catch(e) { console.warn('contacts rt failed:', e); }
     } else {
-      // Load supabase-js if not already present
       if (typeof window.supabase === 'undefined') {
         var script = document.createElement('script');
         script.src = 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2';
@@ -236,7 +287,6 @@
     }
   }
 
-  // ── PUBLIC API ──
   window.ContactsWidget = {
     open: function() {
       CW.open = true;
@@ -246,7 +296,6 @@
       if (!CW.loaded) loadData();
       else render();
       initRealtime();
-      // Focus search
       setTimeout(function(){
         var s = document.getElementById('cw-search');
         if (s) s.focus();
@@ -262,14 +311,12 @@
     _onSearch: function(v) { CW.search = v; render(); }
   };
 
-  // Auto-inject on DOM ready
   function boot() {
-    // Don't inject on the contacts.html page itself (redundant) or on login/onboarding flows
     var path = window.location.pathname.toLowerCase();
     if (path.indexOf('contacts.html') !== -1) return;
     if (path.indexOf('onboarding.html') !== -1) return;
     if (path.indexOf('sign_noncompete.html') !== -1) return;
-    if (path.indexOf('sales_app.html') !== -1) return; // tech PWA, keep clean
+    if (path.indexOf('sales_app.html') !== -1) return;
     injectStyle();
     injectUI();
   }
