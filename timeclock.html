@@ -1449,19 +1449,24 @@ async function checkClockInCelebration(u) {
   try {
     var today = new Date();
     var todayStr = today.toISOString().split('T')[0];
-    // Already celebrated this year?
     var bdayKey = 'jg_bday_celebrated_' + today.getFullYear();
     var annKey  = 'jg_ann_celebrated_'  + today.getFullYear();
-    var email   = u ? u.email : (TC.user ? TC.user.email : '');
-    if (!email) return;
 
-    var cr = await fetch(SB_URL + '/rest/v1/employees?email=eq.' + encodeURIComponent(email) + '&select=name,birthday,start_date', {
-      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
-    });
-    if (!cr.ok) return;
-    var cd = await cr.json();
-    if (!cd || !cd[0]) return;
-    var emp = cd[0];
+    // Use TC.employee if available, otherwise fetch
+    var emp = null;
+    if (TC.employee && (TC.employee.birthday || TC.employee.start_date)) {
+      emp = TC.employee;
+    } else {
+      var email = u ? u.email : '';
+      if (!email) return;
+      var cr = await fetch(SB_URL + '/rest/v1/employees?email=eq.' + encodeURIComponent(email) + '&select=name,birthday,start_date', {
+        headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+      });
+      if (!cr.ok) return;
+      var cd = await cr.json();
+      if (!cd || !cd[0]) return;
+      emp = cd[0];
+    }
 
     // Birthday — fire if today >= birthday month/day and not yet celebrated this year
     if (emp.birthday && !localStorage.getItem(bdayKey)) {
@@ -1533,7 +1538,7 @@ async function clockIn() {
     startPinging();
     logActivity('Clock In', 'Clocked in — Job: ' + (TC.selectedJob ? TC.selectedJob.name : 'None'), 'time_clock');
     // Birthday & anniversary — fire on first clock-in on or after the date
-    checkClockInCelebration(u);
+    checkClockInCelebration(TC.user);
 
     // 7:30 rule check
     var nowDt = new Date();
