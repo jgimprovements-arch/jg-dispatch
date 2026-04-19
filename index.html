@@ -688,14 +688,20 @@ function getBoardStatePayload(){
   // Build jobNames lookup so timeclock can display proper job names
   const jobNames = {};
   Object.keys(jobs).forEach(function(jid){ if(jobs[jid]) jobNames[jid] = jobs[jid].name; });
-  // NOTE: unassigned pool intentionally NOT saved — it causes auto-population bug on restore
+  // Save unassigned pool (v2) — only include valid job IDs to avoid auto-population issues
+  const unassignedOut = {};
+  for(const l of ['appleton','stevens']){
+    unassignedOut[l] = (unassigned[l]||[]).filter(jid => jobs[jid]);
+  }
   return {
     assignments,
+    unassigned: unassignedOut,
     jobNames,
     sick: [...sick],
     overrides: jobOverrides,
     startTimes: {...techStartTimes},
-    savedBy: 'dispatch-board-' + (window._myBoardId||'')
+    savedBy: 'dispatch-board-' + (window._myBoardId||''),
+    schemaVersion: 2
   };
 }
 
@@ -722,16 +728,26 @@ function saveBoardState(){
       localStorage.setItem('jg_board_state_v1', JSON.stringify(stateWithDate));
     }catch(e){}
     updateSyncBadge(Date.now());
-  }, 1000);
+  }, 250);
 }
 
 function updateSyncBadge(ts){
   const badge = document.getElementById('sync-badge');
-  if(badge){
-    const t = new Date(ts).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'});
-    badge.textContent = '🔄 Synced ' + t;
-  }
+  if(!badge) return;
+  badge._lastTs = ts;
+  const age = Math.floor((Date.now() - ts) / 1000);
+  let color = '#2e7d32'; // green
+  let label = 'Live';
+  if(age > 30) { color = '#b06a00'; label = age + 's old'; }
+  if(age > 120) { color = '#c02020'; label = Math.floor(age/60) + 'm stale — refresh'; }
+  badge.innerHTML = '<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:'+color+';margin-right:5px;vertical-align:1px;"></span>' + label;
+  badge.title = 'Last sync: ' + new Date(ts).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',second:'2-digit'});
 }
+// Update badge every 10s so age reflects reality even without new syncs
+setInterval(function(){
+  const badge = document.getElementById('sync-badge');
+  if(badge && badge._lastTs) updateSyncBadge(badge._lastTs);
+}, 10000);
 
 function restoreBoardStateLocal(){
   // Instantly restore from localStorage — no network wait
@@ -1076,13 +1092,15 @@ async function refreshAll(){
 function markSick(nm){
   logActivity('Tech Marked Out', nm + ' marked out of dispatch', 'dispatch', nm);
   sick.add(nm);
+  markLaneChanged(loc, nm);
   const orphans=(techQ[loc][nm]?.jobs||[]).filter(jid=>
     !Object.entries(techQ[loc]).some(([n,t])=>n!==nm&&t.jobs.includes(jid)));
   render();
+  saveBoardState();
   if(orphans.length)triggerAI(nm,orphans);
   else showToast(nm.split(' ')[0]+' marked out — jobs already covered');
 }
-function undoSick(nm){sick.delete(nm);closeAI();render();showToast(nm.split(' ')[0]+' restored');}
+function undoSick(nm){sick.delete(nm);markLaneChanged(loc, nm);closeAI();render();saveBoardState();showToast(nm.split(' ')[0]+' restored');}
 
 async function triggerAI(sickNm,orphans){
   const key=getAnthKey(); if(!key)return;
@@ -1526,11 +1544,14 @@ function renderPool(){
     e.preventDefault();pool.classList.remove('drag-over');
     if(!dragJob||dragPool)return;
     if(dragSrc&&techQ[loc][dragSrc]){
+      markLaneChanged(loc, dragSrc);
+      markLaneChanged(loc, null); // pool was also changed
       techQ[loc][dragSrc].jobs=techQ[loc][dragSrc].jobs.filter(j=>j!==dragJob);
       const still=Object.values(techQ[loc]).some(t=>t.jobs.includes(dragJob));
       if(!still&&!unassigned[loc].includes(dragJob))unassigned[loc].push(dragJob);
     }
     showToast('Removed from '+dragSrc?.split(' ')[0]);render();
+    saveBoardState();
   });
   // Sort newest first (highest job number = newest)
   const sortFn=(a,b)=>{
@@ -1584,6 +1605,10 @@ function onDD(e){
   const tT=body.dataset.tech;if(!dragJob||!tT)return;
   if(sick.has(tT)){showToast(tT.split(' ')[0]+' is out');return;}
   const isReorder=dragSrc===tT;
+  // Mark destination lane as locally-edited (and source lane too if different)
+  markLaneChanged(loc, tT);
+  if(dragSrc && dragSrc !== tT) markLaneChanged(loc, dragSrc);
+  if(dragPool) markLaneChanged(loc, null);
   if(isReorder)techQ[loc][tT].jobs=techQ[loc][tT].jobs.filter(j=>j!==dragJob);
   else if(dragPool)unassigned[loc]=unassigned[loc].filter(j=>j!==dragJob);
   const curJobs=techQ[loc][tT].jobs.filter(j=>j!==dragJob);
@@ -1597,6 +1622,7 @@ function onDD(e){
   else if(dragPool)showToast((j?.name||dragJob)+' → '+tT.split(' ')[0]);
   else showToast((j?.name||dragJob)+' also on '+tT.split(' ')[0]+' (team job)');
   render();
+  saveBoardState();
 }
 
 // ── HELPERS ───────────────────────────────
@@ -2440,6 +2466,10 @@ function onDDCross(e, nm, otherLoc){
   if(!dragJob) return;
   const tech = techQ[otherLoc]?.[nm];
   if(!tech) return;
+  // Mark both source and destination lanes as locally edited
+  markLaneChanged(otherLoc, nm);
+  if(dragSrc) markLaneChanged(loc, dragSrc);
+  if(dragPool) markLaneChanged(loc, null);
   // Remove from source
   if(dragSrc && techQ[loc]?.[dragSrc]){
     techQ[loc][dragSrc].jobs = techQ[loc][dragSrc].jobs.filter(j=>j!==dragJob);
@@ -2449,6 +2479,7 @@ function onDDCross(e, nm, otherLoc){
   if(!tech.jobs.includes(dragJob)) tech.jobs.push(dragJob);
   showToast(jobs[dragJob]?.name+' → '+nm.split(' ')[0]);
   render();
+  saveBoardState();
 }
 
 async function pushOneCrossLoc(nm, otherLoc){
@@ -2460,7 +2491,21 @@ async function pushOneCrossLoc(nm, otherLoc){
 
 // ── TIME OVERRIDES ───────────────────────
 let jobOverrides = {}; // key: "techName|jobId" → {start:"HH:MM", end:"HH:MM"}
-let lastLocalChange = 0; // timestamp of last local drag/edit
+let lastLocalChange = 0; // timestamp of last local drag/edit (legacy global)
+// Per-lane change tracking — keys are "market|techName" and "market|__pool"
+// Enables merge-remote-changes to skip only lanes currently being edited.
+let laneLocalChange = {};
+const LANE_LOCAL_WINDOW = 400; // ms — how long to ignore remote updates for a locally-edited lane
+function markLaneChanged(market, tech){
+  const key = market + '|' + (tech || '__pool');
+  laneLocalChange[key] = Date.now();
+  lastLocalChange = Date.now(); // keep legacy global in sync
+}
+function isLaneFresh(market, tech){
+  const key = market + '|' + (tech || '__pool');
+  const t = laneLocalChange[key] || 0;
+  return Date.now() - t < LANE_LOCAL_WINDOW;
+}
 // Unique ID for this browser session — used to identify remote vs local saves
 window._myBoardId = Math.random().toString(36).slice(2,8);
 let timeModalTech = null;
@@ -2527,50 +2572,83 @@ function clearTimeOverride(){
 // ── SHARED STATE SYNC ────────────────────
 let lastSyncTs = 0;
 
+/**
+ * Merge remote board_state into local state per-lane.
+ * - Skips lanes that were locally edited in the last LANE_LOCAL_WINDOW ms
+ * - Merges unassigned pool (v2 schema) if present
+ * - Returns {changed, skipped} counts so caller can decide whether to re-render/toast
+ */
+function mergeRemoteState(state){
+  var result = { changed: 0, skipped: 0, who: state.savedBy || 'another user' };
+  for(const l of ['appleton','stevens']){
+    // Merge tech lane assignments
+    const remoteTechs = state.assignments?.[l] || {};
+    for(const [nm, jids] of Object.entries(remoteTechs)){
+      if(!techQ[l]?.[nm]) continue;
+      if(isLaneFresh(l, nm)){ result.skipped++; continue; }
+      const validJids = jids.filter(jid=>jobs[jid]);
+      const current = JSON.stringify(techQ[l][nm].jobs);
+      const incoming = JSON.stringify(validJids);
+      if(current !== incoming){
+        techQ[l][nm].jobs = validJids;
+        // Any job we just placed on a tech should no longer be in the pool
+        unassigned[l] = (unassigned[l]||[]).filter(jid=>!validJids.includes(jid));
+        result.changed++;
+      }
+    }
+    // Clear local techs that no longer have assignments in remote (unless that lane is locally fresh)
+    for(const nm of Object.keys(techQ[l]||{})){
+      if(isLaneFresh(l, nm)) continue;
+      if(!remoteTechs[nm] && techQ[l][nm].jobs.length){
+        // Return their jobs to the pool (remote will tell us if they're truly unassigned)
+        techQ[l][nm].jobs.forEach(jid=>{
+          if(!(unassigned[l]||[]).includes(jid)) (unassigned[l]=unassigned[l]||[]).push(jid);
+        });
+        techQ[l][nm].jobs = [];
+        result.changed++;
+      }
+    }
+    // Merge unassigned pool (v2 schema — older saves won't have it)
+    if(state.unassigned && state.unassigned[l] && !isLaneFresh(l, null)){
+      const remotePool = state.unassigned[l].filter(jid=>jobs[jid]);
+      // A job should be in the pool only if it's not assigned to any tech
+      const allAssigned = new Set();
+      for(const [nm, tech] of Object.entries(techQ[l]||{})){
+        tech.jobs.forEach(jid=>allAssigned.add(jid));
+      }
+      const mergedPool = remotePool.filter(jid=>!allAssigned.has(jid));
+      const curPoolStr = JSON.stringify([...(unassigned[l]||[])].sort());
+      const newPoolStr = JSON.stringify([...mergedPool].sort());
+      if(curPoolStr !== newPoolStr){
+        unassigned[l] = mergedPool;
+        result.changed++;
+      }
+    }
+  }
+  // Sick flags are additive — always accept remote sicks
+  if(state.sick) state.sick.forEach(nm=>sick.add(nm));
+  return result;
+}
+
 async function pollSharedState(){
   try{
     const r = await sbFetch('/rest/v1/board_state?id=eq.current&select=state,updated_at');
     if(!r.ok) return;
     const rows = await r.json();
     if(!rows.length || !rows[0].state) return;
-    const data = {state: rows[0].state};
-    if(!data.state) return;
-    // Only update if server state is newer than what we have
-    if(data.state.ts > lastSyncTs + 5000){
-      lastSyncTs = data.state.ts;
-      const today = new Date().toISOString().split('T')[0];
-      if(data.state.date !== today){ updateSyncBadge(data.state.ts); return; }
-      // Only apply if from another user AND no local change in last 5 seconds
-      const fromOther = data.state.savedBy && data.state.savedBy !== 'dispatch-board-' + (window._myBoardId||'');
-      if(fromOther && Date.now() - lastLocalChange > 5000){
-        let changed = false;
-        for(const l of ['appleton','stevens']){
-          for(const [nm, jids] of Object.entries(data.state.assignments?.[l]||{})){
-            if(techQ[l]?.[nm]){
-              const validJids = jids.filter(jid=>jobs[jid]);
-              const current = JSON.stringify(techQ[l][nm].jobs);
-              const incoming = JSON.stringify(validJids);
-              if(current !== incoming){
-                techQ[l][nm].jobs = validJids;
-                unassigned[l] = (unassigned[l]||[]).filter(jid=>!validJids.includes(jid));
-                changed = true;
-              }
-            }
-          }
-          // Clear assignments for techs not in remote state (job was removed)
-          for(const nm of Object.keys(techQ[l]||{})){
-            if(!data.state.assignments?.[l]?.[nm] && techQ[l][nm].jobs.length){
-              unassigned[l] = [...(unassigned[l]||[]), ...techQ[l][nm].jobs.filter(jid=>!(unassigned[l]||[]).includes(jid))];
-              techQ[l][nm].jobs = [];
-              changed = true;
-            }
-          }
-        }
-        if(data.state.sick) data.state.sick.forEach(nm=>sick.add(nm));
-        if(changed){ render(); showToast('🔄 Board updated by ' + (data.state.savedBy||'another user')); }
-      }
-      updateSyncBadge(data.state.ts);
+    const state = rows[0].state;
+    if(!state.ts) return;
+    // Dedupe: don't re-apply the same snapshot
+    if(state.ts <= lastSyncTs) return;
+    lastSyncTs = state.ts;
+    const today = new Date().toISOString().split('T')[0];
+    if(state.date !== today){ updateSyncBadge(state.ts); return; }
+    const fromOther = state.savedBy && state.savedBy !== 'dispatch-board-' + (window._myBoardId||'');
+    if(fromOther){
+      const res = mergeRemoteState(state);
+      if(res.changed){ render(); showToast('🔄 Board updated'); }
     }
+    updateSyncBadge(state.ts);
   }catch(e){}
 }
 
@@ -2628,38 +2706,17 @@ function initRealtime() {
         if (!data || !data.state) return;
         var state = data.state;
         if (!state.ts) return;
-        if (state.ts === lastSyncTs) return;
+        if (state.ts <= lastSyncTs) return;
         lastSyncTs = state.ts;
         var today = new Date().toISOString().split('T')[0];
         if (state.date !== today) { updateSyncBadge(state.ts); return; }
-        // Only apply if from another user AND no local drag in last 5 seconds
         var fromOther = state.savedBy && state.savedBy !== 'dispatch-board-' + (window._myBoardId||'');
-        if (fromOther && Date.now() - lastLocalChange > 5000) {
-          var changed = false;
-          for (var l of ['appleton','stevens']) {
-            for (var [nm, jids] of Object.entries(state.assignments?.[l]||{})) {
-              if (techQ[l]?.[nm]) {
-                var validJids = jids.filter(function(jid){ return jobs[jid]; });
-                var current  = JSON.stringify(techQ[l][nm].jobs);
-                var incoming = JSON.stringify(validJids);
-                if (current !== incoming) {
-                  techQ[l][nm].jobs = validJids;
-                  unassigned[l] = (unassigned[l]||[]).filter(function(jid){ return !validJids.includes(jid); });
-                  changed = true;
-                }
-              }
-            }
-            // Clear techs that no longer have assignments in remote state
-            for (var rnm of Object.keys(techQ[l]||{})) {
-              if (!state.assignments?.[l]?.[rnm] && techQ[l][rnm].jobs.length) {
-                unassigned[l] = [...(unassigned[l]||[]), ...techQ[l][rnm].jobs.filter(function(jid){ return !(unassigned[l]||[]).includes(jid); })];
-                techQ[l][rnm].jobs = [];
-                changed = true;
-              }
-            }
+        if (fromOther) {
+          var res = mergeRemoteState(state);
+          if (res.changed) {
+            render();
+            showToast('🔄 Board updated' + (res.skipped ? ' (' + res.skipped + ' of your edits preserved)' : ''));
           }
-          if (state.sick) state.sick.forEach(function(nm){ sick.add(nm); });
-          if (changed) { render(); showToast('🔄 Board updated by ' + (state.savedBy||'another user')); }
         }
         updateSyncBadge(state.ts);
       })
@@ -2727,7 +2784,8 @@ function setJobTime(nm, jid, newStart, newEnd){
     start: newStart !== null ? newStart : cur.start,
     end:   newEnd   !== null ? newEnd   : cur.end
   };
-  lastLocalChange = Date.now();
+  const techLoc = Object.keys(techQ.appleton||{}).includes(nm) ? 'appleton' : 'stevens';
+  markLaneChanged(techLoc, nm);
   saveBoardState();
 }
 
@@ -2759,11 +2817,10 @@ function setTechStart(nm, timeStr){
   }
 
   lastLocalChange = Date.now();
+  markLaneChanged(techLoc, nm);
   saveBoardState();
   render();
-}
-
-function getTechStart(nm){
+}function getTechStart(nm){
   return techStartTimes[nm] !== undefined ? techStartTimes[nm] : START;
 }
 
@@ -2824,6 +2881,7 @@ function onCardDrop(e, nm, jid){
   if(fromIdx === -1 || toIdx === -1) return;
   jobs.splice(fromIdx, 1);
   jobs.splice(toIdx, 0, reorderSrc);
+  markLaneChanged(techLoc, nm);
   reorderSrc = null; reorderTech = null;
   saveBoardState();
   render();
@@ -2950,7 +3008,8 @@ function renderTimelineLane(body, nm, tech){
         const cs = parseFloat(card.dataset.startHr);
         const ce = parseFloat(card.dataset.endHr);
         jobOverrides[nm+'|'+jid] = {start:decToTime(cs), end:decToTime(ce)};
-        lastLocalChange = Date.now();
+        const tlLoc = Object.keys(techQ.appleton||{}).includes(nm) ? 'appleton' : 'stevens';
+        markLaneChanged(tlLoc, nm);
         saveBoardState();
         document.removeEventListener('mousemove', onMove);
         document.removeEventListener('mouseup', onUp);
@@ -2981,7 +3040,8 @@ function renderTimelineLane(body, nm, tech){
         const cs = parseFloat(card.dataset.startHr);
         const ce = parseFloat(card.dataset.endHr);
         jobOverrides[nm+'|'+jid] = {start:decToTime(cs), end:decToTime(ce)};
-        lastLocalChange = Date.now();
+        const tlLoc = Object.keys(techQ.appleton||{}).includes(nm) ? 'appleton' : 'stevens';
+        markLaneChanged(tlLoc, nm);
         saveBoardState();
         document.removeEventListener('mousemove', onMove);
         document.removeEventListener('mouseup', onUp);
