@@ -433,8 +433,6 @@ body{
 /* Body offset — collapsed width only */
 body{padding-left:48px;box-sizing:border-box;}
 * {box-sizing:border-box;}
-.hub-app-row{display:flex;align-items:center;gap:10px;padding:8px 12px;border-radius:8px;border:1px solid rgba(13,45,94,.1);background:#fff;text-decoration:none;color:#0d1f3c;transition:background .12s;}
-.hub-app-row:hover{background:rgba(13,45,94,.05);}
 </style>
 </head>
 <body>
@@ -467,9 +465,6 @@ body{padding-left:48px;box-sizing:border-box;}
   <a href="qa.html" class="sb-lnk "><span class="sb-icon">🔍</span><span class="sb-label">QA Review</span></a>
   <a href="adjuster.html" class="sb-lnk "><span class="sb-icon">⚖️</span><span class="sb-label">Adjuster Rebuttal</span></a>
   <a href="recon.html" class="sb-lnk "><span class="sb-icon">🏗️</span><span class="sb-label">Recon Estimate</span></a>
-  <div class="sb-sec">TIME</div>
-  <a href="timeclock_admin.html" class="sb-lnk"><span class="sb-icon">⏱</span><span class="sb-label">Time Admin</span></a>
-  <a href="timeclock.html" class="sb-lnk"><span class="sb-icon">⏰</span><span class="sb-label">Time Clock</span></a>
   <div class="sb-sec">TIME</div>
   <a href="timeclock_admin.html" class="sb-lnk"><span class="sb-icon">⏱</span><span class="sb-label">Time Admin</span></a>
   <a href="timeclock.html" class="sb-lnk"><span class="sb-icon">⏰</span><span class="sb-label">Time Clock</span></a>
@@ -515,7 +510,7 @@ body{padding-left:48px;box-sizing:border-box;}
       <div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;">Your Apps</div>
       <div id="hub-role-badge" style="font-size:11px;font-weight:700;padding:3px 10px;background:rgba(13,45,94,.08);border-radius:20px;color:var(--navy);"></div>
     </div>
-    <div id="app-grid" style="margin-bottom:24px;"></div>
+    <div id="app-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:14px;margin-bottom:24px;"></div>
     <!-- Legacy cards hidden — replaced by dynamic grid -->
     <div style="display:none;">
     <a href="index.html" class="app-card card-dispatch">
@@ -786,48 +781,61 @@ async function initHub(u) {
   setInterval(loadStats, 60000);
 }
 
-var APP_GROUPS = [
-  { label:'Operations', apps:[
-    { key:'dispatch',        icon:'📋', label:'Dispatch Board',   url:'index.html' },
-    { key:'timeclock_admin', icon:'⏱', label:'Time Admin',        url:'timeclock_admin.html' },
-    { key:'timeclock',       icon:'⏰', label:'Time Clock',        url:'timeclock.html' },
-  ]},
-  { label:'Sales', apps:[
-    { key:'sales',           icon:'📈', label:'Sales Dashboard',  url:'sales.html' },
-    { key:'sales_admin',     icon:'🔐', label:'Sales Admin',       url:'sales_admin.html' },
-  ]},
-  { label:'AI Tools', apps:[
-    { key:'qa',              icon:'🔍', label:'QA Review',         url:'qa.html' },
-    { key:'adjuster',        icon:'⚖️', label:'Adjuster Rebuttal', url:'adjuster.html' },
-    { key:'recon',           icon:'🏗️', label:'Recon Estimate',    url:'recon.html' },
-    { key:'intelligence',    icon:'🧠', label:'Adjuster Intel',    url:'intelligence.html' },
-  ]},
-];
+async function loadAccessSettings() {
+  try {
+    var r = await fetch(SB_URL + '/rest/v1/access_settings?id=eq.current&select=settings', {
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+    });
+    if (r.ok) {
+      var rows = await r.json();
+      if (rows && rows[0] && rows[0].settings) {
+        localStorage.setItem('jg_access_settings', JSON.stringify(rows[0].settings));
+        return rows[0].settings;
+      }
+    }
+  } catch(e) {}
+  try { var ls = localStorage.getItem('jg_access_settings'); if (ls) return JSON.parse(ls); } catch(e) {}
+  return {
+    dispatch:       ['Project Manager','Estimator','Office','Admin'],
+    sales:          ['Project Manager','Estimator','Office','Admin'],
+    sales_admin:    ['Admin'],
+    timeclock:      ['Technician','Project Manager','Estimator','Office','Admin'],
+    timeclock_admin:['Office','Admin'],
+    qa:             ['Project Manager','Estimator','Office','Admin'],
+    adjuster:       ['Project Manager','Estimator','Office','Admin'],
+    recon:          ['Project Manager','Estimator','Admin'],
+    intelligence:   ['Project Manager','Estimator','Office','Admin']
+  };
+}
 
-function renderHub(role) {
-  var allowed = ROLE_ACCESS[role] || ROLE_ACCESS['Technician'];
+async function renderHub(role) {
+  var settings = await loadAccessSettings();
+  var empId = _currentEmployee ? _currentEmployee.id : null;
+
+  function isAllowed(pageKey) {
+    if (empId && (settings['_deny_'+empId]||[]).includes(pageKey)) return false;
+    if (empId && (settings['_emp_'+empId]||[]).includes(pageKey)) return true;
+    return (settings[pageKey] || ROLE_ACCESS[role] || []).includes(role);
+  }
+
   var grid = document.getElementById('app-grid');
   if (!grid) return;
 
-  var html = '<div style="display:flex;gap:32px;flex-wrap:wrap;align-items:flex-start;">';
-  APP_GROUPS.forEach(function(group) {
-    var visible = group.apps.filter(function(a){ return allowed.includes(a.key); });
-    if (!visible.length) return;
-    html += '<div style="flex:1;min-width:150px;">';
-    html += '<p style="font-size:11px;color:#6b7a96;text-transform:uppercase;letter-spacing:.06em;font-weight:700;margin:0 0 8px;">' + group.label + '</p>';
-    html += '<div style="display:flex;flex-direction:column;gap:3px;">';
-    visible.forEach(function(app) {
-      html += '<a href="' + app.url + '" class="hub-app-row">' +
-        '<span style="font-size:15px;width:20px;text-align:center;flex-shrink:0;">' + app.icon + '</span>' +
-        '<span style="font-size:13px;font-weight:600;">' + app.label + '</span>' +
-        '</a>';
-    });
-    html += '</div></div>';
-  });
-  html += '</div>';
+  var allowed = Object.keys(APP_CONFIG).filter(isAllowed);
 
-  grid.style.display = 'block';
-  grid.innerHTML = html;
+  grid.innerHTML = allowed.map(function(key) {
+    var app = APP_CONFIG[key];
+    if (!app) return '';
+    return '<a href="' + app.url + '" class="app-card" style="--card-accent:' + app.color + ';text-decoration:none;">' +
+      '<div class="app-card-header">' +
+        '<div class="app-icon" style="background:rgba(0,0,0,.06);font-size:24px;width:48px;height:48px;border-radius:12px;display:flex;align-items:center;justify-content:center;">' + app.icon + '</div>' +
+        '<div class="app-status live">Live</div>' +
+      '</div>' +
+      '<div class="app-name">' + app.label + '</div>' +
+      '<div class="app-desc">' + app.desc + '</div>' +
+      '<div class="app-cta"><span class="app-cta-btn">Open →</span></div>' +
+    '</a>';
+  }).join('');
 
   var roleBadge = document.getElementById('hub-role-badge');
   if (roleBadge) roleBadge.textContent = role;
