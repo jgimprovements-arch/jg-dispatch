@@ -2712,6 +2712,239 @@ async function logActivity(action, detail, category, employeeName) {
 var _archiveData = null;  // cached list of archive records
 var _archiveFilter = { employee: 'All', year: 'All', search: '' };
 
+// ── COMMISSION PREVIEW (from Albi closed jobs) ─────────────────────────
+// State for the preview panel
+var _commPreviewData = null;  // cached Albi closed jobs with salesperson
+var _commPreviewLoading = false;
+var _commPreviewFilter = { days: 30 };  // lookback window
+
+// Build the preview HTML block. Called from renderCommissions.
+function _renderCommissionPreview(isAdminUser, myName) {
+  var h = '';
+  h += '<div class="card" style="margin-bottom:16px;border:2px solid rgba(232,93,4,.3);">';
+  h += '<div class="card-hdr" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;background:linear-gradient(135deg,rgba(232,93,4,.06),rgba(232,93,4,.02));">';
+  h += '<div class="card-title" style="color:var(--orange);">🔮 Upcoming Pay — Closed Jobs from Albi</div>';
+  h += '<div style="display:flex;gap:8px;align-items:center;">';
+  h += '<select class="form-select" onchange="_commPreviewFilter.days=parseInt(this.value);_commPreviewData=null;renderCommissions();" style="font-size:12px;padding:6px 10px;">';
+  [7, 14, 30, 60, 90].forEach(function(d){
+    h += '<option value="'+d+'"'+(_commPreviewFilter.days===d?' selected':'')+'>Last '+d+' days</option>';
+  });
+  h += '</select>';
+  h += '<button class="btn btn-sm" onclick="_loadCommPreview(true)">↻ Refresh</button>';
+  h += '</div>';
+  h += '</div>';
+
+  if (_commPreviewLoading) {
+    h += '<div class="card-body"><div style="text-align:center;padding:30px;color:var(--muted);">Loading Albi jobs...</div></div>';
+    h += '</div>';
+    return h;
+  }
+
+  if (!_commPreviewData) {
+    // Trigger background load
+    _loadCommPreview();
+    h += '<div class="card-body"><div style="text-align:center;padding:30px;color:var(--muted);">Fetching closed jobs from Albi...</div></div>';
+    h += '</div>';
+    return h;
+  }
+
+  // Filter to lookback window + map Albi salesPerson to JG employees
+  var cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - _commPreviewFilter.days);
+
+  var eligible = _commPreviewData.filter(function(j) {
+    if (!j.closedBoolean) return false;
+    if (!j.salesPerson) return false;  // no rep assigned, skip
+    var d = j.closedDate ? new Date(j.closedDate) : null;
+    if (!d || isNaN(d.getTime())) return false;
+    return d >= cutoff;
+  });
+
+  // Map to JG employees — match on albi_salesperson_name OR employee name
+  eligible = eligible.map(function(j) {
+    var matched = ST.employees.find(function(e) {
+      var albiName = (e.albi_salesperson_name || e.name || '').trim().toLowerCase();
+      var jobName = (j.salesPerson || '').trim().toLowerCase();
+      return albiName && jobName && albiName === jobName;
+    });
+    return Object.assign({}, j, {
+      matchedEmployee: matched || null,
+      // Check if this job was already converted to a commission entry (by matching job_id)
+      alreadyConverted: (ST.commissions || []).some(function(c) { return c.job_id === j.id; })
+    });
+  });
+
+  // Filter to what the current user can see
+  if (!isAdminUser) {
+    eligible = eligible.filter(function(j) {
+      return j.matchedEmployee && j.matchedEmployee.name === myName;
+    });
+  }
+
+  if (!eligible.length) {
+    h += '<div class="card-body">';
+    h += '<div style="text-align:center;padding:24px;color:var(--muted);font-size:12px;">';
+    h += 'No closed Albi jobs with a salesperson assignment in the last ' + _commPreviewFilter.days + ' days';
+    if (!isAdminUser) h += ' attributed to you';
+    h += '.<br><span style="font-size:11px;margin-top:6px;display:block;">Make sure Albi has the Sales Person field populated on closed jobs.</span>';
+    h += '</div></div></div>';
+    return h;
+  }
+
+  // Summary: count matched, count unmatched, total potential commission
+  var matchedJobs = eligible.filter(function(j){ return j.matchedEmployee; });
+  var unmatchedJobs = eligible.filter(function(j){ return !j.matchedEmployee; });
+  var alreadyConvertedCount = eligible.filter(function(j){ return j.alreadyConverted; }).length;
+
+  var totalPotentialCommission = matchedJobs
+    .filter(function(j){ return !j.alreadyConverted && j.matchedEmployee.default_commission_rate; })
+    .reduce(function(s, j) {
+      var rev = parseFloat(j.actualRevenue || j.estimatedRevenue || 0);
+      var rate = parseFloat(j.matchedEmployee.default_commission_rate || 0);
+      return s + (rev * rate / 100);
+    }, 0);
+
+  h += '<div class="card-body">';
+
+  // Stat strip
+  h += '<div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:12px;font-size:11px;">';
+  h += '<div style="background:rgba(46,125,50,.08);padding:6px 12px;border-radius:6px;"><strong style="color:#2e7d32;">'+matchedJobs.length+'</strong> matched to JG rep</div>';
+  if (isAdminUser && unmatchedJobs.length) {
+    h += '<div style="background:rgba(198,40,40,.08);padding:6px 12px;border-radius:6px;"><strong style="color:#c62828;">'+unmatchedJobs.length+'</strong> unmatched <span style="color:var(--muted);">(rep name doesn\'t match)</span></div>';
+  }
+  if (alreadyConvertedCount) {
+    h += '<div style="background:rgba(13,45,94,.08);padding:6px 12px;border-radius:6px;"><strong style="color:var(--navy);">'+alreadyConvertedCount+'</strong> already in ledger</div>';
+  }
+  if (totalPotentialCommission > 0) {
+    h += '<div style="margin-left:auto;background:rgba(232,93,4,.1);padding:6px 12px;border-radius:6px;"><span style="color:var(--muted);">Est. unpaid liability:</span> <strong style="color:var(--orange);">$'+totalPotentialCommission.toFixed(2)+'</strong></div>';
+  }
+  h += '</div>';
+
+  // Table
+  h += '<table class="tc-table" style="font-size:12px;"><thead><tr>';
+  h += '<th>Job</th>';
+  h += '<th>Closed</th>';
+  h += '<th>Rep</th>';
+  h += '<th style="text-align:right;">Revenue</th>';
+  h += '<th style="text-align:right;">Est. Commission</th>';
+  h += '<th></th>';
+  h += '</tr></thead><tbody>';
+
+  // Sort: already converted last, then by closed date desc
+  eligible.sort(function(a,b) {
+    if (a.alreadyConverted !== b.alreadyConverted) return a.alreadyConverted ? 1 : -1;
+    return new Date(b.closedDate) - new Date(a.closedDate);
+  });
+
+  eligible.forEach(function(j, idx) {
+    var closedD = new Date(j.closedDate);
+    var closedStr = closedD.toLocaleDateString('en-US',{month:'numeric',day:'numeric',year:'2-digit'});
+    var revenue = parseFloat(j.actualRevenue || j.estimatedRevenue || 0);
+    var revenueLabel = j.actualRevenue ? '$'+revenue.toFixed(0) : (j.estimatedRevenue ? '<span style="color:var(--muted);">est $'+revenue.toFixed(0)+'</span>' : '<span style="color:var(--muted);font-style:italic;">no revenue</span>');
+
+    var repCell;
+    var estCommCell = '<span style="color:var(--muted);">—</span>';
+    var actionCell;
+
+    if (j.matchedEmployee) {
+      repCell = '<strong style="color:var(--navy);">'+j.matchedEmployee.name+'</strong>';
+      var rate = parseFloat(j.matchedEmployee.default_commission_rate || 0);
+      if (rate > 0 && revenue > 0) {
+        var est = revenue * rate / 100;
+        estCommCell = '<strong style="color:var(--orange);">$'+est.toFixed(2)+'</strong> <span style="color:var(--muted);font-size:10px;">('+rate+'%)</span>';
+      } else if (!rate) {
+        estCommCell = '<span style="color:var(--muted);font-size:11px;">no rate set</span>';
+      }
+    } else {
+      repCell = '<span style="color:#c62828;">'+j.salesPerson+'</span> <span style="color:var(--muted);font-size:10px;">(no JG match)</span>';
+    }
+
+    if (j.alreadyConverted) {
+      actionCell = '<span style="color:var(--muted);font-size:11px;">✓ In ledger</span>';
+    } else if (j.matchedEmployee && canEdit) {
+      actionCell = '<button class="btn btn-sm" onclick="_convertJobToCommission('+idx+')" style="background:var(--orange);color:#fff;border-color:var(--orange);font-size:11px;">→ Add</button>';
+    } else if (!j.matchedEmployee && isAdminUser) {
+      actionCell = '<span style="color:var(--muted);font-size:10px;">Set Albi name<br>on employee</span>';
+    } else {
+      actionCell = '';
+    }
+
+    h += '<tr'+(j.alreadyConverted?' style="opacity:.55;"':'')+'>';
+    h += '<td><strong>'+j.name+'</strong><div style="font-size:10px;color:var(--muted);">'+(j.customerName||'')+(j.projectType?' • '+j.projectType:'')+'</div></td>';
+    h += '<td style="font-size:11px;white-space:nowrap;">'+closedStr+'</td>';
+    h += '<td>'+repCell+'</td>';
+    h += '<td style="text-align:right;white-space:nowrap;">'+revenueLabel+'</td>';
+    h += '<td style="text-align:right;white-space:nowrap;">'+estCommCell+'</td>';
+    h += '<td>'+actionCell+'</td>';
+    h += '</tr>';
+  });
+  h += '</tbody></table>';
+
+  // Tip if there are unmatched jobs
+  if (isAdminUser && unmatchedJobs.length) {
+    var unmatchedNames = [...new Set(unmatchedJobs.map(function(j){ return j.salesPerson; }))].join(', ');
+    h += '<div style="margin-top:10px;padding:8px 12px;background:rgba(198,40,40,.05);border-left:3px solid #c62828;font-size:11px;color:var(--muted);">';
+    h += '<strong style="color:#c62828;">Unmatched rep names in Albi:</strong> ' + unmatchedNames + '. Edit the employee record and set their "Albi Salesperson Name" field to fix matching.';
+    h += '</div>';
+  }
+
+  h += '</div></div>';
+
+  // Store filtered list for action callbacks
+  window._commPreviewEligible = eligible;
+
+  return h;
+}
+
+async function _loadCommPreview(forceRefresh) {
+  if (_commPreviewLoading) return;
+  _commPreviewLoading = true;
+  if (forceRefresh) _albiJobs = null;  // force refresh of entire cache
+  try {
+    await ensureAlbiJobsLoaded();
+    _commPreviewData = _albiJobs || [];
+  } catch(err) {
+    console.warn('Albi preview load failed:', err);
+    _commPreviewData = [];
+  }
+  _commPreviewLoading = false;
+  if (ST.tab === 'commissions') renderCommissions();
+}
+
+function _convertJobToCommission(idx) {
+  var j = (window._commPreviewEligible || [])[idx];
+  if (!j || !j.matchedEmployee) return;
+
+  // Pre-fill the commission modal with job data
+  openCommissionModal();
+
+  // Wait a tick for modal to render, then populate
+  setTimeout(function() {
+    var empSel = document.getElementById('comm-emp');
+    var typeSel = document.getElementById('comm-type');
+    var jobIdEl = document.getElementById('comm-job-id');
+    var jobNameEl = document.getElementById('comm-job-name');
+    var jobSearchEl = document.getElementById('comm-job-search');
+    var revEl = document.getElementById('comm-revenue');
+    var rateEl = document.getElementById('comm-rate');
+    var amtEl = document.getElementById('comm-amount');
+    var descEl = document.getElementById('comm-desc');
+
+    if (empSel) empSel.value = j.matchedEmployee.name;
+    if (typeSel) { typeSel.value = 'commission'; _commTypeChanged(); }
+    if (jobIdEl) jobIdEl.value = j.id;
+    if (jobNameEl) jobNameEl.value = j.name;
+    if (jobSearchEl) jobSearchEl.value = j.name;
+
+    var revenue = parseFloat(j.actualRevenue || j.estimatedRevenue || 0);
+    var rate = parseFloat(j.matchedEmployee.default_commission_rate || 0);
+    if (revEl) revEl.value = revenue > 0 ? revenue.toFixed(2) : '';
+    if (rateEl) rateEl.value = rate > 0 ? rate : '';
+    if (revenue > 0 && rate > 0 && amtEl) amtEl.value = (revenue * rate / 100).toFixed(2);
+    if (descEl) descEl.value = 'Commission: '+j.name+' ('+(j.customerName||'')+')';
+  }, 50);
+}
+
 // ── COMMISSIONS TAB ──────────────────────────────────────────────────────
 // Manual entry ledger for commissions, bonuses, referrals, and spiffs.
 // Visibility: everyone sees their own; admins see all.
@@ -2774,6 +3007,12 @@ async function renderCommissions() {
   var grandTotal = pendingTotal + approvedTotal + paidTotal;
 
   var h = '';
+
+  // ─── UPCOMING PAY — Preview of jobs closed in Albi where salesPerson matches a JG employee ───
+  // Admins see all. Non-admins see only jobs attributed to them.
+  if (isAdminUser || canEdit || true) {  // keep available to all — they only see their own by name match
+    h += _renderCommissionPreview(isAdminUser, myName);
+  }
 
   // Header card
   h += '<div class="card" style="margin-bottom:16px;">';
@@ -4387,6 +4626,12 @@ function buildEmpForm(emp) {
     '<div><label class="form-label">Sick Days This Year</label><input class="form-input" id="emp-sick-count" type="number" step="1" value="'+(emp.sick_days_ytd||0)+'" placeholder="0" readonly style="background:rgba(13,45,94,.03);"></div>' +
     '</div>' +
     '<div style="font-size:11px;color:var(--muted);margin-top:4px;">Employee gets a warning when sick days reach the threshold. Auto-counted from absence records.</div>' +
+    '<div style="border-top:1px solid var(--border);margin:12px 0;padding-top:12px;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;">Commission / Sales</div>' +
+    '<div class="form-row">' +
+    '<div><label class="form-label">Default Commission Rate (% of actual revenue)</label><input class="form-input" id="emp-comm-rate" type="number" step="0.1" value="'+(emp.default_commission_rate||'')+'" placeholder="e.g. 5 for 5%"></div>' +
+    '<div><label class="form-label">Albi Salesperson Name</label><input class="form-input" id="emp-albi-sales-name" type="text" value="'+(emp.albi_salesperson_name||emp.name||'')+'" placeholder="Exact name from Albi"></div>' +
+    '</div>' +
+    '<div style="font-size:11px;color:var(--muted);margin-top:4px;">If the name in Albi differs from their JG name (e.g. "Rylan Reoh" vs "Rylan"), use the Albi name for matching. Leave rate blank if commissions are always case-by-case.</div>' +
     '<div class="form-row">' +
     '</div>';
 }
@@ -4411,6 +4656,8 @@ async function saveEmployee() {
     pto_hours_available: Math.max(0, (parseFloat((document.getElementById('emp-pto-total')||{}).value)||0) - (parseFloat((document.getElementById('emp-pto-used')||{}).value)||0)),
     pto_accrual_rate: parseFloat(document.getElementById('emp-pto-accrual').value) || 0,
     pto_notes: (document.getElementById('emp-pto-notes').value || '').trim(),
+    default_commission_rate: parseFloat((document.getElementById('emp-comm-rate')||{}).value) || null,
+    albi_salesperson_name: ((document.getElementById('emp-albi-sales-name')||{}).value || '').trim() || null,
     paychex_id: (((document.getElementById('emp-paychex-id')||{}).value) || ((document.getElementById('emp-paychex-id-sal')||{}).value) || '').trim() || null
   };
   if (!data.name || !data.email) { toast('Name and email are required'); return; }
@@ -4523,7 +4770,9 @@ async function editEntry(id) {
 
 var _albiJobs = null;
 
-// Standalone Albi load — safe to call from anywhere, caches globally
+// Standalone Albi load — safe to call from anywhere, caches globally.
+// Stores {id, name, market} for job pickers + {salesPerson, actualRevenue, closedBoolean, updatedAt, status, projectType}
+// for the commission preview feature. Existing consumers only use id/name/market so they're unaffected.
 async function ensureAlbiJobsLoaded() {
   if (_albiJobs) return _albiJobs;
   try {
@@ -4540,7 +4789,22 @@ async function ensureAlbiJobsLoaded() {
         var name = p.name || p.projectName || jid;
         var loc = (p.location || '').toString().toLowerCase();
         var market = (loc.includes('stevens') || loc.includes('point')) ? 'Stevens Point' : 'Appleton';
-        if (jid) allJobs.push({ id: jid, name: name, market: market });
+        if (jid) allJobs.push({
+          id: jid,
+          name: name,
+          market: market,
+          // Commission preview fields
+          salesPerson: p.salesPerson || null,
+          actualRevenue: p.actualRevenue || null,
+          estimatedRevenue: p.estimatedRevenue || null,
+          closedBoolean: p.closedBoolean === true,
+          status: p.status || null,
+          projectType: p.projectType || null,
+          updatedAt: p.updatedAt || null,
+          closedDate: p.statusDate || p.updatedAt || null,  // best-effort close date proxy
+          customerName: p.customerName || null,
+          url: p.url || null
+        });
       });
       if (items.length < 50) break;
       page++;
