@@ -35,9 +35,14 @@
   function clearErr(){ showErr(''); }
 
   async function checkEmployee(email){
-    // Returns the employee record if they exist AND active, else null
+    // Returns the employee record if they exist AND active, else null.
+    // Checks BOTH `email` (work/company) and `personal_email` columns so
+    // employees can sign in with either their JG address or personal Gmail.
     try {
-      var r = await fetch(SB_URL + '/rest/v1/employees?email=eq.' + encodeURIComponent(email.toLowerCase()) + '&select=id,name,role,market,active,pending_approval', {
+      var e = encodeURIComponent(email.toLowerCase());
+      // PostgREST `or` filter matches either column
+      var filter = 'or=(email.eq.' + e + ',personal_email.eq.' + e + ')';
+      var r = await fetch(SB_URL + '/rest/v1/employees?' + filter + '&select=id,name,role,market,active,pending_approval,email,personal_email', {
         headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
       });
       if (!r.ok) return null;

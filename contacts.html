@@ -264,7 +264,7 @@ async function handleContact(ev, kind, value, label) {
 }
 
 // Tapping the whole contact row on mobile → pull up action menu (native-app feel)
-function rowTap(ev, phone, email, name) {
+function rowTap(ev, phone, email, personalEmail, name) {
   if (!IS_MOBILE) return; // desktop uses hover + click
   // If they clicked inside an action button, bail
   if (ev.target.closest('.contact-action')) return;
@@ -277,7 +277,11 @@ function rowTap(ev, phone, email, name) {
   }
   if (email) {
     opts.push({ label: '✉️  Email ' + email, action: function(){ handleContact(null,'email',email,'email'); } });
-    opts.push({ label: '📋  Copy email', action: async function(){ await copyToClipboard(email); showToast('📋 Copied ' + email); } });
+    opts.push({ label: '📋  Copy ' + email, action: async function(){ await copyToClipboard(email); showToast('📋 Copied ' + email); } });
+  }
+  if (personalEmail && personalEmail !== email) {
+    opts.push({ label: '✉️  Email ' + personalEmail + ' (personal)', action: function(){ handleContact(null,'email',personalEmail,'email'); } });
+    opts.push({ label: '📋  Copy ' + personalEmail, action: async function(){ await copyToClipboard(personalEmail); showToast('📋 Copied ' + personalEmail); } });
   }
   if (!opts.length) return;
   showActionSheet(name, opts);
@@ -321,7 +325,7 @@ function showActionSheet(title, options) {
 
 async function loadEmployees() {
   try {
-    var r = await fetch(SB_URL + '/rest/v1/employees?active=eq.true&select=id,name,email,phone,role,market&order=role.asc,name.asc', { headers: SB_HEADERS });
+    var r = await fetch(SB_URL + '/rest/v1/employees?active=eq.true&select=id,name,email,personal_email,phone,role,market&order=role.asc,name.asc', { headers: SB_HEADERS });
     if (!r.ok) throw new Error('HTTP ' + r.status);
     EMPLOYEES = await r.json();
     render();
@@ -341,6 +345,7 @@ function render() {
           || (e.role||'').toLowerCase().indexOf(q) !== -1
           || (e.market||'').toLowerCase().indexOf(q) !== -1
           || (e.email||'').toLowerCase().indexOf(q) !== -1
+          || (e.personal_email||'').toLowerCase().indexOf(q) !== -1
           || (e.phone||'').toLowerCase().indexOf(q) !== -1;
       })
     : EMPLOYEES;
@@ -382,9 +387,12 @@ function renderContact(e) {
   var phone = e.phone || '';
   var phoneFmt = phone ? formatPhone(phone) : '';
   var email = e.email || '';
+  var personalEmail = e.personal_email || '';
   var market = e.market || '';
+  // Direct email button sends to personal if present, otherwise work
+  var directEmail = personalEmail || email;
 
-  var h = '<div class="contact" onclick="rowTap(event,\'' + attrEsc(phone) + '\',\'' + attrEsc(email) + '\',\'' + attrEsc(name) + '\')">';
+  var h = '<div class="contact" onclick="rowTap(event,\'' + attrEsc(phone) + '\',\'' + attrEsc(email) + '\',\'' + attrEsc(personalEmail) + '\',\'' + attrEsc(name) + '\')">';
   h += '<div class="contact-avatar ' + roleClass(e.role) + '">' + esc(initials(name)) + '</div>';
   h += '<div class="contact-body">';
   h += '<div class="contact-name" title="' + attrEsc(name) + '">' + esc(name) + '</div>';
@@ -398,8 +406,8 @@ function renderContact(e) {
     h += '<button class="contact-action disabled" data-tip="No phone">📞</button>';
     h += '<button class="contact-action disabled" data-tip="No phone">💬</button>';
   }
-  if (email) {
-    h += '<button class="contact-action" data-tip="Email ' + attrEsc(email) + '" onclick="handleContact(event,\'email\',\'' + attrEsc(email) + '\',\'email\')">✉️</button>';
+  if (directEmail) {
+    h += '<button class="contact-action" data-tip="Email ' + attrEsc(directEmail) + '" onclick="handleContact(event,\'email\',\'' + attrEsc(directEmail) + '\',\'email\')">✉️</button>';
   } else {
     h += '<button class="contact-action disabled" data-tip="No email">✉️</button>';
   }
