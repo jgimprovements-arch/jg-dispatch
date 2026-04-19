@@ -26,12 +26,14 @@
 
     { section: 'OPERATIONS' },
     { label: 'Dispatch',            icon: '📋',  url: 'index.html' },
-    { label: 'Time Clock / Payroll',icon: '⏱',  url: 'timeclock_admin.html' },
+
+    { section: 'TIME' },
+    { label: 'Time Admin',          icon: '⏱',  url: 'timeclock_admin.html' },
     { label: 'Clock In/Out',        icon: '🕐',  url: 'timeclock.html' },
 
     { section: 'SALES' },
     { label: 'Sales Dashboard',     icon: '📈',  url: 'sales.html' },
-    { label: 'Admin Panel',         icon: '🛡',  url: 'admin.html' },
+    { label: 'Sales Admin',         icon: '🔐',  url: 'sales_admin.html' },
 
     { section: 'AI TOOLS' },
     { label: 'QA Review',           icon: '🔍',  url: 'qa.html' },
@@ -71,11 +73,9 @@ body{padding-left:48px;box-sizing:border-box;}
 `;
 
   // ── DETERMINE ACTIVE PAGE ──
-  // Gets the current filename (e.g. 'hub.html', 'admin.html')
   function currentFilename() {
     var path = window.location.pathname;
     var filename = path.substring(path.lastIndexOf('/') + 1) || 'index.html';
-    // Strip query string if any
     var q = filename.indexOf('?');
     if (q !== -1) filename = filename.substring(0, q);
     return filename;
@@ -90,7 +90,6 @@ body{padding-left:48px;box-sizing:border-box;}
       if (item.section) {
         html += '<div class="sb-sec">' + item.section + '</div>';
       } else {
-        // Check if this link matches the current page
         var linkPage = item.url.split('?')[0];
         var isActive = (linkPage === activePage);
         html += '<a href="' + item.url + '" class="sb-lnk' + (isActive ? ' active' : '') + '">';
@@ -100,7 +99,6 @@ body{padding-left:48px;box-sizing:border-box;}
       }
     });
 
-    // User block at bottom
     html += '<div class="sb-btm">';
     html += '<div class="sb-user" onclick="if(typeof jgSignOut===\'function\')jgSignOut();else window.location=\'hub.html\'" title="Sign out">';
     html += '<span id="sb-av">👤</span>';
@@ -112,11 +110,9 @@ body{padding-left:48px;box-sizing:border-box;}
 
   // ── INJECTION ──
   function injectSidebar() {
-    // Remove any existing sidebar (so this script can safely replace old hardcoded ones)
     var existing = document.getElementById('jg-sidebar');
     if (existing) existing.remove();
 
-    // Inject CSS if not already present
     if (!document.getElementById('jg-sidebar-css')) {
       var style = document.createElement('style');
       style.id = 'jg-sidebar-css';
@@ -124,7 +120,6 @@ body{padding-left:48px;box-sizing:border-box;}
       document.head.appendChild(style);
     }
 
-    // Inject nav
     var nav = document.createElement('nav');
     nav.id = 'jg-sidebar';
     nav.innerHTML = buildSidebarHtml();
@@ -132,30 +127,28 @@ body{padding-left:48px;box-sizing:border-box;}
   }
 
   // ── USER NAME POPULATION ──
-  // If the page's auth logic sets window.JG_USER or similar, display it
+  // Reads from jg_platform_user (the actual localStorage key used by all pages)
   function tryPopulateUser() {
     var nmEl = document.getElementById('sb-nm');
     var avEl = document.getElementById('sb-av');
     if (!nmEl) return;
 
-    // Try common locations where user info might live
-    var user = window.JG_USER || window.currentUser || window._user;
-    if (!user) {
-      // Try to read from localStorage (many pages cache auth there)
-      try {
-        var cached = localStorage.getItem('jg_user');
-        if (cached) user = JSON.parse(cached);
-      } catch(e) {}
-    }
+    var user = null;
+    try {
+      var cached = localStorage.getItem('jg_platform_user');
+      if (cached) user = JSON.parse(cached);
+    } catch(e) {}
+
+    // Fallback: in-memory globals set by page-specific auth
+    if (!user) user = window.JG_USER || window._user;
+
     if (user && (user.name || user.email || user.given_name)) {
-      var displayName = user.given_name || user.name || user.email || '...';
+      var displayName = user.given_name || (user.name ? user.name.split(' ')[0] : null) || user.email.split('@')[0];
       nmEl.textContent = displayName;
-      // Generate initials as fallback avatar
       if (avEl && user.picture) {
-        avEl.innerHTML = '<img src="' + user.picture + '" style="width:20px;height:20px;border-radius:50%;object-fit:cover;">';
+        avEl.innerHTML = '<img src="' + user.picture + '" style="width:22px;height:22px;border-radius:50%;object-fit:cover;">';
       } else if (avEl) {
-        var initials = displayName.split(' ').map(function(w){return w.charAt(0);}).join('').substring(0,2).toUpperCase();
-        avEl.textContent = initials || '👤';
+        avEl.textContent = '👤';
       }
     }
   }
@@ -164,9 +157,13 @@ body{padding-left:48px;box-sizing:border-box;}
   function init() {
     injectSidebar();
     tryPopulateUser();
-    // Re-try user population after 500ms in case auth resolves async
+    // Re-try user population after auth resolves async
     setTimeout(tryPopulateUser, 500);
     setTimeout(tryPopulateUser, 1500);
+    // Refresh when auth changes in another tab
+    window.addEventListener('storage', function(e) {
+      if (e.key === 'jg_platform_user') tryPopulateUser();
+    });
   }
 
   if (document.readyState === 'loading') {
@@ -176,7 +173,6 @@ body{padding-left:48px;box-sizing:border-box;}
   }
 
   // ── PUBLIC API ──
-  // Lets pages call window.JGSidebar.refresh() after login to update the username
   window.JGSidebar = {
     refresh: tryPopulateUser,
     setActive: function(filename) {
@@ -184,6 +180,6 @@ body{padding-left:48px;box-sizing:border-box;}
         a.classList.toggle('active', a.getAttribute('href').split('?')[0] === filename);
       });
     },
-    menu: SIDEBAR_MENU  // expose for debugging
+    menu: SIDEBAR_MENU
   };
 })();
