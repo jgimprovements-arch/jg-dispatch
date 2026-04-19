@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>JG Restoration — Time Clock</title>
+<title>JG Restoration — Time Clock / Payroll</title>
 <link rel="icon" type="image/png" href="https://jgimprovements-arch.github.io/jg-dispatch/logo.png">
 <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script>
@@ -186,7 +186,7 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;min
 
 <!-- MAIN -->
 <div class="tc-header">
-  <div class="tc-header-title"><span>⏱</span> Time Clock Admin</div>
+  <div class="tc-header-title"><span>⏱</span> Time Clock / Payroll</div>
   <button onclick="loadAll()" class="btn" style="border-color:rgba(255,255,255,.2);color:rgba(255,255,255,.8);background:rgba(255,255,255,.1);font-size:12px;">↻ Refresh</button>
 </div>
 
@@ -438,6 +438,10 @@ function showTab(tab, el) {
     toast('Office, PM, or Admin access required');
     return;
   }
+  if (tab === 'commissions' && !_canViewCommissionsTab()) {
+    toast('You don\'t have access to the Commissions tab');
+    return;
+  }
   ST.tab = tab;
   document.querySelectorAll('.tc-tab').forEach(function(t) { t.classList.remove('active'); });
   if (el) el.classList.add('active');
@@ -449,10 +453,12 @@ function render() {
   var rptTab = document.getElementById('tab-reports');
   var routeTab    = document.getElementById('tab-routes');
   var activityTab = document.getElementById('tab-activity');
+  var commTab     = document.getElementById('tab-commissions');
   if (empTab)      empTab.style.display      = isAdmin() ? '' : 'none';
   if (rptTab)      rptTab.style.display      = isAdmin() ? '' : 'none';
   if (routeTab)    routeTab.style.display    = canViewMaps() ? '' : 'none';
   if (activityTab) activityTab.style.display = isAdmin() ? '' : 'none';
+  if (commTab)     commTab.style.display     = _canViewCommissionsTab() ? '' : 'none';
   var liveTab = document.getElementById('tab-live');
   if (liveTab) liveTab.style.display = 'none';
   var accessTab = document.getElementById('tab-access');
@@ -463,7 +469,7 @@ function render() {
   else if (ST.tab === 'reports')   { if (isAdmin()) renderReports(); }
   else if (ST.tab === 'routes')   renderRoutes();
   else if (ST.tab === 'jobcost')  { renderJobCost(); }
-  else if (ST.tab === 'commissions') { renderCommissions(); }
+  else if (ST.tab === 'commissions') { if (_canViewCommissionsTab()) renderCommissions(); else { ST.tab = 'timesheets'; renderTimesheets(); } }
   else if (ST.tab === 'archive')  { if (isAdmin()) renderArchive(); }
   else if (ST.tab === 'activity') { if (isAdmin()) renderActivity(); }
   else if (ST.tab === 'access')   { if (isAdmin()) renderAccess(); }
@@ -2967,20 +2973,23 @@ function _getCurrentUserName() {
   } catch(e) { return ''; }
 }
 
+function _canViewCommissionsTab() {
+  // Admin bypasses all restrictions
+  if (isAdmin()) return true;
+  return _userHasAccess('tab_commissions');
+}
+
 function _canSeeCommission(commission) {
   if (isAdmin()) return true;
+  // Everyone who can view the tab sees their own entries only
   var myName = _getCurrentUserName();
   return commission.employee_name === myName;
 }
 
 function _canEditCommissions() {
-  // Admin only can add/edit/approve. Office can also if you want to loosen later.
-  try {
-    var u = JSON.parse(localStorage.getItem('jg_platform_user') || '{}');
-    var myEmail = u.email || '';
-    var emp = ST.employees.find(function(e){ return e.email === myEmail; });
-    return emp && ['Admin','Office'].includes(emp.role);
-  } catch(e) { return false; }
+  // Admin always; otherwise, check the tab_commissions_edit access setting
+  if (isAdmin()) return true;
+  return _userHasAccess('tab_commissions_edit');
 }
 
 async function renderCommissions() {
@@ -3777,7 +3786,7 @@ const ACCESS_PAGES = [
   ['sales',          '📈 Sales Dashboard',   'sales.html'],
   ['sales_admin',    '🔐 Sales Admin',       'sales_admin.html'],
   ['timeclock',      '⏱ Clock In/Out',       'timeclock.html'],
-  ['timeclock_admin','📊 Time Admin',        'timeclock_admin.html'],
+  ['timeclock_admin','📊 Time Clock / Payroll', 'timeclock_admin.html'],
   ['qa',             '🔍 QA Review',         'qa.html'],
   ['adjuster',       '⚖️ Adjuster Rebuttal', 'adjuster.html'],
   ['recon',          '🏗️ Recon Estimate',    'recon.html'],
@@ -3796,10 +3805,42 @@ const ACCESS_DEFAULTS = {
   intelligence:   ['Project Manager','Estimator','Office','Admin']
 };
 
+// Tab-level controls WITHIN Time Clock / Payroll.
+// These are enforced by the UI (rendering + button visibility) in this page only.
+// Key naming: 'tab_<tabname>' so they don't collide with page-level keys above.
+const TAB_ACCESS_PAGES = [
+  ['tab_commissions', '💵 Commissions Tab', 'Who can view the Commissions tab and their own entries'],
+  ['tab_commissions_edit', '✏️ Commissions — Edit/Approve', 'Who can add, approve, mark paid, or delete commission entries']
+];
+const TAB_ACCESS_DEFAULTS = {
+  tab_commissions:      ['Technician','Project Manager','Estimator','Office','Admin'],  // everyone sees their own
+  tab_commissions_edit: ['Office','Admin']  // only Office + Admin can edit/approve
+};
+
 function getAccessSettings() {
+  var merged = Object.assign({}, ACCESS_DEFAULTS, TAB_ACCESS_DEFAULTS);
   try {
-    return JSON.parse(localStorage.getItem('jg_access_settings') || 'null') || ACCESS_DEFAULTS;
-  } catch(e) { return Object.assign({}, ACCESS_DEFAULTS); }
+    var saved = JSON.parse(localStorage.getItem('jg_access_settings') || 'null');
+    return saved ? Object.assign({}, merged, saved) : merged;
+  } catch(e) { return merged; }
+}
+
+// Get the current user's role (returns e.g. "Admin", "Office", "Technician", etc.)
+function _getCurrentUserRole() {
+  try {
+    var u = JSON.parse(localStorage.getItem('jg_platform_user') || '{}');
+    var emp = ST.employees && ST.employees.find(function(e){ return e.email === u.email; });
+    return emp ? (emp.role || 'Technician') : null;
+  } catch(e) { return null; }
+}
+
+// Check if the current user has a given access key (page or tab)
+function _userHasAccess(key) {
+  var role = _getCurrentUserRole();
+  if (!role) return false;
+  var settings = getAccessSettings();
+  var allowed = settings[key] || TAB_ACCESS_DEFAULTS[key] || ACCESS_DEFAULTS[key] || [];
+  return allowed.indexOf(role) !== -1;
 }
 
 function saveAccessSettings(settings) {
@@ -3880,6 +3921,35 @@ async function renderAccess() {
     h += '</div></div></div>';
   });
   h += '</div>';
+
+  // Tab-level controls WITHIN Time Clock / Payroll
+  h += '<div style="margin-top:28px;padding-top:20px;border-top:2px solid var(--border);">';
+  h += '<div style="font-size:14px;font-weight:700;color:var(--navy);margin-bottom:4px;">📑 Tab-Level Controls (within Time Clock / Payroll)</div>';
+  h += '<div style="font-size:12px;color:var(--muted);margin-bottom:12px;">Finer-grained controls for specific tabs on this page. These only apply if the user can access Time Clock / Payroll first.</div>';
+  h += '<div style="display:grid;gap:10px;">';
+  TAB_ACCESS_PAGES.forEach(function(page) {
+    var pageKey = page[0], pageLabel = page[1], pageDesc = page[2];
+    var allowed = settings[pageKey] || TAB_ACCESS_DEFAULTS[pageKey] || [];
+    h += '<div class="card" style="padding:14px 18px;">';
+    h += '<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;">';
+    h += '<div>';
+    h += '<div style="font-size:13px;font-weight:700;color:var(--navy);">' + pageLabel + '</div>';
+    h += '<div style="font-size:11px;color:var(--muted);">' + pageDesc + '</div>';
+    h += '</div>';
+    h += '<div style="display:flex;gap:6px;flex-wrap:wrap;">';
+    ACCESS_ROLES.forEach(function(role) {
+      var isOn = allowed.includes(role);
+      var col = roleColors[role] || '#333';
+      h += '<button onclick="toggleAccess(\''+pageKey+'\',\''+role+'\')" ';
+      h += 'style="padding:5px 12px;border-radius:6px;border:1.5px solid '+(isOn?col:'var(--border)')+';';
+      h += 'background:'+(isOn?'rgba('+hexToRgbAccess(col)+',.12)':'var(--surface)')+';';
+      h += 'color:'+(isOn?col:'var(--muted)')+';font-size:11px;font-weight:'+(isOn?'700':'500')+';cursor:pointer;';
+      h += 'font-family:DM Sans,sans-serif;">';
+      h += (isOn ? '✓ ' : '') + role + '</button>';
+    });
+    h += '</div></div></div>';
+  });
+  h += '</div></div>';
 
   // Per-employee overrides
   h += '<div style="margin-top:24px;">';
