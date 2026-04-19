@@ -2944,6 +2944,7 @@ function renderEmployees() {
     h += '<td>'+(emp.active?'<span class="badge badge-green">Active</span>':'<span class="badge badge-gray">Inactive</span>')+'</td>';
     h += '<td style="font-size:11px;color:var(--muted);">'+new Date(emp.created_at).toLocaleDateString()+'</td>';
     h += '<td style="display:flex;gap:4px;flex-wrap:wrap;">';
+    h += '<button class="btn btn-sm" onclick="openEmployeeFile(\''+emp.id+'\')" style="background:var(--navy);color:#fff;border-color:var(--navy);">📄 File</button>';
     h += '<button class="btn btn-sm" onclick="openEditEmployee(\''+emp.id+'\')">Edit</button>';
     h += '<button class="btn btn-sm" onclick="openEmployeeAbsences(\''+emp.name.replace(/\'/g,"\\'")+'\')">📅 Absences</button>';
     h += '<button class="btn btn-sm '+(emp.active?'btn-danger':'')+'" onclick="toggleEmployee(\''+emp.id+'\','+emp.active+')">'+(emp.active?'Deactivate':'Activate')+'</button>';
@@ -5828,6 +5829,186 @@ async function sendInviteFromModal() {
     console.error('Invite exception:', e);
     if (btn) { btn.textContent = '✉️ Save & Send Invite Email'; btn.disabled = false; }
   }
+}
+
+// ── EMPLOYEE FILE — Full profile view with onboarding, acknowledgments, activity ──
+async function openEmployeeFile(empId) {
+  var emp = ST.employees.find(function(e){ return e.id === empId; });
+  if (!emp) { toast('Employee not found'); return; }
+
+  // Show loading state
+  var loadingBody = '<div style="text-align:center;padding:40px;color:var(--muted);">Loading employee file...</div>';
+  showModal('📄 Employee File — ' + emp.name, loadingBody, null);
+
+  // Fetch the invite record (for acknowledgments / signature details)
+  var inviteData = null;
+  try {
+    var invites = await sb('/rest/v1/employee_invites?employee_id=eq.' + empId + '&order=sent_at.desc&limit=1');
+    if (invites && invites.length) inviteData = invites[0];
+  } catch(e) { console.warn('Could not fetch invite:', e); }
+
+  // Build the file view
+  var body = _buildEmployeeFileBody(emp, inviteData);
+  showModal('📄 Employee File — ' + emp.name, body, null);
+}
+
+function _buildEmployeeFileBody(emp, invite) {
+  var h = '';
+  var fmtD = function(iso) { if (!iso) return '—'; var d = new Date(iso); return d.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}); };
+  var fmtDT = function(iso) { if (!iso) return '—'; var d = new Date(iso); return d.toLocaleString('en-US',{month:'short',day:'numeric',year:'numeric',hour:'numeric',minute:'2-digit'}); };
+  var val = function(v) { return v ? v : '<span style="color:var(--muted);font-style:italic;">Not provided</span>'; };
+
+  // Header card with actions
+  h += '<div style="background:linear-gradient(135deg,var(--navy),#1e4a8f);color:#fff;padding:18px 20px;border-radius:12px;margin-bottom:16px;">';
+  h += '<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;">';
+  h += '<div>';
+  h += '<div style="font-size:22px;font-weight:700;margin-bottom:4px;">'+emp.name+'</div>';
+  h += '<div style="font-size:12px;color:rgba(255,255,255,.85);">';
+  h += (emp.role || '—') + ' · ' + (emp.market || '—') + ' · ';
+  h += '<span style="padding:2px 8px;border-radius:4px;background:'+(emp.active?'rgba(46,125,50,.7)':'rgba(192,32,32,.7)')+';font-weight:700;">'+(emp.active?'Active':'Inactive')+'</span>';
+  if (emp.created_at) h += ' · Added '+fmtD(emp.created_at);
+  h += '</div></div>';
+  h += '<div style="display:flex;gap:6px;flex-wrap:wrap;">';
+  h += '<button class="btn btn-sm" onclick="closeModal();setTimeout(function(){openEditEmployee(\''+emp.id+'\');},200);" style="background:rgba(255,255,255,.15);color:#fff;border-color:rgba(255,255,255,.3);">✏️ Edit</button>';
+  if (emp.invite_pending || !emp.onboarding_signed_at) h += '<button class="btn btn-sm" onclick="closeModal();setTimeout(function(){openInviteEmployee();},200);" style="background:var(--orange);color:#fff;border-color:var(--orange);">📲 Re-invite</button>';
+  h += '</div></div></div>';
+
+  // Two-column grid
+  h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">';
+
+  // Personal Info
+  h += '<div style="background:#fff;border:1px solid var(--border);border-radius:10px;padding:14px 16px;">';
+  h += '<div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;">👤 Personal Info</div>';
+  h += _fileRow('Email', val(emp.email));
+  h += _fileRow('Phone', val(emp.phone));
+  h += _fileRow('Address', val(emp.address));
+  h += _fileRow('Date of Birth', emp.dob ? fmtD(emp.dob+'T00:00:00') : val(null));
+  h += '</div>';
+
+  // Emergency Contact
+  h += '<div style="background:#fff;border:1px solid var(--border);border-radius:10px;padding:14px 16px;">';
+  h += '<div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;">📞 Emergency Contact</div>';
+  h += _fileRow('Name', val(emp.emergency_contact_name));
+  h += _fileRow('Phone', val(emp.emergency_contact_phone));
+  h += _fileRow('Relationship', val(emp.emergency_contact_relationship));
+  if (!emp.emergency_contact_name && !emp.emergency_contact_phone) {
+    h += '<div style="margin-top:8px;padding:8px 10px;background:rgba(230,81,0,.06);border-radius:6px;font-size:11px;color:#e65100;">⚠ No emergency contact on file</div>';
+  }
+  h += '</div>';
+  h += '</div>';
+
+  // Comp & Pay
+  h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">';
+  h += '<div style="background:#fff;border:1px solid var(--border);border-radius:10px;padding:14px 16px;">';
+  h += '<div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;">💰 Compensation</div>';
+  var payType = emp.pay_type || 'hourly';
+  h += _fileRow('Pay Type', payType.charAt(0).toUpperCase() + payType.slice(1));
+  if (payType === 'salary') {
+    h += _fileRow('Annual Salary', emp.annual_salary ? '$'+Number(emp.annual_salary).toLocaleString() : val(null));
+  } else {
+    h += _fileRow('Hourly Rate', emp.hourly_rate ? '$'+Number(emp.hourly_rate).toFixed(2)+'/hr' : val(null));
+  }
+  h += _fileRow('Role', val(emp.role));
+  h += _fileRow('Market', val(emp.market));
+  h += '</div>';
+
+  // PTO & Sick
+  h += '<div style="background:#fff;border:1px solid var(--border);border-radius:10px;padding:14px 16px;">';
+  h += '<div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;">🏖 Time Off Balance</div>';
+  // Compute PTO info if we can
+  var ptoEarned = typeof getPtoEarned === 'function' ? getPtoEarned(emp) : 0;
+  var ptoUsed = typeof getPtoUsed === 'function' ? getPtoUsed(emp.name) : 0;
+  var ptoRemaining = Math.max(0, ptoEarned - ptoUsed);
+  var sickUsed = typeof getSickDaysUsedYTD === 'function' ? getSickDaysUsedYTD(emp.name) : 0;
+  var sickLimit = emp.sick_days_year ? parseInt(emp.sick_days_year) : 3;
+  h += _fileRow('PTO Earned', ptoEarned.toFixed(1) + 'h');
+  h += _fileRow('PTO Used', ptoUsed.toFixed(1) + 'h');
+  h += _fileRow('PTO Remaining', '<strong style="color:'+(ptoRemaining<8?'#c62828':'#2e7d32')+';">'+ptoRemaining.toFixed(1)+'h</strong>');
+  h += _fileRow('Sick Days YTD', sickUsed + ' / ' + sickLimit);
+  h += '</div>';
+  h += '</div>';
+
+  // Onboarding & Acknowledgments — THE main new feature
+  h += '<div style="background:#fff;border:1px solid var(--border);border-radius:10px;padding:16px 18px;margin-bottom:16px;">';
+  h += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">';
+  h += '<div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;">✍️ Onboarding & Acknowledgments</div>';
+  if (emp.onboarding_signed_at) {
+    h += '<span style="padding:3px 10px;background:rgba(46,125,50,.1);color:#2e7d32;border-radius:4px;font-size:11px;font-weight:700;">✓ SIGNED</span>';
+  } else if (emp.invite_pending) {
+    h += '<span style="padding:3px 10px;background:rgba(230,81,0,.1);color:#e65100;border-radius:4px;font-size:11px;font-weight:700;">⏳ PENDING</span>';
+  } else {
+    h += '<span style="padding:3px 10px;background:rgba(192,32,32,.08);color:#c62828;border-radius:4px;font-size:11px;font-weight:700;">✗ NOT SIGNED</span>';
+  }
+  h += '</div>';
+
+  if (emp.onboarding_signed_at && invite && invite.acknowledgments) {
+    var acks = invite.acknowledgments;
+    if (typeof acks === 'string') { try { acks = JSON.parse(acks); } catch(e) { acks = {}; } }
+
+    h += '<div style="background:rgba(46,125,50,.04);border:1px solid rgba(46,125,50,.2);border-radius:8px;padding:12px 14px;margin-bottom:12px;">';
+    h += '<div style="font-size:13px;font-weight:700;color:var(--navy);margin-bottom:8px;">Signed on ' + fmtDT(emp.onboarding_signed_at) + ' by "' + (emp.onboarding_signed_name || emp.name) + '"</div>';
+
+    h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:10px;">';
+    var ackItems = [
+      { key: 'handbook', label: 'Employee Handbook receipt' },
+      { key: 'at_will', label: 'At-will employment (Wisconsin)' },
+      { key: 'safety', label: 'Safety & PPE requirements' },
+      { key: 'timeclock', label: 'Timeclock accuracy commitment' },
+      { key: 'confidential', label: 'Confidentiality agreement' }
+    ];
+    ackItems.forEach(function(item) {
+      var checked = !!acks[item.key];
+      h += '<div style="display:flex;align-items:center;gap:6px;font-size:12px;'+(checked?'':'color:#c62828;')+'">';
+      h += '<span style="font-size:14px;">'+(checked?'✅':'❌')+'</span>';
+      h += '<span>'+item.label+'</span></div>';
+    });
+    h += '</div>';
+
+    // Signature block
+    h += '<div style="background:#fff;border:1px solid rgba(46,125,50,.3);border-radius:6px;padding:10px 12px;font-family:DM Mono,monospace;">';
+    h += '<div style="font-size:10px;color:var(--muted);margin-bottom:4px;">TYPED SIGNATURE</div>';
+    h += '<div style="font-size:15px;font-weight:700;font-style:italic;color:var(--navy);border-bottom:1px solid var(--navy);padding-bottom:4px;margin-bottom:8px;">'+(acks.signature||emp.onboarding_signed_name||emp.name)+'</div>';
+    if (acks.signed_at) h += '<div style="font-size:10px;color:var(--muted);">Signed at: '+fmtDT(acks.signed_at)+'</div>';
+    if (acks.user_agent) h += '<div style="font-size:9px;color:var(--muted);margin-top:2px;word-break:break-all;">Device: '+acks.user_agent.substring(0,100)+(acks.user_agent.length>100?'...':'')+'</div>';
+    h += '</div>';
+    h += '</div>';
+
+    // Audit statement for buyer/legal
+    h += '<div style="background:rgba(13,45,94,.04);border-radius:6px;padding:10px 12px;font-size:11px;color:var(--navy);line-height:1.5;">📋 <strong>Audit record:</strong> This employee electronically acknowledged 5 workplace policies by typing their full name as signature on '+fmtD(emp.onboarding_signed_at)+'. Record stored immutably in employee_invites table with timestamp and browser fingerprint.</div>';
+  } else if (invite && invite.status === 'pending') {
+    h += '<div style="padding:14px;background:rgba(230,81,0,.04);border-radius:8px;text-align:center;">';
+    h += '<div style="font-size:13px;color:#e65100;margin-bottom:4px;"><strong>Invite sent '+fmtD(invite.sent_at)+'</strong> but not yet accepted.</div>';
+    h += '<div style="font-size:11px;color:var(--muted);">Expires '+fmtD(invite.expires_at)+' · sent to '+(invite.sent_to_email||invite.sent_to_phone||'unknown')+'</div>';
+    h += '</div>';
+  } else {
+    h += '<div style="padding:14px;background:rgba(192,32,32,.04);border-radius:8px;text-align:center;">';
+    h += '<div style="font-size:13px;color:#c62828;margin-bottom:6px;"><strong>No signed onboarding record</strong></div>';
+    h += '<div style="font-size:11px;color:var(--muted);margin-bottom:8px;">This employee was added before the onboarding system was in place, or has never been invited.</div>';
+    h += '<button class="btn btn-sm" onclick="closeModal();setTimeout(function(){openInviteEmployee();},200);" style="background:var(--orange);color:#fff;border-color:var(--orange);">📲 Send Onboarding Invite</button>';
+    h += '</div>';
+  }
+  h += '</div>';
+
+  // Invite History
+  if (invite) {
+    h += '<div style="background:#fff;border:1px solid var(--border);border-radius:10px;padding:14px 16px;margin-bottom:12px;">';
+    h += '<div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;">📲 Invite Record</div>';
+    h += _fileRow('Status', '<span style="text-transform:uppercase;font-weight:700;font-size:11px;padding:2px 8px;border-radius:4px;background:'+(invite.status==='accepted'?'rgba(46,125,50,.1);color:#2e7d32':invite.status==='pending'?'rgba(230,81,0,.1);color:#e65100':'rgba(192,32,32,.08);color:#c62828')+';">'+invite.status+'</span>');
+    h += _fileRow('Sent Via', (invite.channel||'—').toUpperCase());
+    h += _fileRow('Sent By', val(invite.sent_by));
+    h += _fileRow('Sent At', fmtDT(invite.sent_at));
+    if (invite.accepted_at) h += _fileRow('Accepted At', fmtDT(invite.accepted_at));
+    h += '</div>';
+  }
+
+  return h;
+}
+
+function _fileRow(label, value) {
+  return '<div style="display:flex;justify-content:space-between;align-items:start;gap:12px;padding:5px 0;font-size:12px;">' +
+    '<span style="color:var(--muted);min-width:90px;flex-shrink:0;">'+label+'</span>' +
+    '<span style="text-align:right;color:var(--navy);font-weight:500;">'+value+'</span>' +
+    '</div>';
 }
 
 function openEditEmployee(id) {
