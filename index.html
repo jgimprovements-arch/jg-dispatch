@@ -332,7 +332,6 @@ body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);min
     <button class="btn btn-ghost" style="font-size:10px;" onclick="showInfo()">ℹ Help</button>
     <span id="sync-badge" style="font-size:10px;color:var(--muted);padding:4px 8px;"></span>
     <button class="btn btn-ghost" style="font-size:10px;color:var(--danger);" onclick="clearBoardState()">🗑 Reset Board</button>
-    <button class="btn btn-gold" id="push-btn" onclick="pushAll()">Push All → T-Sheets</button>
   </div>
 </div>
 
@@ -504,16 +503,16 @@ body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);min
       </div>
 
       <div style="background:rgba(255,255,255,0.07);border-radius:8px;padding:14px;">
-        <div style="font-size:13px;font-weight:700;color:#f5a623;margin-bottom:6px;">↑ Pushing to T-Sheets</div>
+        <div style="font-size:13px;font-weight:700;color:#f5a623;margin-bottom:6px;">📱 How Techs See Their Schedule</div>
         <div style="font-size:12px;color:#cdd8e3;line-height:1.7;">
-          Once jobs are assigned to techs, click <b>↑ Push</b> on an individual tech lane to push that tech's schedule to T-Sheets, or click <b>Push All → T-Sheets</b> in the top right to push every tech at once. Events are created on the <b>JG Restoration</b> schedule calendar starting at <b>7:30 AM</b>, with each job allocated time based on type. Jobs show the customer name and address in the event notes.
+          Once jobs are assigned to a tech's lane, those jobs <b>automatically appear</b> at the top of their time clock as "Today's Assigned Jobs." They tap a job to clock in — no manual searching through the full job list. Changes you make here sync to their phone within seconds via live updates.
         </div>
       </div>
 
       <div style="background:rgba(255,255,255,0.07);border-radius:8px;padding:14px;">
         <div style="font-size:13px;font-weight:700;color:#f5a623;margin-bottom:6px;">🚫 Marking a Tech Out</div>
         <div style="font-size:12px;color:#cdd8e3;line-height:1.7;">
-          Click <b>Out</b> on any tech lane to mark them as unavailable. A popup will ask for the reason (Sick, PTO, Personal Day, No Call No Show, Injured, or Other). Click <b>Mark Out + Push to T-Sheets</b> to block their schedule for the day in T-Sheets. The AI will automatically suggest redistributing their jobs to other techs. Click <b>↩ Undo</b> to restore the tech.
+          Click <b>Out</b> on any tech lane to mark them as unavailable. A popup will ask for the reason (Sick, PTO, Personal Day, No Call No Show, Injured, or Other). The AI will automatically suggest redistributing their jobs to other techs. Click <b>↩ Undo</b> to restore the tech.
         </div>
       </div>
 
@@ -1066,82 +1065,74 @@ async function pullProxyLocation(locKey, locName, cutoffDate){
     page++;
   }
 }
-// ── T-SHEETS: PULL GROUPS + BUILD TECH ROSTER ──
+// ── LOAD TECH ROSTER FROM SUPABASE EMPLOYEES TABLE ──
+// Formerly pulled from T-Sheets groups. Now reads the employees table directly.
+// Only Technicians and Project Managers appear on dispatch.
+// Josh is always shown regardless of role (owner override).
+// show_on_dispatch=false flag can opt someone out even within allowed roles.
 async function lookupTSIds(){
-  setMsg('Loading technicians from T-Sheets...');
+  setMsg('Loading technicians from platform roster...');
   try{
-    const gr=await fetch(TS_PROXY+'?path=groups');
-    if(!gr.ok)throw new Error(gr.status);
-    const gd=await gr.json();
-    const groups=Object.values(gd.results?.groups||{});
-    const groupIds={appleton:null,stevens:null};
-    Object.entries(TS_GROUPS).forEach(([l,name])=>{
-      const g=groups.find(g=>g.name.toLowerCase()===name.toLowerCase());
-      if(g)groupIds[l]=g.id;
-    });
     let colorIdx=0;
-    // Deep copy current assignments to preserve them across T-Sheets reload
+    // Deep copy current assignments to preserve them across reload
     const prevTechQ = {};
     for(const l of ['appleton','stevens']){
       prevTechQ[l] = {};
       for(const [nm,tech] of Object.entries(techQ[l]||{})){
-        // Only carry over jobs that exist in the current jobs object (valid assignments)
         prevTechQ[l][nm] = { jobs: (tech.jobs||[]).filter(jid=>jobs[jid]) };
       }
     }
     techQ={appleton:{},stevens:{}};
-    for(const [l,gid] of Object.entries(groupIds)){
-      if(!gid){showToast('⚠ Group not found: '+TS_GROUPS[l]);continue;}
-      const ur=await fetch(TS_PROXY+'?path=users&qs=group_ids='+gid+'%26active=yes');
-      if(!ur.ok)continue;
-      const ud=await ur.json();
-      // Load employee roster from Supabase (role + dispatch flag)
-      // Dispatch logic: ONLY Technicians and Project Managers appear.
-      // Office/Admin/Sales/Estimator never appear on dispatch.
-      // Even within allowed roles, show_on_dispatch=false is an explicit opt-out (e.g. on leave).
-      let roleMap = {};         // name(lower) -> role
-      let dispatchFlags = {};   // name(lower) -> true/false (defaults to true)
-      try {
-        const SB_URL2 = 'https://nuykvchgecpiuikoerze.supabase.co';
-        const SB_KEY2 = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im51eWt2Y2hnZWNwaXVpa29lcnplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYyNjM3ODYsImV4cCI6MjA5MTgzOTc4Nn0.39hZ8DdjT_0iFJXPeAL2FXUSLw8FZBirDVzxZTO1W9s';
-        const er = await fetch(SB_URL2 + '/rest/v1/employees?select=name,role,show_on_dispatch&active=eq.true', { headers: { 'apikey': SB_KEY2, 'Authorization': 'Bearer ' + SB_KEY2 } });
-        if (er.ok) {
-          const emps = await er.json();
-          (emps || []).forEach(function(e) {
-            if (!e.name) return;
-            const k = e.name.toLowerCase().trim();
-            roleMap[k] = e.role || '';
-            if (e.show_on_dispatch === false) dispatchFlags[k] = false;
-          });
-        }
-      } catch(e2) { console.warn('employee roster fetch failed:', e2.message); }
 
-      const DISPATCH_ROLES = new Set(['Technician','Project Manager']);
-
-      Object.values(ud.results?.users||{}).forEach(u=>{
-        const nm=u.first_name+' '+u.last_name;
-        const k=nm.toLowerCase().trim();
-        const role = roleMap[k];
-        const flag = dispatchFlags[k];
-        // Always show Josh regardless of role (owner override)
-        const isOwner = k.includes('josh') || k.includes('greil');
-        // If we have a role on record, enforce the allow-list. If we DON'T have them in Supabase yet,
-        // include them by default (first-load behavior before roster sync) — fail open, not closed.
-        if (role !== undefined && !DISPATCH_ROLES.has(role) && !isOwner) return;
-        // Respect explicit opt-out
-        if (flag === false && !isOwner) return;
-        tsIdMap[nm.toLowerCase()]=u.id;
-        // Preserve existing job assignments if this tech was already loaded
-        const existingJobs = prevTechQ?.[l]?.[nm]?.jobs || [];
-        techQ[l][nm]={tsId:u.id,initials:(u.first_name[0]||'')+(u.last_name[0]||'').toUpperCase(),color:AV_COLORS[colorIdx%AV_COLORS.length],jobs:existingJobs};
-        colorIdx++;
-      });
+    // Fetch active employees — filtered server-side to just dispatch roles for efficiency
+    const DISPATCH_ROLES = ['Technician','Project Manager','Admin'];
+    const rolesParam = DISPATCH_ROLES.map(r=>encodeURIComponent(r)).join(',');
+    const er = await fetch(SB_URL + '/rest/v1/employees?active=eq.true&role=in.(' + rolesParam + ')&select=name,role,market,show_on_dispatch', {
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+    });
+    if (!er.ok) throw new Error('employees fetch HTTP ' + er.status);
+    const emps = await er.json();
+    if (!Array.isArray(emps) || !emps.length) {
+      showToast('⚠ No active employees found in roster');
+      return;
     }
+
+    // Build tech lanes from employee roster
+    emps.forEach(function(e){
+      if (!e.name) return;
+      const nm = e.name.trim();
+      const k = nm.toLowerCase();
+      const isOwner = k.includes('josh') && k.includes('greil');
+      // Respect explicit opt-out (unless owner)
+      if (e.show_on_dispatch === false && !isOwner) return;
+      // Admins don't appear on dispatch unless they're the owner
+      if (e.role === 'Admin' && !isOwner) return;
+      // Determine which market lane this employee belongs to
+      // Default to Appleton if market missing
+      const marketRaw = (e.market || 'Appleton').toLowerCase();
+      const lane = marketRaw.includes('stevens') || marketRaw.includes('point') ? 'stevens' : 'appleton';
+      // Owner always goes to Appleton
+      const targetLane = isOwner ? 'appleton' : lane;
+      // Build initials from name
+      const parts = nm.split(/\s+/);
+      const initials = (parts[0]?.[0]||'') + (parts[1]?.[0]||'');
+      // Preserve existing assignments across refresh
+      const existingJobs = prevTechQ?.[targetLane]?.[nm]?.jobs || [];
+      techQ[targetLane][nm] = {
+        tsId: null, // legacy field, kept for compatibility with code that references it
+        initials: initials.toUpperCase(),
+        color: AV_COLORS[colorIdx % AV_COLORS.length],
+        jobs: existingJobs
+      };
+      tsIdMap[k] = nm; // legacy field — some code paths use it as a name lookup
+      colorIdx++;
+    });
+
     const app=Object.keys(techQ.appleton).length, sp=Object.keys(techQ.stevens).length;
-    showToast(`✓ ${app} Appleton · ${sp} Stevens Point techs loaded`);
+    showToast(`✓ ${app} Appleton · ${sp} Stevens Point — loaded from roster`);
   }catch(e){
-    console.warn('T-Sheets error:',e.message);
-    showToast('⚠ T-Sheets unavailable — techs will load from Albi data');
+    console.warn('Employee roster error:',e.message);
+    showToast('⚠ Could not load employee roster: ' + e.message);
   }
 
   // Always ensure owner (Josh Greil) appears on Appleton board
@@ -1385,9 +1376,7 @@ function renderBoard(){
         <div style="display:flex;gap:3px;">
           ${isSick
             ?`<button class="undo-btn" onclick="undoSick('${nm}')">↩ Undo</button>`
-            :`<button class="tout-btn" onclick="promptOut('${nm}')">Out</button>
-              <button class="push-one-btn" onclick="pushOne('${nm}')">↑ Push</button>
-`}
+            :`<button class="tout-btn" onclick="promptOut('${nm}')">Out</button>`}
         </div>
         <div style="display:flex;flex-direction:column;align-items:flex-start;gap:2px;">
           <span style="font-size:10px;color:rgba(255,255,255,.65);line-height:1;font-weight:600;text-transform:uppercase;letter-spacing:.04em;">Start</span>
@@ -1482,8 +1471,7 @@ function renderBoard(){
       <div class="lane-hd-btns">
         ${isSick
           ?`<button class="undo-btn" onclick="undoSick('${nm}')">↩ Undo</button>`
-          :`<button class="tout-btn" onclick="promptOut('${nm}')">Out</button>
-            <button class="push-one-btn" onclick="pushOne('${nm}')">↑ Push</button>`}
+          :`<button class="tout-btn" onclick="promptOut('${nm}')">Out</button>`}
       </div>`;
       const body=document.createElement('div');
       body.className='lane-body'+(timelineModes.has(nm)?' timeline-mode':'');
@@ -1577,7 +1565,6 @@ function renderBoard(){
       </div>
       <div class="lane-hd-btns">
         <button class="undo-btn" onclick="removeCrossLocTech('${nm}')" style="font-size:9px;">✕ Remove</button>
-        <button class="push-one-btn" onclick="pushOneCrossLoc('${nm}','${otherLoc2}')">↑ Push</button>
       </div>`;
       const body=document.createElement('div');body.className='lane-body';
       body.addEventListener('dragover',onDO);body.addEventListener('dragleave',onDL);body.addEventListener('drop',(e)=>onDDCross(e,nm,otherLoc2));

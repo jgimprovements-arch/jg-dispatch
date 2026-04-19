@@ -1103,6 +1103,7 @@ async function initApp(u) {
   // Celebrations fire on first clock-in on/after birthday or anniversary (see clockIn())
   loadNotifications();
   initRealtimeSync();
+  loadMyAssignedJobs();  // Pull today's dispatch board assignments for this tech
 
   // Restore last active tab
   var savedTab = sessionStorage.getItem('jg_tc_tab');
@@ -1411,19 +1412,72 @@ function renderJobs() {
     el.innerHTML = '<div class="empty">' + (TC.jobs.length ? 'No matching jobs' : 'Loading jobs from Albi...') + '</div>';
     return;
   }
-  el.innerHTML = filtered.slice(0, 100).map(function(j) {
+
+  // Separate "My Assigned Jobs" (from today's dispatch board) from the rest
+  var myAssignedIds = new Set();
+  if (!q && TC._boardAssignments) {
+    var myName = (TC.employee && TC.employee.name ? TC.employee.name : '').toLowerCase();
+    if (myName) {
+      var firstName = myName.split(' ')[0];
+      Object.values(TC._boardAssignments).forEach(function(locObj){
+        Object.entries(locObj).forEach(function(kv){
+          var tname = (kv[0]||'').toLowerCase();
+          var jids = kv[1] || [];
+          // Match on first name contained in tech name on board
+          if (tname.includes(firstName) && firstName.length > 1) {
+            jids.forEach(function(jid){ myAssignedIds.add(String(jid)); });
+          }
+        });
+      });
+    }
+  }
+  var myJobs = filtered.filter(function(j){ return myAssignedIds.has(String(j.id)); });
+  var otherJobs = filtered.filter(function(j){ return !myAssignedIds.has(String(j.id)); });
+
+  var renderRow = function(j) {
     var sel = j.id === TC.selectedJobId;
     var colors = { 'Appleton': '#1565c0', 'Stevens Point': '#2e7d32' };
     var color = colors[j.market] || '#546e7a';
     var safeId   = (j.id||'').replace(/'/g,'&#39;');
     var safeName = (j.name||'').replace(/'/g,'&#39;');
     var safeMkt  = (j.market||'').replace(/'/g,'&#39;');
-    return '<div class="job-row' + (sel?' selected':'') + '" onclick="selectJob(this)" data-id="' + safeId + '" data-name="' + safeName + '" data-market="' + safeMkt + '">' +
+    var isAssigned = myAssignedIds.has(String(j.id));
+    return '<div class="job-row' + (sel?' selected':'') + '" onclick="selectJob(this)" data-id="' + safeId + '" data-name="' + safeName + '" data-market="' + safeMkt + '" style="' + (isAssigned ? 'border-left:3px solid var(--orange);' : '') + '">' +
       '<div class="job-dot" style="background:' + color + ';"></div>' +
-      '<div class="job-info"><div class="job-name">' + j.name + '</div><div class="job-meta">' + (j.market||'') + (j.type?' · '+j.type:'') + '</div></div>' +
+      '<div class="job-info"><div class="job-name">' + j.name + (isAssigned ? ' <span style="font-size:9px;color:var(--orange);font-weight:700;">● ASSIGNED</span>' : '') + '</div><div class="job-meta">' + (j.market||'') + (j.type?' · '+j.type:'') + '</div></div>' +
       '<div class="job-check">&#10003;</div>' +
     '</div>';
-  }).join('') + (filtered.length > 100 ? '<div style="padding:8px 14px;font-size:11px;color:var(--muted);text-align:center;">Showing 100 of '+filtered.length+' — search to narrow down</div>' : '');
+  };
+
+  var html = '';
+  if (myJobs.length && !q) {
+    html += '<div style="padding:8px 14px;font-size:10px;font-weight:700;color:var(--orange);text-transform:uppercase;letter-spacing:.05em;background:rgba(232,93,4,.08);border-bottom:1px solid rgba(232,93,4,.2);">📋 My Jobs Today — ' + myJobs.length + '</div>';
+    html += myJobs.map(renderRow).join('');
+    if (otherJobs.length) {
+      html += '<div style="padding:8px 14px;font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;background:rgba(0,0,0,.03);">All Active Jobs</div>';
+    }
+  }
+  html += otherJobs.slice(0, 100).map(renderRow).join('');
+  if (otherJobs.length > 100) {
+    html += '<div style="padding:8px 14px;font-size:11px;color:var(--muted);text-align:center;">Showing 100 of '+otherJobs.length+' — search to narrow down</div>';
+  }
+
+  el.innerHTML = html;
+}
+
+// Fetch today's dispatch board assignments so we can highlight "My Jobs" at top of picker
+async function loadMyAssignedJobs() {
+  try {
+    var br = await fetch(SB_URL + '/rest/v1/board_state?id=eq.current&select=state', {
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+    });
+    if (!br.ok) return;
+    var brows = await br.json();
+    var boardState = brows && brows[0] && brows[0].state ? brows[0].state : {};
+    TC._boardAssignments = boardState.assignments || {};
+    TC._boardJobNames = boardState.jobNames || {};
+    if (typeof renderJobs === 'function') renderJobs();
+  } catch(e) { /* silent — just means no "my jobs" section, full list still works */ }
 }
 // ACTIONS 
 function selectJob(elOrId, name, market) {
@@ -3220,7 +3274,7 @@ function initRealtimeSync() {
       window.JGSupabase = window.JGSupabase || {};
       window.JGSupabase.client = _rtClient;
     }
-    var tables = ["time_entries","employees","oncall_schedule","oncall_swap_requests","oncall_notifications"];
+    var tables = ["time_entries","employees","oncall_schedule","oncall_swap_requests","oncall_notifications","board_state"];
     tables.forEach(function(table) {
       var ch = _rtClient.channel('rt_' + table)
         .on('postgres_changes', { event: '*', schema: 'public', table: table }, function(payload) {
@@ -3239,6 +3293,10 @@ function onRealtimeChange(table, payload) {
   if (table === 'time_entries') {
     loadTeamData();
     if (_currentTab === 'hours') loadMyHours();
+  }
+  if (table === 'board_state') {
+    // Dispatcher made a change — refresh this tech's assigned jobs at top of picker
+    if (typeof loadMyAssignedJobs === 'function') loadMyAssignedJobs();
   }
   if (table === 'employees') {
     // reload employee profile if needed
