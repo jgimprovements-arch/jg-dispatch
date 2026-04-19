@@ -384,10 +384,14 @@ var SB_URL = 'https://nuykvchgecpiuikoerze.supabase.co';
 var SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im51eWt2Y2hnZWNwaXVpa29lcnplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYyNjM3ODYsImV4cCI6MjA5MTgzOTc4Nn0.39hZ8DdjT_0iFJXPeAL2FXUSLw8FZBirDVzxZTO1W9s';
 
 async function sb(path, opts) {
-  var r = await fetch(SB_URL + path, Object.assign({
-    headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' }
-  }, opts || {}));
-  if (!r.ok) return null;
+  opts = opts || {};
+  var baseHeaders = { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' };
+  opts.headers = Object.assign({}, baseHeaders, opts.headers || {});
+  var r = await fetch(SB_URL + path, opts);
+  if (!r.ok) {
+    console.warn('sb() request failed:', r.status, path);
+    return null;
+  }
   return r.json().catch(function() { return null; });
 }
 
@@ -953,6 +957,14 @@ async function _tcRedownloadPDF(idx) {
   var approvalInfo = ST.approvals[getApprovalKey(k[0], k[1])] || {};
   toast('Regenerating PDF for ' + k[1] + '...');
   await generateAndArchiveTimecard(k[1], k[0], approvalInfo.approved_by || 'Admin', approvalInfo.approved_at || new Date().toISOString());
+}
+
+// Jump to a specific pay period label
+function _tcGoToPeriod(periodLabel) {
+  ST.selPeriod = periodLabel;
+  renderTimesheets();
+  // Scroll to top so the new period's summary is visible
+  window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
 // Top-level OT helpers (also defined locally inside renderTimesheets — kept for module scope access)
@@ -1865,18 +1877,49 @@ function renderTimesheets() {
     var empNamesInPeriod = Object.keys(byEmp);
     var approvedCount = empNamesInPeriod.filter(function(nm){ return getApprovalStatus(selPeriod, nm) === 'approved'; }).length;
     var allApproved = approvedCount === empNamesInPeriod.length && empNamesInPeriod.length > 0;
-    h += '<div style="display:flex;align-items:center;justify-content:space-between;padding:12px 16px;background:'+(allApproved?'rgba(46,125,50,.06)':'rgba(245,166,35,.06)')+';border:1px solid '+(allApproved?'#2e7d32':'rgba(245,166,35,.4)')+';border-radius:10px;margin-bottom:16px;">';
-    var barColor = allApproved ? '#2e7d32' : 'var(--warn)';
-    var barMsg = allApproved ? '&#128274; All timecards approved &amp; locked' : '&#8987; '+approvedCount+' of '+empNamesInPeriod.length+' timecards approved';
-    h += '<div style="font-size:13px;font-weight:700;color:'+barColor+';">'+barMsg+'</div>';
-    h += '<div style="display:flex;gap:8px;flex-wrap:wrap;">';
-    if (!allApproved) {
-      h += '<button class="btn btn-primary" style="background:#2e7d32;border-color:#2e7d32;" onclick="_tcApproveAll()">&#10003; Approve All</button>';
+
+    // Find next unapproved pay period (for the "Next Period" button)
+    var periodsForNav = getPayPeriods(ST.payPeriod.type, ST.payPeriod.start, 80);
+    var curIdx = periodsForNav.findIndex(function(p){ return p.label === selPeriod; });
+    var nextUnapprovedPeriod = null;
+    for (var np = curIdx + 1; np < periodsForNav.length; np++) {
+      var candidate = periodsForNav[np];
+      // Look for a period with at least one entry not yet approved
+      var hasUnapproved = ST.entries.some(function(e){
+        if (!e.clock_out) return false;
+        var d = new Date(e.clock_in);
+        if (d < candidate.start || d > candidate.end) return false;
+        return getApprovalStatus(candidate.label, e.employee_name) !== 'approved';
+      });
+      if (hasUnapproved) { nextUnapprovedPeriod = candidate.label; break; }
     }
-    h += '<button class="btn" onclick="openAbsenceModal()" style="background:var(--orange);color:#fff;border-color:var(--orange);">+ Log Absence</button>';
-    h += '<button class="btn" onclick="sendVerificationReminders()" style="background:#0d2d5e;color:#fff;border-color:#0d2d5e;">📱 Text Unverified</button>';
-    h += '<button class="btn btn-primary" onclick="_tcPayrollReport()">📥 Paychex Export</button>';
-    h += '</div></div>';
+
+    if (allApproved) {
+      // Celebratory complete state
+      h += '<div style="padding:16px 20px;background:linear-gradient(135deg,rgba(46,125,50,.10),rgba(46,125,50,.03));border:2px solid #2e7d32;border-radius:12px;margin-bottom:16px;">';
+      h += '<div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;">';
+      h += '<div>';
+      h += '<div style="font-size:16px;font-weight:700;color:#2e7d32;margin-bottom:4px;">🎉 Period Complete — '+empNamesInPeriod.length+' timecard'+(empNamesInPeriod.length>1?'s':'')+' approved & locked</div>';
+      h += '<div style="font-size:12px;color:var(--navy);">Next: download Paychex CSV, then advance to the next pay period.</div>';
+      h += '</div>';
+      h += '<div style="display:flex;gap:8px;flex-wrap:wrap;">';
+      h += '<button class="btn btn-primary" onclick="_tcPayrollReport()" style="background:#2e7d32;border-color:#2e7d32;">📥 Paychex Export</button>';
+      if (nextUnapprovedPeriod) {
+        h += '<button class="btn btn-primary" onclick="_tcGoToPeriod(\''+nextUnapprovedPeriod.replace(/\'/g,"\\'")+'\')" style="background:#0d2d5e;border-color:#0d2d5e;">→ Next Pay Period</button>';
+      }
+      h += '</div>';
+      h += '</div></div>';
+    } else {
+      // Normal progress bar
+      h += '<div style="display:flex;align-items:center;justify-content:space-between;padding:12px 16px;background:rgba(245,166,35,.06);border:1px solid rgba(245,166,35,.4);border-radius:10px;margin-bottom:16px;flex-wrap:wrap;gap:8px;">';
+      h += '<div style="font-size:13px;font-weight:700;color:var(--warn);">&#8987; '+approvedCount+' of '+empNamesInPeriod.length+' timecards approved</div>';
+      h += '<div style="display:flex;gap:8px;flex-wrap:wrap;">';
+      h += '<button class="btn btn-primary" style="background:#2e7d32;border-color:#2e7d32;" onclick="_tcApproveAll()">&#10003; Approve All</button>';
+      h += '<button class="btn" onclick="openAbsenceModal()" style="background:var(--orange);color:#fff;border-color:var(--orange);">+ Log Absence</button>';
+      h += '<button class="btn" onclick="sendVerificationReminders()" style="background:#0d2d5e;color:#fff;border-color:#0d2d5e;">📱 Text Unverified</button>';
+      h += '<button class="btn btn-primary" onclick="_tcPayrollReport()">📥 Paychex Export</button>';
+      h += '</div></div>';
+    }
 
     // Detail table (hide entries for employees whose timecards are approved — they show in Approved section above)
     var pendingFiltered = filtered.filter(function(e) {
