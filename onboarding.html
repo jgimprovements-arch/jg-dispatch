@@ -188,9 +188,24 @@ textarea.form-input{min-height:72px;resize:vertical;}
     <div class="card-title">Step 3 of 4 · Policy Acknowledgments</div>
     <p style="font-size:13px;color:var(--dim);margin-bottom:16px;line-height:1.5;">Please review and check each item below. These are standard workplace policies — your manager can walk you through any questions.</p>
 
+    <!-- Handbook download card -->
+    <div id="handbook-card" style="background:linear-gradient(135deg,rgba(13,45,94,.05),rgba(232,93,4,.04));border:1.5px solid var(--navy);border-radius:10px;padding:14px 16px;margin-bottom:14px;">
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px;">
+        <div style="font-size:32px;flex-shrink:0;">📄</div>
+        <div style="flex:1;">
+          <div style="font-size:14px;font-weight:700;color:var(--navy);margin-bottom:2px;">JG Restoration Employee Handbook</div>
+          <div style="font-size:11px;color:var(--dim);" id="handbook-meta">Loading current version…</div>
+        </div>
+      </div>
+      <p style="font-size:12px;color:var(--txt);line-height:1.5;margin-bottom:10px;">Please open the handbook below and review it. You'll be signing to confirm receipt, so make sure you've had a chance to look through it.</p>
+      <a href="#" id="handbook-link" onclick="_openHandbook(event)" class="primary-btn" style="display:block;text-decoration:none;text-align:center;margin:0;">📄 Open Handbook (PDF)</a>
+      <div id="handbook-viewed-badge" style="display:none;margin-top:8px;padding:6px 10px;background:rgba(46,125,50,.1);border-radius:6px;font-size:11px;color:var(--grn);text-align:center;font-weight:700;">✓ Opened — you may now sign below</div>
+      <div id="handbook-not-viewed-hint" style="margin-top:8px;padding:6px 10px;background:rgba(230,81,0,.06);border-radius:6px;font-size:11px;color:var(--wrn);text-align:center;">💡 Tip: Open the handbook above before signing, so your acknowledgment is meaningful.</div>
+    </div>
+
     <div class="checkbox-row" onclick="_toggleAck('ack-handbook')">
       <input type="checkbox" id="ack-handbook" onclick="event.stopPropagation();_updateAckRow(this);">
-      <label for="ack-handbook">I acknowledge that I will receive and review the <strong>JG Restoration Employee Handbook</strong>, including workplace conduct, PTO/sick day policies, and break requirements.</label>
+      <label for="ack-handbook">I acknowledge that I have received and reviewed the <strong>JG Restoration Employee Handbook</strong> (the version linked above), including workplace conduct, PTO/sick day policies, and break requirements.</label>
     </div>
 
     <div class="checkbox-row" onclick="_toggleAck('ack-atwill')">
@@ -216,7 +231,7 @@ textarea.form-input{min-height:72px;resize:vertical;}
     <div style="margin-top:20px;padding:14px;background:rgba(13,45,94,.04);border-radius:8px;">
       <label class="form-label">Type your full name to sign:</label>
       <input type="text" id="signature" class="form-input" placeholder="Your full legal name" oninput="_checkSignReady()">
-      <div style="font-size:10px;color:var(--mut);margin-top:6px;">Your typed signature + today's date + IP address will be recorded as your electronic acknowledgment.</div>
+      <div style="font-size:10px;color:var(--mut);margin-top:6px;">Your typed signature + today's date + browser fingerprint will be recorded as your electronic acknowledgment, along with the exact version of the handbook you received.</div>
     </div>
 
     <button class="primary-btn" id="btn-step3" onclick="nextStep(3)" disabled>Sign & Continue →</button>
@@ -285,7 +300,9 @@ var OB = {
   employee: null,
   step: 1,
   step2Data: {},
-  acks: {}
+  acks: {},
+  handbook: null,           // {filename, version, size, hash, url, uploaded_at}
+  handbookViewedAt: null    // timestamp when user clicked Open Handbook
 };
 
 async function bootOnboarding() {
@@ -355,7 +372,66 @@ function showStep(n) {
   window.scrollTo({top:0,behavior:'smooth'});
 
   if (n === 1) populateStep1();
+  if (n === 3) loadHandbookInfo();
   if (n === 4) populateStep4();
+}
+
+async function loadHandbookInfo() {
+  // Already loaded? Skip.
+  if (OB.handbook) { _renderHandbookCard(); return; }
+
+  try {
+    // Fetch the active handbook version from handbook_versions table
+    var r = await fetch(SB_URL + '/rest/v1/handbook_versions?active=eq.true&order=uploaded_at.desc&limit=1', {
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+    });
+    var data = await r.json();
+    if (data && data.length) {
+      OB.handbook = data[0];
+    }
+  } catch(e) { console.warn('Could not load handbook:', e); }
+  _renderHandbookCard();
+}
+
+function _renderHandbookCard() {
+  var meta = document.getElementById('handbook-meta');
+  var link = document.getElementById('handbook-link');
+  if (!meta || !link) return;
+
+  if (!OB.handbook || !OB.handbook.storage_url) {
+    meta.innerHTML = '⚠ Handbook not yet available — your manager will provide a copy.';
+    link.style.opacity = '0.5';
+    link.style.pointerEvents = 'none';
+    link.textContent = '📄 Handbook Not Available';
+    return;
+  }
+
+  var sizeKb = OB.handbook.file_size ? Math.round(OB.handbook.file_size / 1024) : 0;
+  var versionDate = OB.handbook.version_date
+    ? new Date(OB.handbook.version_date + 'T00:00:00').toLocaleDateString('en-US',{month:'long',day:'numeric',year:'numeric'})
+    : 'current version';
+  meta.textContent = 'Version: ' + versionDate + (sizeKb ? ' · PDF · ' + sizeKb + ' KB' : '');
+  link.href = OB.handbook.storage_url;
+  link.target = '_blank';
+  link.rel = 'noopener';
+}
+
+function _openHandbook(ev) {
+  // Let the click through to open the PDF — but also mark it as viewed
+  if (!OB.handbook || !OB.handbook.storage_url) {
+    if (ev) ev.preventDefault();
+    alert('The handbook is not currently available. Please contact your manager.');
+    return;
+  }
+  // First click — record timestamp
+  if (!OB.handbookViewedAt) {
+    OB.handbookViewedAt = new Date().toISOString();
+    var badge = document.getElementById('handbook-viewed-badge');
+    var hint = document.getElementById('handbook-not-viewed-hint');
+    if (badge) badge.style.display = 'block';
+    if (hint) hint.style.display = 'none';
+  }
+  // Let the default anchor action open the PDF in a new tab
 }
 
 function populateStep1() {
@@ -440,7 +516,7 @@ async function nextStep(fromStep) {
     if (!allChecked) { alert('Please check all acknowledgments before signing.'); return; }
     if (signature.length < 3) { alert('Please type your full name to sign.'); return; }
 
-    // Save acknowledgments
+    // Save acknowledgments — include handbook version snapshot for audit trail
     OB.acks = {
       handbook: true,
       at_will: true,
@@ -449,7 +525,18 @@ async function nextStep(fromStep) {
       confidential: true,
       signature: signature,
       signed_at: new Date().toISOString(),
-      user_agent: navigator.userAgent
+      user_agent: navigator.userAgent,
+      // Handbook audit trail — proves WHICH version was acknowledged
+      handbook_viewed: !!OB.handbookViewedAt,
+      handbook_viewed_at: OB.handbookViewedAt || null,
+      handbook_version: OB.handbook ? {
+        id: OB.handbook.id,
+        filename: OB.handbook.filename,
+        version_date: OB.handbook.version_date,
+        file_size: OB.handbook.file_size,
+        file_hash: OB.handbook.file_hash,
+        uploaded_at: OB.handbook.uploaded_at
+      } : null
     };
 
     try {
