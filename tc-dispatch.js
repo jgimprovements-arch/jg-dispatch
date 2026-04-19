@@ -260,9 +260,15 @@
       });
 
       // For PMs/Admins, pull the employee roster
+      // Filter: active, dispatch-eligible role, and not opted out via show_on_dispatch=false
       if (canEdit()) {
-        var emp = await window.sb('/rest/v1/employees?active=eq.true&role=in.(Technician,%22Project%20Manager%22,Admin)&select=id,name,role,market');
-        D.employees = emp || [];
+        var emp = await window.sb('/rest/v1/employees?active=eq.true&role=in.(Technician,%22Project%20Manager%22,Admin)&or=(show_on_dispatch.is.null,show_on_dispatch.eq.true)&select=id,name,role,market,show_on_dispatch,email');
+        // Extra client-side guard: exclude Admins unless they're the owner (Josh)
+        D.employees = (emp || []).filter(function(e){
+          if (e.role !== 'Admin') return true;
+          var k = (e.name||'').toLowerCase();
+          return k.indexOf('josh') !== -1 && k.indexOf('greil') !== -1;
+        });
       }
 
       D.error = null;
@@ -365,9 +371,13 @@
 
   function techsForMarket(market) {
     // Derive tech list: employees in that market + any tech currently in the board_state
+    // Only include board_state names that also exist in our filtered D.employees
+    // (otherwise an opted-out employee would still appear via their saved lane)
     var mLabel = marketEmp(market);
+    var empNames = {};
+    D.employees.forEach(function(e){ if (e.name) empNames[e.name] = true; });
     var fromEmp = D.employees.filter(function(e) { return e.market === mLabel; }).map(function(e) { return e.name; });
-    var fromBoard = Object.keys(D.state.assignments[market] || {});
+    var fromBoard = Object.keys(D.state.assignments[market] || {}).filter(function(n){ return empNames[n]; });
     var all = fromEmp.concat(fromBoard);
     var seen = {};
     return all.filter(function(n) { if (seen[n]) return false; seen[n] = true; return true; }).sort();
