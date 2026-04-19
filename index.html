@@ -575,7 +575,30 @@ const LOCATIONS = {
 const START = 7.5;
 let techStartTimes = {};
 const timelineModes = new Set(); // nm -> decimal hour e.g. 7.5 = 7:30 AM
-const PM_NAMES = new Set(['Rylan Reoh','Brandon Olmsted','Chad Pansier','Anthony Alvarez','Paul Dischler','Jackson Sawall']);
+// PM_NAMES is populated from the employees table (role = 'Project Manager') on boot.
+// Initial values are a fallback in case the fetch fails on first load.
+let PM_NAMES = new Set(['Rylan Reoh','Brandon Olmsted','Chad Pansier','Anthony Alvarez','Paul Dischler','Jackson Sawall']);
+
+async function refreshPMNames(){
+  try {
+    const r = await fetch(SB_URL + "/rest/v1/employees?role=eq.Project%20Manager&active=eq.true&select=name", {
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+    });
+    if (!r.ok) return;
+    const rows = await r.json();
+    if (!Array.isArray(rows)) return;
+    const fresh = new Set();
+    rows.forEach(function(e){ if (e && e.name) fresh.add(e.name.trim()); });
+    // Only swap if we got at least one result — otherwise keep fallback
+    if (fresh.size > 0) {
+      PM_NAMES = fresh;
+      // Re-render if the board is already up
+      if (typeof render === 'function') {
+        try { render(); } catch(e) {}
+      }
+    }
+  } catch(e) { /* silently keep fallback */ }
+}
 const MIT_TYPES = new Set(['Water Mitigation','Fire Mitigation','Mold','CAT3','Board Up','Contents']);
 const TYPE_KEY  = {
   'Water Mitigation':'water','Fire Mitigation':'fire','Mold':'mold',
@@ -604,6 +627,11 @@ window.addEventListener('load', ()=>{
 
 async function boot(){
   document.getElementById('loader').style.display='flex';
+
+  // Fetch current PM roster from Supabase (overrides hardcoded fallback)
+  refreshPMNames();
+  // Refresh every 5 minutes so role changes made in admin panel propagate without a page reload
+  setInterval(refreshPMNames, 5 * 60 * 1000);
 
   // ── STEP 1: Load techs FIRST (always) ──
   stepActive('techs');
@@ -1404,47 +1432,51 @@ function renderBoard(){
       } else {
       tech.jobs.forEach(jid=>{
         const j=jobs[jid];if(!j)return;
-        const c=document.createElement('div');c.className='card card-'+j.type;
-        c.draggable=true;c.dataset.jobId=jid;c.dataset.src=nm;
         const ov=jobOverrides[nm+'|'+jid];
         const jt=getJobTime(nm,jid);
-        c.innerHTML=`
-          <div style="display:flex;align-items:flex-start;gap:4px;">
-            <div style="flex:1;min-width:0;">
-              <div class="card-name">${j.name}</div>
-              <div class="card-addr">${j.addr}, ${j.city}</div>
-              <div style="display:flex;gap:6px;margin-top:4px;flex-wrap:wrap;">
-                <div style="display:flex;flex-direction:column;gap:1px;">
-                  <span style="font-size:8px;color:var(--muted);line-height:1;">Start</span>
-                  <input type="time" value="${jt.start}"
-                    style="font-size:9px;background:var(--surface);border:1px solid ${ov?'var(--gold)':'var(--border-mid)'};border-radius:4px;color:var(--text);padding:1px 2px;width:90px;"
-                    onclick="event.stopPropagation()"
-                    onchange="event.stopPropagation();setJobTime('${nm}','${jid}',this.value,null)">
-                </div>
-                <div style="display:flex;flex-direction:column;gap:1px;">
-                  <span style="font-size:8px;color:var(--muted);line-height:1;">End</span>
-                  <input type="time" value="${jt.end}"
-                    style="font-size:9px;background:var(--surface);border:1px solid ${ov?'var(--gold)':'var(--border-mid)'};border-radius:4px;color:var(--text);padding:1px 2px;width:90px;"
-                    onclick="event.stopPropagation()"
-                    onchange="event.stopPropagation();setJobTime('${nm}','${jid}',null,this.value)">
-                </div>
-              </div>
-            </div>
-            <div class="drag-handle" title="Drag to reorder" 
-              style="cursor:grab;color:var(--muted);font-size:14px;padding:2px;user-select:none;flex-shrink:0;">⋮⋮</div>
-          </div>`;
-        c.addEventListener('dragstart',(e)=>{
-          c.dataset.wasDragged='1';
+        const shared=Object.entries(techQ[loc]).filter(([n,t])=>n!==nm&&t.jobs.includes(jid)).map(([n])=>n.split(' ')[0]);
+        const card=document.createElement('div');
+        card.className='job-card jc-'+j.type+(isSick?' orphan':'');
+        card.draggable=true;card.dataset.jobId=jid;card.dataset.tech=nm;
+        card.innerHTML=`<div class="c-top">
+          <span class="c-jobname">${j.name}</span>
+          ${isSick?'<span style="font-size:8px;color:var(--danger);font-weight:700;flex-shrink:0">!</span>':'<span class="c-hdl">⠿</span>'}
+        </div>
+        <div class="c-city">${j.city}</div>
+        ${isSick?'':`<div class="c-meta">
+          <span class="chip">${j.status}</span>
+          <div class="hrs-wrap"><input class="hrs-in" type="number" min=".5" max="16" step=".5" value="${j.hrs}"
+            onchange="updHrs('${jid}',this.value)" onclick="event.stopPropagation()">h</div>
+          ${shared.length?`<span class="team-badge">+${shared.join('+')}</span>`:''}
+        </div>
+        <div style="display:flex;gap:6px;margin-top:4px;flex-wrap:wrap;padding:0 4px 4px;">
+          <div style="display:flex;flex-direction:column;gap:1px;">
+            <span style="font-size:8px;color:var(--muted);line-height:1;">Start</span>
+            <input type="time" value="${jt.start}"
+              style="font-size:9px;background:var(--surface);border:1px solid ${ov?'var(--gold)':'var(--border-mid)'};border-radius:4px;color:var(--text);padding:1px 2px;width:90px;"
+              onclick="event.stopPropagation()"
+              onchange="event.stopPropagation();setJobTime('${nm}','${jid}',this.value,null)">
+          </div>
+          <div style="display:flex;flex-direction:column;gap:1px;">
+            <span style="font-size:8px;color:var(--muted);line-height:1;">End</span>
+            <input type="time" value="${jt.end}"
+              style="font-size:9px;background:var(--surface);border:1px solid ${ov?'var(--gold)':'var(--border-mid)'};border-radius:4px;color:var(--text);padding:1px 2px;width:90px;"
+              onclick="event.stopPropagation()"
+              onchange="event.stopPropagation();setJobTime('${nm}','${jid}',null,this.value)">
+          </div>
+        </div>`}`;
+        card.addEventListener('dragstart',(e)=>{
+          card.dataset.wasDragged='1';
           onCardDragStart(e,nm,jid);
         });
-        c.addEventListener('dragend',onDE);
-        c.addEventListener('dragover',(e)=>onCardDragOver(e,nm,jid));
-        c.addEventListener('drop',(e)=>onCardDrop(e,nm,jid));
-        c.addEventListener('mouseup',(e)=>{
+        card.addEventListener('dragend',onDE);
+        card.addEventListener('dragover',(e)=>onCardDragOver(e,nm,jid));
+        card.addEventListener('drop',(e)=>onCardDrop(e,nm,jid));
+        card.addEventListener('mouseup',(e)=>{
           if(e.button!==0)return;
-          if(c.dataset.wasDragged==='1'){c.dataset.wasDragged='0';return;}
+          if(card.dataset.wasDragged==='1'){card.dataset.wasDragged='0';return;}
         });
-        body.appendChild(c);
+        body.appendChild(card);
       });
       const ph=document.createElement('div');ph.className='drop-ph';ph.textContent='+ drop job here';
       body.appendChild(ph);
