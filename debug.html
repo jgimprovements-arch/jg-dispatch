@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>JG Debug</title>
+<style>
+body{font-family:sans-serif;max-width:900px;margin:20px auto;padding:0 16px;background:#f5f5f5;}
+h2{background:#0d2d5e;color:#fff;padding:8px 12px;border-radius:6px;margin-top:30px;}
+pre{background:#fff;padding:12px;border-radius:6px;border:1px solid #ddd;overflow:auto;font-size:12px;}
+.ok{color:#2e7d32;font-weight:700;}
+.warn{color:#e65100;font-weight:700;}
+.err{color:#c02020;font-weight:700;}
+table{border-collapse:collapse;width:100%;margin-top:8px;background:#fff;}
+th,td{padding:6px 10px;border:1px solid #ddd;font-size:13px;text-align:left;}
+th{background:#0d2d5e;color:#fff;}
+.verdict{background:#fff;padding:12px;border-radius:6px;border:2px solid #e85d04;margin:10px 0;font-weight:600;}
+</style>
+</head>
+<body>
+<h1>🔍 JG Dispatch Debug</h1>
+<p>Running diagnostics on the employees table and board state...</p>
+
+<h2>1. All Active Employees in Supabase</h2>
+<div id="r1">Loading...</div>
+
+<h2>2. What the Dispatch Filter Would Include</h2>
+<div id="r2">Loading...</div>
+
+<h2>3. Saved Board State Assignments</h2>
+<div id="r3">Loading...</div>
+
+<h2>4. Verdict</h2>
+<div id="verdict" class="verdict">Analyzing...</div>
+
+<script>
+const SB = 'https://nuykvchgecpiuikoerze.supabase.co';
+const KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im51eWt2Y2hnZWNwaXVpa29lcnplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYyNjM3ODYsImV4cCI6MjA5MTgzOTc4Nn0.39hZ8DdjT_0iFJXPeAL2FXUSLw8FZBirDVzxZTO1W9s';
+const H = { 'apikey':KEY, 'Authorization':'Bearer '+KEY };
+
+async function run() {
+  const findings = [];
+
+  // 1. All active employees
+  try {
+    const r = await fetch(SB+'/rest/v1/employees?active=eq.true&select=id,name,email,role,market,active,show_on_dispatch&order=name.asc', {headers:H});
+    const emps = await r.json();
+    let h = '<table><tr><th>Name</th><th>Role</th><th>Market</th><th>Active</th><th>show_on_dispatch</th></tr>';
+    emps.forEach(e => {
+      h += `<tr><td>${e.name||''}</td><td>${e.role||'<em>(blank)</em>'}</td><td>${e.market||''}</td><td>${e.active}</td><td>${e.show_on_dispatch===false?'<span class="err">FALSE</span>':(e.show_on_dispatch===true?'true':'<em>(null)</em>')}</td></tr>`;
+    });
+    h += '</table>';
+    document.getElementById('r1').innerHTML = h;
+
+    // Find Kristina specifically
+    const kristinas = emps.filter(e => (e.name||'').toLowerCase().includes('kristina'));
+    if (kristinas.length) {
+      const k = kristinas[0];
+      findings.push(`<strong>Kristina's record:</strong> role="${k.role||'(blank)'}", market="${k.market||''}", show_on_dispatch=${k.show_on_dispatch}`);
+    } else {
+      findings.push('<span class="err">No employee named "Kristina" found in Supabase!</span>');
+    }
+
+    // 2. What would the dispatch filter include?
+    const DISPATCH_ROLES = ['Technician','Project Manager','Admin'];
+    const dispatched = emps.filter(e => DISPATCH_ROLES.includes(e.role) && e.show_on_dispatch !== false);
+    const excluded = emps.filter(e => !DISPATCH_ROLES.includes(e.role) || e.show_on_dispatch === false);
+    let h2 = '<h3 style="color:#2e7d32">✓ WOULD APPEAR on dispatch</h3><ul>';
+    dispatched.forEach(e => h2 += `<li>${e.name} (${e.role})</li>`);
+    h2 += '</ul><h3 style="color:#c02020">✗ WOULD NOT appear on dispatch</h3><ul>';
+    excluded.forEach(e => h2 += `<li>${e.name} (${e.role||'(no role)'}) ${e.show_on_dispatch===false?'— explicitly opted out':''}</li>`);
+    h2 += '</ul>';
+    document.getElementById('r2').innerHTML = h2;
+
+    const kristinaWouldAppear = dispatched.some(e => (e.name||'').toLowerCase().includes('kristina'));
+    findings.push(kristinaWouldAppear
+      ? '<span class="err">Kristina WOULD appear based on her role — the role in Supabase needs to change.</span>'
+      : '<span class="ok">Kristina would NOT appear based on the filter — so something else is putting her on the board.</span>');
+  } catch(e) {
+    document.getElementById('r1').innerHTML = '<pre class="err">ERROR: '+e.message+'</pre>';
+  }
+
+  // 3. Board state
+  try {
+    const r = await fetch(SB+'/rest/v1/board_state?id=eq.current&select=state,updated_at', {headers:H});
+    const rows = await r.json();
+    const state = rows?.[0]?.state || {};
+    const assignments = state.assignments || {};
+    const allTechs = [];
+    Object.entries(assignments).forEach(([loc, lanes]) => {
+      Object.keys(lanes).forEach(name => allTechs.push({loc, name, jobCount: (lanes[name]||[]).length}));
+    });
+    let h3 = `<p>Board state last updated: <b>${rows?.[0]?.updated_at}</b></p>`;
+    h3 += '<table><tr><th>Market</th><th>Tech Name</th><th>Jobs Assigned</th></tr>';
+    allTechs.forEach(t => h3 += `<tr><td>${t.loc}</td><td>${t.name}</td><td>${t.jobCount}</td></tr>`);
+    h3 += '</table>';
+    document.getElementById('r3').innerHTML = h3;
+
+    const kristinaInBoard = allTechs.some(t => t.name.toLowerCase().includes('kristina'));
+    if (kristinaInBoard) {
+      findings.push('<span class="err">Kristina is saved in board_state — that\'s why she still appears! Need to clear her lane from saved state.</span>');
+    } else {
+      findings.push('<span class="ok">Kristina is NOT in saved board_state.</span>');
+    }
+  } catch(e) {
+    document.getElementById('r3').innerHTML = '<pre class="err">ERROR: '+e.message+'</pre>';
+  }
+
+  document.getElementById('verdict').innerHTML = findings.join('<br><br>');
+}
+run();
+</script>
+</body>
+</html>
