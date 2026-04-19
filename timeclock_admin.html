@@ -6069,7 +6069,6 @@ function _buildEmployeeFileBody(emp, invite, ncSig) {
     h += '<div style="font-size:13px;color:#c62828;margin-bottom:6px;"><strong>No signed non-compete on file</strong></div>';
     h += '<div style="font-size:11px;color:var(--muted);margin-bottom:8px;">This employee has not yet signed the Non-Competition Agreement.</div>';
     h += '<button class="btn btn-sm" onclick="requestNoncompeteSignature(\''+emp.id+'\')" style="background:var(--orange);color:#fff;border-color:var(--orange);">📑 Request Signature</button>';
-    h += '<div style="font-size:10px;color:var(--muted);margin-top:6px;font-style:italic;">(Retroactive signing flow coming next session)</div>';
     h += '</div>';
   }
   h += '</div>';
@@ -6096,11 +6095,162 @@ function _fileRow(label, value) {
     '</div>';
 }
 
-// Stub — full retroactive non-compete request flow coming in next session
-function requestNoncompeteSignature(empId) {
+// Build full non-compete request flow — sends signing link to existing employees
+async function requestNoncompeteSignature(empId) {
   var emp = ST.employees.find(function(e){ return e.id === empId; });
   if (!emp) { toast('Employee not found'); return; }
-  alert('Retroactive non-compete signing is coming in the next build.\n\nFor now: you can manually send this employee a signing link via invite re-send, or have them sign during their next in-person visit.\n\nEmployee: ' + emp.name + '\nEmail: ' + (emp.email||'—'));
+  if (!isAdmin()) { toast('Admin only'); return; }
+
+  // Check for existing pending request
+  var pending = null;
+  try {
+    var r = await sb('/rest/v1/noncompete_requests?employee_id=eq.' + empId + '&status=eq.pending&select=*&limit=1');
+    if (r && r.length) pending = r[0];
+  } catch(e) {}
+
+  var body = '';
+  body += '<div style="font-size:13px;color:var(--muted);margin-bottom:14px;line-height:1.5;">Send <strong>' + emp.name + '</strong> a secure link to sign the Non-Competition Agreement. They\'ll receive a text and/or email with a link that opens a signing page (no full onboarding wizard — they\'ve already done that).</div>';
+
+  if (pending) {
+    body += '<div style="background:rgba(230,81,0,.08);border:1px solid rgba(230,81,0,.3);border-radius:8px;padding:10px 12px;margin-bottom:14px;font-size:12px;color:#e65100;line-height:1.5;">';
+    body += '⚠ An invite was already sent to this employee on <strong>' + new Date(pending.sent_at).toLocaleDateString() + '</strong>. You can send a new one — the old link will be invalidated.';
+    body += '</div>';
+  }
+
+  body += '<div class="form-row">';
+  body += '<div><label class="form-label">Email</label><input type="email" id="nc-req-email" class="form-input" value="'+(emp.email||'').replace(/"/g,'&quot;')+'"></div>';
+  body += '<div><label class="form-label">Mobile Phone</label><input type="tel" id="nc-req-phone" class="form-input" value="'+(emp.phone||'').replace(/"/g,'&quot;')+'"></div>';
+  body += '</div>';
+
+  body += '<div style="background:rgba(232,93,4,.04);border:1px solid rgba(232,93,4,.2);border-radius:8px;padding:12px;margin-bottom:14px;">';
+  body += '<div style="font-size:11px;font-weight:700;color:var(--orange);text-transform:uppercase;margin-bottom:8px;">📲 Delivery channel</div>';
+  body += '<div style="display:flex;gap:8px;flex-wrap:wrap;">';
+  body += '<label style="flex:1;min-width:120px;padding:10px 12px;border:1.5px solid var(--border);border-radius:6px;cursor:pointer;display:flex;align-items:center;gap:8px;"><input type="radio" name="nc-req-channel" value="sms" checked style="accent-color:var(--orange);"><span style="font-size:13px;font-weight:600;">📱 Text only</span></label>';
+  body += '<label style="flex:1;min-width:120px;padding:10px 12px;border:1.5px solid var(--border);border-radius:6px;cursor:pointer;display:flex;align-items:center;gap:8px;"><input type="radio" name="nc-req-channel" value="email" style="accent-color:var(--orange);"><span style="font-size:13px;font-weight:600;">📧 Email only</span></label>';
+  body += '<label style="flex:1;min-width:120px;padding:10px 12px;border:1.5px solid var(--border);border-radius:6px;cursor:pointer;display:flex;align-items:center;gap:8px;"><input type="radio" name="nc-req-channel" value="both" style="accent-color:var(--orange);"><span style="font-size:13px;font-weight:600;">📱📧 Both</span></label>';
+  body += '<label style="flex:1;min-width:120px;padding:10px 12px;border:1.5px solid var(--border);border-radius:6px;cursor:pointer;display:flex;align-items:center;gap:8px;"><input type="radio" name="nc-req-channel" value="link" style="accent-color:var(--orange);"><span style="font-size:13px;font-weight:600;">🔗 Link only</span></label>';
+  body += '</div></div>';
+
+  body += '<div style="font-size:11px;color:var(--muted);padding:8px 12px;background:rgba(13,45,94,.04);border-radius:6px;line-height:1.5;">The link expires in <strong>14 days</strong>. This is longer than the onboarding invite because existing employees may need time to read before signing.</div>';
+
+  showModal('📑 Request Non-Compete Signature — ' + emp.name, body, '_submitNoncompeteRequest("' + empId + '")');
+}
+
+async function _submitNoncompeteRequest(empId) {
+  var emp = ST.employees.find(function(e){ return e.id === empId; });
+  if (!emp) { alert('Employee not found'); return; }
+
+  var email = (document.getElementById('nc-req-email')||{}).value.trim().toLowerCase();
+  var phone = (document.getElementById('nc-req-phone')||{}).value.trim();
+  var channelEl = document.querySelector('input[name="nc-req-channel"]:checked');
+  var channel = channelEl ? channelEl.value : 'link';
+
+  if ((channel==='sms' || channel==='both') && !phone) { alert('Phone is required for SMS'); return; }
+  if ((channel==='email' || channel==='both') && !email) { alert('Email is required for email channel'); return; }
+
+  var token = _generateInviteToken();
+  var expiresAt = new Date(Date.now() + 14*24*60*60*1000).toISOString();
+
+  try {
+    // Invalidate any prior pending requests for this employee
+    await fetch(SB_URL + '/rest/v1/noncompete_requests?employee_id=eq.' + empId + '&status=eq.pending', {
+      method: 'PATCH',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'superseded' })
+    });
+
+    // Create new request record
+    var createR = await fetch(SB_URL + '/rest/v1/noncompete_requests', {
+      method: 'POST',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
+      body: JSON.stringify({
+        token: token,
+        employee_id: empId,
+        employee_name: emp.name,
+        sent_to_email: email || null,
+        sent_to_phone: phone || null,
+        channel: channel,
+        status: 'pending',
+        sent_at: new Date().toISOString(),
+        expires_at: expiresAt,
+        sent_by: getApprovedBy()
+      })
+    });
+    if (!createR.ok) {
+      var errText = await createR.text().catch(function(){return '';});
+      if (errText.indexOf('does not exist') !== -1 || errText.indexOf('relation') !== -1) {
+        throw new Error('Database table missing. Run the SQL for noncompete_requests table.');
+      }
+      throw new Error('Failed to create request: ' + errText.substring(0, 200));
+    }
+
+    // Build the signing URL
+    var signUrl = window.location.origin + window.location.pathname.replace(/[^\/]+$/, '') + 'sign_noncompete.html?token=' + token;
+
+    // Prepare messages
+    var firstName = emp.name.split(' ')[0];
+    var smsBody = 'Hi '+firstName+' — JG Restoration needs your signature on our Non-Competition Agreement. Tap here to review & sign (link expires in 14 days): '+signUrl+' — Questions? Call (920) 428-4200.';
+    var emailSubject = 'Action Required: JG Restoration Non-Compete Agreement';
+    var emailBody = 'Hi '+firstName+',\n\nAs part of our ongoing workplace documentation, JG Restoration is requiring all current employees to review and sign our Non-Competition Agreement.\n\nTo review and sign, click this secure link (expires in 14 days):\n'+signUrl+'\n\nThe signing process takes about 3 minutes. You\'ll see the full agreement before signing.\n\nIf you have questions before signing, please talk to Josh or call (920) 428-4200. If you have concerns about any terms, let us know — we\'d rather address them before you sign than afterward.\n\nThank you,\nJG Restoration';
+
+    // Fire webhook(s)
+    if (channel === 'sms' || channel === 'both') {
+      try {
+        var normalizedPhone = _normalizePhoneE164(phone);
+        if (normalizedPhone) {
+          var smsParams = new URLSearchParams({
+            type: 'noncompete_sms',
+            to: normalizedPhone,
+            body: smsBody,
+            employee_name: emp.name
+          });
+          await fetch(HOOKS.onboarding, {
+            method: 'POST',
+            body: smsParams.toString(),
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+          });
+        }
+      } catch(e) { console.warn('NC SMS send failed:', e); }
+    }
+    if (channel === 'email' || channel === 'both') {
+      try {
+        var emailParams = new URLSearchParams({
+          type: 'noncompete_email',
+          to: email,
+          subject: emailSubject,
+          body: emailBody,
+          employee_name: emp.name
+        });
+        await fetch(HOOKS.onboarding, {
+          method: 'POST',
+          body: emailParams.toString(),
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+        });
+      } catch(e) { console.warn('NC email send failed:', e); }
+    }
+
+    logActivity('Non-Compete Requested', emp.name + ' • sent via ' + channel, 'employees', emp.name);
+    closeModal();
+
+    // Show confirmation with copy link
+    var confBody = '';
+    confBody += '<div style="text-align:center;margin-bottom:16px;">';
+    confBody += '<div style="font-size:40px;margin-bottom:8px;">✅</div>';
+    confBody += '<div style="font-size:18px;font-weight:700;color:var(--navy);margin-bottom:4px;">Signing Request Sent</div>';
+    confBody += '<div style="font-size:13px;color:var(--muted);">'+emp.name+' will receive their signing link via <strong>'+(channel==='both'?'SMS + email':channel==='sms'?'SMS':channel==='email'?'email':'link copy')+'</strong>.</div>';
+    confBody += '</div>';
+    confBody += '<div style="background:rgba(13,45,94,.04);border-radius:8px;padding:12px 14px;margin-bottom:12px;">';
+    confBody += '<div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px;">Signing Link</div>';
+    confBody += '<div style="font-size:11px;font-family:DM Mono,monospace;word-break:break-all;background:#fff;padding:8px 10px;border-radius:6px;border:1px solid var(--border);margin-bottom:8px;">'+signUrl+'</div>';
+    confBody += '<button class="btn btn-sm" onclick="_copyInviteLink(this)" data-url="'+signUrl+'" style="background:var(--navy);color:#fff;border-color:var(--navy);">📋 Copy Link</button>';
+    confBody += '</div>';
+    confBody += '<div style="font-size:11px;color:var(--muted);padding:8px 12px;background:rgba(230,81,0,.04);border-radius:6px;line-height:1.5;">⏱ Link expires in <strong>14 days</strong>. You can send a new request if they don\'t sign in time.</div>';
+    showModal('Request Sent', confBody, null);
+
+  } catch(err) {
+    console.error(err);
+    alert('Request failed: ' + err.message);
+  }
 }
 
 function openEditEmployee(id) {
