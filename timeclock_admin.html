@@ -538,7 +538,10 @@ function renderLive() {
   }
 
   h += '<div class="card"><div class="card-hdr" style="display:flex;align-items:center;justify-content:space-between;"><div class="card-title"><span class="live-dot"></span>Currently Clocked In</div>';
+  h += '<div style="display:flex;gap:6px;align-items:center;">';
+  h += '<button class="btn" onclick="openAbsenceModal()" style="font-size:11px;background:var(--orange);color:#fff;border-color:var(--orange);">+ Log Absence</button>';
   h += '<button class="btn" onclick="loadAll();renderLive();" style="font-size:11px;">↻ Refresh</button>';
+  h += '</div>';
   h += '</div>';
   if (!active.length) {
     h += '<div class="empty">No one clocked in right now</div>';
@@ -764,8 +767,32 @@ async function addAbsence() {
     body: JSON.stringify({ employee_name: name, date: date, reason: reason, notes: notes, market: market, logged_by: 'admin' })
   });
   toast('Absence recorded for ' + name);
+  closeModal();
   await loadAll();
-  showTab('timesheets', document.getElementById('tab-timesheets'));
+  render();
+}
+
+// ── ABSENCE POPUP ─────────────────────────────────────────────────────────
+function openAbsenceModal(presetName, presetDate) {
+  var today = presetDate || new Date().toISOString().split('T')[0];
+  var activeEmps = ST.employees.filter(function(e){ return e.active; });
+  var empOptions = '<option value="">-- Select --</option>';
+  activeEmps.forEach(function(e) {
+    empOptions += '<option value="'+e.name+'"'+(presetName===e.name?' selected':'')+'>'+e.name+'</option>';
+  });
+
+  var body = '<p style="font-size:12px;color:var(--muted);margin-bottom:14px;line-height:1.5;">Manually log an employee absence. This will appear in timesheets for the pay period.</p>';
+  body += '<div class="form-row">';
+  body += '<div><label class="form-label">Employee *</label><select class="form-select" id="abs-name">'+empOptions+'</select></div>';
+  body += '<div><label class="form-label">Date *</label><input type="date" class="form-input" id="abs-date" value="'+today+'"></div>';
+  body += '</div>';
+  body += '<div class="form-row">';
+  body += '<div><label class="form-label">Reason</label><select class="form-select" id="abs-reason"><option>Sick</option><option>PTO</option><option>Personal Day</option><option>No Call No Show</option><option>Injured</option><option>Training</option><option>Shop Time</option><option>Jury Duty</option><option>Bereavement</option><option>Other</option></select></div>';
+  body += '<div><label class="form-label">Market</label><select class="form-select" id="abs-market"><option>Appleton</option><option>Stevens Point</option></select></div>';
+  body += '</div>';
+  body += '<div><label class="form-label">Notes (optional)</label><input type="text" class="form-input" id="abs-notes" placeholder="e.g. Called in sick at 6am..."></div>';
+
+  showModal('📋 Log Absence / Out of Office', body, 'addAbsence()');
 }
 
 function exportPayPeriodCSV() {
@@ -1713,10 +1740,11 @@ function renderTimesheets() {
     var barColor = allApproved ? '#2e7d32' : 'var(--warn)';
     var barMsg = allApproved ? '&#128274; All timecards approved &amp; locked' : '&#8987; '+approvedCount+' of '+empNamesInPeriod.length+' timecards approved';
     h += '<div style="font-size:13px;font-weight:700;color:'+barColor+';">'+barMsg+'</div>';
-    h += '<div style="display:flex;gap:8px;">';
+    h += '<div style="display:flex;gap:8px;flex-wrap:wrap;">';
     if (!allApproved) {
       h += '<button class="btn btn-primary" style="background:#2e7d32;border-color:#2e7d32;" onclick="_tcApproveAll()">&#10003; Approve All</button>';
     }
+    h += '<button class="btn" onclick="openAbsenceModal()" style="background:var(--orange);color:#fff;border-color:var(--orange);">+ Log Absence</button>';
     h += '<button class="btn" onclick="sendVerificationReminders()" style="background:#0d2d5e;color:#fff;border-color:#0d2d5e;">📱 Text Unverified</button>';
     h += '<button class="btn btn-primary" onclick="_tcPayrollReport()">📥 Paychex Export</button>';
     h += '</div></div>';
@@ -2726,10 +2754,11 @@ function renderReports() {
   h += '<div class="stat-card"><div class="stat-val">'+ST.entries.length+'</div><div class="stat-lbl">Total Entries</div></div>';
   h += '</div>';
 
-  h += '<div style="display:flex;gap:8px;margin-bottom:16px;">';
+  h += '<div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;">';
   h += '<button class="btn btn-primary" onclick="exportCSV(7)">↓ CSV — Last 7 Days</button>';
   h += '<button class="btn btn-primary" onclick="exportCSV(14)">↓ CSV — Last 14 Days</button>';
   h += '<button class="btn btn-primary" onclick="exportCSV(30)">↓ CSV — Last 30 Days</button>';
+  h += '<button class="btn" onclick="openAbsenceModal()" style="background:var(--orange);color:#fff;border-color:var(--orange);">+ Log Absence</button>';
   h += '<button class="btn" onclick="exportCSV()" style="margin-left:auto;">↓ CSV — Current Filter</button>';
   h += '</div>';
 
@@ -2752,25 +2781,6 @@ function renderReports() {
   });
   h += '</tbody></table></div>';
 
-
-  // Absence / Out of Office log section
-  h += '<div class="card" style="margin-top:20px;">';
-  h += '<div class="card-hdr"><div class="card-title">Log Absence / Out of Office</div></div>';
-  h += '<div class="card-body">';
-  h += '<p style="font-size:12px;color:var(--muted);margin-bottom:14px;line-height:1.5;">Manually log an employee absence. This will appear in timesheets for the pay period.</p>';
-  h += '<div class="form-row">';
-  h += '<div><label class="form-label">Employee *</label><select class="form-select" id="abs-name"><option value="">-- Select --</option>';
-  ST.employees.filter(function(e){return e.active;}).forEach(function(e){ h += '<option>'+e.name+'</option>'; });
-  h += '</select></div>';
-  h += '<div><label class="form-label">Date *</label><input type="date" class="form-input" id="abs-date" value="'+new Date().toISOString().split('T')[0]+'"></div>';
-  h += '</div>';
-  h += '<div class="form-row">';
-  h += '<div><label class="form-label">Reason</label><select class="form-select" id="abs-reason"><option>Sick</option><option>PTO</option><option>Personal Day</option><option>No Call No Show</option><option>Injured</option><option>Training</option><option>Shop Time</option><option>Jury Duty</option><option>Bereavement</option><option>Other</option></select></div>';
-  h += '<div><label class="form-label">Market</label><select class="form-select" id="abs-market"><option>Appleton</option><option>Stevens Point</option></select></div>';
-  h += '</div>';
-  h += '<div><label class="form-label">Notes (optional)</label><input type="text" class="form-input" id="abs-notes" placeholder="e.g. Called in sick at 6am..."></div>';
-  h += '<button class="btn btn-primary" onclick="addAbsence()" style="margin-top:12px;width:100%;padding:11px;">+ Log Absence</button>';
-  h += '</div></div>';
 
   document.getElementById('tc-body').innerHTML = h;
 }
