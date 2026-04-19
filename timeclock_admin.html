@@ -195,7 +195,6 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;min
   <button class="tc-tab" id="tab-employees" onclick="showTab('employees',this)">👥 Employees</button>
   <button class="tc-tab" id="tab-reports" onclick="showTab('reports',this)">📊 Reports</button>
   <button class="tc-tab" id="tab-routes" onclick="showTab('routes',this)">🗺 Routes & Live</button>
-  <button class="tc-tab" id="tab-jobcost" onclick="showTab('jobcost',this)">💰 Job Costing</button>
   <button class="tc-tab" id="tab-commissions" onclick="showTab('commissions',this)">💵 Commissions</button>
   <button class="tc-tab" id="tab-timeoff" onclick="showTab('timeoff',this)">🏖 Time Off</button>
   <button class="tc-tab" id="tab-archive" onclick="showTab('archive',this)">🗄 Archive</button>
@@ -397,8 +396,78 @@ async function sb(path, opts) {
   return r.json().catch(function() { return null; });
 }
 
+// ── APP SETTINGS (labor burden rate, etc.) ────────────────────────────────
+var _appSettings = {
+  labor_burden_rate: 40  // default $40/hr; overridden from Supabase on load
+};
+
+async function loadAppSettings() {
+  try {
+    var rows = await sb('/rest/v1/app_settings?select=id,value');
+    if (rows && rows.length) {
+      rows.forEach(function(r) {
+        if (r.id && r.value != null) {
+          _appSettings[r.id] = typeof r.value === 'number' ? r.value : (parseFloat(r.value) || _appSettings[r.id]);
+        }
+      });
+    }
+  } catch(e) { console.warn('loadAppSettings failed:', e); }
+  return _appSettings;
+}
+
+function getLaborBurdenRate() {
+  return parseFloat(_appSettings.labor_burden_rate || 40);
+}
+
+// Compute labor burden cost for a given number of minutes
+function laborBurdenCost(minutes) {
+  return (minutes / 60) * getLaborBurdenRate();
+}
+
+// Format currency
+function fmtMoney(n) {
+  return '$' + Math.round(n).toLocaleString();
+}
+
+async function saveLaborBurdenRate(newRate) {
+  var rate = parseFloat(newRate);
+  if (isNaN(rate) || rate < 0) { toast('Invalid rate'); return false; }
+  _appSettings.labor_burden_rate = rate;
+  try {
+    await fetch(SB_URL + '/rest/v1/app_settings', {
+      method: 'POST',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'resolution=merge-duplicates,return=minimal' },
+      body: JSON.stringify({ id: 'labor_burden_rate', value: rate, updated_at: new Date().toISOString() })
+    });
+    logActivity('Labor Burden Rate Updated', 'New rate: $' + rate + '/hr', 'general', null);
+    toast('✓ Saved: $' + rate + '/hr');
+    return true;
+  } catch(e) { toast('Save failed'); return false; }
+}
+
+function openLaborBurdenSettings() {
+  if (!isAdmin()) { toast('Admin only'); return; }
+  var current = getLaborBurdenRate();
+  var body = '';
+  body += '<div style="font-size:12px;color:var(--muted);margin-bottom:12px;line-height:1.5;">Labor burden is the <strong style="color:var(--navy);">fully-loaded cost per hour</strong> of a technician — includes wages, payroll taxes, insurance, benefits, and equipment overhead. Used everywhere hours are displayed.</div>';
+  body += '<div style="margin-bottom:8px;"><label class="form-label">Labor Burden Rate ($/hour)</label>';
+  body += '<input type="number" step="0.50" id="lb-rate-input" class="form-input" value="'+current+'" style="font-size:16px;font-weight:700;" autofocus></div>';
+  body += '<div style="font-size:11px;color:var(--muted);margin-top:10px;padding:8px 12px;background:rgba(13,45,94,.04);border-radius:6px;">💡 Typical restoration labor burden is <strong>$35–$50/hr</strong> for direct labor costs. Can be refined later per-employee or per-market.</div>';
+  showModal('⚙️ Labor Burden Rate', body, '_saveLaborBurdenFromModal()');
+}
+
+async function _saveLaborBurdenFromModal() {
+  var val = (document.getElementById('lb-rate-input')||{}).value;
+  if (await saveLaborBurdenRate(val)) {
+    closeModal();
+    render();  // re-render to update visible costs
+  }
+}
+
 // ── LOAD ──────────────────────────────────────────────────────────────────
 async function loadAll() {
+  await loadAppSettings();
+
   var emps = await sb('/rest/v1/employees?order=name.asc&select=*');
   ST.employees = emps || [];
 
@@ -471,7 +540,6 @@ function render() {
   else if (ST.tab === 'employees') { if (isAdmin()) renderEmployees(); }
   else if (ST.tab === 'reports')   { if (isAdmin()) renderReports(); }
   else if (ST.tab === 'routes')   renderRoutes();
-  else if (ST.tab === 'jobcost')  { renderJobCost(); }
   else if (ST.tab === 'commissions') { if (_canViewCommissionsTab()) renderCommissions(); else { ST.tab = 'timesheets'; renderTimesheets(); } }
   else if (ST.tab === 'timeoff')  { if (isAdmin()) renderTimeOff(); }
   else if (ST.tab === 'archive')  { if (isAdmin()) renderArchive(); }
@@ -2385,15 +2453,19 @@ function renderTimesheets() {
     var ptoHrsStr = periodPtoHrs.toFixed(1)+'h';
     // Build summary into its own string so we can inject it at the TOP of the page
     var summaryBlock = '';
+    var periodLaborMins = periodRegMins + periodOtMins;  // worked (non-PTO) minutes
+    var periodLaborBurden = laborBurdenCost(periodLaborMins);
     summaryBlock += '<div class="card" style="margin-bottom:16px;padding:0;overflow:hidden;">';
     summaryBlock += '<div style="background:var(--navy);padding:10px 18px;"><div style="font-size:11px;font-weight:700;color:rgba(255,255,255,.6);text-transform:uppercase;letter-spacing:.06em;">Pay Period Summary — '+selPeriod+'</div></div>';
     var hasPto = periodPtoHrs > 0 || periodTrainHrs > 0;
-    var gridCols = hasPto ? (periodTotalPay>0 ? '1fr 1fr 1fr 1fr 1fr' : '1fr 1fr 1fr 1fr') : (periodTotalPay>0 ? '1fr 1fr 1fr 1fr' : '1fr 1fr 1fr');
+    // grid: +1 column for labor burden
+    var gridCols = hasPto ? (periodTotalPay>0 ? '1fr 1fr 1fr 1fr 1fr 1fr' : '1fr 1fr 1fr 1fr 1fr') : (periodTotalPay>0 ? '1fr 1fr 1fr 1fr 1fr' : '1fr 1fr 1fr 1fr');
     summaryBlock += '<div style="display:grid;grid-template-columns:'+gridCols+';">';
     summaryBlock += '<div style="padding:16px 18px;border-right:1px solid var(--border);"><div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">Total Hours</div><div style="font-size:24px;font-weight:700;color:var(--navy);line-height:1;">'+totalHrs2+'</div></div>';
     summaryBlock += '<div style="padding:16px 18px;border-right:1px solid var(--border);"><div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">Regular</div><div style="font-size:24px;font-weight:700;color:var(--navy);line-height:1;">'+regHrsStr2+'</div></div>';
     summaryBlock += '<div style="padding:16px 18px;border-right:1px solid var(--border);"><div style="font-size:10px;font-weight:700;color:'+(periodOtMins>0?'#c62828':'var(--muted)')+';text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">Overtime</div>';
     summaryBlock += '<div style="font-size:24px;font-weight:700;color:'+(periodOtMins>0?'#c62828':'var(--muted)')+';line-height:1;">'+otHrsStr2+'</div></div>';
+    summaryBlock += '<div style="padding:16px 18px;border-right:1px solid var(--border);background:rgba(232,93,4,.05);"><div style="font-size:10px;font-weight:700;color:var(--orange);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">Labor Burden</div><div style="font-size:24px;font-weight:700;color:var(--orange);line-height:1;">'+fmtMoney(periodLaborBurden)+'</div><div style="font-size:9px;color:var(--muted);margin-top:2px;">@ $'+getLaborBurdenRate()+'/hr</div></div>';
     if (hasPto) {
       summaryBlock += '<div style="padding:16px 18px;'+(periodTotalPay>0?'border-right:1px solid var(--border);':'')+'background:rgba(46,125,50,.04);">';
       summaryBlock += '<div style="font-size:10px;font-weight:700;color:#2e7d32;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">PTO / Training</div>';
@@ -4540,177 +4612,6 @@ async function loadRouteMap() {
   setTimeout(function(){ if (_routeMap) _routeMap.invalidateSize(); }, 300);
 }
 
-async function renderJobCost() {
-  var fmtDur = function(mins){ return Math.floor(mins/60)+'h '+(mins%60)+'m'; };
-  var durMins = function(e){ var out=e.clock_out?new Date(e.clock_out):new Date(); return Math.floor((out-new Date(e.clock_in))/60000); };
-
-  // Show loading while Albi data loads (first time only)
-  if (!_albiJobs) {
-    document.getElementById('tc-body').innerHTML = '<div class="card"><div class="empty" style="padding:40px;">Loading Albi project names...</div></div>';
-  }
-  await ensureAlbiJobsLoaded();
-
-  // Default hide-junk to ON (zero-duration + no-job entries are data noise)
-  if (typeof ST.hideJunkEntries === 'undefined') ST.hideJunkEntries = true;
-
-  var h = '';
-  h += '<div class="filter-bar" style="margin-bottom:16px;">';
-  h += '<select onchange="ST.filterEmp=this.value;renderJobCost();" style="min-width:160px;">';
-  h += '<option value="All">All Employees</option>';
-  var empNames = [...new Set(ST.entries.map(function(e){return e.employee_name;}))].sort();
-  empNames.forEach(function(n){ h += '<option value="'+n+'"'+(ST.filterEmp===n?' selected':'')+'>'+n+'</option>'; });
-  h += '</select>';
-  h += '<input type="date" class="form-input" style="max-width:150px;" value="'+(ST.filterDate||new Date(Date.now()-30*86400000).toISOString().split('T')[0])+'" onchange="ST.filterDate=this.value;loadAll().then(renderJobCost)">';
-  h += '<span style="font-size:12px;color:var(--muted);align-self:center;">to</span>';
-  h += '<input type="date" class="form-input" style="max-width:150px;" value="'+(ST.filterDateEnd||new Date().toISOString().split('T')[0])+'" onchange="ST.filterDateEnd=this.value;loadAll().then(renderJobCost)">';
-  h += '<label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);cursor:pointer;margin-left:12px;"><input type="checkbox" '+(ST.hideJunkEntries?'checked':'')+' onchange="ST.hideJunkEntries=this.checked;renderJobCost();" style="accent-color:var(--orange);">Hide 0-min & no-job entries</label>';
-  h += '<button class="btn btn-primary" onclick="exportJobCostCSV()" style="margin-left:auto;">Export CSV</button>';
-  h += '</div>';
-
-  // Base filter by employee
-  var rawFiltered = ST.entries.filter(function(e){
-    return ST.filterEmp === 'All' || e.employee_name === ST.filterEmp;
-  });
-
-  // Data hygiene filter
-  var junkCount = 0, zeroMinCount = 0, noJobCount = 0;
-  var filtered = rawFiltered.filter(function(e) {
-    var mins = e.duration_minutes || durMins(e);
-    var resolvedName = resolveJobName(e.job_id, e.job_name);
-    var isZero = mins === 0;
-    var isNoJob = !resolvedName || resolvedName === 'No Job Assigned' || resolvedName.indexOf('ID: ') === 0 && !e.job_name;
-    if (isZero) zeroMinCount++;
-    if (isNoJob) noJobCount++;
-    if (isZero || isNoJob) junkCount++;
-    if (ST.hideJunkEntries && (isZero || isNoJob)) return false;
-    return true;
-  });
-
-  // Data quality stat banner
-  if (junkCount > 0) {
-    h += '<div style="background:rgba(245,166,35,.06);border:1px solid rgba(245,166,35,.4);border-radius:10px;padding:10px 14px;margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;gap:12px;">';
-    h += '<div style="font-size:12px;color:var(--navy);">';
-    h += '<strong style="color:#c85e00;">⚠ '+junkCount+' data quality issue(s):</strong> ';
-    h += zeroMinCount + ' zero-duration, ' + noJobCount + ' missing job' + (ST.hideJunkEntries?'. These are hidden below.':'. Shown in red below.');
-    h += '</div>';
-    h += '<button class="btn btn-sm" onclick="showDataQualityReport()" style="white-space:nowrap;">View Details</button>';
-    h += '</div>';
-  }
-
-  if (!filtered.length) {
-    h += '<div class="card"><div class="empty">No entries for this filter</div></div>';
-    document.getElementById('tc-body').innerHTML = h;
-    return;
-  }
-
-  // Group by job — use resolved Albi name as the display key
-  var byJob = {};
-  filtered.forEach(function(e) {
-    var resolvedName = resolveJobName(e.job_id, e.job_name);
-    var jobKey = resolvedName || 'No Job Assigned';
-    if (!byJob[jobKey]) byJob[jobKey] = { jobId: e.job_id||'', entries: [], totalMins: 0, employees: {} };
-    var mins = e.duration_minutes || durMins(e);
-    byJob[jobKey].entries.push(e);
-    byJob[jobKey].totalMins += mins;
-    if (!byJob[jobKey].employees[e.employee_name]) byJob[jobKey].employees[e.employee_name] = 0;
-    byJob[jobKey].employees[e.employee_name] += mins;
-  });
-
-  var sortedJobs = Object.entries(byJob).sort(function(a,b){ return b[1].totalMins - a[1].totalMins; });
-  var grandTotal = sortedJobs.reduce(function(s,kv){ return s + kv[1].totalMins; }, 0);
-
-  // Summary cards
-  var uniqueEmps = new Set(filtered.map(function(e){return e.employee_name;})).size;
-  h += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:20px;">';
-  h += '<div class="stat-card"><div class="stat-val">'+sortedJobs.length+'</div><div class="stat-lbl">Jobs</div></div>';
-  h += '<div class="stat-card"><div class="stat-val">'+fmtDur(grandTotal)+'</div><div class="stat-lbl">Total Hours</div></div>';
-  h += '<div class="stat-card"><div class="stat-val">'+filtered.length+'</div><div class="stat-lbl">Entries</div></div>';
-  h += '<div class="stat-card"><div class="stat-val">'+uniqueEmps+'</div><div class="stat-lbl">Employees</div></div>';
-  h += '</div>';
-
-  // Hours by job table
-  h += '<div class="card"><div class="card-hdr"><div class="card-title">💰 Hours by Job</div></div>';
-  h += '<table class="tc-table"><thead><tr><th>Job</th><th>Entries</th><th>Total Hours</th><th>% of Period</th><th>Employees</th><th>Est. Labor Cost</th></tr></thead><tbody>';
-
-  sortedJobs.forEach(function(kv) {
-    var jobName = kv[0], jd = kv[1];
-    var pct = grandTotal > 0 ? Math.round(jd.totalMins / grandTotal * 100) : 0;
-    var empList = Object.entries(jd.employees).sort(function(a,b){return b[1]-a[1];});
-    var laborCost = 0;
-    jd.entries.forEach(function(e) {
-      var emp = ST.employees.find(function(x){ return x.name === e.employee_name; });
-      var rate = emp ? parseFloat(emp.hourly_rate || 0) : 0;
-      laborCost += rate * (e.duration_minutes || durMins(e)) / 60;
-    });
-    var isNoJob = jobName === 'No Job Assigned';
-    h += '<tr>';
-    h += '<td><div style="font-weight:700;color:'+(isNoJob?'var(--muted)':'var(--navy)');+'font-style:'+(isNoJob?'italic':'normal')+';">'+(isNoJob?'<em>'+jobName+'</em>':jobName)+'</div>';
-    if (jd.jobId) h += '<div style="font-size:10px;color:var(--muted);">ID: '+jd.jobId+'</div>';
-    h += '</td>';
-    h += '<td>'+jd.entries.length+'</td>';
-    h += '<td><strong class="mono">'+fmtDur(jd.totalMins)+'</strong><div class="prog-bar"><div class="prog-fill" style="width:'+pct+'%;background:var(--orange);"></div></div></td>';
-    h += '<td><strong>'+pct+'%</strong></td>';
-    h += '<td>'+empList.map(function(ev){ return '<div style="font-size:11px;"><strong>'+ev[0].split(' ')[0]+'</strong>: '+fmtDur(ev[1])+'</div>'; }).join('')+'</td>';
-    h += '<td>'+(laborCost>0?'<strong style="color:#2e7d32;">$'+laborCost.toFixed(2)+'</strong>':'<span style="color:var(--muted);font-size:11px;">No rate set</span>')+'</td>';
-    h += '</tr>';
-  });
-  h += '</tbody></table></div>';
-
-  // Detailed entry breakdown
-  h += '<div class="card" style="margin-top:16px;"><div class="card-hdr"><div class="card-title">👤 Employee Time by Job — Detail</div></div>';
-  h += '<table class="tc-table"><thead><tr><th>Employee</th><th>Job</th><th>Date</th><th>Duration</th><th>In</th><th>Out</th><th>Est. Cost</th></tr></thead><tbody>';
-
-  var fmt = function(iso){ if(!iso)return ''; var d=new Date(iso),h2=d.getHours()%12||12,m=d.getMinutes(),ap=d.getHours()>=12?'PM':'AM'; return h2+':'+(m<10?'0':'')+m+' '+ap; };
-  var sortedEntries = filtered.slice().sort(function(a,b){
-    if (a.employee_name !== b.employee_name) return a.employee_name.localeCompare(b.employee_name);
-    return (a.job_name||'').localeCompare(b.job_name||'');
-  });
-
-  var prevEmp = null, prevJob = null;
-  sortedEntries.forEach(function(e) {
-    var emp = ST.employees.find(function(x){ return x.name === e.employee_name; });
-    var rate = emp ? parseFloat(emp.hourly_rate || 0) : 0;
-    var mins = e.duration_minutes || durMins(e);
-    var cost = rate * mins / 60;
-    var resolvedName = resolveJobName(e.job_id, e.job_name);
-    var isNewEmp = e.employee_name !== prevEmp;
-    var isNewJob = resolvedName !== prevJob || isNewEmp;
-    h += '<tr'+(isNewEmp?' style="border-top:2px solid var(--border);"':'')+'>';
-    h += '<td>'+(isNewEmp?'<strong>'+e.employee_name+'</strong>':'')+'</td>';
-    h += '<td>'+(isNewJob?'<span style="font-weight:600;color:var(--navy);">'+(resolvedName||'<em style="color:var(--muted);">No Job</em>')+'</span>':'')+'</td>';
-    h += '<td style="font-size:11px;">'+fmtD(new Date(e.clock_in))+'</td>';
-    h += '<td><strong>'+fmtDur(mins)+'</strong></td>';
-    h += '<td class="mono" style="font-size:11px;">'+fmt(e.clock_in)+'</td>';
-    h += '<td class="mono" style="font-size:11px;">'+(e.clock_out?fmt(e.clock_out):'<span class="badge badge-green">Active</span>')+'</td>';
-    h += '<td style="font-size:11px;">'+(cost>0?'$'+cost.toFixed(2):'-')+'</td>';
-    h += '</tr>';
-    prevEmp = e.employee_name;
-    prevJob = resolvedName;
-  });
-  h += '</tbody></table></div>';
-
-  document.getElementById('tc-body').innerHTML = h;
-}
-
-function exportJobCostCSV() {
-  var fmtDur = function(mins){ return (mins/60).toFixed(2); };
-  var durMins = function(e){ var out=e.clock_out?new Date(e.clock_out):new Date(); return Math.floor((out-new Date(e.clock_in))/60000); };
-  var fmt = function(iso){ if(!iso)return ''; var d=new Date(iso),h=d.getHours()%12||12,m=d.getMinutes(),ap=d.getHours()>=12?'PM':'AM'; return h+':'+(m<10?'0':'')+m+' '+ap; };
-  var filtered = ST.entries.filter(function(e){ return ST.filterEmp === 'All' || e.employee_name === ST.filterEmp; });
-  var rows = [['Employee','Job','Job ID','Date','Clock In','Clock Out','Hours','Hourly Rate','Labor Cost']];
-  filtered.forEach(function(e) {
-    var emp = ST.employees.find(function(x){ return x.name === e.employee_name; });
-    var rate = emp ? parseFloat(emp.hourly_rate||0) : 0;
-    var mins = e.duration_minutes || durMins(e);
-    var cost = rate * mins / 60;
-    rows.push([e.employee_name, e.job_name||'No Job', e.job_id||'', fmtD(new Date(e.clock_in)), fmt(e.clock_in), fmt(e.clock_out), fmtDur(mins), rate?'$'+rate.toFixed(2):'', cost?'$'+cost.toFixed(2):'']);
-  });
-  var csv = rows.map(function(r){ return r.map(function(c){ return '"'+String(c).replace(/"/g,'""')+'"'; }).join(','); }).join('\n');
-  var a = document.createElement('a');
-  a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
-  a.download = 'jg_job_cost_' + new Date().toISOString().split('T')[0] + '.csv';
-  a.click();
-}
 
 function renderReports() {
   var fmtDur = function(mins){ return Math.floor(mins/60)+'h '+(mins%60)+'m'; };
@@ -4724,7 +4625,6 @@ function renderReports() {
     byEmp[e.employee_name].days.add(e.clock_in.split('T')[0]);
   });
 
-  // Compute OT (over 40h/week is simplified here)
   Object.values(byEmp).forEach(function(d){
     var hrs = d.mins / 60;
     d.ot = Math.max(0, hrs - 40);
@@ -4735,39 +4635,191 @@ function renderReports() {
 
   var h = '';
 
-  // Stats
+  // ─── JOB SEARCH CARD ──────────────────────────────────────────────────
+  h += '<div class="card" style="margin-bottom:16px;padding:0;overflow:hidden;">';
+  h += '<div class="card-hdr" style="background:var(--navy);"><div class="card-title" style="color:#fff;">🔍 Search Hours by Job</div></div>';
+  h += '<div style="padding:16px;">';
+  h += '<div style="position:relative;margin-bottom:12px;">';
+  h += '<input type="text" id="job-search-input" class="form-input" placeholder="Type to search Albi jobs..." value="'+(ST.jobSearchName||'')+'" oninput="_filterJobSearch(this.value)" autocomplete="off" style="font-size:14px;padding:12px 14px;">';
+  h += '<div id="job-search-dropdown" style="display:none;position:absolute;top:100%;left:0;right:0;background:#fff;border:1.5px solid var(--border);border-radius:8px;max-height:250px;overflow-y:auto;z-index:100;box-shadow:0 4px 16px rgba(0,0,0,.15);margin-top:4px;"></div>';
+  h += '</div>';
+
+  if (ST.jobSearchId) {
+    h += '<div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;">';
+    h += '<button class="btn btn-sm" onclick="_clearJobSearch()" style="background:var(--surface);color:var(--muted);">✕ Clear</button>';
+    h += '<span style="font-size:11px;color:var(--muted);">Showing all clock-in entries for <strong style="color:var(--navy);">'+ST.jobSearchName+'</strong></span>';
+    h += '</div>';
+    h += _renderJobSearchResults();
+  } else {
+    h += '<div style="padding:20px;text-align:center;color:var(--muted);font-size:12px;">Pick an Albi job above to see total hours, which techs worked it, and when.</div>';
+  }
+
+  h += '</div></div>';
+
+  // ─── OVERALL STATS (existing) ─────────────────────────────────────────
+  var burdenTotal = laborBurdenCost(totalMins);
   h += '<div class="stat-grid">';
   h += '<div class="stat-card"><div class="stat-val">'+fmtDur(totalMins)+'</div><div class="stat-lbl">Total Hours</div></div>';
+  h += '<div class="stat-card" style="border-left:3px solid var(--orange);"><div class="stat-val" style="color:var(--orange);">'+fmtMoney(burdenTotal)+'</div><div class="stat-lbl">Labor Cost (@ $'+getLaborBurdenRate()+'/hr)</div></div>';
   h += '<div class="stat-card"><div class="stat-val" style="color:var(--red);">'+totalOT.toFixed(1)+'h</div><div class="stat-lbl">Overtime Hours</div></div>';
   h += '<div class="stat-card"><div class="stat-val">'+Object.keys(byEmp).length+'</div><div class="stat-lbl">Employees</div></div>';
   h += '<div class="stat-card"><div class="stat-val">'+ST.entries.length+'</div><div class="stat-lbl">Total Entries</div></div>';
   h += '</div>';
 
-  h += '<div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;">';
+  h += '<div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;align-items:center;">';
   h += '<button class="btn" onclick="openAbsenceModal()" style="background:var(--orange);color:#fff;border-color:var(--orange);">+ Log Absence</button>';
+  h += '<button class="btn btn-sm" onclick="openLaborBurdenSettings()" style="margin-left:auto;background:var(--surface);color:var(--muted);" title="Configure labor burden rate">⚙️ Burden: $'+getLaborBurdenRate()+'/hr</button>';
   h += '</div>';
 
   h += '<div class="card"><div class="card-hdr"><div class="card-title">Hours by Employee</div></div>';
-  h += '<table class="tc-table"><thead><tr><th>Employee</th><th>Total Hours</th><th>Days Worked</th><th>Avg/Day</th><th>OT Hours</th><th>vs 40h Week</th></tr></thead><tbody>';
+  h += '<table class="tc-table"><thead><tr><th>Employee</th><th>Total Hours</th><th>Labor Cost</th><th>Days Worked</th><th>Avg/Day</th><th>OT Hours</th><th>vs 40h Week</th></tr></thead><tbody>';
   Object.entries(byEmp).sort(function(a,b){return b[1].mins-a[1].mins;}).forEach(function(kv) {
     var name=kv[0], d=kv[1];
     var hrs = d.mins/60;
     var days = d.days.size;
     var avgDay = days ? (hrs/days).toFixed(1) : 0;
     var vs40 = hrs - 40;
+    var empBurden = laborBurdenCost(d.mins);
     h += '<tr>';
     h += '<td><strong>'+name+'</strong></td>';
     h += '<td><strong class="mono">'+fmtDur(d.mins)+'</strong></td>';
+    h += '<td class="mono" style="color:var(--orange);font-weight:700;">'+fmtMoney(empBurden)+'</td>';
     h += '<td>'+days+'</td>';
     h += '<td class="mono">'+avgDay+'h</td>';
     h += '<td>'+(d.ot>0?'<strong style="color:var(--red);">'+d.ot.toFixed(1)+'h</strong>':'-')+'</td>';
     h += '<td>'+(vs40>0?'<span class="badge badge-red">+'+vs40.toFixed(1)+'h OT</span>':'<span class="badge badge-green">'+Math.abs(vs40).toFixed(1)+'h left</span>')+'</td>';
     h += '</tr>';
   });
+  // Total row
+  h += '<tr style="background:rgba(13,45,94,.04);border-top:2px solid var(--navy);font-weight:700;">';
+  h += '<td style="font-weight:700;color:var(--navy);">TOTAL</td>';
+  h += '<td class="mono" style="font-weight:700;">'+fmtDur(totalMins)+'</td>';
+  h += '<td class="mono" style="color:var(--orange);font-weight:700;">'+fmtMoney(burdenTotal)+'</td>';
+  h += '<td colspan="4" style="color:var(--muted);font-size:11px;">@ $'+getLaborBurdenRate()+'/hr burden</td>';
+  h += '</tr>';
   h += '</tbody></table></div>';
 
-
   document.getElementById('tc-body').innerHTML = h;
+
+  // Kick off Albi load for the job search autocomplete
+  ensureAlbiJobsLoaded();
+}
+
+// ── JOB SEARCH (on Reports tab) ──────────────────────────────────────────
+function _filterJobSearch(q) {
+  var dd = document.getElementById('job-search-dropdown');
+  if (!dd) return;
+  if (!q || q.length < 2 || !_albiJobs) { dd.style.display = 'none'; return; }
+  var matches = _albiJobs.filter(function(j){ return j.name.toLowerCase().indexOf(q.toLowerCase()) !== -1; }).slice(0, 15);
+  if (!matches.length) {
+    dd.innerHTML = '<div style="padding:12px;color:var(--muted);font-size:12px;">No matching jobs found.</div>';
+    dd.style.display = 'block';
+    return;
+  }
+  var html = '';
+  matches.forEach(function(j) {
+    html += '<div onclick="_pickJobSearch(\''+j.id+'\',\''+j.name.replace(/\'/g,"\\'")+'\')" style="padding:10px 14px;cursor:pointer;border-bottom:1px solid var(--border);font-size:13px;" onmouseover="this.style.background=\'rgba(13,45,94,.06)\'" onmouseout="this.style.background=\'transparent\'">';
+    html += '<div style="font-weight:600;color:var(--navy);">'+j.name+'</div>';
+    html += '<div style="font-size:11px;color:var(--muted);">'+(j.market||'')+(j.projectType?' • '+j.projectType:'')+(j.customerName?' • '+j.customerName:'')+'</div>';
+    html += '</div>';
+  });
+  dd.innerHTML = html;
+  dd.style.display = 'block';
+}
+
+function _pickJobSearch(id, name) {
+  ST.jobSearchId = id;
+  ST.jobSearchName = name;
+  var dd = document.getElementById('job-search-dropdown');
+  if (dd) dd.style.display = 'none';
+  renderReports();
+}
+
+function _clearJobSearch() {
+  ST.jobSearchId = null;
+  ST.jobSearchName = null;
+  renderReports();
+}
+
+function _renderJobSearchResults() {
+  var fmt = function(iso){ if(!iso)return ''; var d=new Date(iso),h=d.getHours()%12||12,m=d.getMinutes(),ap=d.getHours()>=12?'PM':'AM'; return h+':'+(m<10?'0':'')+m+' '+ap; };
+  var fmtDate = function(iso){ var d=new Date(iso); return d.toLocaleDateString('en-US',{weekday:'short',month:'numeric',day:'numeric',year:'2-digit'}); };
+  var fmtDur = function(mins){ return Math.floor(mins/60)+'h '+(mins%60)+'m'; };
+  var durMins = function(e){ var out=e.clock_out?new Date(e.clock_out):new Date(); return Math.floor((out-new Date(e.clock_in))/60000); };
+
+  // Match by job_id OR job_name (defensive — older entries may have name without id)
+  var jobIdStr = String(ST.jobSearchId||'');
+  var jobNameStr = (ST.jobSearchName||'').toLowerCase();
+  var matched = ST.entries.filter(function(e) {
+    if (!e.clock_in) return false;
+    if (e.job_id && String(e.job_id) === jobIdStr) return true;
+    if (e.job_name && e.job_name.toLowerCase() === jobNameStr) return true;
+    return false;
+  }).sort(function(a,b){ return new Date(b.clock_in) - new Date(a.clock_in); });
+
+  if (!matched.length) {
+    return '<div style="padding:20px;text-align:center;color:var(--muted);font-size:12px;background:rgba(198,40,40,.04);border-radius:8px;">No clock-in entries found for this job.<br><span style="font-size:11px;">This either hasn\'t been worked yet, or technicians didn\'t tag their time entries with this job.</span></div>';
+  }
+
+  // Summary stats
+  var totalMins = matched.reduce(function(s,e){ return s + (e.duration_minutes || durMins(e)); }, 0);
+  var byTech = {};
+  var dateSet = new Set();
+  matched.forEach(function(e) {
+    if (!byTech[e.employee_name]) byTech[e.employee_name] = { mins: 0, count: 0 };
+    var m = e.duration_minutes || durMins(e);
+    byTech[e.employee_name].mins += m;
+    byTech[e.employee_name].count++;
+    dateSet.add(e.clock_in.split('T')[0]);
+  });
+  var techCount = Object.keys(byTech).length;
+  var uniqueDays = dateSet.size;
+
+  // Stat strip
+  var burdenCost = laborBurdenCost(totalMins);
+  var h = '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:14px;">';
+  h += '<div style="background:rgba(13,45,94,.04);border-radius:8px;padding:10px 12px;"><div style="font-size:22px;font-weight:700;color:var(--navy);line-height:1;">'+fmtDur(totalMins)+'</div><div style="font-size:10px;color:var(--muted);text-transform:uppercase;font-weight:700;margin-top:4px;">Total Hours</div></div>';
+  h += '<div style="background:rgba(232,93,4,.06);border-radius:8px;padding:10px 12px;border:1px solid rgba(232,93,4,.2);"><div style="font-size:22px;font-weight:700;color:var(--orange);line-height:1;">'+fmtMoney(burdenCost)+'</div><div style="font-size:10px;color:var(--muted);text-transform:uppercase;font-weight:700;margin-top:4px;">Labor Cost (@ $'+getLaborBurdenRate()+'/hr)</div></div>';
+  h += '<div style="background:rgba(13,45,94,.04);border-radius:8px;padding:10px 12px;"><div style="font-size:22px;font-weight:700;color:var(--navy);line-height:1;">'+matched.length+'</div><div style="font-size:10px;color:var(--muted);text-transform:uppercase;font-weight:700;margin-top:4px;">Clock-ins</div></div>';
+  h += '<div style="background:rgba(13,45,94,.04);border-radius:8px;padding:10px 12px;"><div style="font-size:22px;font-weight:700;color:var(--navy);line-height:1;">'+techCount+'</div><div style="font-size:10px;color:var(--muted);text-transform:uppercase;font-weight:700;margin-top:4px;">Technicians</div></div>';
+  h += '<div style="background:rgba(13,45,94,.04);border-radius:8px;padding:10px 12px;"><div style="font-size:22px;font-weight:700;color:var(--navy);line-height:1;">'+uniqueDays+'</div><div style="font-size:10px;color:var(--muted);text-transform:uppercase;font-weight:700;margin-top:4px;">Unique Days</div></div>';
+  h += '</div>';
+
+  // Breakdown by tech
+  h += '<div style="background:var(--surface);border-radius:8px;padding:12px 14px;margin-bottom:14px;">';
+  h += '<div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:8px;">Hours by Technician</div>';
+  Object.entries(byTech).sort(function(a,b){return b[1].mins - a[1].mins;}).forEach(function(kv) {
+    var pct = totalMins > 0 ? Math.round(kv[1].mins / totalMins * 100) : 0;
+    var techBurden = laborBurdenCost(kv[1].mins);
+    h += '<div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;">';
+    h += '<div style="min-width:110px;font-size:12px;font-weight:700;color:var(--navy);">'+kv[0]+'</div>';
+    h += '<div style="flex:1;height:8px;background:var(--border);border-radius:4px;overflow:hidden;"><div style="height:100%;background:var(--orange);width:'+pct+'%;border-radius:4px;"></div></div>';
+    h += '<div style="min-width:85px;text-align:right;font-size:12px;font-weight:600;font-family:DM Mono,monospace;">'+fmtDur(kv[1].mins)+'</div>';
+    h += '<div style="min-width:75px;text-align:right;font-size:12px;font-weight:700;font-family:DM Mono,monospace;color:var(--orange);">'+fmtMoney(techBurden)+'</div>';
+    h += '<div style="min-width:40px;text-align:right;font-size:11px;color:var(--muted);">('+kv[1].count+' clk)</div>';
+    h += '</div>';
+  });
+  h += '</div>';
+
+  // Detail table — every clock-in
+  h += '<div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;overflow:hidden;">';
+  h += '<div style="padding:10px 14px;background:var(--navy);color:#fff;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;">Every Clock-In on This Job</div>';
+  h += '<table class="tc-table" style="margin:0;">';
+  h += '<thead><tr><th>Date</th><th>Tech</th><th>Clock In</th><th>Clock Out</th><th>Duration</th><th>Notes</th></tr></thead><tbody>';
+  matched.forEach(function(e) {
+    var m = e.duration_minutes || durMins(e);
+    h += '<tr>';
+    h += '<td style="font-size:12px;white-space:nowrap;">'+fmtDate(e.clock_in)+'</td>';
+    h += '<td><strong style="color:var(--navy);">'+e.employee_name+'</strong></td>';
+    h += '<td class="mono">'+fmt(e.clock_in)+'</td>';
+    h += '<td class="mono">'+(e.clock_out ? fmt(e.clock_out) : '<span style="color:var(--warn);">in progress</span>')+'</td>';
+    h += '<td><strong>'+fmtDur(m)+'</strong></td>';
+    h += '<td style="font-size:11px;color:var(--muted);max-width:200px;">'+(e.notes||'-')+'</td>';
+    h += '</tr>';
+  });
+  h += '</tbody></table></div>';
+
+  return h;
 }
 
 // ── EMPLOYEE EDIT ─────────────────────────────────────────────────────────
