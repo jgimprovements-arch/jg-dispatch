@@ -5840,27 +5840,33 @@ async function openEmployeeFile(empId) {
   var loadingBody = '<div style="text-align:center;padding:40px;color:var(--muted);">Loading employee file...</div>';
   showModal('📄 Employee File — ' + emp.name, loadingBody, null);
 
-  // Fetch invite + non-compete signature + documents in parallel
+  // Fetch invite + non-compete signature + documents + comp history + reviews in parallel
   var inviteData = null;
   var ncSignatureData = null;
   var documentsData = [];
+  var compHistoryData = [];
+  var reviewsData = [];
   try {
     var results = await Promise.all([
       sb('/rest/v1/employee_invites?employee_id=eq.' + empId + '&order=sent_at.desc&limit=1'),
       sb('/rest/v1/noncompete_signatures?employee_id=eq.' + empId + '&order=signed_at.desc&limit=1'),
-      sb('/rest/v1/employee_documents?employee_id=eq.' + empId + '&order=uploaded_at.desc')
+      sb('/rest/v1/employee_documents?employee_id=eq.' + empId + '&order=uploaded_at.desc'),
+      sb('/rest/v1/comp_history?employee_id=eq.' + empId + '&order=effective_date.desc'),
+      sb('/rest/v1/performance_reviews?employee_id=eq.' + empId + '&order=review_date.desc')
     ]);
     if (results[0] && results[0].length) inviteData = results[0][0];
     if (results[1] && results[1].length) ncSignatureData = results[1][0];
     if (results[2]) documentsData = results[2];
+    if (results[3]) compHistoryData = results[3];
+    if (results[4]) reviewsData = results[4];
   } catch(e) { console.warn('Could not fetch employee records:', e); }
 
   // Build the file view
-  var body = _buildEmployeeFileBody(emp, inviteData, ncSignatureData, documentsData);
+  var body = _buildEmployeeFileBody(emp, inviteData, ncSignatureData, documentsData, compHistoryData, reviewsData);
   showModal('📄 Employee File — ' + emp.name, body, null);
 }
 
-function _buildEmployeeFileBody(emp, invite, ncSig, documents) {
+function _buildEmployeeFileBody(emp, invite, ncSig, documents, compHistory, reviews) {
   var h = '';
   var fmtD = function(iso) { if (!iso) return '—'; var d = new Date(iso); return d.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}); };
   var fmtDT = function(iso) { if (!iso) return '—'; var d = new Date(iso); return d.toLocaleString('en-US',{month:'short',day:'numeric',year:'numeric',hour:'numeric',minute:'2-digit'}); };
@@ -6136,6 +6142,123 @@ function _buildEmployeeFileBody(emp, invite, ncSig, documents) {
 
   h += '</div>';
   // End Documents section
+
+  // ── COMPENSATION HISTORY ──
+  var compHist = compHistory || [];
+  h += '<div style="background:#fff;border:1px solid var(--border);border-radius:10px;padding:16px 18px;margin-bottom:16px;">';
+  h += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">';
+  h += '<div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;">💰 Compensation History</div>';
+  h += '<button class="btn btn-sm" onclick="openCompChange(\''+emp.id+'\')" style="background:var(--navy);color:#fff;border-color:var(--navy);">+ Record Change</button>';
+  h += '</div>';
+
+  if (!compHist.length) {
+    // Seed prompt — no history yet
+    var currentRate = emp.pay_type === 'salary'
+      ? (emp.annual_salary ? '$'+Number(emp.annual_salary).toLocaleString()+'/yr' : 'not set')
+      : (emp.hourly_rate ? '$'+Number(emp.hourly_rate).toFixed(2)+'/hr' : 'not set');
+    h += '<div style="padding:14px;background:rgba(230,81,0,.04);border:1px solid rgba(230,81,0,.25);border-radius:8px;text-align:center;">';
+    h += '<div style="font-size:12px;color:var(--navy);margin-bottom:6px;"><strong>No compensation history recorded yet.</strong></div>';
+    h += '<div style="font-size:11px;color:var(--muted);margin-bottom:10px;line-height:1.5;">Current rate: '+currentRate+' · For the sale, you want a timestamped pay history. Start by seeding a baseline.</div>';
+    h += '<button class="btn btn-sm" onclick="_seedCompBaseline(\''+emp.id+'\')" style="background:var(--orange);color:#fff;border-color:var(--orange);">Seed Baseline with Current Rate</button>';
+    h += '</div>';
+  } else {
+    h += '<div style="display:flex;flex-direction:column;gap:8px;">';
+    compHist.forEach(function(ch, idx) {
+      var typeIcon = { hire:'🎉', raise:'💵', promotion:'💼', adjustment:'📊', salary_to_hourly:'🔄', hourly_to_salary:'🔄' }[ch.change_type] || '📊';
+      var fmtRate = function(type, rate) {
+        if (!rate) return '—';
+        if (type === 'salary') return '$'+Number(rate).toLocaleString()+'/yr';
+        return '$'+Number(rate).toFixed(2)+'/hr';
+      };
+      var beforeLabel = ch.before_rate ? fmtRate(ch.before_pay_type || 'hourly', ch.before_rate) : null;
+      var afterLabel = fmtRate(ch.after_pay_type || 'hourly', ch.after_rate);
+      var changeLabel;
+      if (ch.change_type === 'hire') {
+        changeLabel = 'Initial rate: <strong>'+afterLabel+'</strong>';
+      } else if (beforeLabel) {
+        var deltaPct = '';
+        if (ch.before_rate && ch.after_rate && (ch.before_pay_type||'hourly') === (ch.after_pay_type||'hourly')) {
+          var pct = ((ch.after_rate - ch.before_rate) / ch.before_rate * 100).toFixed(1);
+          var dollarDelta = (ch.after_rate - ch.before_rate).toFixed(2);
+          deltaPct = ' <span style="color:'+(ch.after_rate>ch.before_rate?'#2e7d32':'#c62828')+';font-weight:700;">(' + (ch.after_rate>ch.before_rate?'+':'') + '$' + dollarDelta + ', ' + (pct > 0 ? '+' : '') + pct + '%)</span>';
+        }
+        changeLabel = beforeLabel + ' → <strong>' + afterLabel + '</strong>' + deltaPct;
+      } else {
+        changeLabel = 'Now: <strong>'+afterLabel+'</strong>';
+      }
+
+      h += '<div style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;">';
+      h += '<div style="display:flex;align-items:start;gap:10px;">';
+      h += '<div style="font-size:22px;flex-shrink:0;">'+typeIcon+'</div>';
+      h += '<div style="flex:1;min-width:0;">';
+      h += '<div style="font-size:13px;font-weight:700;color:var(--navy);">'+_compChangeTypeLabel(ch.change_type)+' — '+new Date(ch.effective_date+'T00:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})+'</div>';
+      h += '<div style="font-size:12px;color:var(--navy);margin-top:4px;">'+changeLabel+'</div>';
+      if (ch.new_role && ch.new_role !== emp.role) h += '<div style="font-size:11px;color:var(--muted);margin-top:2px;">New role: <strong>'+ch.new_role+'</strong></div>';
+      if (ch.reason) h += '<div style="font-size:11px;color:var(--navy);margin-top:4px;font-style:italic;">'+ch.reason+'</div>';
+      h += '<div style="font-size:10px;color:var(--muted);margin-top:4px;">Recorded by '+(ch.recorded_by||'—')+' on '+new Date(ch.recorded_at||ch.effective_date).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})+'</div>';
+      h += '</div>';
+      h += '<button class="btn btn-sm" onclick="deleteCompChange(\''+ch.id+'\',\''+emp.id+'\')" title="Delete this entry" style="color:#c62828;flex-shrink:0;">🗑</button>';
+      h += '</div>';
+      h += '</div>';
+    });
+    h += '</div>';
+  }
+  h += '</div>';
+
+  // ── PERFORMANCE REVIEWS ──
+  var revs = reviews || [];
+  h += '<div style="background:#fff;border:1px solid var(--border);border-radius:10px;padding:16px 18px;margin-bottom:16px;">';
+  h += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">';
+  h += '<div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;">📋 Performance Reviews</div>';
+  h += '<button class="btn btn-sm" onclick="openReview(\''+emp.id+'\')" style="background:var(--navy);color:#fff;border-color:var(--navy);">+ Add Review</button>';
+  h += '</div>';
+
+  if (!revs.length) {
+    h += '<div style="padding:20px;text-align:center;font-size:12px;color:var(--muted);background:rgba(13,45,94,.02);border-radius:8px;">No performance reviews yet. Click Add Review to document a conversation.</div>';
+  } else {
+    h += '<div style="display:flex;flex-direction:column;gap:8px;">';
+    revs.forEach(function(rv) {
+      var ratingMap = { 'exceeds':'⭐⭐⭐ Exceeds Expectations', 'meets':'⭐⭐ Meets Expectations', 'needs_improvement':'⭐ Needs Improvement', 'new_hire':'🌱 New Hire / 90-day' };
+      var ratingLabel = ratingMap[rv.rating] || rv.rating || '';
+      var ratingColor = {
+        'exceeds':'#2e7d32', 'meets':'var(--navy)', 'needs_improvement':'#c62828', 'new_hire':'var(--orange)'
+      }[rv.rating] || 'var(--muted)';
+
+      h += '<div style="border:1px solid var(--border);border-radius:8px;padding:12px 14px;">';
+      h += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">';
+      h += '<div>';
+      h += '<div style="font-size:13px;font-weight:700;color:var(--navy);">'+(rv.review_type?rv.review_type.charAt(0).toUpperCase()+rv.review_type.slice(1):'Review')+' — '+new Date(rv.review_date+'T00:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})+'</div>';
+      if (ratingLabel) h += '<div style="font-size:11px;color:'+ratingColor+';font-weight:700;margin-top:2px;">'+ratingLabel+'</div>';
+      h += '</div>';
+      h += '<button class="btn btn-sm" onclick="deleteReview(\''+rv.id+'\',\''+emp.id+'\')" title="Delete review" style="color:#c62828;">🗑</button>';
+      h += '</div>';
+
+      if (rv.strengths) {
+        h += '<div style="margin-top:8px;padding:8px 10px;background:rgba(46,125,50,.04);border-left:3px solid #2e7d32;border-radius:4px;">';
+        h += '<div style="font-size:10px;font-weight:700;color:#2e7d32;text-transform:uppercase;margin-bottom:4px;">Strengths</div>';
+        h += '<div style="font-size:12px;color:var(--navy);line-height:1.5;white-space:pre-wrap;">'+rv.strengths+'</div>';
+        h += '</div>';
+      }
+      if (rv.growth_areas) {
+        h += '<div style="margin-top:6px;padding:8px 10px;background:rgba(230,81,0,.04);border-left:3px solid var(--orange);border-radius:4px;">';
+        h += '<div style="font-size:10px;font-weight:700;color:var(--orange);text-transform:uppercase;margin-bottom:4px;">Growth Areas</div>';
+        h += '<div style="font-size:12px;color:var(--navy);line-height:1.5;white-space:pre-wrap;">'+rv.growth_areas+'</div>';
+        h += '</div>';
+      }
+      if (rv.goals) {
+        h += '<div style="margin-top:6px;padding:8px 10px;background:rgba(13,45,94,.04);border-left:3px solid var(--navy);border-radius:4px;">';
+        h += '<div style="font-size:10px;font-weight:700;color:var(--navy);text-transform:uppercase;margin-bottom:4px;">Goals Next 12 Months</div>';
+        h += '<div style="font-size:12px;color:var(--navy);line-height:1.5;white-space:pre-wrap;">'+rv.goals+'</div>';
+        h += '</div>';
+      }
+
+      h += '<div style="font-size:10px;color:var(--muted);margin-top:8px;">Reviewed by '+(rv.reviewed_by||'—')+' on '+new Date(rv.created_at||rv.review_date).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})+'</div>';
+      h += '</div>';
+    });
+    h += '</div>';
+  }
+  h += '</div>';
+
   if (invite) {
     h += '<div style="background:#fff;border:1px solid var(--border);border-radius:10px;padding:14px 16px;margin-bottom:12px;">';
     h += '<div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;">📲 Invite Record</div>';
@@ -6155,6 +6278,292 @@ function _fileRow(label, value) {
     '<span style="color:var(--muted);min-width:90px;flex-shrink:0;">'+label+'</span>' +
     '<span style="text-align:right;color:var(--navy);font-weight:500;">'+value+'</span>' +
     '</div>';
+}
+
+// ── COMPENSATION HISTORY ──
+function _compChangeTypeLabel(t) {
+  return {
+    hire: 'Initial Hire',
+    raise: 'Raise',
+    promotion: 'Promotion',
+    adjustment: 'Adjustment',
+    salary_to_hourly: 'Converted to Hourly',
+    hourly_to_salary: 'Converted to Salary'
+  }[t] || 'Change';
+}
+
+async function _seedCompBaseline(empId) {
+  if (!isAdmin()) { toast('Admin only'); return; }
+  var emp = ST.employees.find(function(e){ return e.id === empId; });
+  if (!emp) return;
+  if (!confirm('Seed a baseline entry for '+emp.name+' using their current rate?\n\nThis creates a "Baseline" entry dated today. Use it as your starting point, then go add any historical entries you remember.')) return;
+
+  var rate = emp.pay_type === 'salary' ? emp.annual_salary : emp.hourly_rate;
+  if (!rate) { alert('No current rate set on this employee. Add a rate in Edit Employee first.'); return; }
+
+  try {
+    var today = new Date().toISOString().split('T')[0];
+    await fetch(SB_URL + '/rest/v1/comp_history', {
+      method: 'POST',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
+      body: JSON.stringify({
+        employee_id: empId,
+        employee_name: emp.name,
+        change_type: 'adjustment',
+        effective_date: today,
+        before_rate: null,
+        before_pay_type: null,
+        after_rate: rate,
+        after_pay_type: emp.pay_type || 'hourly',
+        new_role: emp.role,
+        reason: 'Baseline recorded — current rate at time compensation history was first seeded',
+        recorded_by: getApprovedBy(),
+        recorded_at: new Date().toISOString()
+      })
+    });
+    logActivity('Comp Baseline Seeded', emp.name + ' · baseline rate recorded', 'employees', emp.name);
+    toast('✓ Baseline recorded');
+    setTimeout(function(){ openEmployeeFile(empId); }, 300);
+  } catch(err) { alert('Seed failed: '+err.message); }
+}
+
+function openCompChange(empId) {
+  if (!isAdmin()) { toast('Admin only'); return; }
+  var emp = ST.employees.find(function(e){ return e.id === empId; });
+  if (!emp) return;
+
+  var currentType = emp.pay_type || 'hourly';
+  var currentRate = currentType === 'salary' ? emp.annual_salary : emp.hourly_rate;
+
+  var body = '';
+  body += '<div style="font-size:13px;color:var(--muted);margin-bottom:14px;line-height:1.5;">Record a compensation change for <strong>'+emp.name+'</strong>. Current rate: <strong>'+(currentRate?(currentType==='salary'?'$'+Number(currentRate).toLocaleString()+'/yr':'$'+Number(currentRate).toFixed(2)+'/hr'):'not set')+'</strong></div>';
+
+  body += '<div class="form-row">';
+  body += '<label class="form-label">Change Type *</label>';
+  body += '<select id="cc-type" class="form-select">';
+  [['raise','💵 Raise'],['promotion','💼 Promotion (new role + raise)'],['hire','🎉 Initial Hire (historical)'],['adjustment','📊 Adjustment'],['salary_to_hourly','🔄 Switched Salary → Hourly'],['hourly_to_salary','🔄 Switched Hourly → Salary']].forEach(function(opt){
+    body += '<option value="'+opt[0]+'">'+opt[1]+'</option>';
+  });
+  body += '</select></div>';
+
+  body += '<div class="form-row">';
+  body += '<label class="form-label">Effective Date *</label>';
+  body += '<input type="date" id="cc-date" class="form-input" value="'+new Date().toISOString().split('T')[0]+'">';
+  body += '</div>';
+
+  body += '<div class="form-row">';
+  body += '<label class="form-label">New Pay Type *</label>';
+  body += '<select id="cc-after-type" class="form-select">';
+  body += '<option value="hourly"'+(currentType==='hourly'?' selected':'')+'>Hourly</option>';
+  body += '<option value="salary"'+(currentType==='salary'?' selected':'')+'>Salary (annual)</option>';
+  body += '</select></div>';
+
+  body += '<div class="form-row">';
+  body += '<label class="form-label">New Rate *</label>';
+  body += '<input type="number" step="0.01" id="cc-after-rate" class="form-input" placeholder="e.g. 24.50 or 65000" value="'+(currentRate||'')+'">';
+  body += '<div style="font-size:10px;color:var(--muted);margin-top:4px;">Enter hourly rate (like 24.50) OR annual salary (like 65000), depending on the pay type above.</div>';
+  body += '</div>';
+
+  body += '<div class="form-row">';
+  body += '<label class="form-label">New Role <span style="font-weight:400;color:var(--muted);">(only for promotions)</span></label>';
+  body += '<input type="text" id="cc-new-role" class="form-input" placeholder="e.g. Lead Technician" value="'+(emp.role||'')+'">';
+  body += '</div>';
+
+  body += '<div class="form-row">';
+  body += '<label class="form-label">Reason *</label>';
+  body += '<input type="text" id="cc-reason" class="form-input" placeholder="e.g. Annual review, strong performance. IICRC WRT completed.">';
+  body += '<div style="font-size:10px;color:var(--muted);margin-top:4px;">Document why. This shows up in the audit trail.</div>';
+  body += '</div>';
+
+  body += '<div style="background:rgba(13,45,94,.04);border-radius:6px;padding:10px 12px;font-size:11px;color:var(--navy);line-height:1.5;">💡 <strong>This will update the live employee record</strong> with the new rate and role so payroll reports use the current figure going forward. The historical entry preserves the change for the audit trail.</div>';
+
+  showModal('💰 Record Compensation Change — '+emp.name, body, "_submitCompChange('"+empId+"')");
+}
+
+async function _submitCompChange(empId) {
+  var emp = ST.employees.find(function(e){ return e.id === empId; });
+  if (!emp) return;
+
+  var changeType = document.getElementById('cc-type').value;
+  var effDate = document.getElementById('cc-date').value;
+  var afterType = document.getElementById('cc-after-type').value;
+  var afterRate = parseFloat(document.getElementById('cc-after-rate').value);
+  var newRole = document.getElementById('cc-new-role').value.trim();
+  var reason = document.getElementById('cc-reason').value.trim();
+
+  if (!effDate) { alert('Effective date required'); return; }
+  if (!afterRate || afterRate <= 0) { alert('Enter a valid rate'); return; }
+  if (!reason) { alert('Reason required'); return; }
+
+  try {
+    // Record the comp history entry
+    await fetch(SB_URL + '/rest/v1/comp_history', {
+      method: 'POST',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
+      body: JSON.stringify({
+        employee_id: empId,
+        employee_name: emp.name,
+        change_type: changeType,
+        effective_date: effDate,
+        before_rate: changeType === 'hire' ? null : (emp.pay_type === 'salary' ? emp.annual_salary : emp.hourly_rate),
+        before_pay_type: changeType === 'hire' ? null : (emp.pay_type || 'hourly'),
+        before_role: emp.role,
+        after_rate: afterRate,
+        after_pay_type: afterType,
+        new_role: newRole || emp.role,
+        reason: reason,
+        recorded_by: getApprovedBy(),
+        recorded_at: new Date().toISOString()
+      })
+    });
+
+    // Update the live employee record
+    var updatePayload = { pay_type: afterType };
+    if (afterType === 'hourly') {
+      updatePayload.hourly_rate = afterRate;
+      updatePayload.annual_salary = null;
+    } else {
+      updatePayload.annual_salary = afterRate;
+      updatePayload.hourly_rate = null;
+    }
+    if (newRole) updatePayload.role = newRole;
+
+    await fetch(SB_URL + '/rest/v1/employees?id=eq.' + empId, {
+      method: 'PATCH',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify(updatePayload)
+    });
+
+    logActivity('Compensation Changed', emp.name + ' · ' + _compChangeTypeLabel(changeType) + ' · ' + reason.substring(0, 100), 'employees', emp.name);
+    closeModal();
+    toast('✓ Comp change recorded · employee rate updated');
+    await loadAll();
+    setTimeout(function(){ openEmployeeFile(empId); }, 300);
+  } catch(err) {
+    console.error(err);
+    alert('Failed: ' + err.message);
+  }
+}
+
+async function deleteCompChange(changeId, empId) {
+  if (!isAdmin()) { toast('Admin only'); return; }
+  if (!confirm('Delete this compensation history entry?\n\nThis removes the audit trail entry but does NOT change the employee\'s current rate.')) return;
+  try {
+    await fetch(SB_URL + '/rest/v1/comp_history?id=eq.' + changeId, {
+      method: 'DELETE',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+    });
+    logActivity('Comp History Entry Deleted', 'by ' + getApprovedBy(), 'employees', null);
+    toast('✓ Entry deleted');
+    setTimeout(function(){ openEmployeeFile(empId); }, 300);
+  } catch(err) { alert('Delete failed: '+err.message); }
+}
+
+// ── PERFORMANCE REVIEWS ──
+function openReview(empId) {
+  if (!isAdmin()) { toast('Admin only'); return; }
+  var emp = ST.employees.find(function(e){ return e.id === empId; });
+  if (!emp) return;
+
+  var body = '';
+  body += '<div style="font-size:13px;color:var(--muted);margin-bottom:14px;line-height:1.5;">Add a performance review for <strong>'+emp.name+'</strong>. These are admin-only — employees don\'t see them.</div>';
+
+  body += '<div class="form-row">';
+  body += '<label class="form-label">Review Type</label>';
+  body += '<select id="rv-type" class="form-select">';
+  ['Annual','Quarterly','90-Day','Probationary','Ad-hoc','Termination'].forEach(function(t){
+    body += '<option value="'+t.toLowerCase()+'">'+t+'</option>';
+  });
+  body += '</select></div>';
+
+  body += '<div class="form-row">';
+  body += '<label class="form-label">Review Date</label>';
+  body += '<input type="date" id="rv-date" class="form-input" value="'+new Date().toISOString().split('T')[0]+'">';
+  body += '</div>';
+
+  body += '<div class="form-row">';
+  body += '<label class="form-label">Overall Rating</label>';
+  body += '<select id="rv-rating" class="form-select">';
+  body += '<option value="exceeds">⭐⭐⭐ Exceeds Expectations</option>';
+  body += '<option value="meets" selected>⭐⭐ Meets Expectations</option>';
+  body += '<option value="needs_improvement">⭐ Needs Improvement</option>';
+  body += '<option value="new_hire">🌱 New Hire / 90-day</option>';
+  body += '</select></div>';
+
+  body += '<div class="form-row">';
+  body += '<label class="form-label">Strengths</label>';
+  body += '<textarea id="rv-strengths" class="form-input" rows="3" placeholder="What are they good at? Specific examples better than general praise.&#10;&#10;e.g. Great customer rapport. Mentoring Rylan well. Reliable on on-call rotation."></textarea>';
+  body += '</div>';
+
+  body += '<div class="form-row">';
+  body += '<label class="form-label">Growth Areas</label>';
+  body += '<textarea id="rv-growth" class="form-input" rows="3" placeholder="What can they improve? Honest but constructive.&#10;&#10;e.g. Documentation on mold jobs sometimes incomplete. Need photos before/during/after."></textarea>';
+  body += '</div>';
+
+  body += '<div class="form-row">';
+  body += '<label class="form-label">Goals for Next 12 Months</label>';
+  body += '<textarea id="rv-goals" class="form-input" rows="3" placeholder="Concrete, achievable.&#10;&#10;e.g. Complete IICRC AMRT by Q3. Run one complex fire job start to finish. Train Kristina on intake."></textarea>';
+  body += '</div>';
+
+  body += '<div style="background:rgba(13,45,94,.04);border-radius:6px;padding:10px 12px;font-size:11px;color:var(--navy);line-height:1.5;">🔒 <strong>Admin-only:</strong> Reviews are stored in the employee\'s file but are NOT visible to the employee. You can share verbally or via separate document if you want them to see it.</div>';
+
+  showModal('📋 Add Performance Review — '+emp.name, body, "_submitReview('"+empId+"')");
+}
+
+async function _submitReview(empId) {
+  var emp = ST.employees.find(function(e){ return e.id === empId; });
+  if (!emp) return;
+
+  var reviewType = document.getElementById('rv-type').value;
+  var reviewDate = document.getElementById('rv-date').value;
+  var rating = document.getElementById('rv-rating').value;
+  var strengths = document.getElementById('rv-strengths').value.trim();
+  var growth = document.getElementById('rv-growth').value.trim();
+  var goals = document.getElementById('rv-goals').value.trim();
+
+  if (!reviewDate) { alert('Review date required'); return; }
+  if (!strengths && !growth && !goals) { alert('Please fill at least one of the three review fields.'); return; }
+
+  try {
+    await fetch(SB_URL + '/rest/v1/performance_reviews', {
+      method: 'POST',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
+      body: JSON.stringify({
+        employee_id: empId,
+        employee_name: emp.name,
+        review_type: reviewType,
+        review_date: reviewDate,
+        rating: rating,
+        strengths: strengths || null,
+        growth_areas: growth || null,
+        goals: goals || null,
+        reviewed_by: getApprovedBy(),
+        created_at: new Date().toISOString()
+      })
+    });
+
+    logActivity('Performance Review Added', emp.name + ' · ' + reviewType + ' · ' + rating, 'employees', emp.name);
+    closeModal();
+    toast('✓ Review recorded');
+    setTimeout(function(){ openEmployeeFile(empId); }, 300);
+  } catch(err) {
+    console.error(err);
+    alert('Failed: ' + err.message);
+  }
+}
+
+async function deleteReview(reviewId, empId) {
+  if (!isAdmin()) { toast('Admin only'); return; }
+  if (!confirm('Delete this performance review?\n\nThis cannot be undone.')) return;
+  try {
+    await fetch(SB_URL + '/rest/v1/performance_reviews?id=eq.' + reviewId, {
+      method: 'DELETE',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+    });
+    logActivity('Performance Review Deleted', 'by ' + getApprovedBy(), 'employees', null);
+    toast('✓ Review deleted');
+    setTimeout(function(){ openEmployeeFile(empId); }, 300);
+  } catch(err) { alert('Delete failed: '+err.message); }
 }
 
 // ── EMPLOYEE DOCUMENT MANAGEMENT ──
