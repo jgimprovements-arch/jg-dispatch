@@ -1925,7 +1925,6 @@ function renderTimesheets() {
   var empNames = [...new Set(ST.entries.map(function(e){return e.employee_name;}))].sort();
   empNames.forEach(function(n){ h += '<option value="'+n+'"'+(ST.filterEmp===n?' selected':'')+'>'+n+'</option>'; });
   h += '</select>';
-  h += '<button class="btn btn-primary" onclick="exportPayPeriodCSV()" style="margin-left:auto;">Export CSV</button>';
   h += '</div>';
 
   var curPer = periods.find(function(p){ return p.label === selPeriod; });
@@ -2093,34 +2092,40 @@ function renderTimesheets() {
 
       // Compact table layout for approved
       h += '<table class="tc-table" style="margin:0;background:#fff;border-radius:8px;overflow:hidden;">';
-      h += '<thead><tr><th>Employee</th><th style="text-align:right;">Total Hrs</th><th style="text-align:right;">Reg</th><th style="text-align:right;">OT</th><th style="text-align:right;">Gross</th><th>Approved By</th><th>Approved At</th><th></th></tr></thead><tbody>';
+      h += '<thead><tr><th>Employee</th><th style="text-align:right;">Total Hrs</th><th style="text-align:right;">Reg</th><th style="text-align:right;">OT</th><th style="text-align:right;">PTO/Sick</th><th style="text-align:right;">Gross</th><th>Approved By</th><th>Approved At</th><th></th></tr></thead><tbody>';
 
       Object.entries(approvedEmps).forEach(function(kv) {
         var nm3 = kv[0], d3 = kv[1];
         var emp3 = ST.employees.find(function(e){ return e.name === nm3; });
         var rate3 = emp3 ? parseFloat(emp3.hourly_rate||0) : 0;
         var ot4 = calcOT(d3.entries);
-        var regP3 = 0, otP3 = 0, tot3 = 0;
+
+        // Absence breakdown for this approved employee
+        var absBrk3 = getAbsenceHoursForPeriod(nm3, curPer.start, curPer.end);
+        var totalPaidPtoHrs = absBrk3.ptoPaidHours + absBrk3.regularPaidHours;
+
+        var regP3 = 0, otP3 = 0, ptoP3 = 0, tot3 = 0;
         if (emp3 && emp3.pay_type==='salary' && emp3.annual_salary) {
           var annSal3 = parseFloat(emp3.annual_salary);
           var periodPay3 = annSal3/(ST.payPeriod.type==='weekly'?52:ST.payPeriod.type==='biweekly'?26:24);
-          var pd3 = ST.payPeriod.type==='weekly'?5:10;
-          var wd3 = new Set(d3.entries.map(function(e){return e.clock_in.split('T')[0];})).size;
-          var md3 = Math.max(0, pd3-wd3);
-          regP3 = periodPay3-md3*(periodPay3/pd3); tot3 = regP3;
+          tot3 = periodPay3; regP3 = periodPay3;
         } else if (rate3) {
-          regP3 = rate3*(ot4.regMins/60); otP3 = rate3*1.5*(ot4.otMins/60); tot3 = regP3+otP3;
+          regP3 = rate3*(ot4.regMins/60); otP3 = rate3*1.5*(ot4.otMins/60); ptoP3 = rate3*totalPaidPtoHrs;
+          tot3 = regP3+otP3+ptoP3;
         }
         var approvalInfo3 = ST.approvals[getApprovalKey(selPeriod, nm3)] || {};
-        var totalHrsStr = Math.floor((ot4.regMins+ot4.otMins)/60)+'h '+(((ot4.regMins+ot4.otMins)%60))+'m';
+        var totalMinsWithPto = ot4.regMins + ot4.otMins + Math.round(totalPaidPtoHrs * 60);
+        var totalHrsStr = Math.floor(totalMinsWithPto/60)+'h '+(totalMinsWithPto%60)+'m';
         var regStr = Math.floor(ot4.regMins/60)+'h '+(ot4.regMins%60)+'m';
         var otStr = ot4.otMins > 0 ? Math.floor(ot4.otMins/60)+'h '+(ot4.otMins%60)+'m' : '—';
+        var ptoStr = totalPaidPtoHrs > 0 ? totalPaidPtoHrs.toFixed(1)+'h' : '—';
         var empIdx3 = Object.keys(byEmp).indexOf(nm3);
         h += '<tr>';
         h += '<td><strong style="color:var(--navy);">'+nm3+'</strong></td>';
         h += '<td style="text-align:right;font-weight:700;">'+totalHrsStr+'</td>';
         h += '<td style="text-align:right;">'+regStr+'</td>';
         h += '<td style="text-align:right;color:'+(ot4.otMins>0?'#c62828':'var(--muted)')+';">'+otStr+'</td>';
+        h += '<td style="text-align:right;color:'+(totalPaidPtoHrs>0?'#2e7d32':'var(--muted)')+';">'+ptoStr+'</td>';
         h += '<td style="text-align:right;font-weight:700;color:#2e7d32;">$'+tot3.toFixed(2)+'</td>';
         h += '<td style="font-size:11px;">'+(approvalInfo3.approved_by||'—')+'</td>';
         h += '<td style="font-size:11px;color:var(--muted);">'+(approvalInfo3.approved_at?new Date(approvalInfo3.approved_at).toLocaleDateString():'—')+'</td>';
@@ -2128,28 +2133,47 @@ function renderTimesheets() {
         if (isAdmin()) h += '<button class="btn btn-sm" onclick="_tcUnlock('+empIdx3+')" title="Unlock for edits">🔓</button>';
         h += '</td>';
         h += '</tr>';
+
+        // Sub-row showing absence detail if there are any
+        var periodAbsForEmp = (ST.absences||[]).filter(function(a){
+          if (a.employee_name !== nm3) return false;
+          var ad = new Date(a.date+'T00:00:00'); ad.setHours(0,0,0,0);
+          return ad >= curPer.start && ad <= curPer.end;
+        });
+        if (periodAbsForEmp.length) {
+          h += '<tr style="background:rgba(46,125,50,.03);"><td colspan="9" style="padding:6px 12px 10px 28px;font-size:11px;color:var(--muted);">';
+          h += '<span style="font-weight:700;color:#2e7d32;">Absences included:</span> ';
+          h += periodAbsForEmp.map(function(a){
+            var d4 = new Date(a.date+'T00:00:00');
+            var dateLabel = (d4.getMonth()+1)+'/'+d4.getDate();
+            return dateLabel+' <span style="color:var(--navy);font-weight:600;">'+a.reason+'</span>';
+          }).join(' • ');
+          h += '</td></tr>';
+        }
       });
       h += '</tbody></table>';
 
-      // Totals row for approved
-      var appRegMins=0, appOtMins=0, appGross=0;
+      // Totals row for approved — include PTO/sick hours
+      var appRegMins=0, appOtMins=0, appPtoHrs=0, appGross=0;
       Object.entries(approvedEmps).forEach(function(kv){
         var d4 = kv[1]; var emp4 = ST.employees.find(function(e){ return e.name === kv[0]; });
         var ot5 = calcOT(d4.entries);
+        var absBrk4 = getAbsenceHoursForPeriod(kv[0], curPer.start, curPer.end);
         appRegMins += ot5.regMins; appOtMins += ot5.otMins;
+        appPtoHrs += absBrk4.ptoPaidHours + absBrk4.regularPaidHours;
         var rate4 = emp4 ? parseFloat(emp4.hourly_rate||0) : 0;
         if (emp4 && emp4.pay_type==='salary' && emp4.annual_salary) {
-          var pp5 = parseFloat(emp4.annual_salary)/(ST.payPeriod.type==='weekly'?52:ST.payPeriod.type==='biweekly'?26:24);
-          var pd5 = ST.payPeriod.type==='weekly'?5:10;
-          var wd5 = new Set(d4.entries.map(function(e){return e.clock_in.split('T')[0];})).size;
-          var md5 = Math.max(0, pd5-wd5);
-          appGross += pp5-md5*(pp5/pd5);
+          appGross += parseFloat(emp4.annual_salary)/(ST.payPeriod.type==='weekly'?52:ST.payPeriod.type==='biweekly'?26:24);
         } else if (rate4) {
-          appGross += rate4*(ot5.regMins/60) + rate4*1.5*(ot5.otMins/60);
+          appGross += rate4*(ot5.regMins/60) + rate4*1.5*(ot5.otMins/60) + rate4*(absBrk4.ptoPaidHours+absBrk4.regularPaidHours);
         }
       });
-      h += '<div style="margin-top:10px;padding:10px 14px;background:#fff;border-radius:8px;display:flex;gap:24px;align-items:center;font-size:12px;">';
-      h += '<div><span style="color:var(--muted);">Approved Total:</span> <strong>'+(Math.floor((appRegMins+appOtMins)/60))+'h '+((appRegMins+appOtMins)%60)+'m</strong></div>';
+      var totalMins = appRegMins + appOtMins + Math.round(appPtoHrs*60);
+      h += '<div style="margin-top:10px;padding:10px 14px;background:#fff;border-radius:8px;display:flex;gap:24px;align-items:center;font-size:12px;flex-wrap:wrap;">';
+      h += '<div><span style="color:var(--muted);">Approved Total:</span> <strong>'+Math.floor(totalMins/60)+'h '+(totalMins%60)+'m</strong></div>';
+      if (appPtoHrs > 0) {
+        h += '<div><span style="color:var(--muted);">PTO/Sick included:</span> <strong style="color:#2e7d32;">'+appPtoHrs.toFixed(1)+'h</strong></div>';
+      }
       h += '<div><span style="color:var(--muted);">Approved Gross:</span> <strong style="color:#2e7d32;">$'+appGross.toFixed(2)+'</strong></div>';
       h += '</div>';
 
@@ -2308,14 +2332,16 @@ function renderTimesheets() {
       h += '</tbody></table></div>';
     } // end if pendingFiltered.length
 
-    // Absence records
+    // Absence records — hide absences for employees whose timecards are already approved
+    // (those absences are now included in the approved timecard archive)
     var periodAbsences=ST.absences.filter(function(a){
       if(!curPer)return false;
       var d3=new Date(a.date+'T00:00:00'); d3.setHours(0,0,0,0);
       return d3>=curPer.start&&d3<=curPer.end;
-    }).filter(function(a){return ST.filterEmp==='All'||a.employee_name===ST.filterEmp;});
+    }).filter(function(a){return ST.filterEmp==='All'||a.employee_name===ST.filterEmp;})
+      .filter(function(a){ return getApprovalStatus(selPeriod, a.employee_name) !== 'approved'; });
     if(periodAbsences.length){
-      h += '<div class="card" style="margin-top:12px;"><div class="card-hdr"><div class="card-title">Absences / Out of Office</div></div>';
+      h += '<div class="card" style="margin-top:12px;"><div class="card-hdr"><div class="card-title">Absences / Out of Office <span style="font-size:11px;font-weight:400;color:var(--muted);">(approved employees\' absences shown in archive above)</span></div></div>';
       h += '<table class="tc-table"><thead><tr><th>Employee</th><th>Date</th><th>Reason</th><th>Market</th><th>Notes</th><th></th></tr></thead><tbody>';
       periodAbsences.forEach(function(a){
         var badge=({'Sick':'badge-red','PTO':'badge-green','No Call No Show':'badge-red','Personal Day':'badge-warn','Injured':'badge-red','Training':'badge-green','Shop Time':'badge-warn','Jury Duty':'badge-gray','Bereavement':'badge-gray'}[a.reason])||'badge-gray';
