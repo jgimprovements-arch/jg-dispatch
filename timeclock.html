@@ -874,11 +874,22 @@ async function emailSignIn() {
     var data = await r.json();
     if (!r.ok || !data.user) throw new Error(data.error_description || data.msg || 'Invalid email or password');
 
+    // Gate on employees table — Supabase Auth pass alone isn't enough
+    var emailLow = email.trim().toLowerCase();
+    var empR = await fetch(SB_URL + '/rest/v1/employees?email=eq.' + encodeURIComponent(emailLow) + '&select=active,pending_approval,name', {
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+    });
+    var empRows = await empR.json();
+    var emp = empRows && empRows[0] ? empRows[0] : null;
+    if (!emp) throw new Error('Your account is not in the employee roster. Contact the office.');
+    if (emp.active === false && !emp.pending_approval) throw new Error('Your account has been disabled. Contact the office.');
+
     var u = {
-      name: data.user.user_metadata?.name || email.split('@')[0],
-      email: data.user.email,
+      name: data.user.user_metadata?.name || emp.name || email.split('@')[0],
+      email: emailLow,
       picture: '',
-      access_token: data.access_token
+      access_token: data.access_token,
+      auth_method: 'email'
     };
     localStorage.setItem(TC_KEY, JSON.stringify(u));
     localStorage.setItem(TC_EXP, String(Date.now() + 43200000));
@@ -890,15 +901,42 @@ async function emailSignIn() {
   if (btn) { btn.textContent = 'Sign In'; btn.disabled = false; }
 }
 
-window.tcGoogleCb = function(r) {
+window.tcGoogleCb = async function(r) {
   try {
     var p = JSON.parse(atob(r.credential.split('.')[1]));
-    var u = { name: p.name||p.given_name, email: p.email, picture: p.picture||'' };
+    var email = (p.email || '').toLowerCase();
+    var isJGDomain = email.endsWith('@jg-restoration.com');
+    var errEl = document.getElementById('login-err');
+
+    // If NOT a JG email, must exist in employees table
+    if (!isJGDomain) {
+      try {
+        var er = await fetch(SB_URL + '/rest/v1/employees?email=eq.' + encodeURIComponent(email) + '&select=active,pending_approval', {
+          headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+        });
+        var rows = await er.json();
+        var emp = rows && rows[0] ? rows[0] : null;
+        if (!emp) {
+          if (errEl) errEl.textContent = 'Your email is not authorized. Contact the office at (920) 428-4200.';
+          return;
+        }
+        if (emp.active === false && !emp.pending_approval) {
+          if (errEl) errEl.textContent = 'Your account has been disabled. Contact the office.';
+          return;
+        }
+      } catch(e) {
+        if (errEl) errEl.textContent = 'Could not verify account. Try again.';
+        return;
+      }
+    }
+
+    var u = { name: p.name||p.given_name, email: email, picture: p.picture||'', auth_method: 'google' };
     localStorage.setItem(TC_KEY, JSON.stringify(u));
     localStorage.setItem(TC_EXP, String(Date.now() + 43200000));
     initApp(u);
   } catch(e) {
-    document.getElementById('login-err').textContent = 'Sign in failed — try again.';
+    var errEl = document.getElementById('login-err');
+    if (errEl) errEl.textContent = 'Sign in failed — try again.';
   }
 };
 
