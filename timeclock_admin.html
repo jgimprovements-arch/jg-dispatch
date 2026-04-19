@@ -189,11 +189,10 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;min
 </div>
 
 <div class="tc-tabs">
-  <button class="tc-tab active" id="tab-live" onclick="showTab('live',this)">🟢 Live</button>
-  <button class="tc-tab" id="tab-timesheets" onclick="showTab('timesheets',this)">📋 Timesheets</button>
+  <button class="tc-tab active" id="tab-timesheets" onclick="showTab('timesheets',this)">📋 Timesheets</button>
   <button class="tc-tab" id="tab-employees" onclick="showTab('employees',this)">👥 Employees</button>
   <button class="tc-tab" id="tab-reports" onclick="showTab('reports',this)">📊 Reports</button>
-  <button class="tc-tab" id="tab-routes" onclick="showTab('routes',this)">🗺 Routes</button>
+  <button class="tc-tab" id="tab-routes" onclick="showTab('routes',this)">🗺 Routes & Live</button>
   <button class="tc-tab" id="tab-jobcost" onclick="showTab('jobcost',this)">💰 Job Costing</button>
   <button class="tc-tab" id="tab-activity" onclick="showTab('activity',this)">📜 Activity</button>
   <button class="tc-tab" id="tab-access" onclick="showTab('access',this)">🔐 Access</button>
@@ -210,7 +209,7 @@ var SB_URL = 'https://nuykvchgecpiuikoerze.supabase.co';
 var SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im51eWt2Y2hnZWNwaXVpa29lcnplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYyNjM3ODYsImV4cCI6MjA5MTgzOTc4Nn0.39hZ8DdjT_0iFJXPeAL2FXUSLw8FZBirDVzxZTO1W9s';
 
 var ST = {
-  tab: 'live',
+  tab: 'timesheets',
   employees: [],
   entries: [],
   breaks: [],
@@ -368,11 +367,12 @@ function render() {
   if (rptTab)      rptTab.style.display      = isAdmin() ? '' : 'none';
   if (routeTab)    routeTab.style.display    = canViewMaps() ? '' : 'none';
   if (activityTab) activityTab.style.display = isAdmin() ? '' : 'none';
+  var liveTab = document.getElementById('tab-live');
+  if (liveTab) liveTab.style.display = 'none';
   var accessTab = document.getElementById('tab-access');
   if (accessTab) accessTab.style.display = isAdmin() ? '' : 'none';
 
-  if (ST.tab === 'live') renderLive();
-  else if (ST.tab === 'timesheets') renderTimesheets();
+  if (ST.tab === 'timesheets') renderTimesheets();
   else if (ST.tab === 'employees') { if (isAdmin()) renderEmployees(); }
   else if (ST.tab === 'reports')   { if (isAdmin()) renderReports(); }
   else if (ST.tab === 'routes')   renderRoutes();
@@ -1515,6 +1515,39 @@ function renderRoutes() {
   var h = '';
   var today = new Date().toISOString().split('T')[0];
 
+  // ── LIVE STATUS ──────────────────────────────────────────────────────────
+  var fmt = function(iso){ if(!iso)return ''; var d=new Date(iso),hh=d.getHours()%12||12,m=d.getMinutes(),ap=d.getHours()>=12?'PM':'AM'; return hh+':'+(m<10?'0':'')+m+' '+ap; };
+  var durMinsLive = function(e){ var out=e.clock_out?new Date(e.clock_out):new Date(); return Math.floor((out-new Date(e.clock_in))/60000); };
+  var todayStr = today;
+  var active = ST.entries.filter(function(e){ return !e.clock_out && e.clock_in.startsWith(todayStr); });
+  var todayAll = ST.entries.filter(function(e){ return e.clock_in.startsWith(todayStr); });
+
+  h += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;margin-bottom:16px;">';
+  h += '<div class="stat-card"><div class="stat-val" style="color:var(--green);">'+active.length+'</div><div class="stat-lbl"><span class="live-dot"></span>Clocked In</div></div>';
+  h += '<div class="stat-card"><div class="stat-val">'+todayAll.length+'</div><div class="stat-lbl">Entries Today</div></div>';
+  h += '<div class="stat-card"><div class="stat-val">'+ST.employees.filter(function(e){return e.active;}).length+'</div><div class="stat-lbl">Active Employees</div></div>';
+  h += '</div>';
+
+  if (active.length) {
+    h += '<div class="card" style="margin-bottom:16px;"><div class="card-hdr"><div class="card-title"><span class="live-dot"></span>Currently Clocked In</div></div>';
+    h += '<table class="tc-table"><thead><tr><th>Employee</th><th>Job</th><th>In</th><th>Duration</th><th>Status</th><th>GPS</th></tr></thead><tbody>';
+    active.forEach(function(e) {
+      var mins = durMinsLive(e);
+      var alert = mins > 600;
+      var hasBreak = ST.breaks.some(function(b){ return b.entry_id===e.id && !b.break_end; });
+      h += '<tr>';
+      h += '<td><strong>'+e.employee_name+'</strong></td>';
+      h += '<td>'+(e.job_name||'<span style="color:var(--muted);">No job</span>')+'</td>';
+      h += '<td class="mono">'+fmt(e.clock_in)+'</td>';
+      h += '<td><strong style="color:'+(alert?'var(--red)':'var(--green)')+';">'+Math.floor(mins/60)+'h '+(mins%60)+'m</strong></td>';
+      h += '<td>'+(hasBreak?'<span class="badge badge-warn">Break</span>':alert?'<span class="badge badge-red">Long</span>':'<span class="badge badge-green">Active</span>')+'</td>';
+      h += '<td>'+(e.clock_in_lat?'<a href="https://maps.google.com/?q='+e.clock_in_lat+','+e.clock_in_lng+'" target="_blank" style="color:var(--orange);font-size:11px;">📍 View</a>':'<span style="color:var(--muted);font-size:11px;">—</span>')+'</td>';
+      h += '</tr>';
+    });
+    h += '</tbody></table></div>';
+  }
+
+  // ── ROUTE MAP ────────────────────────────────────────────────────────────
   h += '<div class="card" style="margin-bottom:16px;"><div class="card-body">';
   h += '<div class="form-row">';
   h += '<div><label class="form-label">Employee</label><select class="form-select" id="route-emp">';
