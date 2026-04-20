@@ -7,6 +7,8 @@
 <link rel="icon" type="image/png" href="https://jgimprovements-arch.github.io/jg-dispatch/logo.png">
 <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script src="auth.js?v=20260419-1"></script>
+<!-- Shared constants/permissions/market — keep ?v= in sync with sales-shared.js VERSION -->
+<script src="sales-shared.js?v=2026-04-20-1"></script>
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <style>
@@ -180,7 +182,9 @@ function setMarket(m){ST.market=m;loadAll();}
 
 // ── PARTNER TYPES — single source of truth across all dropdowns/filters ──
 // Alphabetical. Keep in sync with sales_app.html.
-var PARTNER_TYPES = ['Assisted Living','Chamber of Commerce','Charity','Customer','Fire Department','Foundation Repair','GC','HVAC','Insurance Adjuster','Insurance Agent','Other','Plumber','Property Manager','Realtor'];
+// Sourced from JG_SHARED so mobile and desktop stay in sync.
+// Inline array kept as fallback in case sales-shared.js fails to load.
+var PARTNER_TYPES = (window.JG_SHARED && window.JG_SHARED.PARTNER_TYPES) || ['Assisted Living','Chamber of Commerce','Charity','Customer','Fire Department','Foundation Repair','GC','HVAC','Insurance Adjuster','Insurance Agent','Other','Plumber','Property Manager','Realtor'];
 
 function mkTypeFilters() {
   var types = ['All'].concat(PARTNER_TYPES);
@@ -1667,8 +1671,10 @@ async function runImport() {
 }
 
 // ── ROLES & PERMISSIONS ───────────────────────────────────────────────────────
-var ADMINS = ['josh@jg-restoration.com','josh.greil@jg-restoration.com'];
-var REPS = {
+// ADMINS and REPS now sourced from JG_SHARED so mobile/desktop stay in sync.
+// Inline values kept as fallback if sales-shared.js fails to load.
+var ADMINS = (window.JG_SHARED && window.JG_SHARED.ADMINS) || ['josh@jg-restoration.com','josh.greil@jg-restoration.com'];
+var REPS = (window.JG_SHARED && window.JG_SHARED.REPS) || {
   'kristina@jg-restoration.com': 'Kristina',
   'rylan@jg-restoration.com':    'Rylan',
   'rylan.reoh@jg-restoration.com': 'Rylan',
@@ -1678,26 +1684,38 @@ var REPS = {
   'josh.greil@jg-restoration.com': 'Josh'
 };
 
+// currentUser / isAdmin / currentRepName / canEdit / canDelete are kept as
+// local function names (every call site in this file uses them) but delegate
+// to JG_SHARED.auth when available. Local bodies preserved as fallback.
 function currentUser() {
   try { return JSON.parse(localStorage.getItem('jg_platform_user')||'null'); } catch(e) { return null; }
 }
 function isAdmin() {
+  if (window.JG_SHARED && window.JG_SHARED.auth) return window.JG_SHARED.auth.isAdmin();
   var u = currentUser();
   return u && ADMINS.includes(u.email.toLowerCase());
 }
 function currentRepName() {
+  if (window.JG_SHARED && window.JG_SHARED.auth) return window.JG_SHARED.auth.currentRepName();
   var u = currentUser();
   if (!u) return '';
   return REPS[u.email.toLowerCase()] || u.name || u.email.split('@')[0];
 }
 function canEdit(partner) {
+  if (window.JG_SHARED && window.JG_SHARED.auth) return window.JG_SHARED.auth.canEdit(partner);
   if (isAdmin()) return true;
   var rep = currentRepName();
   return partner && (partner.assigned_to === rep || !partner.assigned_to);
 }
-function canDelete() { return isAdmin(); }
+function canDelete() {
+  if (window.JG_SHARED && window.JG_SHARED.auth) return window.JG_SHARED.auth.canDelete();
+  return isAdmin();
+}
 function canImport() { return isAdmin(); }
 function canChangeTier(partner) {
+  // Kept local — JG_SHARED doesn't expose this one. Same rule as canEdit
+  // but excludes the "unassigned = any rep" case: only admin or owner can
+  // change tier.
   if (isAdmin()) return true;
   var rep = currentRepName();
   return partner && partner.assigned_to === rep;

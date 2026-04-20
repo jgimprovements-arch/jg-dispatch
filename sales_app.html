@@ -555,9 +555,11 @@
   .contacts-empty { text-align: center; padding: 50px 24px; color: var(--muted); font-size: 14px; }
   .contacts-loading { text-align: center; padding: 50px 24px; color: var(--muted); font-size: 14px; }
 </style>
+<!-- Shared constants/permissions/market — keep ?v= in sync with sales-shared.js VERSION -->
+<script src="sales-shared.js?v=2026-04-20-1"></script>
 <!-- Auto-update: service worker forces fresh fetch on every deploy -->
 <script>
-var APP_VERSION = '2025-04-16-v1'; // bump this to force cache clear
+var APP_VERSION = '2026-04-20-v1'; // bump this to force cache clear
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('sw.js').then(function(reg) {
     reg.update(); // check for updates on every load
@@ -857,10 +859,12 @@ const REPS = {
   'josh.greil@jg-restoration.com': 'Josh'
 };
 
-const TYPE_COLORS = {
+// TYPE_COLORS — sourced from JG_SHARED so mobile and desktop stay in sync.
+// Falls back to a local object only if sales-shared.js fails to load.
+var TYPE_COLORS = (window.JG_SHARED && window.JG_SHARED.TYPE_COLORS) || {
   'Plumber':'#1565c0','Realtor':'#6a1b9a','Insurance Agent':'#c0392b',
   'Property Manager':'#e65100','GC':'#4a148c','Fire Department':'#b71c1c',
-  'Firefighter':'#e53935','Charity':'#2e7d32','Chamber of Commerce':'#f57f17',
+  'Charity':'#2e7d32','Chamber of Commerce':'#f57f17',
   'Customer':'#546e7a','Other':'#546e7a'
 };
 
@@ -868,6 +872,7 @@ const TYPE_COLORS = {
 var APP = {
   user: null,
   repName: '',
+  repMarket: 'Appleton', // set by JG_SHARED.market.init() after login
   partners: [],
   touches: [],
   routes: [],
@@ -883,6 +888,30 @@ var APP = {
   ltPartnerName: '',
   ltPartnerType: ''
 };
+
+// ── PERMISSIONS ───────────────────────────────────────────────────────────
+// Thin wrappers around JG_SHARED.auth so the mobile code reads naturally.
+// Fallbacks keep the app usable if sales-shared.js fails to load: we default
+// to "non-admin" behavior, which is the safer fail-closed default.
+function _isAdmin() {
+  if (window.JG_SHARED && window.JG_SHARED.auth) return window.JG_SHARED.auth.isAdmin();
+  return false;
+}
+function _canEdit(partner) {
+  if (window.JG_SHARED && window.JG_SHARED.auth) return window.JG_SHARED.auth.canEdit(partner);
+  // Fallback: any rep can edit partners they own or that are unassigned
+  if (!partner) return false;
+  if (!partner.assigned_to) return true;
+  return partner.assigned_to === APP.repName;
+}
+function _canDelete() {
+  if (window.JG_SHARED && window.JG_SHARED.auth) return window.JG_SHARED.auth.canDelete();
+  return false; // fail-closed: only admins should ever delete
+}
+function _canReassign() {
+  if (window.JG_SHARED && window.JG_SHARED.auth) return window.JG_SHARED.auth.canReassign();
+  return false;
+}
 
 // ── AUTH ──────────────────────────────────────────────────────────────────
 // Auth handled via OAuth redirect
@@ -916,6 +945,17 @@ function initApp(u) {
   var now = new Date();
   document.getElementById('greeting-date').textContent = days[now.getDay()] + ', ' + months[now.getMonth()] + ' ' + now.getDate();
 
+  // Resolve rep's home market from employees table (cached after first lookup).
+  // We don't await this — loadAll() can start immediately. Partner-based market
+  // inheritance doesn't need the rep's market, and ad-hoc touches always have
+  // a partner context. The rep's market is a fallback used when no partner
+  // is selected (rare on mobile).
+  if (window.JG_SHARED && window.JG_SHARED.market) {
+    window.JG_SHARED.market.init(_sbFetchRaw).then(function(m){
+      APP.repMarket = m || 'Appleton';
+    }).catch(function(){ APP.repMarket = 'Appleton'; });
+  }
+
   loadAll();
   // Show install banner and header button if not already installed
   setTimeout(function() {
@@ -934,6 +974,14 @@ async function sb(path, opts) {
   }, opts || {}));
   if (!r.ok) return null;
   return r.json().catch(function(){ return null; });
+}
+
+// Raw-response fetcher passed to JG_SHARED.market.init() so it can parse
+// employees data itself without duplicating creds here.
+function _sbFetchRaw(path, opts) {
+  return fetch(SB_URL + path, Object.assign({
+    headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' }
+  }, opts || {}));
 }
 
 async function loadAll() {
@@ -1043,7 +1091,15 @@ function renderHome() {
 
 // ── PARTNERS ──────────────────────────────────────────────────────────────
 function renderTypePills() {
-  var types = ['All','Plumber','Realtor','Insurance Agent','Property Manager','GC','Fire Department','Firefighter','Charity','Chamber of Commerce','Customer','Other'];
+  // Source types from JG_SHARED so mobile and desktop always match.
+  // Fallback list (used only if sales-shared.js fails to load) omits
+  // "Firefighter" — collapsed into "Fire Department" on 2026-04-20.
+  var sharedTypes = (window.JG_SHARED && window.JG_SHARED.PARTNER_TYPES) || [
+    'Assisted Living','Chamber of Commerce','Charity','Customer','Fire Department',
+    'Foundation Repair','GC','HVAC','Insurance Adjuster','Insurance Agent',
+    'Other','Plumber','Property Manager','Realtor'
+  ];
+  var types = ['All'].concat(sharedTypes);
   var el = document.getElementById('type-pills');
   // My Partners pill first
   var myActive = APP.filterMyPartners;
@@ -1439,10 +1495,13 @@ async function confirmRecurring() {
     return { partner_id: s.partner_id, partner_name: s.partner_name, address: s.address||'', duration: s.duration||45, order: i, completed: false };
   });
   try {
+    // Market: templates carry their own market (preserve it); else rep's market.
+    var routeMarket = t.market
+      || ((window.JG_SHARED && window.JG_SHARED.market) ? window.JG_SHARED.market.resolveMarketForRoute() : (APP.repMarket || 'Appleton'));
     await fetch(SB_URL + '/rest/v1/sales_routes', {
       method: 'POST',
       headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
-      body: JSON.stringify({ route_date: today, rep_name: APP.repName, stops: stops, notes: 'From template: ' + t.name, status: 'Planned', market: 'Appleton', total_stops: stops.length })
+      body: JSON.stringify({ route_date: today, rep_name: APP.repName, stops: stops, notes: 'From template: ' + t.name, status: 'Planned', market: routeMarket, total_stops: stops.length })
     });
     // Update last_generated on template
     await fetch(SB_URL + '/rest/v1/sales_route_templates?id=eq.' + t.id, {
@@ -1618,11 +1677,15 @@ async function submitPlanRoute() {
   var isRecurring = document.getElementById('pr-recurring').checked;
 
   try {
+    // Resolve market from rep's profile (routes are always per-rep, no partner context)
+    var routeMarket = (window.JG_SHARED && window.JG_SHARED.market)
+      ? window.JG_SHARED.market.resolveMarketForRoute()
+      : (APP.repMarket || 'Appleton');
     // Save the route
     await fetch(SB_URL + '/rest/v1/sales_routes', {
       method: 'POST',
       headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
-      body: JSON.stringify({ route_date: routeDate, rep_name: repName, stops: _prStops, notes: '', status: 'Planned', market: 'Appleton', total_stops: _prStops.length })
+      body: JSON.stringify({ route_date: routeDate, rep_name: repName, stops: _prStops, notes: '', status: 'Planned', market: routeMarket, total_stops: _prStops.length })
     });
 
     // If recurring, also save as template
@@ -1636,7 +1699,7 @@ async function submitPlanRoute() {
       await fetch(SB_URL + '/rest/v1/sales_route_templates', {
         method: 'POST',
         headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
-        body: JSON.stringify({ name: tmplName, market: 'Appleton', stops: tmplStops, recurrence: recurrence, recurrence_day: recDay, active: true, last_generated: routeDate })
+        body: JSON.stringify({ name: tmplName, market: routeMarket, stops: tmplStops, recurrence: recurrence, recurrence_day: recDay, active: true, last_generated: routeDate })
       });
       toast('✓ Route saved + recurring template created');
     } else {
@@ -1657,11 +1720,19 @@ var _editPid = null;
 function openPartnerEdit(pid) {
   var p = APP.partners.find(function(x){ return x.id === pid; });
   if (!p) return;
+  // Guard: the edit button should already be hidden for non-editors, but
+  // catch any programmatic call here too.
+  if (!_canEdit(p)) { toast('You don\'t have permission to edit this partner'); return; }
   _editPid = pid;
 
   var INP = 'width:100%;padding:13px 14px;border:1.5px solid var(--border);border-radius:12px;font-size:15px;font-family:DM Sans,sans-serif;outline:none;background:var(--bg);box-sizing:border-box;margin-top:4px;';
   var SEL = INP + 'appearance:none;-webkit-appearance:none;';
-  var TYPES = ['Plumber','Realtor','Insurance Agent','Property Manager','GC','Fire Department','Firefighter','Charity','Chamber of Commerce','Customer','Other'];
+  // Use shared PARTNER_TYPES — same list desktop uses, no more "Firefighter"
+  var TYPES = (window.JG_SHARED && window.JG_SHARED.PARTNER_TYPES) || [
+    'Assisted Living','Chamber of Commerce','Charity','Customer','Fire Department',
+    'Foundation Repair','GC','HVAC','Insurance Adjuster','Insurance Agent',
+    'Other','Plumber','Property Manager','Realtor'
+  ];
 
   var html =
     '<div class="field-label">Name</div><input id="pe-name" type="text" style="' + INP + '" value="' + (p.name||'').replace(/"/g,'&quot;') + '">' +
@@ -1684,11 +1755,21 @@ function openPartnerEdit(pid) {
     '<div class="field-label">Family / Kids / Pets</div><input id="pe-family" type="text" style="' + INP + '" value="' + (p.family_members||'').replace(/"/g,'&quot;') + '" placeholder="Wife Sarah, 2 kids...">' +
     '<div class="field-label">Last Conversation</div><textarea id="pe-convo" style="' + INP + 'height:70px;resize:none;">' + (p.last_convo_note||'') + '</textarea>' +
     '<div class="field-label">Notes</div><textarea id="pe-notes" style="' + INP + 'height:60px;resize:none;">' + (p.notes||'') + '</textarea>' +
-    '<div class="field-label">Assigned Sales Rep</div>' +
-    '<select id="pe-assigned" style="' + SEL + '">' +
-      '<option value="">— Unassigned —</option>' +
-      ['Kristina','Rylan','David','Brent','Josh'].map(function(r){ return '<option value="'+r+'"'+(p.assigned_to===r?' selected':'')+'>'+r+'</option>'; }).join('') +
-    '</select>';
+    // Assigned rep: admins get a dropdown, others see read-only text so we
+    // don't accidentally accept a reassignment via stale DOM on submit.
+    (_canReassign()
+      ? ('<div class="field-label">Assigned Sales Rep</div>' +
+         '<select id="pe-assigned" style="' + SEL + '">' +
+           '<option value="">— Unassigned —</option>' +
+           ['Kristina','Rylan','David','Brent','Josh'].map(function(r){ return '<option value="'+r+'"'+(p.assigned_to===r?' selected':'')+'>'+r+'</option>'; }).join('') +
+         '</select>')
+      : ('<div class="field-label">Assigned Sales Rep</div>' +
+         '<div style="padding:13px 14px;border:1.5px solid var(--border);border-radius:12px;font-size:15px;background:var(--bg);color:var(--muted);">' +
+           (p.assigned_to || 'Unassigned') +
+           ' <span style="font-size:11px;color:#999;margin-left:4px;">(admin only)</span>' +
+         '</div>' +
+         '<input type="hidden" id="pe-assigned" value="' + (p.assigned_to||'') + '">')
+    );
 
   document.getElementById('partner-edit-body').innerHTML = html;
   document.getElementById('partner-edit-overlay').classList.add('open');
@@ -1702,6 +1783,8 @@ function closePartnerEdit() {
 
 async function submitPartnerEdit() {
   if (!_editPid) return;
+  var targetPartner = APP.partners.find(function(p){ return p.id === _editPid; });
+  if (!_canEdit(targetPartner)) { toast('You don\'t have permission to edit this partner'); return; }
   var g = function(id){ var el=document.getElementById(id); return el?el.value:''; };
   var data = {
     id: _editPid,
@@ -1716,9 +1799,13 @@ async function submitPartnerEdit() {
     family_members:  g('pe-family'),
     last_convo_note: g('pe-convo'),
     notes:           g('pe-notes'),
-    assigned_to:     g('pe-assigned') || null,
     updated_at:      new Date().toISOString()
   };
+  // Only admins can change the assignment. Non-admins never send this field,
+  // even if the hidden input was tampered with — we just don't include it.
+  if (_canReassign()) {
+    data.assigned_to = g('pe-assigned') || null;
+  }
   try {
     await fetch(SB_URL + '/rest/v1/sales_partners?id=eq.' + _editPid, {
       method: 'PATCH',
@@ -1784,11 +1871,15 @@ function openPartnerDetail(pid) {
   if (p.last_convo_note) html += '<div class="intel-chip"><b>Last convo:</b> ' + p.last_convo_note + '</div>';
   if (p.notes)           html += '<div class="intel-chip" style="color:var(--muted);">' + p.notes + '</div>';
 
-  // Log touch button
+  // Action buttons — log touch always available, edit/delete gated by permissions
   html += '<div style="display:flex;gap:8px;margin-top:16px;">';
   html += '<button class="submit-btn" style="flex:1;" onclick="closePartnerDetail();openLogTouchForStop(\'' + p.id + '\',\'' + (p.name||'').replace(/\'/, '\\x27') + '\')">📋 Log Touch</button>';
-  html += '<button onclick="openPartnerEdit(\'' + p.id + '\')" style="padding:16px 18px;border-radius:14px;border:1.5px solid var(--border);background:transparent;font-size:15px;cursor:pointer;">✏️</button>';
-  html += '<button onclick="deletePartnerApp(\'' + p.id + '\',\'' + (p.name||'').replace(/\'/, '\\x27') + '\')" style="padding:16px 18px;border-radius:14px;border:1.5px solid rgba(198,40,40,.3);background:rgba(198,40,40,.05);font-size:15px;cursor:pointer;">🗑️</button>';
+  if (_canEdit(p)) {
+    html += '<button onclick="openPartnerEdit(\'' + p.id + '\')" style="padding:16px 18px;border-radius:14px;border:1.5px solid var(--border);background:transparent;font-size:15px;cursor:pointer;" title="Edit partner">✏️</button>';
+  }
+  if (_canDelete()) {
+    html += '<button onclick="deletePartnerApp(\'' + p.id + '\',\'' + (p.name||'').replace(/\'/, '\\x27') + '\')" style="padding:16px 18px;border-radius:14px;border:1.5px solid rgba(198,40,40,.3);background:rgba(198,40,40,.05);font-size:15px;cursor:pointer;" title="Delete partner">🗑️</button>';
+  }
   html += '</div>';
 
   document.getElementById('partner-detail-body').innerHTML = html;
@@ -1796,6 +1887,9 @@ function openPartnerDetail(pid) {
 }
 
 async function deletePartnerApp(pid, pname) {
+  // Defense in depth: button is hidden for non-admins via _canDelete() in
+  // openPartnerDetail, but guard here too in case this is called some other way.
+  if (!_canDelete()) { toast('Only admins can delete partners'); return; }
   if (!confirm('Delete ' + pname + '?\nThis cannot be undone.')) return;
   try {
     await fetch(SB_URL + '/rest/v1/sales_partners?id=eq.' + pid, {
@@ -1941,6 +2035,12 @@ function selectLtPartner(id, name, type) {
 async function submitLogTouch() {
   if (!APP.ltPartnerId) { toast('Select a partner first'); return; }
   var today = new Date().toISOString().split('T')[0];
+  // Find the selected partner so we can inherit its market. Mobile had been
+  // hardcoding 'Appleton' here which corrupted Stevens Point data.
+  var selectedPartner = APP.partners.find(function(x){ return x.id === APP.ltPartnerId; });
+  var market = (window.JG_SHARED && window.JG_SHARED.market)
+    ? window.JG_SHARED.market.resolveMarketForTouch(selectedPartner)
+    : ((selectedPartner && selectedPartner.market) || APP.repMarket || 'Appleton');
   var data = {
     partner_id: APP.ltPartnerId,
     partner_name: APP.ltPartnerName,
@@ -1950,7 +2050,7 @@ async function submitLogTouch() {
     outcome: document.getElementById('lt-outcome').value,
     notes: document.getElementById('lt-notes').value,
     logged_by: APP.repName,
-    market: 'Appleton'
+    market: market
   };
   try {
     await fetch(SB_URL + '/rest/v1/sales_touches', {
