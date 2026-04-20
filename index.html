@@ -1061,8 +1061,7 @@ async function pullProxyLocation(locKey, locName, cutoffDate){
 // ── LOAD TECH ROSTER FROM SUPABASE EMPLOYEES TABLE ──
 // Formerly pulled from T-Sheets groups. Now reads the employees table directly.
 // Only Technicians and Project Managers appear on dispatch.
-// Josh is always shown regardless of role (owner override).
-// show_on_dispatch=false flag can opt someone out even within allowed roles.
+// show_on_dispatch=false flag opts someone out even within allowed roles.
 async function lookupTSIds(){
   setMsg('Loading technicians from platform roster...');
   try{
@@ -1077,8 +1076,8 @@ async function lookupTSIds(){
     }
     techQ={appleton:{},stevens:{}};
 
-    // Fetch active employees — filtered server-side to just dispatch roles for efficiency
-    const DISPATCH_ROLES = ['Technician','Project Manager','Admin'];
+    // Fetch active Technicians and Project Managers only — Admins excluded from dispatch
+    const DISPATCH_ROLES = ['Technician','Project Manager'];
     const rolesParam = DISPATCH_ROLES.map(r=>encodeURIComponent(r)).join(',');
     const er = await fetch(SB_URL + '/rest/v1/employees?active=eq.true&role=in.(' + rolesParam + ')&select=name,role,market,show_on_dispatch', {
       headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
@@ -1095,23 +1094,17 @@ async function lookupTSIds(){
       if (!e.name) return;
       const nm = e.name.trim();
       const k = nm.toLowerCase();
-      const isOwner = k.includes('josh') && k.includes('greil');
-      // Respect explicit opt-out (unless owner)
-      if (e.show_on_dispatch === false && !isOwner) return;
-      // Admins don't appear on dispatch unless they're the owner
-      if (e.role === 'Admin' && !isOwner) return;
+      // Respect explicit opt-out
+      if (e.show_on_dispatch === false) return;
       // Determine which market lane this employee belongs to
-      // Default to Appleton if market missing
       const marketRaw = (e.market || 'Appleton').toLowerCase();
       const lane = marketRaw.includes('stevens') || marketRaw.includes('point') ? 'stevens' : 'appleton';
-      // Owner always goes to Appleton
-      const targetLane = isOwner ? 'appleton' : lane;
       // Build initials from name
       const parts = nm.split(/\s+/);
       const initials = (parts[0]?.[0]||'') + (parts[1]?.[0]||'');
       // Preserve existing assignments across refresh
-      const existingJobs = prevTechQ?.[targetLane]?.[nm]?.jobs || [];
-      techQ[targetLane][nm] = {
+      const existingJobs = prevTechQ?.[lane]?.[nm]?.jobs || [];
+      techQ[lane][nm] = {
         tsId: null, // legacy field, kept for compatibility with code that references it
         initials: initials.toUpperCase(),
         color: AV_COLORS[colorIdx % AV_COLORS.length],
@@ -1126,18 +1119,6 @@ async function lookupTSIds(){
   }catch(e){
     console.warn('Employee roster error:',e.message);
     showToast('⚠ Could not load employee roster: ' + e.message);
-  }
-
-  // Always ensure owner (Josh Greil) appears on Appleton board
-  const OWNER_NAME = 'Josh Greil';
-  if (!techQ.appleton[OWNER_NAME]) {
-    // Always start with empty jobs — board state restore will re-apply any saved assignments
-    techQ.appleton[OWNER_NAME] = {
-      tsId: null,
-      initials: 'JG',
-      color: AV_COLORS[0],
-      jobs: []
-    };
   }
 }
 
