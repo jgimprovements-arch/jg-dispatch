@@ -167,6 +167,7 @@ input[type=file]{display:none}
 </div>
 
 <div id="app"><div style="padding:40px;text-align:center;color:#6b7a96;">Loading...</div></div>
+<div id="modal-layer"></div>
 <script>
 function mkMarketToggle() {
   var a = ST.market==="Appleton", s = ST.market==="Stevens Point";
@@ -177,8 +178,12 @@ function mkMarketToggle() {
 }
 function setMarket(m){ST.market=m;loadAll();}
 
+// ── PARTNER TYPES — single source of truth across all dropdowns/filters ──
+// Alphabetical. Keep in sync with sales_app.html.
+var PARTNER_TYPES = ['Assisted Living','Chamber of Commerce','Charity','Customer','Fire Department','Foundation Repair','GC','HVAC','Insurance Adjuster','Insurance Agent','Other','Plumber','Property Manager','Realtor'];
+
 function mkTypeFilters() {
-  var types = ['All','Plumber','Realtor','Insurance Agent','Property Manager','GC','Other'];
+  var types = ['All'].concat(PARTNER_TYPES);
   return types.map(function(t) {
     var active = ST.filterType===t;
     var bg = active ? 'var(--navy)' : 'var(--surface)';
@@ -395,6 +400,143 @@ async function completeRouteStop(routeId, stopIdx) {
 
 function addPartner(){ST.modal="add-partner";ST.selected=null;render();}
 function editPartner(id){ST.selected=id;ST.modal="add-partner";render();}
+
+// ── MERGE + DUPLICATE DETECTION ──────────────────────────────────────────
+// Anyone with sales access can merge. Fields auto-pick the non-empty value
+// from either partner. Touches/followups get re-pointed to the keeper,
+// then the loser is deleted. No undo — confirmation is required.
+
+// Open the picker UI to choose WHICH partner to merge INTO the selected one
+function openMergePicker(keeperId) {
+  ST.mergeKeeper = keeperId;
+  ST.mergeLoser = null;
+  ST.mergeSearch = '';
+  ST.modal = 'merge-picker';
+  render();
+}
+
+// Admin picked a loser — advance to preview/confirm
+function selectMergeLoser(loserId) {
+  if (loserId === ST.mergeKeeper) { alert("Can't merge a partner with itself."); return; }
+  ST.mergeLoser = loserId;
+  ST.modal = 'merge-preview';
+  render();
+}
+
+// Auto-pick non-empty: if keeper has value, use it; otherwise take loser's.
+// This way we never blow away existing data — we only fill in blanks.
+function _mergeFields(keeper, loser) {
+  var out = {};
+  var fields = ['company','type','phone','email','city','notes','tier','albi_contact_id','assigned_to','status'];
+  fields.forEach(function(f){
+    var kv = keeper[f];
+    var lv = loser[f];
+    // Use keeper's value if non-empty; else loser's value if non-empty; else leave undefined (won't PATCH)
+    if (kv !== null && kv !== undefined && String(kv).trim() !== '') {
+      out[f] = kv;
+    } else if (lv !== null && lv !== undefined && String(lv).trim() !== '') {
+      out[f] = lv;
+    }
+  });
+  // Counts and revenue: always sum
+  out.touch_count      = (parseInt(keeper.touch_count||0,10)) + (parseInt(loser.touch_count||0,10));
+  out.referral_count   = (parseInt(keeper.referral_count||0,10)) + (parseInt(loser.referral_count||0,10));
+  out.referral_revenue = (parseFloat(keeper.referral_revenue||0)) + (parseFloat(loser.referral_revenue||0));
+  // last_touch_date: use the more recent one
+  var kd = keeper.last_touch_date ? new Date(keeper.last_touch_date).getTime() : 0;
+  var ld = loser.last_touch_date  ? new Date(loser.last_touch_date).getTime()  : 0;
+  if (ld > kd) out.last_touch_date = loser.last_touch_date;
+  return out;
+}
+
+// Execute the merge: re-point dependent rows, update keeper, delete loser
+async function confirmMerge() {
+  var keeper = ST.partners.find(function(p){ return p.id === ST.mergeKeeper; });
+  var loser  = ST.partners.find(function(p){ return p.id === ST.mergeLoser;  });
+  if (!keeper || !loser) { alert('One of the partners is missing. Reload and try again.'); return; }
+  if (!confirm('MERGE ' + loser.name + ' INTO ' + keeper.name + '?\n\n' +
+               '• Touches, follow-ups, and revenue will be combined onto ' + keeper.name + '\n' +
+               '• ' + loser.name + ' will be permanently deleted\n' +
+               '• This cannot be undone.\n\nContinue?')) return;
+
+  var patch = _mergeFields(keeper, loser);
+  patch.updated_at = new Date().toISOString();
+
+  try {
+    // 1. Re-point sales_touches (they reference partner_id AND store denormalized partner_name/partner_type — keep those as-is for historical accuracy)
+    await sb('/rest/v1/sales_touches?partner_id=eq.'+loser.id, {
+      method:'PATCH', body: JSON.stringify({ partner_id: keeper.id })
+    });
+
+    // 2. Re-point sales_followups
+    await sb('/rest/v1/sales_followups?partner_id=eq.'+loser.id, {
+      method:'PATCH', body: JSON.stringify({ partner_id: keeper.id })
+    });
+
+    // 3. Update keeper with merged data
+    await sb('/rest/v1/sales_partners?id=eq.'+keeper.id, {
+      method:'PATCH', body: JSON.stringify(patch)
+    });
+
+    // 4. Delete loser
+    await sb('/rest/v1/sales_partners?id=eq.'+loser.id, { method:'DELETE' });
+
+    ST.modal = null;
+    ST.mergeKeeper = null;
+    ST.mergeLoser = null;
+    ST.selected = keeper.id;
+    await loadAll();
+    alert('✓ Merged. ' + keeper.name + ' now has ' + (patch.touch_count||0) + ' touches and ' + (patch.referral_count||0) + ' referrals.');
+  } catch(e) {
+    alert('Merge failed: ' + (e.message||e) + '\n\nData may be in a partial state. Refresh and check the partners.');
+    console.error('merge error:', e);
+  }
+}
+
+// ── FIND DUPLICATES ──────────────────────────────────────────────────────
+// Groups partners by likely duplicate keys: normalized name, shared phone,
+// shared email. A partner can appear in multiple groups (e.g. name match AND
+// phone match). Shows groups of 2+ partners as merge candidates.
+function openFindDuplicates() {
+  ST.modal = 'find-dupes';
+  render();
+}
+
+function _normalizePhone(s) {
+  return (s||'').replace(/\D/g,'').replace(/^1/,'').slice(-10);
+}
+function _normalizeName(s) {
+  return (s||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+}
+function _normalizeEmail(s) {
+  return (s||'').toLowerCase().trim();
+}
+
+function findDuplicateGroups() {
+  var groups = [];
+  var byPhone = {}, byEmail = {}, byName = {};
+  ST.partners.forEach(function(p){
+    var ph = _normalizePhone(p.phone);
+    var em = _normalizeEmail(p.email);
+    var nm = _normalizeName(p.name);
+    if (ph && ph.length >= 10) (byPhone[ph] = byPhone[ph] || []).push(p);
+    if (em) (byEmail[em] = byEmail[em] || []).push(p);
+    if (nm && nm.length >= 3) (byName[nm] = byName[nm] || []).push(p);
+  });
+  // Collect groups of 2+
+  var seen = new Set();
+  function addGroup(list, reason) {
+    if (list.length < 2) return;
+    var key = list.map(function(p){return p.id;}).sort().join('|') + '::' + reason;
+    if (seen.has(key)) return;
+    seen.add(key);
+    groups.push({ reason: reason, partners: list });
+  }
+  Object.values(byPhone).forEach(function(l){ addGroup(l, 'same phone'); });
+  Object.values(byEmail).forEach(function(l){ addGroup(l, 'same email'); });
+  Object.values(byName).forEach(function(l){ addGroup(l, 'same name'); });
+  return groups;
+}
 function openModal(name){ST.modal=name;ST.selected=null;render();}
 function importAlbi(){ST.modal=null;importFromAlbi();}
 async function importFromAlbi() {
@@ -439,7 +581,23 @@ function tierColor(tier) {
 }
 
 function typeColor(type) {
-  var m={'Plumber':'#1565c0','Realtor':'#6a1b9a','Insurance Agent':'#c0392b','Property Manager':'#e65100','GC':'#4a148c','General Contractor':'#4a148c'};
+  var m={
+    'Plumber':'#1565c0',
+    'Realtor':'#6a1b9a',
+    'Insurance Agent':'#c0392b',
+    'Insurance Adjuster':'#ad1457',
+    'Property Manager':'#e65100',
+    'GC':'#4a148c',
+    'General Contractor':'#4a148c',
+    'HVAC':'#00796b',
+    'Foundation Repair':'#5d4037',
+    'Assisted Living':'#827717',
+    'Fire Department':'#b71c1c',
+    'Chamber of Commerce':'#455a64',
+    'Charity':'#558b2f',
+    'Customer':'#37474f',
+    'Other':'#6b7a96'
+  };
   return m[type]||'#6b7a96';
 }
 
@@ -514,6 +672,9 @@ function renderPartnerList() {
 // This is a cheap win because the codebase has 26+ render() calls, many of which
 // fire in sequence (e.g. modal close → state change → render → render again).
 var _renderPending = null;
+// Track last-rendered background signature so we can skip rebuilding the 1000+
+// partner cards when only the modal opened/closed.
+var _lastBgSig = null;
 function render() {
   if (_renderPending) return;
   _renderPending = requestAnimationFrame(function(){
@@ -522,9 +683,33 @@ function render() {
   });
 }
 
+// Signature of all state that affects the background (non-modal) view.
+// If this matches the last one, the background HTML would be identical — skip it.
+function _bgSignature() {
+  return [
+    ST.tab, ST.market, ST.filterType, ST.filterTier, ST.searchQ,
+    ST.partners.length, ST.touches.length, ST.followups.length, ST.routes.length,
+    ST.loading ? 1 : 0,
+    ST.selected || ''
+  ].join('|');
+}
+
 function _renderNow() {
   var a = document.getElementById('app');
   if (!a) return;
+
+  // Short-circuit: if only the modal state changed, skip the expensive
+  // 1000-card background rebuild and only repaint the modal layer.
+  var sig = _bgSignature();
+  if (sig === _lastBgSig && a.innerHTML && a.innerHTML.indexOf('Loading...') === -1) {
+    // Build modal HTML directly without the full render
+    var mh = _buildModalHtml();
+    var modalLayer = document.getElementById('modal-layer');
+    if (modalLayer) modalLayer.innerHTML = mh;
+    return;
+  }
+  _lastBgSig = sig;
+
   var h = '';
 
   // HEADER
@@ -535,6 +720,7 @@ function _renderNow() {
   h += '<span style="font-size:10px;padding:2px 8px;background:rgba(255,255,255,.12);color:rgba(255,255,255,.8);border-radius:20px;border:1px solid rgba(255,255,255,.18);">' + ST.market + '</span>';
   h += '</div>';
   h += '<div style="display:flex;gap:6px;">';
+  h += '<button class="btn btn-ghost" style="font-size:11px;" onclick="openFindDuplicates()">🔍 Find Dupes</button>';
   if(isAdmin()) h += '<button class="btn btn-ghost" style="font-size:11px;" onclick="importAlbi()">↓ Import Albi</button>';
   if(isAdmin()) h += '<button class="btn btn-gold" style="font-size:11px;" onclick="addPartner()">+ Partner</button>';
   h += '</div></div>';
@@ -739,7 +925,7 @@ function _renderNow() {
     h += '</div>';
     h += '<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:20px;margin-bottom:16px;">';
     h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:16px;">';
-    h += '<div class="form-group"><label class="form-label">Default Partner Type</label><select class="form-select" id="imp-type"><option>Customer</option><option>Plumber</option><option>Realtor</option><option>Insurance Agent</option><option>Property Manager</option><option>GC</option><option>Other</option></select></div>';
+    h += '<div class="form-group"><label class="form-label">Default Partner Type</label><select class="form-select" id="imp-type">' + PARTNER_TYPES.map(function(t){ return '<option'+(t==='Customer'?' selected':'')+'>'+t+'</option>'; }).join('') + '</select></div>';
     h += '<div class="form-group"><label class="form-label">Default Tier</label><select class="form-select" id="imp-tier"><option value="C">C - Cold / Prospect</option><option value="B">B - Active</option><option value="A">A - Top Partner</option></select></div>';
     h += '</div>';
     h += '<div style="border:2px dashed var(--border);border-radius:8px;padding:32px 16px;text-align:center;cursor:pointer;" onclick="document.getElementById(\'imp-file\').click()">';
@@ -860,41 +1046,148 @@ function _renderNow() {
     h += '</div></div>';
   }
 
+
   // ── MODALS ────────────────────────────────────────────────────────────────
+  // Modal HTML is built by _buildModalHtml() and written to #modal-layer.
+  // This means opening/closing a modal doesn't require re-rendering the 1000+
+  // partner cards underneath.
+  var mh = _buildModalHtml();
+
+  h += '</div>'; // end sales-body
+  a.innerHTML = h;
+
+  // Modal layer renders independently — swapping modals no longer forces
+  // re-render of the 1000+ partner cards behind them.
+  var modalLayer = document.getElementById('modal-layer');
+  if (modalLayer) modalLayer.innerHTML = mh;
+}
+
+// ── MODAL SUBMIT HELPERS ─────────────────────────────────────────────────────
+// ── _buildModalHtml ───────────────────────────────────────────────────────
+// Returns the HTML for the currently-open modal (or empty string if none).
+// Called by _renderNow. Split out so the 1000+ partner cards don't have to
+// re-render every time a modal opens/closes.
+// ── _partnerCombobox ──────────────────────────────────────────────────────
+// Reusable searchable partner picker. Replaces plain <select> which was
+// building 1000+ <option> elements every time a modal opened (slow).
+// Usage: _partnerCombobox('tPartner') — returns HTML that mounts:
+//   • <input id="tPartner-query"> visible search box
+//   • <input type="hidden" id="tPartner"> stores "id|name|type" for submit code
+//   • <div id="tPartner-list"> dropdown that appears on focus
+// Submit handlers read the hidden input exactly as before.
+function _partnerCombobox(id, placeholder) {
+  placeholder = placeholder || 'Type to search partners...';
+  return (
+    '<div style="position:relative;">' +
+      '<input autocomplete="off" id="'+id+'-query" oninput="_pcFilter(\''+id+'\')" onfocus="_pcShow(\''+id+'\')" ' +
+        'placeholder="'+placeholder+'" class="form-input" style="width:100%;">' +
+      '<input type="hidden" id="'+id+'">' +
+      '<div id="'+id+'-list" style="display:none;position:absolute;top:100%;left:0;right:0;z-index:100;background:#fff;border:1.5px solid var(--border);border-radius:6px;max-height:260px;overflow-y:auto;margin-top:2px;box-shadow:0 4px 12px rgba(0,0,0,0.15);"></div>' +
+    '</div>'
+  );
+}
+
+// Filter the combobox list based on current query. Shows top 15 matches.
+// Called on every keystroke in the input — cheap because we only iterate
+// once and stop after 15 hits.
+function _pcFilter(id) {
+  var qEl = document.getElementById(id+'-query');
+  var listEl = document.getElementById(id+'-list');
+  if (!qEl || !listEl) return;
+  var q = (qEl.value||'').toLowerCase().trim();
+  var matches = [];
+  if (q.length < 1) {
+    // Show first 15 alphabetical to give a starting point
+    matches = ST.partners.slice(0, 15);
+  } else {
+    for (var i = 0; i < ST.partners.length && matches.length < 15; i++) {
+      var p = ST.partners[i];
+      var n = (p.name||'').toLowerCase();
+      var c = (p.company||'').toLowerCase();
+      var ph = (p.phone||'').toLowerCase();
+      if (n.indexOf(q) !== -1 || c.indexOf(q) !== -1 || ph.indexOf(q) !== -1) {
+        matches.push(p);
+      }
+    }
+  }
+  if (!matches.length) {
+    listEl.innerHTML = '<div style="padding:10px 12px;color:var(--muted);font-size:12px;">No matches. Type more or add a new partner.</div>';
+  } else {
+    listEl.innerHTML = matches.map(function(p){
+      var val = p.id + '|' + (p.name||'') + '|' + (p.type||'');
+      var safeVal = val.replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+      var label = (p.name||'') + (p.company ? ' — '+p.company : '');
+      var safeLabel = label.replace(/</g,'&lt;');
+      return '<div onclick="_pcPick(\''+id+'\',\''+safeVal+'\',\''+safeLabel.replace(/'/g,"\\'")+'\')" style="padding:8px 12px;cursor:pointer;border-bottom:1px solid rgba(13,45,94,.06);font-size:13px;" onmouseover="this.style.background=\'rgba(13,45,94,.06)\'" onmouseout="this.style.background=\'\'">' +
+        '<div style="font-weight:600;color:var(--navy);">' + (p.name||'').replace(/</g,'&lt;') + '</div>' +
+        (p.company ? '<div style="font-size:10px;color:var(--muted);">' + p.company.replace(/</g,'&lt;') + '</div>' : '') +
+      '</div>';
+    }).join('');
+  }
+  listEl.style.display = 'block';
+}
+
+function _pcShow(id) { _pcFilter(id); }
+
+function _pcPick(id, val, label) {
+  var q = document.getElementById(id+'-query');
+  var hidden = document.getElementById(id);
+  var listEl = document.getElementById(id+'-list');
+  if (q) q.value = label;
+  if (hidden) hidden.value = val;
+  if (listEl) listEl.style.display = 'none';
+}
+
+// Close dropdown on outside click
+document.addEventListener('click', function(ev){
+  var targets = document.querySelectorAll('[id$="-list"]');
+  targets.forEach(function(el){
+    if (!el.id.match(/^(tPartner|fuPartner)-list$/)) return;
+    var combo = el.parentElement;
+    if (combo && !combo.contains(ev.target)) el.style.display = 'none';
+  });
+});
+
+function _buildModalHtml() {
+  // ── MODALS ────────────────────────────────────────────────────────────────
+  // Modal HTML is built into a separate string (mh) and written to #modal-layer.
+  // This means opening/closing a modal doesn't require re-rendering the 1000+
+  // partner cards underneath.
+  var mh = '';
   if (ST.modal) {
-    h += '<div class="modal-overlay" onclick="if(event.target===this){ST.modal=null;render();}">';
-    h += '<div class="modal-box">';
+    mh += '<div class="modal-overlay" onclick="if(event.target===this){ST.modal=null;render();}">';
+    mh += '<div class="modal-box">';
 
     if (ST.modal === 'add-partner') {
       // Detect edit mode — if ST.selected is set AND partner exists, prefill the form
       var editP = ST.selected ? ST.partners.find(function(x){ return x.id === ST.selected; }) : null;
       var isEdit = !!editP;
       var _ve = function(v){ return (v==null?'':String(v)).replace(/"/g,'&quot;'); };
-      h += '<div class="modal-title">' + (isEdit ? '✏️ Edit Partner' : '+ New Partner') + '</div>';
-      h += '<div class="form-group"><label class="form-label">Full Name *</label><input class="form-input" id="pName" placeholder="John Smith" value="' + _ve(editP && editP.name) + '"></div>';
-      h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">';
-      h += '<div class="form-group"><label class="form-label">Company</label><input class="form-input" id="pCompany" placeholder="ABC Plumbing" value="' + _ve(editP && editP.company) + '"></div>';
-      h += '<div class="form-group"><label class="form-label">Type</label><select class="form-select" id="pType">';
-      ['Plumber','Realtor','Insurance Agent','Property Manager','GC','Other'].forEach(function(t){
-        h += '<option' + (editP && editP.type===t?' selected':'') + '>'+t+'</option>';
+      mh += '<div class="modal-title">' + (isEdit ? '✏️ Edit Partner' : '+ New Partner') + '</div>';
+      mh += '<div class="form-group"><label class="form-label">Full Name *</label><input class="form-input" id="pName" placeholder="John Smith" value="' + _ve(editP && editP.name) + '"></div>';
+      mh += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">';
+      mh += '<div class="form-group"><label class="form-label">Company</label><input class="form-input" id="pCompany" placeholder="ABC Plumbing" value="' + _ve(editP && editP.company) + '"></div>';
+      mh += '<div class="form-group"><label class="form-label">Type</label><select class="form-select" id="pType">';
+      PARTNER_TYPES.forEach(function(t){
+        mh += '<option' + (editP && editP.type===t?' selected':'') + '>'+t+'</option>';
       });
-      h += '</select></div>';
-      h += '</div>';
-      h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">';
-      h += '<div class="form-group"><label class="form-label">Phone</label><input class="form-input" id="pPhone" placeholder="(920) 555-1234" value="' + _ve(editP && editP.phone) + '"></div>';
-      h += '<div class="form-group"><label class="form-label">Email</label><input class="form-input" id="pEmail" type="email" value="' + _ve(editP && editP.email) + '"></div>';
-      h += '</div>';
-      h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">';
-      h += '<div class="form-group"><label class="form-label">City</label><input class="form-input" id="pCity" placeholder="Appleton" value="' + _ve(editP && editP.city) + '"></div>';
-      h += '<div class="form-group"><label class="form-label">Tier</label><select class="form-select" id="pTier">';
+      mh += '</select></div>';
+      mh += '</div>';
+      mh += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">';
+      mh += '<div class="form-group"><label class="form-label">Phone</label><input class="form-input" id="pPhone" placeholder="(920) 555-1234" value="' + _ve(editP && editP.phone) + '"></div>';
+      mh += '<div class="form-group"><label class="form-label">Email</label><input class="form-input" id="pEmail" type="email" value="' + _ve(editP && editP.email) + '"></div>';
+      mh += '</div>';
+      mh += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">';
+      mh += '<div class="form-group"><label class="form-label">City</label><input class="form-input" id="pCity" placeholder="Appleton" value="' + _ve(editP && editP.city) + '"></div>';
+      mh += '<div class="form-group"><label class="form-label">Tier</label><select class="form-select" id="pTier">';
       [['B','B - Active'],['A','A - Top Partner'],['C','C - Cold']].forEach(function(opt){
-        h += '<option value="'+opt[0]+'"' + (editP && editP.tier===opt[0]?' selected':'') + '>'+opt[1]+'</option>';
+        mh += '<option value="'+opt[0]+'"' + (editP && editP.tier===opt[0]?' selected':'') + '>'+opt[1]+'</option>';
       });
-      h += '</select></div>';
-      h += '</div>';
-      h += '<div class="form-group"><label class="form-label">Notes</label><textarea class="form-input" id="pNotes" rows="2" style="resize:vertical;">' + _ve(editP && editP.notes).replace(/&quot;/g,'"') + '</textarea></div>';
-      h += '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">';
-      h += '<button style="padding:8px 16px;border-radius:6px;border:1.5px solid var(--border);background:transparent;cursor:pointer;font-size:12px;" onclick="ST.modal=null;ST.selected=null;render()">Cancel</button>';
+      mh += '</select></div>';
+      mh += '</div>';
+      mh += '<div class="form-group"><label class="form-label">Notes</label><textarea class="form-input" id="pNotes" rows="2" style="resize:vertical;">' + _ve(editP && editP.notes).replace(/&quot;/g,'"') + '</textarea></div>';
+      mh += '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">';
+      mh += '<button style="padding:8px 16px;border-radius:6px;border:1.5px solid var(--border);background:transparent;cursor:pointer;font-size:12px;" onclick="ST.modal=null;ST.selected=null;render()">Cancel</button>';
       // Build the save call — include id when editing, omit for new partners
       var saveCall = 'savePartner({' + (isEdit ? "id:'"+editP.id+"'," : '') +
         "name:document.getElementById('pName').value," +
@@ -907,123 +1200,237 @@ function _renderNow() {
         "notes:document.getElementById('pNotes').value" +
         (isEdit ? '' : ",status:'Active'") +
         "});ST.modal=null;" + (isEdit ? '' : 'ST.selected=null;');
-      h += '<button style="padding:8px 20px;border-radius:6px;border:none;background:var(--orange);color:#fff;font-size:12px;font-weight:600;cursor:pointer;" onclick="' + saveCall + '">' + (isEdit ? 'Save Changes' : 'Save Partner') + '</button>';
-      h += '</div>';
+      mh += '<button style="padding:8px 20px;border-radius:6px;border:none;background:var(--orange);color:#fff;font-size:12px;font-weight:600;cursor:pointer;" onclick="' + saveCall + '">' + (isEdit ? 'Save Changes' : 'Save Partner') + '</button>';
+      mh += '</div>';
     }
 
     if (ST.modal === 'log-touch') {
       var selP = ST.selected ? ST.partners.find(function(p){ return p.id === ST.selected; }) : null;
-      h += '<div class="modal-title">📋 Log Touch</div>';
+      mh += '<div class="modal-title">📋 Log Touch</div>';
       if (!selP) {
-        h += '<div class="form-group"><label class="form-label">Partner</label><select class="form-select" id="tPartner"><option value="">Select partner...</option>';
-        ST.partners.forEach(function(p){ h += '<option value="' + p.id + '|' + p.name + '|' + (p.type||'') + '">' + p.name + (p.company ? ' — ' + p.company : '') + '</option>'; });
-        h += '</select></div>';
+        mh += '<div class="form-group"><label class="form-label">Partner</label>' + _partnerCombobox('tPartner') + '</div>';
       } else {
-        h += '<div style="background:rgba(13,45,94,.06);border-radius:8px;padding:10px 14px;margin-bottom:14px;font-weight:600;color:var(--navy);">' + selP.name + (selP.company ? ' — ' + selP.company : '') + '</div>';
+        mh += '<div style="background:rgba(13,45,94,.06);border-radius:8px;padding:10px 14px;margin-bottom:14px;font-weight:600;color:var(--navy);">' + selP.name + (selP.company ? ' — ' + selP.company : '') + '</div>';
       }
-      h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">';
-      h += '<div class="form-group"><label class="form-label">Type</label><select class="form-select" id="tType"><option>Call</option><option>Visit</option><option>Drop-in</option><option>Text</option><option>Email</option><option>Event</option></select></div>';
-      h += '<div class="form-group"><label class="form-label">Date</label><input class="form-input" type="date" id="tDate" value="' + ST.today + '"></div>';
-      h += '</div>';
-      h += '<div class="form-group"><label class="form-label">Outcome</label><select class="form-select" id="tOutcome"><option>Positive</option><option>Neutral</option><option>No Answer</option><option>Left VM</option><option>Not Interested</option></select></div>';
-      h += '<div class="form-group"><label class="form-label">Notes</label><textarea class="form-input" id="tNotes" rows="3" style="resize:vertical;" placeholder="What was discussed?"></textarea></div>';
-      h += '<div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;padding:10px 12px;background:rgba(245,166,35,.06);border-radius:8px;border:1px solid rgba(245,166,35,.2);">';
-      h += '<input type="checkbox" id="tFollowup" style="width:16px;height:16px;accent-color:var(--orange);">';
-      h += '<label for="tFollowup" style="font-size:12px;font-weight:600;cursor:pointer;">Schedule follow-up</label>';
-      h += '<input class="form-input" type="date" id="tFollowupDate" style="width:160px;margin-left:auto;" value="' + new Date(Date.now()+7*86400000).toISOString().split('T')[0] + '">';
-      h += '</div>';
-      h += '<div style="display:flex;gap:8px;justify-content:flex-end;">';
-      h += '<button style="padding:8px 16px;border-radius:6px;border:1.5px solid var(--border);background:transparent;cursor:pointer;font-size:12px;" onclick="ST.modal=null;ST.selected=null;render()">Cancel</button>';
-      h += '<button style="padding:8px 20px;border-radius:6px;border:none;background:var(--orange);color:#fff;font-size:12px;font-weight:600;cursor:pointer;" onclick="submitTouch()">Log Touch</button>';
-      h += '</div>';
+      mh += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">';
+      mh += '<div class="form-group"><label class="form-label">Type</label><select class="form-select" id="tType"><option>Call</option><option>Visit</option><option>Drop-in</option><option>Text</option><option>Email</option><option>Event</option></select></div>';
+      mh += '<div class="form-group"><label class="form-label">Date</label><input class="form-input" type="date" id="tDate" value="' + ST.today + '"></div>';
+      mh += '</div>';
+      mh += '<div class="form-group"><label class="form-label">Outcome</label><select class="form-select" id="tOutcome"><option>Positive</option><option>Neutral</option><option>No Answer</option><option>Left VM</option><option>Not Interested</option></select></div>';
+      mh += '<div class="form-group"><label class="form-label">Notes</label><textarea class="form-input" id="tNotes" rows="3" style="resize:vertical;" placeholder="What was discussed?"></textarea></div>';
+      mh += '<div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;padding:10px 12px;background:rgba(245,166,35,.06);border-radius:8px;border:1px solid rgba(245,166,35,.2);">';
+      mh += '<input type="checkbox" id="tFollowup" style="width:16px;height:16px;accent-color:var(--orange);">';
+      mh += '<label for="tFollowup" style="font-size:12px;font-weight:600;cursor:pointer;">Schedule follow-up</label>';
+      mh += '<input class="form-input" type="date" id="tFollowupDate" style="width:160px;margin-left:auto;" value="' + new Date(Date.now()+7*86400000).toISOString().split('T')[0] + '">';
+      mh += '</div>';
+      mh += '<div style="display:flex;gap:8px;justify-content:flex-end;">';
+      mh += '<button style="padding:8px 16px;border-radius:6px;border:1.5px solid var(--border);background:transparent;cursor:pointer;font-size:12px;" onclick="ST.modal=null;ST.selected=null;render()">Cancel</button>';
+      mh += '<button style="padding:8px 20px;border-radius:6px;border:none;background:var(--orange);color:#fff;font-size:12px;font-weight:600;cursor:pointer;" onclick="submitTouch()">Log Touch</button>';
+      mh += '</div>';
     }
 
     if (ST.modal === 'add-route') {
-      h += '<div class="modal-title">🚗 Plan Route</div>';
-      h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">';
-      h += '<div class="form-group"><label class="form-label">Date</label><input class="form-input" type="date" id="rDate" value="' + ST.today + '"></div>';
-      h += '<div class="form-group"><label class="form-label">Rep Name</label><input class="form-input" id="rRep" placeholder="Your name"></div>';
-      h += '</div>';
-      h += '<div class="form-group"><label class="form-label">Select Stops (click to add)</label>';
-      h += '<div style="max-height:240px;overflow-y:auto;border:1.5px solid var(--border);border-radius:6px;">';
+      mh += '<div class="modal-title">🚗 Plan Route</div>';
+      mh += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">';
+      mh += '<div class="form-group"><label class="form-label">Date</label><input class="form-input" type="date" id="rDate" value="' + ST.today + '"></div>';
+      mh += '<div class="form-group"><label class="form-label">Rep Name</label><input class="form-input" id="rRep" placeholder="Your name"></div>';
+      mh += '</div>';
+      mh += '<div class="form-group"><label class="form-label">Select Stops (click to add)</label>';
+      mh += '<div style="max-height:240px;overflow-y:auto;border:1.5px solid var(--border);border-radius:6px;">';
       ST.partners.forEach(function(p,i) {
-        h += '<div style="padding:8px 12px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px;cursor:pointer;background:' + (i%2===0?'var(--surface)':'#fff') + '" onclick="this.classList.toggle(\'selected\');this.style.background=this.classList.contains(\'selected\')?\'rgba(232,93,4,.08)\':null;">';
-        h += '<span>🚗</span>';
-        h += '<span style="font-size:12px;font-weight:600;" data-pid="' + p.id + '" data-pname="' + p.name + '" data-paddr="' + (p.address||p.city||'') + '">' + p.name + '</span>';
-        h += '<span style="font-size:10px;color:var(--muted);">' + (p.company||'') + (p.city?' · '+p.city:'') + '</span>';
-        h += '</div>';
+        mh += '<div style="padding:8px 12px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px;cursor:pointer;background:' + (i%2===0?'var(--surface)':'#fff') + '" onclick="this.classList.toggle(\'selected\');this.style.background=this.classList.contains(\'selected\')?\'rgba(232,93,4,.08)\':null;">';
+        mh += '<span>🚗</span>';
+        mh += '<span style="font-size:12px;font-weight:600;" data-pid="' + p.id + '" data-pname="' + p.name + '" data-paddr="' + (p.address||p.city||'') + '">' + p.name + '</span>';
+        mh += '<span style="font-size:10px;color:var(--muted);">' + (p.company||'') + (p.city?' · '+p.city:'') + '</span>';
+        mh += '</div>';
       });
-      h += '</div></div>';
-      h += '<div class="form-group"><label class="form-label">Notes</label><input class="form-input" id="rNotes" placeholder="e.g. Focus on south Appleton today"></div>';
-      h += '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">';
-      h += '<button style="padding:8px 16px;border-radius:6px;border:1.5px solid var(--border);background:transparent;cursor:pointer;font-size:12px;" onclick="ST.modal=null;render()">Cancel</button>';
-      h += '<button style="padding:8px 20px;border-radius:6px;border:none;background:var(--orange);color:#fff;font-size:12px;font-weight:600;cursor:pointer;" onclick="submitRoute()">Save Route</button>';
-      h += '</div>';
+      mh += '</div></div>';
+      mh += '<div class="form-group"><label class="form-label">Notes</label><input class="form-input" id="rNotes" placeholder="e.g. Focus on south Appleton today"></div>';
+      mh += '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">';
+      mh += '<button style="padding:8px 16px;border-radius:6px;border:1.5px solid var(--border);background:transparent;cursor:pointer;font-size:12px;" onclick="ST.modal=null;render()">Cancel</button>';
+      mh += '<button style="padding:8px 20px;border-radius:6px;border:none;background:var(--orange);color:#fff;font-size:12px;font-weight:600;cursor:pointer;" onclick="submitRoute()">Save Route</button>';
+      mh += '</div>';
     }
 
     if (ST.modal === 'add-followup') {
-      h += '<div class="modal-title">🔔 Add Follow-up</div>';
-      h += '<div class="form-group"><label class="form-label">Partner</label><select class="form-select" id="fuPartner"><option value="">Select partner...</option>';
-      ST.partners.forEach(function(p){ h += '<option value="' + p.id + '|' + p.name + '|' + (p.type||'') + '">' + p.name + (p.company?' — '+p.company:'') + '</option>'; });
-      h += '</select></div>';
-      h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">';
-      h += '<div class="form-group"><label class="form-label">Due Date</label><input class="form-input" type="date" id="fuDate" value="' + new Date(Date.now()+3*86400000).toISOString().split('T')[0] + '"></div>';
-      h += '<div class="form-group"><label class="form-label">Priority</label><select class="form-select" id="fuPriority"><option>Normal</option><option>High</option><option>Low</option></select></div>';
-      h += '</div>';
-      h += '<div class="form-group"><label class="form-label">Reason / Notes</label><input class="form-input" id="fuReason" placeholder="e.g. Check in on referral"></div>';
-      h += '<div class="form-group"><label class="form-label">Assigned To</label><input class="form-input" id="fuAssigned" placeholder="Your name"></div>';
-      h += '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">';
-      h += '<button style="padding:8px 16px;border-radius:6px;border:1.5px solid var(--border);background:transparent;cursor:pointer;font-size:12px;" onclick="ST.modal=null;render()">Cancel</button>';
-      h += '<button style="padding:8px 20px;border-radius:6px;border:none;background:var(--orange);color:#fff;font-size:12px;font-weight:600;cursor:pointer;" onclick="submitFollowup()">Save</button>';
-      h += '</div>';
+      mh += '<div class="modal-title">🔔 Add Follow-up</div>';
+      mh += '<div class="form-group"><label class="form-label">Partner</label>' + _partnerCombobox('fuPartner') + '</div>';
+      mh += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">';
+      mh += '<div class="form-group"><label class="form-label">Due Date</label><input class="form-input" type="date" id="fuDate" value="' + new Date(Date.now()+3*86400000).toISOString().split('T')[0] + '"></div>';
+      mh += '<div class="form-group"><label class="form-label">Priority</label><select class="form-select" id="fuPriority"><option>Normal</option><option>High</option><option>Low</option></select></div>';
+      mh += '</div>';
+      mh += '<div class="form-group"><label class="form-label">Reason / Notes</label><input class="form-input" id="fuReason" placeholder="e.g. Check in on referral"></div>';
+      mh += '<div class="form-group"><label class="form-label">Assigned To</label><input class="form-input" id="fuAssigned" placeholder="Your name"></div>';
+      mh += '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">';
+      mh += '<button style="padding:8px 16px;border-radius:6px;border:1.5px solid var(--border);background:transparent;cursor:pointer;font-size:12px;" onclick="ST.modal=null;render()">Cancel</button>';
+      mh += '<button style="padding:8px 20px;border-radius:6px;border:none;background:var(--orange);color:#fff;font-size:12px;font-weight:600;cursor:pointer;" onclick="submitFollowup()">Save</button>';
+      mh += '</div>';
     }
 
     if (ST.modal === 'partner-detail') {
       var p = ST.partners.find(function(x){ return x.id === ST.selected; });
       if (p) {
         var ptouches = ST.touches.filter(function(t){ return t.partner_id === p.id; });
-        h += '<div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;">';
-        h += '<div class="partner-avatar" style="background:' + tierColor(p.tier||'C') + ';width:52px;height:52px;font-size:20px;">' + partnerInitials(p.name) + '</div>';
-        h += '<div><div style="font-size:18px;font-weight:700;color:var(--navy);">' + p.name + '</div>';
-        h += '<div style="font-size:12px;color:var(--muted);">' + (p.company||'') + '</div></div>';
-        h += '<div style="margin-left:auto;"><select class="form-select" style="width:120px;font-size:11px;" onchange="savePartner({id:\'' + p.id + '\',tier:this.value})">';
-        ['A','B','C'].forEach(function(t){ h += '<option '+(p.tier===t?'selected':'')+' value="'+t+'">'+t+'-Tier</option>'; });
-        h += '</select></div></div>';
-        h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px;">';
-        if (p.phone) h += '<a href="tel:' + p.phone + '" style="padding:8px 12px;border-radius:6px;background:rgba(13,45,94,.06);font-size:12px;font-weight:600;color:var(--navy);text-decoration:none;">📞 ' + p.phone + '</a>';
-        if (p.email) h += '<a href="mailto:' + p.email + '" style="padding:8px 12px;border-radius:6px;background:rgba(13,45,94,.06);font-size:12px;font-weight:600;color:var(--navy);text-decoration:none;">📧 ' + p.email + '</a>';
-        h += '</div>';
-        h += '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:14px;">';
-        h += '<div style="background:rgba(13,45,94,.06);border-radius:6px;padding:8px;text-align:center;"><div style="font-size:20px;font-weight:700;color:var(--navy);">' + (p.touch_count||0) + '</div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;">Touches</div></div>';
-        h += '<div style="background:rgba(232,93,4,.06);border-radius:6px;padding:8px;text-align:center;"><div style="font-size:20px;font-weight:700;color:var(--orange);">' + (p.referral_count||0) + '</div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;">Referrals</div></div>';
-        h += '<div style="background:rgba(46,125,50,.06);border-radius:6px;padding:8px;text-align:center;"><div style="font-size:16px;font-weight:700;color:var(--ok);">$' + (p.referral_revenue?Math.round(p.referral_revenue).toLocaleString():0) + '</div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;">Rev</div></div>';
-        h += '</div>';
-        if (p.notes) h += '<div style="background:rgba(245,166,35,.06);border-radius:8px;padding:10px 12px;margin-bottom:12px;font-size:12px;">' + p.notes + '</div>';
-        h += '<div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;margin-bottom:8px;">Recent Touches</div>';
-        if (!ptouches.length) h += '<div style="font-size:12px;color:var(--muted);margin-bottom:12px;">No touches logged yet.</div>';
+        mh += '<div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;">';
+        mh += '<div class="partner-avatar" style="background:' + tierColor(p.tier||'C') + ';width:52px;height:52px;font-size:20px;">' + partnerInitials(p.name) + '</div>';
+        mh += '<div><div style="font-size:18px;font-weight:700;color:var(--navy);">' + p.name + '</div>';
+        mh += '<div style="font-size:12px;color:var(--muted);">' + (p.company||'') + '</div></div>';
+        mh += '<div style="margin-left:auto;"><select class="form-select" style="width:120px;font-size:11px;" onchange="savePartner({id:\'' + p.id + '\',tier:this.value})">';
+        ['A','B','C'].forEach(function(t){ mh += '<option '+(p.tier===t?'selected':'')+' value="'+t+'">'+t+'-Tier</option>'; });
+        mh += '</select></div></div>';
+        mh += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px;">';
+        if (p.phone) mh += '<a href="tel:' + p.phone + '" style="padding:8px 12px;border-radius:6px;background:rgba(13,45,94,.06);font-size:12px;font-weight:600;color:var(--navy);text-decoration:none;">📞 ' + p.phone + '</a>';
+        if (p.email) mh += '<a href="mailto:' + p.email + '" style="padding:8px 12px;border-radius:6px;background:rgba(13,45,94,.06);font-size:12px;font-weight:600;color:var(--navy);text-decoration:none;">📧 ' + p.email + '</a>';
+        mh += '</div>';
+        mh += '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:14px;">';
+        mh += '<div style="background:rgba(13,45,94,.06);border-radius:6px;padding:8px;text-align:center;"><div style="font-size:20px;font-weight:700;color:var(--navy);">' + (p.touch_count||0) + '</div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;">Touches</div></div>';
+        mh += '<div style="background:rgba(232,93,4,.06);border-radius:6px;padding:8px;text-align:center;"><div style="font-size:20px;font-weight:700;color:var(--orange);">' + (p.referral_count||0) + '</div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;">Referrals</div></div>';
+        mh += '<div style="background:rgba(46,125,50,.06);border-radius:6px;padding:8px;text-align:center;"><div style="font-size:16px;font-weight:700;color:var(--ok);">$' + (p.referral_revenue?Math.round(p.referral_revenue).toLocaleString():0) + '</div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;">Rev</div></div>';
+        mh += '</div>';
+        if (p.notes) mh += '<div style="background:rgba(245,166,35,.06);border-radius:8px;padding:10px 12px;margin-bottom:12px;font-size:12px;">' + p.notes + '</div>';
+        mh += '<div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;margin-bottom:8px;">Recent Touches</div>';
+        if (!ptouches.length) mh += '<div style="font-size:12px;color:var(--muted);margin-bottom:12px;">No touches logged yet.</div>';
         ptouches.slice(0,5).forEach(function(t){
-          h += '<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);">';
-          h += '<span>' + touchIcon(t.touch_type) + '</span>';
-          h += '<span style="font-size:12px;flex:1;">' + (t.notes||t.touch_type||'') + '</span>';
-          h += '<span style="font-size:10px;color:var(--muted);">' + fmtDate(t.touch_date) + '</span>';
-          h += '</div>';
+          mh += '<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);">';
+          mh += '<span>' + touchIcon(t.touch_type) + '</span>';
+          mh += '<span style="font-size:12px;flex:1;">' + (t.notes||t.touch_type||'') + '</span>';
+          mh += '<span style="font-size:10px;color:var(--muted);">' + fmtDate(t.touch_date) + '</span>';
+          mh += '</div>';
         });
-        h += '<div style="display:flex;gap:8px;margin-top:16px;">';
-        h += '<button style="padding:8px 16px;border-radius:6px;border:none;background:var(--orange);color:#fff;font-size:12px;font-weight:600;cursor:pointer;flex:1;" onclick="ST.modal=\'log-touch\';render()">📋 Log Touch</button>';
-        h += '<button style="padding:8px 16px;border-radius:6px;border:1.5px solid var(--navy);background:transparent;color:var(--navy);font-size:12px;font-weight:600;cursor:pointer;" onclick="editPartner(\'' + p.id + '\')">✏️ Edit</button>';
-        h += '<button style="padding:8px 16px;border-radius:6px;border:1.5px solid var(--border);background:transparent;font-size:12px;cursor:pointer;" onclick="ST.modal=null;ST.selected=null;render()">Close</button>';
-        h += '</div>';
+        mh += '<div style="display:flex;gap:8px;margin-top:16px;flex-wrap:wrap;">';
+        mh += '<button style="padding:8px 16px;border-radius:6px;border:none;background:var(--orange);color:#fff;font-size:12px;font-weight:600;cursor:pointer;flex:1;min-width:120px;" onclick="ST.modal=\'log-touch\';render()">📋 Log Touch</button>';
+        mh += '<button style="padding:8px 16px;border-radius:6px;border:1.5px solid var(--navy);background:transparent;color:var(--navy);font-size:12px;font-weight:600;cursor:pointer;" onclick="editPartner(\'' + p.id + '\')">✏️ Edit</button>';
+        mh += '<button style="padding:8px 16px;border-radius:6px;border:1.5px solid var(--danger);background:transparent;color:var(--danger);font-size:12px;font-weight:600;cursor:pointer;" onclick="openMergePicker(\'' + p.id + '\')">⇄ Merge</button>';
+        mh += '<button style="padding:8px 16px;border-radius:6px;border:1.5px solid var(--border);background:transparent;font-size:12px;cursor:pointer;" onclick="ST.modal=null;ST.selected=null;render()">Close</button>';
+        mh += '</div>';
       }
     }
 
-    h += '</div></div>';
+    // ── MERGE PICKER ────────────────────────────────────────────────────────
+    if (ST.modal === 'merge-picker') {
+      var keeper = ST.partners.find(function(x){ return x.id === ST.mergeKeeper; });
+      if (keeper) {
+        mh += '<div class="modal-title">⇄ Merge Into: ' + keeper.name + '</div>';
+        mh += '<div style="font-size:12px;color:var(--muted);margin-bottom:12px;line-height:1.5;">Pick the duplicate partner to merge into <strong>' + keeper.name + '</strong>. Their touches and revenue will combine onto this record, and the duplicate will be deleted.</div>';
+        mh += '<input class="form-input" id="merge-search" placeholder="Search by name, company, or phone..." oninput="ST.mergeSearch=this.value;render()" value="' + (ST.mergeSearch||'').replace(/"/g,'&quot;') + '" style="margin-bottom:10px;">';
+        var q = (ST.mergeSearch||'').toLowerCase().trim();
+        var candidates = ST.partners.filter(function(p){
+          if (p.id === keeper.id) return false;
+          if (!q) return true;
+          return (p.name||'').toLowerCase().indexOf(q) !== -1
+              || (p.company||'').toLowerCase().indexOf(q) !== -1
+              || (p.phone||'').indexOf(q) !== -1;
+        }).slice(0, 50);
+        mh += '<div style="max-height:360px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;">';
+        if (!candidates.length) {
+          mh += '<div style="padding:20px;text-align:center;color:var(--muted);font-size:12px;">No partners match.</div>';
+        } else {
+          candidates.forEach(function(p){
+            mh += '<div style="padding:10px 12px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;cursor:pointer;" onclick="selectMergeLoser(\'' + p.id + '\')">';
+            mh += '<div class="partner-avatar" style="background:' + tierColor(p.tier||'C') + ';width:32px;height:32px;font-size:12px;">' + partnerInitials(p.name) + '</div>';
+            mh += '<div style="flex:1;min-width:0;">';
+            mh += '<div style="font-size:13px;font-weight:600;color:var(--navy);">' + p.name + '</div>';
+            mh += '<div style="font-size:11px;color:var(--muted);">' + (p.company||'—') + ' · ' + (p.phone||'no phone') + '</div>';
+            mh += '</div>';
+            mh += '<div style="font-size:11px;color:var(--muted);">' + (p.touch_count||0) + ' touches</div>';
+            mh += '</div>';
+          });
+        }
+        mh += '</div>';
+        mh += '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">';
+        mh += '<button style="padding:8px 16px;border-radius:6px;border:1.5px solid var(--border);background:transparent;cursor:pointer;font-size:12px;" onclick="ST.modal=\'partner-detail\';ST.mergeKeeper=null;ST.mergeSearch=\'\';render()">Cancel</button>';
+        mh += '</div>';
+      }
+    }
+
+    // ── MERGE PREVIEW + CONFIRM ─────────────────────────────────────────────
+    if (ST.modal === 'merge-preview') {
+      var mk = ST.partners.find(function(x){ return x.id === ST.mergeKeeper; });
+      var ml = ST.partners.find(function(x){ return x.id === ST.mergeLoser;  });
+      if (mk && ml) {
+        var merged = _mergeFields(mk, ml);
+        mh += '<div class="modal-title">⇄ Confirm Merge</div>';
+        mh += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px;">';
+        // Keeper
+        mh += '<div style="border:2px solid var(--ok);border-radius:8px;padding:10px 12px;">';
+        mh += '<div style="font-size:10px;font-weight:700;color:var(--ok);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">KEEP</div>';
+        mh += '<div style="font-size:14px;font-weight:700;color:var(--navy);margin-bottom:6px;">' + mk.name + '</div>';
+        mh += '<div style="font-size:11px;color:var(--muted);line-height:1.6;">';
+        mh += (mk.company||'<em>—</em>') + '<br>' + (mk.phone||'<em>no phone</em>') + '<br>' + (mk.email||'<em>no email</em>');
+        mh += '</div>';
+        mh += '<div style="font-size:11px;margin-top:6px;"><strong>' + (mk.touch_count||0) + '</strong> touches · <strong>' + (mk.referral_count||0) + '</strong> refs · <strong>$' + (mk.referral_revenue?Math.round(mk.referral_revenue).toLocaleString():0) + '</strong></div>';
+        mh += '</div>';
+        // Loser
+        mh += '<div style="border:2px solid var(--danger);border-radius:8px;padding:10px 12px;opacity:.75;">';
+        mh += '<div style="font-size:10px;font-weight:700;color:var(--danger);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">DELETE</div>';
+        mh += '<div style="font-size:14px;font-weight:700;color:var(--navy);margin-bottom:6px;text-decoration:line-through;">' + ml.name + '</div>';
+        mh += '<div style="font-size:11px;color:var(--muted);line-height:1.6;">';
+        mh += (ml.company||'<em>—</em>') + '<br>' + (ml.phone||'<em>no phone</em>') + '<br>' + (ml.email||'<em>no email</em>');
+        mh += '</div>';
+        mh += '<div style="font-size:11px;margin-top:6px;"><strong>' + (ml.touch_count||0) + '</strong> touches · <strong>' + (ml.referral_count||0) + '</strong> refs · <strong>$' + (ml.referral_revenue?Math.round(ml.referral_revenue).toLocaleString():0) + '</strong></div>';
+        mh += '</div>';
+        mh += '</div>';
+        // Result
+        mh += '<div style="background:rgba(13,45,94,.06);border-radius:8px;padding:10px 12px;margin-bottom:14px;">';
+        mh += '<div style="font-size:10px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">RESULT</div>';
+        mh += '<div style="font-size:13px;color:var(--navy);line-height:1.6;">';
+        mh += '<strong>' + mk.name + '</strong> will have:<br>';
+        mh += '• <strong>' + merged.touch_count + '</strong> combined touches · <strong>' + merged.referral_count + '</strong> referrals · <strong>$' + Math.round(merged.referral_revenue).toLocaleString() + '</strong> revenue<br>';
+        mh += '• Fields filled from ' + ml.name + ' where ' + mk.name + " was blank: " + (function(){
+          var filled = [];
+          ['company','phone','email','city','notes','type','tier','albi_contact_id'].forEach(function(f){
+            var kv = (mk[f]==null?'':String(mk[f])).trim();
+            var lv = (ml[f]==null?'':String(ml[f])).trim();
+            if (!kv && lv) filled.push(f);
+          });
+          return filled.length ? filled.join(', ') : '<em>none (keeper had all fields)</em>';
+        })();
+        mh += '</div></div>';
+        mh += '<div style="font-size:11px;color:var(--danger);margin-bottom:14px;line-height:1.5;"><strong>⚠ Cannot be undone.</strong> ' + ml.name + "'s record will be permanently deleted. All touches and follow-ups will be re-pointed to " + mk.name + '.</div>';
+        mh += '<div style="display:flex;gap:8px;justify-content:flex-end;">';
+        mh += '<button style="padding:8px 16px;border-radius:6px;border:1.5px solid var(--border);background:transparent;cursor:pointer;font-size:12px;" onclick="ST.modal=\'merge-picker\';ST.mergeLoser=null;render()">← Back</button>';
+        mh += '<button style="padding:8px 20px;border-radius:6px;border:none;background:var(--danger);color:#fff;font-size:12px;font-weight:600;cursor:pointer;" onclick="confirmMerge()">⇄ Merge & Delete</button>';
+        mh += '</div>';
+      }
+    }
+
+    // ── FIND DUPLICATES ─────────────────────────────────────────────────────
+    if (ST.modal === 'find-dupes') {
+      var dupeGroups = findDuplicateGroups();
+      mh += '<div class="modal-title">🔍 Find Duplicates</div>';
+      mh += '<div style="font-size:12px;color:var(--muted);margin-bottom:12px;line-height:1.5;">Partners grouped by likely duplicate signal (same phone, email, or name). Click any partner to open it, then use the ⇄ Merge button to combine records.</div>';
+      if (!dupeGroups.length) {
+        mh += '<div style="padding:30px;text-align:center;background:rgba(46,125,50,.06);border-radius:8px;color:var(--ok);font-weight:600;">✓ No obvious duplicates found.</div>';
+      } else {
+        mh += '<div style="max-height:480px;overflow-y:auto;">';
+        dupeGroups.forEach(function(g){
+          mh += '<div style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:10px;">';
+          mh += '<div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px;">' + g.reason + ' · ' + g.partners.length + ' records</div>';
+          g.partners.forEach(function(p){
+            mh += '<div style="padding:8px 0;border-bottom:1px solid rgba(13,45,94,.05);display:flex;align-items:center;gap:10px;cursor:pointer;" onclick="ST.modal=null;ST.selected=\'' + p.id + '\';ST.modal=\'partner-detail\';render()">';
+            mh += '<div class="partner-avatar" style="background:' + tierColor(p.tier||'C') + ';width:28px;height:28px;font-size:11px;">' + partnerInitials(p.name) + '</div>';
+            mh += '<div style="flex:1;min-width:0;">';
+            mh += '<div style="font-size:12px;font-weight:600;color:var(--navy);">' + p.name + '</div>';
+            mh += '<div style="font-size:10px;color:var(--muted);">' + (p.company||'—') + ' · ' + (p.phone||'no phone') + ' · ' + (p.email||'no email') + '</div>';
+            mh += '</div>';
+            mh += '<div style="font-size:10px;color:var(--muted);text-align:right;">' + (p.touch_count||0) + ' touches<br>$' + (p.referral_revenue?Math.round(p.referral_revenue).toLocaleString():0) + '</div>';
+            mh += '</div>';
+          });
+          mh += '</div>';
+        });
+        mh += '</div>';
+      }
+      mh += '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">';
+      mh += '<button style="padding:8px 16px;border-radius:6px;border:1.5px solid var(--border);background:transparent;cursor:pointer;font-size:12px;" onclick="ST.modal=null;render()">Close</button>';
+      mh += '</div>';
+    }
+
+    mh += '</div></div>';
   }
 
-  h += '</div>'; // end sales-body
-  a.innerHTML = h;
+  return mh;
 }
 
-// ── MODAL SUBMIT HELPERS ─────────────────────────────────────────────────────
 function submitTouch() {
   var selP = ST.selected ? ST.partners.find(function(p){ return p.id === ST.selected; }) : null;
   var pid = '', pname = '', ptype = '';
