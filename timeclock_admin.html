@@ -2895,7 +2895,6 @@ function renderEmployees() {
   h += '<div style="display:flex;gap:8px;">';
   h += '<button class="btn" onclick="exportAllEmployeeFilesPDF()" style="background:transparent;color:var(--navy);border-color:var(--navy);" title="Generate PDF for every active employee and download as a ZIP">📦 Export All Files</button>';
   h += '<button class="btn" onclick="openInviteEmployee()" style="background:var(--orange);color:#fff;border-color:var(--orange);">📲 Invite Employee</button>';
-  h += '<button class="btn" onclick="openQuickInvite()" style="background:#fff;color:var(--orange);border-color:var(--orange);" title="Add an employee with access but no onboarding docs (contractors, paper-signed, etc.)">⚡ Quick Invite</button>';
   h += '<button class="btn btn-primary" onclick="openAddEmployee()">+ Add Employee</button>';
   h += '</div></div>';
 
@@ -6177,6 +6176,180 @@ function _generateInviteToken() {
 // ── INVITE ACTIONS MENU ───────────────────────────────────────────────────
 // Surfaced from the employee detail modal. Four actions covering different
 // real-world recovery scenarios: lost email, expired link, wrong phone, etc.
+// ── SIGN-IN DIAGNOSTIC ───────────────────────────────────────────────────
+// Real-world problem: employee says "I can't sign in." Admin has no way to know
+// what email they're trying with. This tool lets you paste what they tried,
+// compares it to what's on file, and offers to fix the mismatch in place.
+function openSignInDiagnostic(empId) {
+  if (!isAdmin()) { toast('Admin only'); return; }
+  var emp = (ST.employees||[]).find(function(e){ return e.id === empId; });
+  if (!emp) { alert('Employee not found'); return; }
+
+  var body = '';
+  body += '<div style="font-size:13px;color:var(--text);margin-bottom:14px;"><strong>'+emp.name+'</strong> · '+emp.role+' · '+(emp.market||'')+'</div>';
+
+  // Status summary
+  body += '<div style="background:rgba(13,45,94,.04);border-radius:8px;padding:12px 14px;margin-bottom:14px;font-size:12px;line-height:1.7;">';
+  body += '<div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px;">Current Account Status</div>';
+  body += '<div>Active: <strong style="color:'+(emp.active ? 'var(--green)' : 'var(--red)')+';">'+(emp.active ? '✓ Yes' : '✗ No (disabled)')+'</strong></div>';
+  body += '<div>Work email on file: <strong>'+(emp.email || '<span style="color:var(--red);">(blank)</span>')+'</strong></div>';
+  body += '<div>Personal email on file: <strong>'+(emp.personal_email || '<span style="color:var(--muted);">(none)</span>')+'</strong></div>';
+  if (emp.invite_pending) body += '<div style="color:var(--orange);">⚠ Invite is still marked pending</div>';
+  body += '</div>';
+
+  // Diagnostic input
+  body += '<div style="margin-bottom:14px;">';
+  body += '<label class="form-label">What email did they try to sign in with?</label>';
+  body += '<input type="email" id="diag-email" class="form-input" placeholder="Paste or type what they told you they tried" autocomplete="off" autocapitalize="off" oninput="_diagCheck(\''+empId+'\')">';
+  body += '<div style="font-size:11px;color:var(--muted);margin-top:4px;">Ask them: "What email did you click/type when signing in?"</div>';
+  body += '</div>';
+
+  // Result area — populated live as they type
+  body += '<div id="diag-result" style="min-height:80px;"></div>';
+
+  showModal('🔍 Sign-In Diagnostic · ' + emp.name, body, null);
+}
+
+// Live comparison as admin types what the employee tried
+function _diagCheck(empId) {
+  var emp = (ST.employees||[]).find(function(e){ return e.id === empId; });
+  if (!emp) return;
+  var tried = ((document.getElementById('diag-email')||{}).value || '').trim().toLowerCase();
+  var resultEl = document.getElementById('diag-result');
+  if (!resultEl) return;
+
+  if (!tried) { resultEl.innerHTML = ''; return; }
+
+  var workEmail = (emp.email || '').toLowerCase();
+  var personalEmail = (emp.personal_email || '').toLowerCase();
+
+  // Does it match either?
+  if (tried === workEmail || tried === personalEmail) {
+    // Perfect match — they should be able to sign in. Check other reasons.
+    var reasons = [];
+    if (emp.active === false) reasons.push('Account is marked <strong style="color:var(--red);">inactive</strong> — reactivate in Edit');
+    if (emp.invite_pending && !emp.onboarding_signed_at) reasons.push('Their invite is still <strong style="color:var(--orange);">pending</strong> — they may need to complete onboarding first, or admin can use ⚡ Skip Onboarding under Invite Actions');
+
+    if (reasons.length) {
+      resultEl.innerHTML = '<div style="background:rgba(230,81,0,.06);border:1.5px solid rgba(230,81,0,.3);border-radius:8px;padding:14px;">' +
+        '<div style="font-weight:700;color:var(--orange);margin-bottom:6px;">⚠ Email matches, but sign-in is blocked</div>' +
+        '<ul style="margin:6px 0 0 18px;padding:0;font-size:12px;line-height:1.7;">' + reasons.map(function(r){return '<li>'+r+'</li>';}).join('') + '</ul>' +
+      '</div>';
+    } else {
+      resultEl.innerHTML = '<div style="background:rgba(46,125,50,.06);border:1.5px solid rgba(46,125,50,.3);border-radius:8px;padding:14px;">' +
+        '<div style="font-weight:700;color:var(--green);margin-bottom:6px;">✓ Email matches — this should work</div>' +
+        '<div style="font-size:12px;color:var(--muted);line-height:1.6;">The email they tried is on file and the account is active. Issue is likely browser cache. Ask them to:<br>1. Close the PWA completely (swipe out of recents)<br>2. Reopen the app<br>3. Try again<br>If still failing, have them try a different browser (Chrome → Safari or vice versa).</div>' +
+      '</div>';
+    }
+    return;
+  }
+
+  // No match — find closest suggestion
+  var candidates = [workEmail, personalEmail].filter(function(e){ return e; });
+  var suggestion = null;
+  candidates.forEach(function(c){
+    // Simple check — same local part OR same domain, likely typo
+    var triedParts = tried.split('@');
+    var cParts = c.split('@');
+    if (triedParts[0] === cParts[0] || triedParts[1] === cParts[1]) {
+      if (!suggestion) suggestion = c;
+    }
+  });
+
+  var h = '<div style="background:rgba(192,32,32,.06);border:1.5px solid rgba(192,32,32,.3);border-radius:8px;padding:14px;">';
+  h += '<div style="font-weight:700;color:var(--red);margin-bottom:6px;">✗ Email mismatch — "not authorized" error</div>';
+  h += '<div style="font-size:12px;line-height:1.6;color:var(--text);margin-bottom:10px;">';
+  h += '<strong>They tried:</strong> <code style="background:#fff;padding:1px 6px;border-radius:4px;border:1px solid var(--border);">'+_escHtml(tried)+'</code><br>';
+  h += '<strong>On file:</strong> '+(workEmail ? '<code style="background:#fff;padding:1px 6px;border-radius:4px;border:1px solid var(--border);">'+_escHtml(workEmail)+'</code> (work)' : '(no work email)');
+  if (personalEmail) h += ' + <code style="background:#fff;padding:1px 6px;border-radius:4px;border:1px solid var(--border);">'+_escHtml(personalEmail)+'</code> (personal)';
+  h += '</div>';
+
+  if (suggestion) {
+    h += '<div style="font-size:12px;color:var(--muted);margin-bottom:10px;">Looks like a typo or similar address. Possible match: <strong>'+_escHtml(suggestion)+'</strong></div>';
+  }
+
+  // Fix options
+  h += '<div style="display:flex;flex-direction:column;gap:6px;margin-top:10px;">';
+  h += '<button class="btn btn-sm" onclick="_diagSetPersonal(\''+empId+'\',\''+_escAttr(tried)+'\')" style="background:var(--orange);color:#fff;border-color:var(--orange);text-align:left;padding:10px 14px;">✚ Add as personal_email → <strong>'+_escHtml(tried)+'</strong></button>';
+  h += '<div style="font-size:10px;color:var(--muted);padding-left:14px;">Adds this email as their "personal email" so they can sign in with it. Keeps their work email as-is.</div>';
+
+  if (workEmail) {
+    h += '<button class="btn btn-sm" onclick="_diagReplaceWork(\''+empId+'\',\''+_escAttr(tried)+'\')" style="background:transparent;color:var(--navy);border-color:var(--navy);text-align:left;padding:10px 14px;margin-top:6px;">✎ Replace work email → <strong>'+_escHtml(tried)+'</strong></button>';
+    h += '<div style="font-size:10px;color:var(--muted);padding-left:14px;">Overwrites the work email. Use if the current one is wrong/outdated.</div>';
+  } else {
+    h += '<button class="btn btn-sm" onclick="_diagReplaceWork(\''+empId+'\',\''+_escAttr(tried)+'\')" style="background:transparent;color:var(--navy);border-color:var(--navy);text-align:left;padding:10px 14px;margin-top:6px;">✚ Set work email → <strong>'+_escHtml(tried)+'</strong></button>';
+    h += '<div style="font-size:10px;color:var(--muted);padding-left:14px;">No work email on file. Set this as their primary sign-in email.</div>';
+  }
+  h += '</div>';
+  h += '</div>';
+
+  resultEl.innerHTML = h;
+}
+
+// Simple HTML escapers for the diagnostic
+function _escHtml(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
+function _escAttr(s) { return String(s||'').replace(/"/g,'&quot;').replace(/'/g,'\\\''); }
+
+// Fix action 1: add tried email as personal_email (safer, non-destructive)
+async function _diagSetPersonal(empId, triedEmail) {
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(triedEmail)) {
+    alert('That doesn\'t look like a valid email. Please correct it first.');
+    return;
+  }
+  var emp = ST.employees.find(function(e){ return e.id === empId; });
+  if (!emp) return;
+  if (!confirm('Add this as ' + emp.name + '\'s personal email (for sign-in)?\n\n  ' + triedEmail + '\n\nTheir work email stays as-is. They\'ll be able to sign in with either one.')) return;
+  try {
+    var r = await fetch(SB_URL + '/rest/v1/employees?id=eq.'+empId, {
+      method: 'PATCH',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ personal_email: triedEmail })
+    });
+    if (!r.ok) {
+      var et = await r.text().catch(function(){return '';});
+      throw new Error('HTTP '+r.status+(et?' · '+et.substring(0,200):''));
+    }
+    logActivity('Personal Email Added', emp.name + ' · ' + triedEmail + ' · fixes sign-in mismatch', 'employees', emp.name);
+    alert('✅ Personal email added. ' + emp.name + ' can now sign in with ' + triedEmail + '.\n\nTell them to close and reopen the app, then try signing in again.');
+    closeModal();
+    await loadAll();
+  } catch(e) {
+    alert('Failed: ' + e.message);
+  }
+}
+
+// Fix action 2: replace the work email outright
+async function _diagReplaceWork(empId, triedEmail) {
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(triedEmail)) {
+    alert('That doesn\'t look like a valid email. Please correct it first.');
+    return;
+  }
+  var emp = ST.employees.find(function(e){ return e.id === empId; });
+  if (!emp) return;
+  var oldEmail = emp.email || '(blank)';
+  if (!confirm('Replace ' + emp.name + '\'s work email?\n\n  Old: ' + oldEmail + '\n  New: ' + triedEmail + '\n\nThis overwrites the existing entry. If the old one was right and they should keep both, use "Add as personal" instead.')) return;
+  try {
+    var r = await fetch(SB_URL + '/rest/v1/employees?id=eq.'+empId, {
+      method: 'PATCH',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: triedEmail })
+    });
+    if (!r.ok) {
+      var et = await r.text().catch(function(){return '';});
+      var msg = 'HTTP '+r.status;
+      if (r.status === 409) msg = 'Another employee already has this email on file. Pick a different fix.';
+      else if (et) msg += ' · ' + et.substring(0,200);
+      throw new Error(msg);
+    }
+    logActivity('Work Email Changed', emp.name + ' · ' + oldEmail + ' → ' + triedEmail + ' · fixes sign-in mismatch', 'employees', emp.name);
+    alert('✅ Work email updated. ' + emp.name + ' can now sign in with ' + triedEmail + '.\n\nTell them to close and reopen the app, then try signing in again.');
+    closeModal();
+    await loadAll();
+  } catch(e) {
+    alert('Failed: ' + e.message);
+  }
+}
+
 function openInviteActions(empId) {
   if (!isAdmin()) { toast('Admin only'); return; }
   var emp = (ST.employees||[]).find(function(e){ return e.id === empId; });
@@ -6550,6 +6723,7 @@ function _buildEmployeeFileBody(emp, invite, ncSig, documents, compHistory, revi
   h += '</div></div>';
   h += '<div style="display:flex;gap:6px;flex-wrap:wrap;">';
   h += '<button class="btn btn-sm" onclick="closeModal();setTimeout(function(){openEditEmployee(\''+emp.id+'\');},200);" style="background:rgba(255,255,255,.15);color:#fff;border-color:rgba(255,255,255,.3);">✏️ Edit</button>';
+  h += '<button class="btn btn-sm" onclick="openSignInDiagnostic(\''+emp.id+'\')" style="background:rgba(255,255,255,.15);color:#fff;border-color:rgba(255,255,255,.3);">🔍 Check Sign-In</button>';
   if (emp.invite_pending || !emp.onboarding_signed_at) h += '<button class="btn btn-sm" onclick="openInviteActions(\''+emp.id+'\')" style="background:var(--orange);color:#fff;border-color:var(--orange);">📲 Invite Actions ▾</button>';
   h += '</div></div></div>';
 
