@@ -2895,6 +2895,7 @@ function renderEmployees() {
   h += '<div style="display:flex;gap:8px;">';
   h += '<button class="btn" onclick="exportAllEmployeeFilesPDF()" style="background:transparent;color:var(--navy);border-color:var(--navy);" title="Generate PDF for every active employee and download as a ZIP">📦 Export All Files</button>';
   h += '<button class="btn" onclick="openInviteEmployee()" style="background:var(--orange);color:#fff;border-color:var(--orange);">📲 Invite Employee</button>';
+  h += '<button class="btn" onclick="openQuickInvite()" style="background:#fff;color:var(--orange);border-color:var(--orange);" title="Add an employee with access but no onboarding docs (contractors, paper-signed, etc.)">⚡ Quick Invite</button>';
   h += '<button class="btn btn-primary" onclick="openAddEmployee()">+ Add Employee</button>';
   h += '</div></div>';
 
@@ -5740,6 +5741,155 @@ function _renderJobSearchResults() {
 
 // ── EMPLOYEE EDIT ─────────────────────────────────────────────────────────
 // ── INVITE EMPLOYEE FLOW ─────────────────────────────────────────────────
+// Quick invite — creates employee + grants immediate sign-in access, skips ALL onboarding docs.
+// Use for contractors, paper-signed employees, or temp workers.
+function openQuickInvite() {
+  if (!isAdmin()) { toast('Admin only'); return; }
+  var body = '';
+  body += '<div style="background:rgba(232,93,4,.06);border:1px solid rgba(232,93,4,.25);border-radius:8px;padding:12px 14px;margin-bottom:14px;font-size:12px;color:var(--text);line-height:1.5;">';
+  body += '<strong style="color:var(--orange);">⚡ Skip-Docs Invite</strong><br>';
+  body += 'Creates the employee record and grants immediate sign-in access. <strong>No onboarding docs, no handbook, no non-compete.</strong> They can sign in right away.';
+  body += '</div>';
+
+  body += '<div class="form-row">';
+  body += '<div><label class="form-label">Full Name *</label><input type="text" id="qi-name" class="form-input" placeholder="Firstname Lastname" autofocus></div>';
+  body += '<div><label class="form-label">Role *</label><select id="qi-role" class="form-select">';
+  ['Technician','Project Manager','Estimator','Office','Admin'].forEach(function(r){ body += '<option value="'+r+'">'+r+'</option>'; });
+  body += '</select></div></div>';
+
+  body += '<div class="form-row">';
+  body += '<div><label class="form-label">Market *</label><select id="qi-market" class="form-select">';
+  ['Appleton','Stevens Point'].forEach(function(m){ body += '<option value="'+m+'">'+m+'</option>'; });
+  body += '</select></div>';
+  body += '<div><label class="form-label">Pay Type</label><select id="qi-paytype" class="form-select">';
+  body += '<option value="hourly">Hourly</option><option value="salary">Salary</option>';
+  body += '</select></div></div>';
+
+  body += '<div class="form-row">';
+  body += '<div><label class="form-label">Work Email *</label><input type="email" id="qi-email" class="form-input" placeholder="firstname@jg-restoration.com"></div>';
+  body += '<div><label class="form-label">Personal Email <span style="font-size:10px;color:var(--muted);font-weight:400;">(for Google Sign-In)</span></label><input type="email" id="qi-personal-email" class="form-input" placeholder="their.name@gmail.com"></div></div>';
+
+  body += '<div class="form-row">';
+  body += '<div><label class="form-label">Mobile Phone</label><input type="tel" id="qi-phone" class="form-input" placeholder="(920) 555-1234"></div>';
+  body += '<div><label class="form-label">Hourly Rate</label><input type="number" id="qi-rate" class="form-input" step="0.01" placeholder="0.00"></div></div>';
+
+  showModal('⚡ Quick Invite — Skip Onboarding', body, '_submitQuickInvite()');
+}
+
+async function _submitQuickInvite() {
+  var name = (document.getElementById('qi-name')||{}).value.trim();
+  var email = (document.getElementById('qi-email')||{}).value.trim().toLowerCase();
+  var personalEmail = ((document.getElementById('qi-personal-email')||{}).value || '').trim().toLowerCase();
+  var phone = (document.getElementById('qi-phone')||{}).value.trim();
+  var role = (document.getElementById('qi-role')||{}).value;
+  var market = (document.getElementById('qi-market')||{}).value;
+  var payType = (document.getElementById('qi-paytype')||{}).value;
+  var rate = parseFloat((document.getElementById('qi-rate')||{}).value) || 0;
+
+  if (!name) { alert('Name is required'); return; }
+  if (!email) { alert('Work email is required — this is their primary sign-in'); return; }
+  if (personalEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(personalEmail)) {
+    alert('Personal email doesn\'t look right. Example: their.name@gmail.com');
+    return;
+  }
+
+  // Dupe check
+  var existing = (ST.employees||[]).find(function(e){ return (e.email||'').toLowerCase() === email; });
+  if (!existing) {
+    try {
+      var liveCheck = await sb('/rest/v1/employees?email=eq.' + encodeURIComponent(email) + '&select=id,name,active&limit=1');
+      if (liveCheck && liveCheck.length) existing = liveCheck[0];
+    } catch(e) { /* non-fatal */ }
+  }
+  if (existing) {
+    if (!confirm('An employee with this email already exists: '+existing.name+'\n\nActivate them with skip-docs instead of creating new?')) return;
+    // Update existing record to active + skipped
+    var now = new Date().toISOString();
+    try {
+      // Try full payload first (with audit columns if they exist)
+      var fullBody = {
+        name: name, phone: phone || null, role: role, market: market,
+        pay_type: payType, hourly_rate: rate || existing.hourly_rate,
+        personal_email: personalEmail || null,
+        active: true, invite_pending: false,
+        onboarding_signed_at: existing.onboarding_signed_at || now,
+        onboarding_skipped: true,
+        onboarding_skipped_by: getApprovedBy(),
+        onboarding_skipped_at: now
+      };
+      var r = await fetch(SB_URL + '/rest/v1/employees?id=eq.'+existing.id, {
+        method: 'PATCH',
+        headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+        body: JSON.stringify(fullBody)
+      });
+      if (!r.ok) {
+        // Fallback — strip audit columns if they don't exist
+        await fetch(SB_URL + '/rest/v1/employees?id=eq.'+existing.id, {
+          method: 'PATCH',
+          headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name: name, phone: phone || null, role: role, market: market,
+            pay_type: payType, hourly_rate: rate || existing.hourly_rate,
+            personal_email: personalEmail || null,
+            active: true, invite_pending: false,
+            onboarding_signed_at: existing.onboarding_signed_at || now
+          })
+        });
+      }
+      logActivity('Quick Invite (Existing)', name + ' · ' + role + ' · ' + market + ' · docs bypassed', 'employees', name);
+      alert('✅ ' + name + ' is active and can sign in with ' + email + (personalEmail ? ' or ' + personalEmail : ''));
+      closeModal();
+      await loadAll();
+    } catch(e) { alert('Failed: ' + e.message); }
+    return;
+  }
+
+  // Create new
+  var nowIso = new Date().toISOString();
+  try {
+    // Try full payload first
+    var fullNewBody = {
+      name: name, email: email, personal_email: personalEmail || null,
+      phone: phone || null, role: role, market: market,
+      pay_type: payType, hourly_rate: rate,
+      active: true, invite_pending: false,
+      onboarding_signed_at: nowIso,
+      onboarding_skipped: true,
+      onboarding_skipped_by: getApprovedBy(),
+      onboarding_skipped_at: nowIso
+    };
+    var createR = await fetch(SB_URL + '/rest/v1/employees', {
+      method: 'POST',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=representation' },
+      body: JSON.stringify(fullNewBody)
+    });
+    // Fallback if audit columns missing
+    if (!createR.ok) {
+      createR = await fetch(SB_URL + '/rest/v1/employees', {
+        method: 'POST',
+        headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=representation' },
+        body: JSON.stringify({
+          name: name, email: email, personal_email: personalEmail || null,
+          phone: phone || null, role: role, market: market,
+          pay_type: payType, hourly_rate: rate,
+          active: true, invite_pending: false,
+          onboarding_signed_at: nowIso
+        })
+      });
+    }
+    if (!createR.ok) {
+      var errText = await createR.text().catch(function(){ return ''; });
+      throw new Error('HTTP ' + createR.status + (errText ? ' · ' + errText.substring(0,200) : ''));
+    }
+    logActivity('Quick Invite (New)', name + ' · ' + role + ' · ' + market + ' · docs bypassed', 'employees', name);
+    alert('✅ ' + name + ' is active and can sign in with ' + email + (personalEmail ? ' or ' + personalEmail : '') + '\n\nThey bypass all onboarding. Handle docs on paper separately.');
+    closeModal();
+    await loadAll();
+  } catch(e) {
+    alert('Failed: ' + e.message);
+  }
+}
+
 function openInviteEmployee() {
   if (!isAdmin()) { toast('Admin only'); return; }
   var body = '';
@@ -6024,6 +6174,282 @@ function _generateInviteToken() {
   return token;
 }
 
+// ── INVITE ACTIONS MENU ───────────────────────────────────────────────────
+// Surfaced from the employee detail modal. Four actions covering different
+// real-world recovery scenarios: lost email, expired link, wrong phone, etc.
+function openInviteActions(empId) {
+  if (!isAdmin()) { toast('Admin only'); return; }
+  var emp = (ST.employees||[]).find(function(e){ return e.id === empId; });
+  if (!emp) { alert('Employee not found'); return; }
+
+  var body = '';
+  body += '<div style="font-size:13px;color:var(--text);margin-bottom:6px;"><strong>'+emp.name+'</strong></div>';
+  body += '<div style="font-size:12px;color:var(--muted);margin-bottom:16px;">'+(emp.email||'—')+' · '+(emp.phone||'no phone')+'</div>';
+
+  body += '<div style="display:flex;flex-direction:column;gap:10px;">';
+
+  // 1. Copy fresh link (silent, no send)
+  body += '<button class="invact-btn" onclick="_invActCopyLink(\''+empId+'\')" style="text-align:left;padding:14px 16px;background:#fff;border:1.5px solid var(--border);border-radius:10px;cursor:pointer;font-family:inherit;display:flex;align-items:center;gap:12px;">';
+  body += '<span style="font-size:24px;flex-shrink:0;">🔗</span>';
+  body += '<div style="flex:1;min-width:0;"><div style="font-size:14px;font-weight:700;color:var(--navy);margin-bottom:2px;">Copy fresh onboarding link</div>';
+  body += '<div style="font-size:11px;color:var(--muted);">Generates a new token + URL. Nothing is sent. You paste it into whatever channel you want.</div></div>';
+  body += '</button>';
+
+  // 2. Resend original (same token, send again)
+  body += '<button class="invact-btn" onclick="_invActResendOriginal(\''+empId+'\')" style="text-align:left;padding:14px 16px;background:#fff;border:1.5px solid var(--border);border-radius:10px;cursor:pointer;font-family:inherit;display:flex;align-items:center;gap:12px;">';
+  body += '<span style="font-size:24px;flex-shrink:0;">📲</span>';
+  body += '<div style="flex:1;min-width:0;"><div style="font-size:14px;font-weight:700;color:var(--navy);margin-bottom:2px;">Resend existing invite</div>';
+  body += '<div style="font-size:11px;color:var(--muted);">Re-delivers the same link via the original channel (SMS / email). Best if they just lost the message.</div></div>';
+  body += '</button>';
+
+  // 3. Reset (new token, old invalidated, send fresh)
+  body += '<button class="invact-btn" onclick="_invActResetInvite(\''+empId+'\')" style="text-align:left;padding:14px 16px;background:#fff;border:1.5px solid var(--border);border-radius:10px;cursor:pointer;font-family:inherit;display:flex;align-items:center;gap:12px;">';
+  body += '<span style="font-size:24px;flex-shrink:0;">♻️</span>';
+  body += '<div style="flex:1;min-width:0;"><div style="font-size:14px;font-weight:700;color:var(--navy);margin-bottom:2px;">Reset invite (new token)</div>';
+  body += '<div style="font-size:11px;color:var(--muted);">Old link stops working. Fresh 7-day link generated and sent. Use if the old link expired or was compromised.</div></div>';
+  body += '</button>';
+
+  // 4. Skip onboarding
+  body += '<button class="invact-btn" onclick="_invActSkipOnboarding(\''+empId+'\')" style="text-align:left;padding:14px 16px;background:rgba(232,93,4,.04);border:1.5px solid rgba(232,93,4,.3);border-radius:10px;cursor:pointer;font-family:inherit;display:flex;align-items:center;gap:12px;">';
+  body += '<span style="font-size:24px;flex-shrink:0;">⚡</span>';
+  body += '<div style="flex:1;min-width:0;"><div style="font-size:14px;font-weight:700;color:var(--orange);margin-bottom:2px;">Skip onboarding · grant access now</div>';
+  body += '<div style="font-size:11px;color:var(--muted);">Bypass all documents. Employee can sign in immediately. Use for paper-signed or contractor situations.</div></div>';
+  body += '</button>';
+
+  body += '</div>';
+
+  showModal('📲 Invite Actions · ' + emp.name, body, null);
+}
+
+// Action 1: generate a fresh link, copy it, don't send
+async function _invActCopyLink(empId) {
+  var emp = ST.employees.find(function(e){ return e.id === empId; });
+  if (!emp) { alert('Employee not found'); return; }
+
+  var token = _generateInviteToken();
+  var expiresAt = new Date(Date.now() + 7*24*60*60*1000).toISOString();
+
+  try {
+    // Create a fresh invite record (doesn't invalidate older ones — admin may want both)
+    var r = await fetch(SB_URL + '/rest/v1/employee_invites', {
+      method: 'POST',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
+      body: JSON.stringify({
+        token: token,
+        employee_id: empId,
+        employee_name: emp.name,
+        sent_to_phone: emp.phone || null,
+        sent_to_email: emp.email,
+        channel: 'link',
+        status: 'pending',
+        sent_at: new Date().toISOString(),
+        expires_at: expiresAt,
+        sent_by: getApprovedBy()
+      })
+    });
+    if (!r.ok) throw new Error('Could not generate invite token');
+
+    var url = window.location.origin + window.location.pathname.replace(/[^\/]+$/, '') + 'onboarding.html?invite=' + token;
+
+    // Reuse existing confirmation modal
+    closeModal();
+    setTimeout(function(){ _showInviteConfirmation(emp.name, url, 'link'); }, 180);
+    logActivity('Invite Link Generated', emp.name + ' · admin copied fresh link', 'employees', emp.name);
+  } catch(e) {
+    alert('Failed: ' + e.message);
+  }
+}
+
+// Action 2: resend whatever existed before
+async function _invActResendOriginal(empId) {
+  var emp = ST.employees.find(function(e){ return e.id === empId; });
+  if (!emp) { alert('Employee not found'); return; }
+
+  try {
+    var rows = await sb('/rest/v1/employee_invites?employee_id=eq.'+empId+'&status=eq.pending&order=sent_at.desc&limit=1');
+    if (!rows || !rows.length) {
+      if (!confirm('No pending invite found. Generate and send a new one instead?')) return;
+      // No existing token → reset flow
+      await _invActResetInvite(empId);
+      return;
+    }
+    var invite = rows[0];
+    var url = window.location.origin + window.location.pathname.replace(/[^\/]+$/, '') + 'onboarding.html?invite=' + invite.token;
+
+    // Re-send via same channel
+    var channel = invite.channel || 'email';
+    var sendResult = await _sendInviteMessage(emp.name, url, emp.email, emp.phone, channel);
+
+    // Log the resend (don't create a new invite row — just update sent_at)
+    await fetch(SB_URL + '/rest/v1/employee_invites?id=eq.'+invite.id, {
+      method: 'PATCH',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sent_at: new Date().toISOString() })
+    });
+    logActivity('Invite Resent', emp.name + ' · resent to ' + channel, 'employees', emp.name);
+
+    closeModal();
+    setTimeout(function(){ _showInviteConfirmation(emp.name, url, channel); }, 180);
+  } catch(e) {
+    alert('Failed: ' + e.message);
+  }
+}
+
+// Action 3: mint a new token, invalidate old pending invites, send fresh
+async function _invActResetInvite(empId) {
+  var emp = ST.employees.find(function(e){ return e.id === empId; });
+  if (!emp) { alert('Employee not found'); return; }
+
+  // Ask which channel
+  var ch = prompt('Send new invite via:\n\n1 = SMS (requires phone)\n2 = Email\n3 = Both\n4 = Just give me the link\n\nEnter 1, 2, 3, or 4:', '2');
+  if (!ch) return;
+  var chanMap = { '1':'sms', '2':'email', '3':'both', '4':'link' };
+  var channel = chanMap[ch.trim()];
+  if (!channel) { alert('Invalid choice'); return; }
+
+  if ((channel === 'sms' || channel === 'both') && !emp.phone) {
+    alert('No phone on file — add one in Edit, or use email instead.');
+    return;
+  }
+  if ((channel === 'email' || channel === 'both') && !emp.email) {
+    alert('No email on file.');
+    return;
+  }
+
+  try {
+    // Invalidate prior pending invites — use existing 'revoked' status
+    await fetch(SB_URL + '/rest/v1/employee_invites?employee_id=eq.'+empId+'&status=eq.pending', {
+      method: 'PATCH',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'revoked' })
+    });
+
+    // Create fresh
+    var token = _generateInviteToken();
+    var expiresAt = new Date(Date.now() + 7*24*60*60*1000).toISOString();
+    var r = await fetch(SB_URL + '/rest/v1/employee_invites', {
+      method: 'POST',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
+      body: JSON.stringify({
+        token: token,
+        employee_id: empId,
+        employee_name: emp.name,
+        sent_to_phone: emp.phone || null,
+        sent_to_email: emp.email,
+        channel: channel,
+        status: 'pending',
+        sent_at: new Date().toISOString(),
+        expires_at: expiresAt,
+        sent_by: getApprovedBy()
+      })
+    });
+    if (!r.ok) throw new Error('Could not create invite record');
+
+    var url = window.location.origin + window.location.pathname.replace(/[^\/]+$/, '') + 'onboarding.html?invite=' + token;
+
+    // Flag employee as pending again (in case they were mid-onboarding)
+    await fetch(SB_URL + '/rest/v1/employees?id=eq.'+empId, {
+      method: 'PATCH',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ invite_pending: true })
+    });
+
+    if (channel !== 'link') {
+      await _sendInviteMessage(emp.name, url, emp.email, emp.phone, channel);
+    }
+    logActivity('Invite Reset', emp.name + ' · new token via ' + channel, 'employees', emp.name);
+
+    closeModal();
+    setTimeout(function(){ _showInviteConfirmation(emp.name, url, channel); }, 180);
+    await loadAll();
+  } catch(e) {
+    alert('Failed: ' + e.message);
+  }
+}
+
+// Action 4: skip onboarding entirely, grant access now
+async function _invActSkipOnboarding(empId) {
+  var emp = ST.employees.find(function(e){ return e.id === empId; });
+  if (!emp) { alert('Employee not found'); return; }
+
+  if (!confirm(
+    'SKIP ONBOARDING for ' + emp.name + '?\n\n' +
+    'This bypasses:\n' +
+    '  • Handbook acknowledgment\n' +
+    '  • Non-compete signing\n' +
+    '  • Personal info / emergency contact\n' +
+    '  • All other onboarding steps\n\n' +
+    'Employee will be marked active and can sign in immediately using their email.\n\n' +
+    'Use only for contractors, paper-signed folks, or temp workers.\n\n' +
+    'Continue?'
+  )) return;
+
+  try {
+    var now = new Date().toISOString();
+    // Try full patch first — writes audit columns if they exist
+    var fullBody = {
+      active: true,
+      invite_pending: false,
+      onboarding_signed_at: now,
+      onboarding_skipped: true,
+      onboarding_skipped_by: getApprovedBy(),
+      onboarding_skipped_at: now
+    };
+    var r = await fetch(SB_URL + '/rest/v1/employees?id=eq.'+empId, {
+      method: 'PATCH',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify(fullBody)
+    });
+    // If full patch failed (e.g. column doesn't exist), fall back to minimal
+    if (!r.ok) {
+      await fetch(SB_URL + '/rest/v1/employees?id=eq.'+empId, {
+        method: 'PATCH',
+        headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ active: true, invite_pending: false, onboarding_signed_at: now })
+      });
+    }
+
+    // Revoke any pending invites — PATCH (preserves audit history) rather than DELETE
+    await fetch(SB_URL + '/rest/v1/employee_invites?employee_id=eq.'+empId+'&status=eq.pending', {
+      method: 'PATCH',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'revoked' })
+    }).catch(function(){ /* non-fatal */ });
+
+    logActivity('Onboarding Skipped', emp.name + ' · docs bypassed by admin · grants immediate access', 'employees', emp.name);
+
+    alert('✅ ' + emp.name + ' can now sign in with their email.\n\nMake sure you\'ve added their personal email if they\'ll use Google Sign-In with a Gmail account.');
+    closeModal();
+    await loadAll();
+  } catch(e) {
+    alert('Failed: ' + e.message);
+  }
+}
+
+// Shared helper — sends SMS/email via existing Zapier hook
+async function _sendInviteMessage(name, url, email, phone, channel) {
+  var smsBody = 'Hi '+name.split(' ')[0]+'! Welcome to JG Restoration. Complete your onboarding here (link expires in 7 days): '+url+' — Questions? Text us at (920) 428-4200.';
+  var emailSubject = 'Welcome to JG Restoration — Finish Your Onboarding';
+  var emailBody = 'Hi '+name.split(' ')[0]+',\n\nWelcome to JG Restoration! We\'ve set up your account.\n\nTo finish your onboarding, click this link (expires in 7 days):\n'+url+'\n\nYou\'ll confirm your info, review a few policies, and get access to the apps you need on the job. Takes about 5 minutes.\n\nQuestions? Reply to this email or call (920) 428-4200.\n\n— JG Restoration';
+
+  if (channel === 'sms' || channel === 'both') {
+    try {
+      var normalizedPhone = _normalizePhoneE164(phone);
+      if (normalizedPhone) {
+        var smsParams = new URLSearchParams({ type: 'invite_sms', to: normalizedPhone, body: smsBody, employee_name: name });
+        await fetch(HOOKS.onboarding, { method: 'POST', body: smsParams.toString(), headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
+      }
+    } catch(e) { console.warn('SMS send failed:', e); }
+  }
+  if (channel === 'email' || channel === 'both') {
+    try {
+      var emailParams = new URLSearchParams({ type: 'invite_email', to: email, subject: emailSubject, body: emailBody, employee_name: name });
+      await fetch(HOOKS.onboarding, { method: 'POST', body: emailParams.toString(), headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
+    } catch(e) { console.warn('Email send failed:', e); }
+  }
+  return true;
+}
+
 function openAddEmployee() {
   var html = buildEmpForm({});
   // Add invite section to the modal
@@ -6124,7 +6550,7 @@ function _buildEmployeeFileBody(emp, invite, ncSig, documents, compHistory, revi
   h += '</div></div>';
   h += '<div style="display:flex;gap:6px;flex-wrap:wrap;">';
   h += '<button class="btn btn-sm" onclick="closeModal();setTimeout(function(){openEditEmployee(\''+emp.id+'\');},200);" style="background:rgba(255,255,255,.15);color:#fff;border-color:rgba(255,255,255,.3);">✏️ Edit</button>';
-  if (emp.invite_pending || !emp.onboarding_signed_at) h += '<button class="btn btn-sm" onclick="closeModal();setTimeout(function(){openInviteEmployee();},200);" style="background:var(--orange);color:#fff;border-color:var(--orange);">📲 Re-invite</button>';
+  if (emp.invite_pending || !emp.onboarding_signed_at) h += '<button class="btn btn-sm" onclick="openInviteActions(\''+emp.id+'\')" style="background:var(--orange);color:#fff;border-color:var(--orange);">📲 Invite Actions ▾</button>';
   h += '</div></div></div>';
 
   // Two-column grid
@@ -6270,7 +6696,7 @@ function _buildEmployeeFileBody(emp, invite, ncSig, documents, compHistory, revi
     h += '<div style="padding:14px;background:rgba(192,32,32,.04);border-radius:8px;text-align:center;">';
     h += '<div style="font-size:13px;color:#c62828;margin-bottom:6px;"><strong>No signed onboarding record</strong></div>';
     h += '<div style="font-size:11px;color:var(--muted);margin-bottom:8px;">This employee was added before the onboarding system was in place, or has never been invited.</div>';
-    h += '<button class="btn btn-sm" onclick="closeModal();setTimeout(function(){openInviteEmployee();},200);" style="background:var(--orange);color:#fff;border-color:var(--orange);">📲 Send Onboarding Invite</button>';
+    h += '<button class="btn btn-sm" onclick="openInviteActions(\''+empId+'\')" style="background:var(--orange);color:#fff;border-color:var(--orange);">📲 Invite Actions ▾</button>';
     h += '</div>';
   }
   h += '</div>';
