@@ -6192,8 +6192,8 @@ function openSignInDiagnostic(empId) {
   body += '<div style="background:rgba(13,45,94,.04);border-radius:8px;padding:12px 14px;margin-bottom:14px;font-size:12px;line-height:1.7;">';
   body += '<div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px;">Current Account Status</div>';
   body += '<div>Active: <strong style="color:'+(emp.active ? 'var(--green)' : 'var(--red)')+';">'+(emp.active ? '✓ Yes' : '✗ No (disabled)')+'</strong></div>';
-  body += '<div>Work email on file: <strong>'+(emp.email || '<span style="color:var(--red);">(blank)</span>')+'</strong></div>';
-  body += '<div>Personal email on file: <strong>'+(emp.personal_email || '<span style="color:var(--muted);">(none)</span>')+'</strong></div>';
+  body += '<div>Sign-in email: <strong>'+(emp.email || '<span style="color:var(--red);">(blank)</span>')+'</strong></div>';
+  body += '<div>Backup sign-in email: <strong>'+(emp.personal_email || '<span style="color:var(--muted);">(none)</span>')+'</strong></div>';
   if (emp.invite_pending) body += '<div style="color:var(--orange);">⚠ Invite is still marked pending</div>';
   body += '</div>';
 
@@ -6260,26 +6260,18 @@ function _diagCheck(empId) {
   h += '<div style="font-weight:700;color:var(--red);margin-bottom:6px;">✗ Email mismatch — "not authorized" error</div>';
   h += '<div style="font-size:12px;line-height:1.6;color:var(--text);margin-bottom:10px;">';
   h += '<strong>They tried:</strong> <code style="background:#fff;padding:1px 6px;border-radius:4px;border:1px solid var(--border);">'+_escHtml(tried)+'</code><br>';
-  h += '<strong>On file:</strong> '+(workEmail ? '<code style="background:#fff;padding:1px 6px;border-radius:4px;border:1px solid var(--border);">'+_escHtml(workEmail)+'</code> (work)' : '(no work email)');
-  if (personalEmail) h += ' + <code style="background:#fff;padding:1px 6px;border-radius:4px;border:1px solid var(--border);">'+_escHtml(personalEmail)+'</code> (personal)';
+  h += '<strong>On file:</strong> '+(workEmail ? '<code style="background:#fff;padding:1px 6px;border-radius:4px;border:1px solid var(--border);">'+_escHtml(workEmail)+'</code> (primary)' : '(no primary email)');
+  if (personalEmail) h += ' + <code style="background:#fff;padding:1px 6px;border-radius:4px;border:1px solid var(--border);">'+_escHtml(personalEmail)+'</code> (backup)';
   h += '</div>';
 
   if (suggestion) {
     h += '<div style="font-size:12px;color:var(--muted);margin-bottom:10px;">Looks like a typo or similar address. Possible match: <strong>'+_escHtml(suggestion)+'</strong></div>';
   }
 
-  // Fix options
-  h += '<div style="display:flex;flex-direction:column;gap:6px;margin-top:10px;">';
-  h += '<button class="btn btn-sm" onclick="_diagSetPersonal(\''+empId+'\',\''+_escAttr(tried)+'\')" style="background:var(--orange);color:#fff;border-color:var(--orange);text-align:left;padding:10px 14px;">✚ Add as personal_email → <strong>'+_escHtml(tried)+'</strong></button>';
-  h += '<div style="font-size:10px;color:var(--muted);padding-left:14px;">Adds this email as their "personal email" so they can sign in with it. Keeps their work email as-is.</div>';
-
-  if (workEmail) {
-    h += '<button class="btn btn-sm" onclick="_diagReplaceWork(\''+empId+'\',\''+_escAttr(tried)+'\')" style="background:transparent;color:var(--navy);border-color:var(--navy);text-align:left;padding:10px 14px;margin-top:6px;">✎ Replace work email → <strong>'+_escHtml(tried)+'</strong></button>';
-    h += '<div style="font-size:10px;color:var(--muted);padding-left:14px;">Overwrites the work email. Use if the current one is wrong/outdated.</div>';
-  } else {
-    h += '<button class="btn btn-sm" onclick="_diagReplaceWork(\''+empId+'\',\''+_escAttr(tried)+'\')" style="background:transparent;color:var(--navy);border-color:var(--navy);text-align:left;padding:10px 14px;margin-top:6px;">✚ Set work email → <strong>'+_escHtml(tried)+'</strong></button>';
-    h += '<div style="font-size:10px;color:var(--muted);padding-left:14px;">No work email on file. Set this as their primary sign-in email.</div>';
-  }
+  // One smart button — figures out where to put the email
+  h += '<div style="margin-top:10px;">';
+  h += '<button class="btn" onclick="_diagAddSignInEmail(\''+empId+'\',\''+_escAttr(tried)+'\')" style="background:var(--orange);color:#fff;border-color:var(--orange);width:100%;padding:12px 14px;text-align:left;">✚ Add this as their sign-in email → <strong>'+_escHtml(tried)+'</strong></button>';
+  h += '<div style="font-size:10px;color:var(--muted);margin-top:6px;text-align:center;">The system will place this in whichever email field is empty, or ask you if both are filled.</div>';
   h += '</div>';
   h += '</div>';
 
@@ -6290,59 +6282,71 @@ function _diagCheck(empId) {
 function _escHtml(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
 function _escAttr(s) { return String(s||'').replace(/"/g,'&quot;').replace(/'/g,'\\\''); }
 
-// Fix action 1: add tried email as personal_email (safer, non-destructive)
-async function _diagSetPersonal(empId, triedEmail) {
+// Smart fix — figures out where to put the email based on what's on file.
+// Empty primary → fills it. Has primary but empty backup → fills backup. Both filled → asks admin.
+async function _diagAddSignInEmail(empId, triedEmail) {
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(triedEmail)) {
     alert('That doesn\'t look like a valid email. Please correct it first.');
     return;
   }
   var emp = ST.employees.find(function(e){ return e.id === empId; });
   if (!emp) return;
-  if (!confirm('Add this as ' + emp.name + '\'s personal email (for sign-in)?\n\n  ' + triedEmail + '\n\nTheir work email stays as-is. They\'ll be able to sign in with either one.')) return;
-  try {
-    var r = await fetch(SB_URL + '/rest/v1/employees?id=eq.'+empId, {
-      method: 'PATCH',
-      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ personal_email: triedEmail })
-    });
-    if (!r.ok) {
-      var et = await r.text().catch(function(){return '';});
-      throw new Error('HTTP '+r.status+(et?' · '+et.substring(0,200):''));
-    }
-    logActivity('Personal Email Added', emp.name + ' · ' + triedEmail + ' · fixes sign-in mismatch', 'employees', emp.name);
-    alert('✅ Personal email added. ' + emp.name + ' can now sign in with ' + triedEmail + '.\n\nTell them to close and reopen the app, then try signing in again.');
-    closeModal();
-    await loadAll();
-  } catch(e) {
-    alert('Failed: ' + e.message);
-  }
-}
 
-// Fix action 2: replace the work email outright
-async function _diagReplaceWork(empId, triedEmail) {
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(triedEmail)) {
-    alert('That doesn\'t look like a valid email. Please correct it first.');
-    return;
+  var primary = (emp.email || '').toLowerCase();
+  var backup  = (emp.personal_email || '').toLowerCase();
+
+  var patch = {};
+  var actionLabel = '';
+
+  if (!primary) {
+    // No primary — fill it
+    patch = { email: triedEmail };
+    actionLabel = 'sign-in email';
+  } else if (!backup) {
+    // Primary exists, backup empty — add as backup
+    patch = { personal_email: triedEmail };
+    actionLabel = 'backup sign-in email';
+  } else {
+    // Both filled — admin must choose which to overwrite
+    var which = prompt(
+      'Both sign-in email slots are already filled:\n\n' +
+      '  Primary: ' + primary + '\n' +
+      '  Backup:  ' + backup + '\n\n' +
+      'To add "' + triedEmail + '", which should be replaced?\n\n' +
+      'Type:\n' +
+      '  1 = replace Primary\n' +
+      '  2 = replace Backup\n' +
+      '  anything else = cancel',
+      '2'
+    );
+    if (which === '1') {
+      patch = { email: triedEmail };
+      actionLabel = 'sign-in email (replaced ' + primary + ')';
+    } else if (which === '2') {
+      patch = { personal_email: triedEmail };
+      actionLabel = 'backup sign-in email (replaced ' + backup + ')';
+    } else {
+      return; // cancelled
+    }
   }
-  var emp = ST.employees.find(function(e){ return e.id === empId; });
-  if (!emp) return;
-  var oldEmail = emp.email || '(blank)';
-  if (!confirm('Replace ' + emp.name + '\'s work email?\n\n  Old: ' + oldEmail + '\n  New: ' + triedEmail + '\n\nThis overwrites the existing entry. If the old one was right and they should keep both, use "Add as personal" instead.')) return;
+
+  if (!confirm('Save ' + triedEmail + ' as ' + emp.name + '\'s ' + actionLabel + '?')) return;
+
   try {
     var r = await fetch(SB_URL + '/rest/v1/employees?id=eq.'+empId, {
       method: 'PATCH',
       headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email: triedEmail })
+      body: JSON.stringify(patch)
     });
     if (!r.ok) {
       var et = await r.text().catch(function(){return '';});
       var msg = 'HTTP '+r.status;
-      if (r.status === 409) msg = 'Another employee already has this email on file. Pick a different fix.';
+      if (r.status === 409) msg = 'Another employee already has this email on file. Try a different one, or remove the duplicate first.';
       else if (et) msg += ' · ' + et.substring(0,200);
       throw new Error(msg);
     }
-    logActivity('Work Email Changed', emp.name + ' · ' + oldEmail + ' → ' + triedEmail + ' · fixes sign-in mismatch', 'employees', emp.name);
-    alert('✅ Work email updated. ' + emp.name + ' can now sign in with ' + triedEmail + '.\n\nTell them to close and reopen the app, then try signing in again.');
+    logActivity('Sign-In Email Fixed', emp.name + ' · added ' + triedEmail + ' as ' + actionLabel, 'employees', emp.name);
+    alert('✅ Done. ' + emp.name + ' can now sign in with ' + triedEmail + '.\n\nTell them to close and reopen the app, then try signing in again.');
     closeModal();
     await loadAll();
   } catch(e) {
@@ -8348,10 +8352,10 @@ function buildEmpForm(emp) {
   var roles = ['Technician','Project Manager','Estimator','Office','Admin'];
   return '<div class="form-row">' +
     '<div><label class="form-label">Full Name</label><input class="form-input" id="emp-name" type="text" value="'+(emp.name||'')+'"></div>' +
-    '<div><label class="form-label">Email</label><input class="form-input" id="emp-email" type="text" value="'+(emp.email||'')+'"></div>' +
+    '<div><label class="form-label">Sign-In Email</label><input class="form-input" id="emp-email" type="text" value="'+(emp.email||'')+'" placeholder="anything@gmail.com or @jg-restoration.com"></div>' +
     '</div>' +
     '<div class="form-row">' +
-    '<div><label class="form-label">Personal Email <span style="font-size:10px;color:var(--muted);font-weight:400;">(optional — for Google Sign-In)</span></label><input class="form-input" id="emp-personal-email" type="text" value="'+(emp.personal_email||'')+'" placeholder="their.name@gmail.com"></div>' +
+    '<div><label class="form-label">Backup Sign-In Email <span style="font-size:10px;color:var(--muted);font-weight:400;">(optional — can be any email)</span></label><input class="form-input" id="emp-personal-email" type="text" value="'+(emp.personal_email||'')+'" placeholder="their other address"></div>' +
     '</div>' +
     '<div class="form-row">' +
     '<div><label class="form-label">Role</label><select class="form-select" id="emp-role">'+roles.map(function(r){return '<option value="'+r+'"'+(emp.role===r?' selected':'')+'>'+r+'</option>';}).join('')+'</select></div>' +
