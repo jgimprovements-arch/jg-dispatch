@@ -520,7 +520,7 @@ function showTab(tab, el) {
 
 // ── PENDING APPROVAL COUNTERS (in-app badges) ─────────────────────────────
 // Single source of truth for "what needs my attention" across all UI surfaces
-function getPendingApprovalCounts() {
+async function getPendingApprovalCounts() {
   var counts = { timecards: 0, timeoff: 0, commissions: 0, total: 0 };
 
   // Timecards: look at most recent 2 pay periods, count unapproved employees
@@ -548,11 +548,15 @@ function getPendingApprovalCounts() {
     });
   } catch(e) {}
 
-  // Time off: count pending vacation_requests
+  // Time off: fetch pending vacation_requests count LIVE (works without visiting tab first)
   try {
-    // _toData is populated on Time Off tab visit; fallback: check if we have it loaded
     if (Array.isArray(_toData)) {
+      // If Time Off tab already loaded data this session, use it — fresh from renderTimeOff
       counts.timeoff = _toData.filter(function(r){ return r.status === 'pending'; }).length;
+    } else if (typeof isAdmin === 'function' && isAdmin()) {
+      // Otherwise fetch a lightweight count from Supabase (admins only — non-admins don't see this tab)
+      var pending = await sb('/rest/v1/vacation_requests?status=eq.pending&select=id');
+      counts.timeoff = Array.isArray(pending) ? pending.length : 0;
     }
   } catch(e) {}
 
@@ -565,8 +569,8 @@ function getPendingApprovalCounts() {
   return counts;
 }
 
-function paintBadges() {
-  var c = getPendingApprovalCounts();
+async function paintBadges() {
+  var c = await getPendingApprovalCounts();
 
   function badge(tabId, n, title) {
     var btn = document.getElementById(tabId);
@@ -628,6 +632,12 @@ function render() {
   // Refresh in-app badges after any render
   try { paintBadges(); } catch(e) {}
 }
+
+// Paint badges on initial page load (before first tab render) so admins
+// see pending counts immediately without having to click around first.
+// Delayed slightly to let ST.employees and auth settle.
+setTimeout(function(){ try { paintBadges(); } catch(e) {} }, 1500);
+setTimeout(function(){ try { paintBadges(); } catch(e) {} }, 4000);
 
 // ── LIVE TAB ──────────────────────────────────────────────────────────────
 var _liveMap = null;
