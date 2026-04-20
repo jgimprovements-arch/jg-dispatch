@@ -87,6 +87,7 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;min
 /* ── LIVE DOT ── */
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
 .live-dot{width:8px;height:8px;border-radius:50%;background:var(--green);display:inline-block;animation:pulse 2s infinite;margin-right:6px;}
+@keyframes spin { to { transform: rotate(360deg); } }
 
 /* ── FORM ── */
 .form-row{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px;}
@@ -4724,6 +4725,29 @@ function renderRoutes() {
   h += '<div id="route-timeline" style="margin-top:12px;"></div>';
   h += '</div>';
 
+  // ── DRIVE AUDIT ──────────────────────────────────────────────────────────
+  // Reconciles gaps between consecutive time entries against expected drive time (OSRM).
+  // Flags suspicious gaps where actual drive took significantly longer than expected.
+  var weekAgo = new Date(); weekAgo.setDate(weekAgo.getDate() - 7);
+  var weekAgoStr = weekAgo.toISOString().split('T')[0];
+  h += '<div class="card" style="margin-bottom:16px;"><div class="card-hdr"><div class="card-title">🚨 Drive Audit</div><div style="font-size:11px;color:var(--muted);">Flags gaps between jobs where actual time exceeds expected drive time</div></div><div class="card-body">';
+  h += '<div class="form-row">';
+  h += '<div><label class="form-label">Employee</label><select class="form-select" id="audit-emp">';
+  h += '<option value="">All Employees</option>';
+  ST.employees.filter(function(e){return e.active;}).forEach(function(e){ h += '<option>'+e.name+'</option>'; });
+  h += '</select></div>';
+  h += '<div><label class="form-label">Start Date</label><input type="date" class="form-input" id="audit-start" value="'+weekAgoStr+'"></div>';
+  h += '<div><label class="form-label">End Date</label><input type="date" class="form-input" id="audit-end" value="'+today+'"></div>';
+  h += '<div><label class="form-label">Flag Threshold</label><select class="form-select" id="audit-threshold">';
+  h += '<option value="1.25">Loose (expected × 1.25 + 15m)</option>';
+  h += '<option value="1.5" selected>Normal (expected × 1.5 + 15m)</option>';
+  h += '<option value="2">Strict (expected × 2 + 15m)</option>';
+  h += '</select></div>';
+  h += '</div>';
+  h += '<button class="btn btn-primary" onclick="runDriveAudit()" style="margin-top:4px;padding:10px 24px;">🚨 Run Audit</button>';
+  h += '<div id="audit-results" style="margin-top:16px;"></div>';
+  h += '</div></div>';
+
   document.getElementById('tc-body').innerHTML = h;
 }
 
@@ -4884,6 +4908,230 @@ async function loadRouteMap() {
   else { _routeMap.setView([44.26, -88.41], 11); }
   // Force tile render
   setTimeout(function(){ if (_routeMap) _routeMap.invalidateSize(); }, 300);
+}
+
+
+// ── DRIVE AUDIT ────────────────────────────────────────────────────────
+// Computes expected vs actual drive time between consecutive clocked jobs.
+// Uses OSRM public routing service (free, no API key).
+// Flags gaps where actual exceeds expected by configured threshold.
+
+function _osrmDriveSeconds(lat1, lng1, lat2, lng2) {
+  // Returns driving duration in seconds, or null on failure.
+  // OSRM expects {lon},{lat} order. Free public endpoint; throttle caller to 1 req/sec.
+  return new Promise(function(resolve) {
+    var url = 'https://router.project-osrm.org/route/v1/driving/' + lng1 + ',' + lat1 + ';' + lng2 + ',' + lat2 + '?overview=false';
+    var ctrl = new AbortController();
+    var timer = setTimeout(function(){ ctrl.abort(); }, 6000);
+    fetch(url, { signal: ctrl.signal })
+      .then(function(r){ clearTimeout(timer); return r.json(); })
+      .then(function(data){
+        if (data && data.routes && data.routes[0] && typeof data.routes[0].duration === 'number') {
+          resolve(data.routes[0].duration);
+        } else resolve(null);
+      })
+      .catch(function(){ clearTimeout(timer); resolve(null); });
+  });
+}
+
+function _haversineMeters(lat1, lng1, lat2, lng2) {
+  // Straight-line distance — used as sanity check when OSRM unavailable
+  var toRad = function(d){ return d * Math.PI / 180; };
+  var R = 6371000;
+  var dLat = toRad(lat2 - lat1);
+  var dLng = toRad(lng2 - lng1);
+  var a = Math.sin(dLat/2)*Math.sin(dLat/2) + Math.cos(toRad(lat1))*Math.cos(toRad(lat2)) * Math.sin(dLng/2)*Math.sin(dLng/2);
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+}
+
+async function runDriveAudit() {
+  var empName  = (document.getElementById('audit-emp')  || {}).value || '';
+  var startDate = (document.getElementById('audit-start') || {}).value;
+  var endDate   = (document.getElementById('audit-end')   || {}).value;
+  var threshold = parseFloat((document.getElementById('audit-threshold') || {}).value || '1.5');
+  var resultsEl = document.getElementById('audit-results');
+  if (!resultsEl) return;
+
+  if (!startDate || !endDate) { resultsEl.innerHTML = '<div class="empty">Pick a date range</div>'; return; }
+
+  resultsEl.innerHTML = '<div style="padding:20px;text-align:center;color:var(--muted);"><span class="spinner" style="display:inline-block;width:14px;height:14px;border:2px solid #e1e4ea;border-top-color:var(--orange);border-radius:50%;animation:spin 0.8s linear infinite;vertical-align:middle;margin-right:8px;"></span>Running audit… calculating drive times…</div>';
+
+  // Fetch entries
+  var filter = '/rest/v1/time_entries?clock_in=gte.'+startDate+'T00:00:00&clock_in=lte.'+endDate+'T23:59:59&order=employee_name.asc,clock_in.asc&select=*';
+  if (empName) filter += '&employee_name=eq.' + encodeURIComponent(empName);
+  var entries = await sb(filter) || [];
+
+  if (!entries.length) {
+    resultsEl.innerHTML = '<div class="empty" style="padding:30px;">No time entries found in that range</div>';
+    return;
+  }
+
+  // Group by employee
+  var byEmp = {};
+  entries.forEach(function(e){
+    if (!byEmp[e.employee_name]) byEmp[e.employee_name] = [];
+    byEmp[e.employee_name].push(e);
+  });
+
+  // Build consecutive-pair gaps per employee
+  var allGaps = [];
+  Object.keys(byEmp).forEach(function(name) {
+    var list = byEmp[name].sort(function(a,b){ return new Date(a.clock_in) - new Date(b.clock_in); });
+    for (var i = 0; i < list.length - 1; i++) {
+      var a = list[i], b = list[i+1];
+      // Only analyze if prior entry has clock_out + GPS, and next has clock_in + GPS
+      if (!a.clock_out || !a.clock_out_lat || !a.clock_out_lng) continue;
+      if (!b.clock_in_lat || !b.clock_in_lng) continue;
+      var tOut = new Date(a.clock_out).getTime();
+      var tIn  = new Date(b.clock_in).getTime();
+      var gapMin = (tIn - tOut) / 60000;
+      if (gapMin < 5)   continue; // instant job switch, not worth analyzing
+      if (gapMin > 720) continue; // > 12hr = overnight, skip
+      // Same-spot check: if coords within 100m, probably didn't drive
+      var dMeters = _haversineMeters(parseFloat(a.clock_out_lat), parseFloat(a.clock_out_lng), parseFloat(b.clock_in_lat), parseFloat(b.clock_in_lng));
+      if (dMeters < 100) continue;
+      allGaps.push({
+        employee: name,
+        date: a.clock_out.split('T')[0],
+        fromJob: a.job_name || '(No job)',
+        toJob:   b.job_name || '(No job)',
+        fromLat: parseFloat(a.clock_out_lat), fromLng: parseFloat(a.clock_out_lng),
+        toLat:   parseFloat(b.clock_in_lat),  toLng:   parseFloat(b.clock_in_lng),
+        clockOutTime: a.clock_out,
+        clockInTime:  b.clock_in,
+        gapMin: Math.round(gapMin),
+        straightLineMiles: (dMeters / 1609.34),
+        expectedMin: null,
+        flag: null
+      });
+    }
+  });
+
+  if (!allGaps.length) {
+    resultsEl.innerHTML = '<div class="empty" style="padding:30px;">No analyzable gaps in this range (needs GPS on both ends, gap 5 min – 12 hr, and actual travel > 100m)</div>';
+    return;
+  }
+
+  // Protective cap — OSRM is throttled at ~1 req/sec and long audits frustrate users
+  var gapCap = 100;
+  var skippedCount = 0;
+  if (allGaps.length > gapCap) {
+    skippedCount = allGaps.length - gapCap;
+    allGaps = allGaps.slice(0, gapCap);
+  }
+
+  // Fetch OSRM estimates with 1 req/sec throttle
+  var progress = 0, total = allGaps.length;
+  var updateProgress = function(){
+    progress++;
+    resultsEl.innerHTML = '<div style="padding:20px;text-align:center;color:var(--muted);"><span class="spinner" style="display:inline-block;width:14px;height:14px;border:2px solid #e1e4ea;border-top-color:var(--orange);border-radius:50%;animation:spin 0.8s linear infinite;vertical-align:middle;margin-right:8px;"></span>Calculating drive times ('+progress+'/'+total+')…' + (skippedCount ? ' <span style="color:var(--red);">(+'+skippedCount+' gaps skipped — narrow date range for full audit)</span>' : '') + '</div>';
+  };
+
+  for (var k = 0; k < allGaps.length; k++) {
+    var g = allGaps[k];
+    var dur = await _osrmDriveSeconds(g.fromLat, g.fromLng, g.toLat, g.toLng);
+    if (dur !== null) {
+      g.expectedMin = Math.round(dur / 60);
+      // Flag if actual > expected * threshold + 15 buffer
+      g.flag = g.gapMin > (g.expectedMin * threshold + 15);
+    }
+    updateProgress();
+    // Throttle: wait 1100ms before next call (OSRM public ~1/sec limit)
+    if (k < allGaps.length - 1) await new Promise(function(r){ setTimeout(r, 1100); });
+  }
+
+  renderDriveAuditResults(allGaps);
+}
+
+function renderDriveAuditResults(gaps) {
+  var resultsEl = document.getElementById('audit-results');
+  if (!resultsEl) return;
+
+  var flagged = gaps.filter(function(g){ return g.flag === true; });
+  var normal  = gaps.filter(function(g){ return g.flag === false; });
+  var unknown = gaps.filter(function(g){ return g.flag === null; });
+  var totalFlaggedMin = flagged.reduce(function(sum, g){ return sum + (g.gapMin - (g.expectedMin||0)); }, 0);
+
+  var uniqEmpsFlagged = {};
+  flagged.forEach(function(g){ uniqEmpsFlagged[g.employee] = true; });
+  var fEmpCount = Object.keys(uniqEmpsFlagged).length;
+
+  // Format helpers
+  var fmt = function(iso){ if(!iso)return ''; var d=new Date(iso); var h=d.getHours()%12||12,m=d.getMinutes(),ap=d.getHours()>=12?'PM':'AM'; return h+':'+(m<10?'0':'')+m+' '+ap; };
+  var fmtDate = function(s){ if(!s)return ''; var p=s.split('-'); return p[1]+'/'+p[2]+'/'+p[0].slice(2); };
+  var fmtMin = function(m){ if(m==null)return '—'; if (m < 60) return m+'m'; return Math.floor(m/60)+'h '+(m%60)+'m'; };
+
+  var h = '';
+
+  // Summary card
+  h += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin-bottom:16px;">';
+  h += '<div class="stat-card" style="border-left:4px solid var(--red);"><div class="stat-val" style="color:var(--red);">'+flagged.length+'</div><div class="stat-lbl">Flagged Gaps</div></div>';
+  h += '<div class="stat-card"><div class="stat-val">'+fEmpCount+'</div><div class="stat-lbl">Employees Flagged</div></div>';
+  h += '<div class="stat-card"><div class="stat-val">'+fmtMin(totalFlaggedMin)+'</div><div class="stat-lbl">Unexplained Time</div></div>';
+  h += '<div class="stat-card"><div class="stat-val" style="color:var(--green);">'+normal.length+'</div><div class="stat-lbl">Normal Gaps</div></div>';
+  if (unknown.length) h += '<div class="stat-card"><div class="stat-val" style="color:var(--muted);">'+unknown.length+'</div><div class="stat-lbl">OSRM Failed</div></div>';
+  h += '</div>';
+
+  if (!flagged.length && !unknown.length && normal.length) {
+    h += '<div class="card"><div class="card-body"><div style="padding:20px;text-align:center;color:var(--green);"><strong>✓ No suspicious gaps found.</strong><br><span style="color:var(--muted);font-size:12px;">All '+normal.length+' analyzable gaps completed within expected drive time + threshold.</span></div></div></div>';
+    resultsEl.innerHTML = h;
+    return;
+  }
+
+  // Flagged table
+  if (flagged.length) {
+    h += '<div class="card" style="margin-bottom:16px;border-left:4px solid var(--red);"><div class="card-hdr"><div class="card-title">⚠ Flagged Gaps</div></div>';
+    h += '<table class="tc-table"><thead><tr><th>Employee</th><th>Date</th><th>From → To</th><th>Clock Out → In</th><th>Actual</th><th>Expected</th><th>Variance</th><th>Map</th></tr></thead><tbody>';
+    flagged.sort(function(a,b){ return (b.gapMin - (b.expectedMin||0)) - (a.gapMin - (a.expectedMin||0)); });
+    flagged.forEach(function(g) {
+      var variance = g.gapMin - (g.expectedMin || 0);
+      h += '<tr>';
+      h += '<td><strong>'+g.employee+'</strong></td>';
+      h += '<td class="mono">'+fmtDate(g.date)+'</td>';
+      h += '<td style="font-size:12px;">'+g.fromJob+' <span style="color:var(--muted);">→</span> '+g.toJob+'</td>';
+      h += '<td class="mono" style="font-size:12px;">'+fmt(g.clockOutTime)+' → '+fmt(g.clockInTime)+'</td>';
+      h += '<td><strong>'+fmtMin(g.gapMin)+'</strong></td>';
+      h += '<td>'+fmtMin(g.expectedMin)+'</td>';
+      h += '<td><strong style="color:var(--red);">+'+fmtMin(variance)+'</strong></td>';
+      h += '<td><a href="https://www.google.com/maps/dir/'+g.fromLat+','+g.fromLng+'/'+g.toLat+','+g.toLng+'/" target="_blank" style="color:var(--orange);font-size:11px;">📍 View</a></td>';
+      h += '</tr>';
+    });
+    h += '</tbody></table></div>';
+  }
+
+  // Unknown table — OSRM failed
+  if (unknown.length) {
+    h += '<div class="card" style="margin-bottom:16px;"><div class="card-hdr"><div class="card-title" style="color:var(--muted);">⚠ Could Not Calculate Drive Time ('+unknown.length+')</div></div>';
+    h += '<table class="tc-table"><thead><tr><th>Employee</th><th>Date</th><th>From → To</th><th>Actual Gap</th><th>Straight Line</th></tr></thead><tbody>';
+    unknown.forEach(function(g) {
+      h += '<tr>';
+      h += '<td>'+g.employee+'</td>';
+      h += '<td class="mono">'+fmtDate(g.date)+'</td>';
+      h += '<td style="font-size:12px;">'+g.fromJob+' → '+g.toJob+'</td>';
+      h += '<td>'+fmtMin(g.gapMin)+'</td>';
+      h += '<td class="mono">'+g.straightLineMiles.toFixed(1)+' mi</td>';
+      h += '</tr>';
+    });
+    h += '</tbody></table></div>';
+  }
+
+  // Normal summary — collapsed detail
+  if (normal.length) {
+    h += '<details style="margin-top:16px;"><summary style="cursor:pointer;font-weight:700;color:var(--green);padding:8px;">✓ '+normal.length+' Normal Gaps (click to expand)</summary>';
+    h += '<div class="card" style="margin-top:8px;"><table class="tc-table"><thead><tr><th>Employee</th><th>Date</th><th>From → To</th><th>Actual</th><th>Expected</th></tr></thead><tbody>';
+    normal.forEach(function(g) {
+      h += '<tr>';
+      h += '<td>'+g.employee+'</td>';
+      h += '<td class="mono">'+fmtDate(g.date)+'</td>';
+      h += '<td style="font-size:12px;">'+g.fromJob+' → '+g.toJob+'</td>';
+      h += '<td>'+fmtMin(g.gapMin)+'</td>';
+      h += '<td>'+fmtMin(g.expectedMin)+'</td>';
+      h += '</tr>';
+    });
+    h += '</tbody></table></div></details>';
+  }
+
+  resultsEl.innerHTML = h;
 }
 
 
