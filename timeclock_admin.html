@@ -2355,6 +2355,23 @@ function renderTimesheets() {
       else pendingEmps[kv[0]] = kv[1];
     });
 
+    // Precompute commissions-by-employee BEFORE rendering cards (cards reference it)
+    // Fixes ordering bug where the summary block below would be the first
+    // to populate this variable, but the card loop already needed it.
+    var periodCommissionsByEmp = {};
+    Object.keys(byEmp).forEach(function(nmPre) {
+      var empCommsPre = (ST.commissions || []).filter(function(c) {
+        if (c.employee_name !== nmPre) return false;
+        if (c.status === 'paid') return false;
+        var dc = new Date((c.earned_date||'') + 'T00:00:00');
+        return dc >= curPer.start && dc <= curPer.end;
+      });
+      var totalPre = empCommsPre.reduce(function(s,c){return s+parseFloat(c.amount||0);},0);
+      if (totalPre > 0) {
+        periodCommissionsByEmp[nmPre] = { total: totalPre, items: empCommsPre };
+      }
+    });
+
     // Employee summary cards (PENDING ONLY — approved collapsed to separate section below)
     var pendingKeys = Object.keys(pendingEmps);
     if (pendingKeys.length) {
@@ -2580,7 +2597,7 @@ function renderTimesheets() {
     }
     var periodRegMins=0, periodOtMins=0, periodPtoHrs=0, periodTrainHrs=0, periodTotalPay=0;
     var periodCommissionTotal = 0;
-    var periodCommissionsByEmp = {};
+    // periodCommissionsByEmp already declared + populated above (before card rendering)
     Object.entries(byEmp).forEach(function(kv){
       var nm2=kv[0], d2=kv[1];
       var emp2=ST.employees.find(function(e){return e.name===nm2;});
