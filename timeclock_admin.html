@@ -6781,27 +6781,30 @@ async function openEmployeeFile(empId) {
   var documentsData = [];
   var compHistoryData = [];
   var reviewsData = [];
+  var vacationRequestsData = [];
   try {
     var results = await Promise.all([
       sb('/rest/v1/employee_invites?employee_id=eq.' + empId + '&order=sent_at.desc&limit=1'),
       sb('/rest/v1/noncompete_signatures?employee_id=eq.' + empId + '&order=signed_at.desc&limit=1'),
       sb('/rest/v1/employee_documents?employee_id=eq.' + empId + '&order=uploaded_at.desc'),
       sb('/rest/v1/comp_history?employee_id=eq.' + empId + '&order=effective_date.desc'),
-      sb('/rest/v1/performance_reviews?employee_id=eq.' + empId + '&order=review_date.desc')
+      sb('/rest/v1/performance_reviews?employee_id=eq.' + empId + '&order=review_date.desc'),
+      sb('/rest/v1/vacation_requests?or=(employee_id.eq.' + empId + ',employee_name.eq.' + encodeURIComponent(emp.name) + ')&order=submitted_at.desc')
     ]);
     if (results[0] && results[0].length) inviteData = results[0][0];
     if (results[1] && results[1].length) ncSignatureData = results[1][0];
     if (results[2]) documentsData = results[2];
     if (results[3]) compHistoryData = results[3];
     if (results[4]) reviewsData = results[4];
+    if (results[5]) vacationRequestsData = results[5];
   } catch(e) { console.warn('Could not fetch employee records:', e); }
 
   // Build the file view
-  var body = _buildEmployeeFileBody(emp, inviteData, ncSignatureData, documentsData, compHistoryData, reviewsData);
+  var body = _buildEmployeeFileBody(emp, inviteData, ncSignatureData, documentsData, compHistoryData, reviewsData, vacationRequestsData);
   showModal('📄 Employee File — ' + emp.name, body, null);
 }
 
-function _buildEmployeeFileBody(emp, invite, ncSig, documents, compHistory, reviews) {
+function _buildEmployeeFileBody(emp, invite, ncSig, documents, compHistory, reviews, vacationRequests) {
   var h = '';
   var fmtD = function(iso) { if (!iso) return '—'; var d = new Date(iso); return d.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}); };
   var fmtDT = function(iso) { if (!iso) return '—'; var d = new Date(iso); return d.toLocaleString('en-US',{month:'short',day:'numeric',year:'numeric',hour:'numeric',minute:'2-digit'}); };
@@ -6881,6 +6884,76 @@ function _buildEmployeeFileBody(emp, invite, ncSig, documents, compHistory, revi
   h += _fileRow('PTO Remaining', '<strong style="color:'+(ptoRemaining<8?'#c62828':'#2e7d32')+';">'+ptoRemaining.toFixed(1)+'h</strong>');
   h += _fileRow('Sick Days YTD', sickUsed + ' / ' + sickLimit);
   h += '</div>';
+  h += '</div>';
+
+  // ── TIME OFF REQUEST HISTORY ──
+  var vrList = vacationRequests || [];
+  h += '<div style="background:#fff;border:1px solid var(--border);border-radius:10px;padding:16px 18px;margin-bottom:16px;">';
+  h += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">';
+  h += '<div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;">🏖 Time Off Request History</div>';
+  h += '<button class="btn btn-sm" onclick="closeModal();setTimeout(function(){showTab(\'timeoff\',document.getElementById(\'tab-timeoff\'));},150);" style="background:var(--surface);border:1.5px solid var(--border);color:var(--navy);font-size:11px;">→ Time Off Tab</button>';
+  h += '</div>';
+  if (!vrList.length) {
+    h += '<div style="padding:20px;text-align:center;font-size:12px;color:var(--muted);background:rgba(13,45,94,.02);border-radius:8px;">No time off requests on record. When '+(emp.name||'').split(' ')[0]+' submits a request from the PWA, it will appear here.</div>';
+  } else {
+    var vrThisYear = new Date().getFullYear();
+    var vrApproved = vrList.filter(function(r){ return r.status === 'approved'; });
+    var vrDenied = vrList.filter(function(r){ return r.status === 'denied'; });
+    var vrPending = vrList.filter(function(r){ return r.status === 'pending'; });
+    var vrYtdDays = vrApproved.filter(function(r){
+      return new Date(r.start_date+'T12:00:00').getFullYear() === vrThisYear;
+    }).reduce(function(s,r){ return s + (parseFloat(r.days_requested)||0); }, 0);
+    // Stat strip
+    h += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(80px,1fr));gap:6px;margin-bottom:12px;">';
+    h += '<div style="background:rgba(13,45,94,.04);border-radius:6px;padding:8px 10px;text-align:center;"><div style="font-size:18px;font-weight:700;color:var(--navy);line-height:1;">'+vrList.length+'</div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;font-weight:700;margin-top:3px;">Total</div></div>';
+    h += '<div style="background:rgba(46,125,50,.06);border-radius:6px;padding:8px 10px;text-align:center;"><div style="font-size:18px;font-weight:700;color:#2e7d32;line-height:1;">'+vrApproved.length+'</div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;font-weight:700;margin-top:3px;">Approved</div></div>';
+    h += '<div style="background:rgba(198,40,40,.06);border-radius:6px;padding:8px 10px;text-align:center;"><div style="font-size:18px;font-weight:700;color:#c62828;line-height:1;">'+vrDenied.length+'</div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;font-weight:700;margin-top:3px;">Denied</div></div>';
+    h += '<div style="background:rgba(230,81,0,.06);border-radius:6px;padding:8px 10px;text-align:center;"><div style="font-size:18px;font-weight:700;color:#e65100;line-height:1;">'+vrPending.length+'</div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;font-weight:700;margin-top:3px;">Pending</div></div>';
+    h += '<div style="background:rgba(13,45,94,.04);border-radius:6px;padding:8px 10px;text-align:center;"><div style="font-size:18px;font-weight:700;color:var(--navy);line-height:1;">'+vrYtdDays+'</div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;font-weight:700;margin-top:3px;">Days '+vrThisYear+'</div></div>';
+    h += '</div>';
+    // Request rows
+    h += '<div style="display:flex;flex-direction:column;gap:6px;">';
+    vrList.forEach(function(r) {
+      var vrFmtD = function(iso) { if (!iso) return '—'; var d = new Date(iso.indexOf('T') === -1 ? iso+'T12:00:00' : iso); return d.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}); };
+      var statusColor = { pending:'#e65100', approved:'#2e7d32', denied:'#c62828' }[r.status] || 'var(--muted)';
+      var statusBg = { pending:'rgba(230,81,0,.05)', approved:'rgba(46,125,50,.05)', denied:'rgba(198,40,40,.05)' }[r.status] || '#fff';
+      var statusIcon = { pending:'⏳', approved:'✓', denied:'✗' }[r.status] || '';
+      var dateRange = r.start_date === r.end_date ? vrFmtD(r.start_date) : vrFmtD(r.start_date) + ' → ' + vrFmtD(r.end_date);
+      h += '<div style="border:1px solid var(--border);background:'+statusBg+';border-left:3px solid '+statusColor+';border-radius:6px;padding:10px 12px;">';
+      h += '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:6px;">';
+      h +=   '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">';
+      h +=     '<span style="font-size:12px;font-weight:700;color:var(--navy);">'+dateRange+'</span>';
+      h +=     '<span style="font-size:10px;color:var(--muted);padding:1px 6px;background:rgba(13,45,94,.06);border-radius:4px;font-weight:600;">'+r.days_requested+' day'+(r.days_requested!==1?'s':'')+' · '+r.hours_requested+'h</span>';
+      h +=     '<span style="font-size:10px;color:var(--navy);padding:1px 6px;background:#fff;border:1px solid var(--border);border-radius:4px;font-weight:600;">'+(r.reason||'—')+'</span>';
+      h +=   '</div>';
+      h +=   '<span style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:4px;background:'+statusColor+';color:#fff;text-transform:uppercase;letter-spacing:.04em;">'+statusIcon+' '+r.status+'</span>';
+      h += '</div>';
+      var metaParts = [];
+      metaParts.push('Submitted '+vrFmtD(r.submitted_at));
+      if (r.status !== 'pending' && r.reviewed_by) {
+        metaParts.push((r.status === 'approved' ? 'Approved' : 'Denied')+' by '+r.reviewed_by+(r.reviewed_at?' on '+vrFmtD(r.reviewed_at):''));
+      }
+      if (r.notice_met === false) {
+        metaParts.push('<span style="color:#c62828;font-weight:700;">⚠ Late notice ('+(r.notice_days||0)+'d of 30)</span>');
+      } else if (r.notice_met === true && r.days_requested > 1 && r.reason !== 'Medical' && r.reason !== 'Family') {
+        metaParts.push('<span style="color:#2e7d32;">'+(r.notice_days||0)+'-day notice</span>');
+      }
+      if (r.created_absence_ids && r.created_absence_ids.length) {
+        metaParts.push('<span style="color:#2e7d32;">→ '+r.created_absence_ids.length+' absence record'+(r.created_absence_ids.length!==1?'s':'')+' created</span>');
+      }
+      h += '<div style="font-size:10px;color:var(--muted);line-height:1.6;">'+metaParts.join(' · ')+'</div>';
+      if (r.notes && r.notes.trim()) {
+        h += '<div style="margin-top:6px;padding:6px 10px;background:#fff;border-left:2px solid var(--border);border-radius:4px;font-size:11px;color:var(--navy);line-height:1.5;"><span style="font-size:9px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;">Note from employee:</span> '+r.notes+'</div>';
+      }
+      if (r.status !== 'pending' && r.review_notes && r.review_notes.trim()) {
+        var rvBg = r.status === 'denied' ? 'rgba(198,40,40,.06)' : 'rgba(46,125,50,.06)';
+        var rvColor = r.status === 'denied' ? '#c62828' : '#2e7d32';
+        h += '<div style="margin-top:6px;padding:6px 10px;background:'+rvBg+';border-left:2px solid '+rvColor+';border-radius:4px;font-size:11px;color:var(--navy);line-height:1.5;"><span style="font-size:9px;font-weight:700;color:'+rvColor+';text-transform:uppercase;letter-spacing:.04em;">'+(r.status === 'denied' ? 'Denial reason' : 'Review note')+':</span> '+r.review_notes+'</div>';
+      }
+      h += '</div>';
+    });
+    h += '</div>';
+  }
   h += '</div>';
 
   // Onboarding & Acknowledgments — THE main new feature
@@ -7519,7 +7592,8 @@ async function _fetchEmployeeFileData(empId) {
     sb('/rest/v1/noncompete_signatures?employee_id=eq.' + empId + '&order=signed_at.desc&limit=1'),
     sb('/rest/v1/employee_documents?employee_id=eq.' + empId + '&order=uploaded_at.desc'),
     sb('/rest/v1/comp_history?employee_id=eq.' + empId + '&order=effective_date.desc'),
-    sb('/rest/v1/performance_reviews?employee_id=eq.' + empId + '&order=review_date.desc')
+    sb('/rest/v1/performance_reviews?employee_id=eq.' + empId + '&order=review_date.desc'),
+    sb('/rest/v1/vacation_requests?or=(employee_id.eq.' + empId + ',employee_name.eq.' + encodeURIComponent(emp.name) + ')&order=submitted_at.desc')
   ]);
 
   return {
@@ -7528,7 +7602,8 @@ async function _fetchEmployeeFileData(empId) {
     ncSig: (results[1] && results[1].length) ? results[1][0] : null,
     documents: results[2] || [],
     compHistory: results[3] || [],
-    reviews: results[4] || []
+    reviews: results[4] || [],
+    vacationRequests: results[5] || []
   };
 }
 
@@ -7775,6 +7850,92 @@ function _buildEmployeeFilePdf(data) {
       }
       y += 8;
     });
+  }
+
+  // Time Off Request History
+  sectionHeader('Time Off Request History (' + data.vacationRequests.length + ')');
+  if (!data.vacationRequests.length) {
+    textBlock('No time off requests on record.', [120,120,120], true);
+  } else {
+    var vrThisYearPdf = new Date().getFullYear();
+    var vrPdfApproved = data.vacationRequests.filter(function(r){ return r.status === 'approved'; });
+    var vrPdfDenied = data.vacationRequests.filter(function(r){ return r.status === 'denied'; });
+    var vrPdfPending = data.vacationRequests.filter(function(r){ return r.status === 'pending'; });
+    var vrPdfYtdDays = vrPdfApproved.filter(function(r){
+      return new Date(r.start_date+'T12:00:00').getFullYear() === vrThisYearPdf;
+    }).reduce(function(s,r){ return s + (parseFloat(r.days_requested)||0); }, 0);
+    doc.setTextColor(100,100,100);
+    doc.setFont('helvetica','normal'); doc.setFontSize(9);
+    var vrSummary = 'Total: ' + data.vacationRequests.length +
+                    '  ·  Approved: ' + vrPdfApproved.length +
+                    '  ·  Denied: ' + vrPdfDenied.length +
+                    '  ·  Pending: ' + vrPdfPending.length +
+                    '  ·  ' + vrThisYearPdf + ' Days Taken: ' + vrPdfYtdDays;
+    ensureSpace(14);
+    doc.text(vrSummary, margin + 10, y);
+    y += 16;
+    var vrRows = data.vacationRequests.map(function(r) {
+      var dateRange = r.start_date === r.end_date
+        ? _fmtDate(r.start_date)
+        : _fmtDate(r.start_date) + ' to ' + _fmtDate(r.end_date);
+      var daysLabel = r.days_requested + 'd / ' + r.hours_requested + 'h';
+      var statusLabel = (r.status || '').toUpperCase();
+      var reviewer = '';
+      if (r.status === 'approved' || r.status === 'denied') {
+        reviewer = (r.reviewed_by || '—');
+        if (r.reviewed_at) reviewer += '\n' + _fmtDate(r.reviewed_at);
+      } else {
+        reviewer = 'Pending';
+      }
+      var notesCol = '';
+      if (r.notes) notesCol += 'Emp: ' + r.notes;
+      if (r.review_notes) {
+        if (notesCol) notesCol += '\n';
+        notesCol += (r.status === 'denied' ? 'Denial: ' : 'Review: ') + r.review_notes;
+      }
+      if (r.notice_met === false) {
+        if (notesCol) notesCol += '\n';
+        notesCol += 'LATE NOTICE (' + (r.notice_days||0) + 'd of 30)';
+      }
+      return [
+        _fmtDate(r.submitted_at),
+        dateRange,
+        daysLabel,
+        r.reason || '—',
+        statusLabel,
+        reviewer,
+        notesCol || '—'
+      ];
+    });
+    doc.autoTable({
+      startY: y,
+      head: [['Submitted', 'Dates', 'Duration', 'Reason', 'Status', 'Reviewer', 'Notes']],
+      body: vrRows,
+      theme: 'grid',
+      styles: { fontSize: 7, cellPadding: 3, overflow: 'linebreak' },
+      headStyles: { fillColor: [13,45,94], textColor: [255,255,255], fontStyle: 'bold', fontSize: 8 },
+      alternateRowStyles: { fillColor: [248,249,252] },
+      columnStyles: {
+        0: { cellWidth: 55 },
+        1: { cellWidth: 95 },
+        2: { cellWidth: 50 },
+        3: { cellWidth: 50 },
+        4: { cellWidth: 45 },
+        5: { cellWidth: 55 },
+        6: { cellWidth: 'auto' }
+      },
+      margin: { left: margin, right: margin },
+      didParseCell: function(cd) {
+        if (cd.column.index === 4 && cd.section === 'body') {
+          var st = (cd.cell.raw || '').toString().toLowerCase();
+          if (st === 'approved') cd.cell.styles.textColor = [46,125,50];
+          else if (st === 'denied') cd.cell.styles.textColor = [198,40,40];
+          else if (st === 'pending') cd.cell.styles.textColor = [230,81,0];
+          cd.cell.styles.fontStyle = 'bold';
+        }
+      }
+    });
+    y = doc.lastAutoTable.finalY + 16;
   }
 
   // ============== PAGE 3 — LEGAL & COMPLIANCE ==============
