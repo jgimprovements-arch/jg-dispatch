@@ -6180,6 +6180,98 @@ function _generateInviteToken() {
 // Real-world problem: employee says "I can't sign in." Admin has no way to know
 // what email they're trying with. This tool lets you paste what they tried,
 // compares it to what's on file, and offers to fix the mismatch in place.
+// ── SEND SIGN-IN LINK ─────────────────────────────────────────────────────
+// For onboarded employees: sends them the timeclock URL via SMS + email
+// so they know where to go. Useful for employees who lost the link, got a new
+// phone, or never saved it after completing onboarding.
+async function sendSignInLink(empId) {
+  if (!isAdmin()) { toast('Admin only'); return; }
+  var emp = (ST.employees||[]).find(function(e){ return e.id === empId; });
+  if (!emp) { alert('Employee not found'); return; }
+
+  // Figure out which email + phone are on file
+  var email = emp.email || emp.personal_email || '';
+  var phone = emp.phone || '';
+
+  if (!email && !phone) {
+    alert('No email OR phone on file for ' + emp.name + '.\n\nAdd one in Edit first.');
+    return;
+  }
+
+  // Preview what they'll get
+  var timeclockUrl = 'https://jgimprovements-arch.github.io/jg-dispatch/timeclock.html';
+  var channels = [];
+  if (phone) channels.push('SMS to ' + phone);
+  if (email) channels.push('email to ' + email);
+
+  if (!confirm(
+    'Send sign-in link to ' + emp.name + '?\n\n' +
+    'Will send via:\n  • ' + channels.join('\n  • ') + '\n\n' +
+    'Message: ' + timeclockUrl
+  )) return;
+
+  try {
+    var sent = [];
+    var failed = [];
+
+    // SMS
+    if (phone) {
+      try {
+        var normalizedPhone = _normalizePhoneE164(phone);
+        if (!normalizedPhone) {
+          failed.push('SMS (invalid phone format)');
+        } else {
+          var smsParams = new URLSearchParams({
+            type: 'invite_sms',
+            to: normalizedPhone,
+            body: 'JG Restoration Time Clock: ' + timeclockUrl,
+            employee_name: emp.name
+          });
+          var smsR = await fetch(HOOKS.onboarding, {
+            method: 'POST',
+            body: smsParams.toString(),
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+          });
+          if (smsR.ok) sent.push('SMS'); else failed.push('SMS (HTTP ' + smsR.status + ')');
+        }
+      } catch(e) { failed.push('SMS (' + e.message + ')'); }
+    }
+
+    // Email
+    if (email) {
+      try {
+        var emailParams = new URLSearchParams({
+          type: 'invite_email',
+          to: email,
+          subject: 'JG Restoration — Time Clock Sign-In Link',
+          body: 'Hi ' + emp.name.split(' ')[0] + ',\n\nHere is your JG Restoration time clock sign-in link:\n\n' + timeclockUrl + '\n\nSign in with the email address we have on file. Questions? Call the office at (920) 428-4200.\n\n— JG Restoration',
+          employee_name: emp.name
+        });
+        var emailR = await fetch(HOOKS.onboarding, {
+          method: 'POST',
+          body: emailParams.toString(),
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+        });
+        if (emailR.ok) sent.push('email'); else failed.push('email (HTTP ' + emailR.status + ')');
+      } catch(e) { failed.push('email (' + e.message + ')'); }
+    }
+
+    logActivity('Sign-In Link Sent', emp.name + ' · sent to ' + (sent.join(' + ') || 'nothing'), 'employees', emp.name);
+
+    var msg;
+    if (sent.length && !failed.length) {
+      msg = '✅ Sent via ' + sent.join(' and ') + '.\n\n' + emp.name + ' should receive the link shortly.';
+    } else if (sent.length && failed.length) {
+      msg = '⚠ Partially sent.\n\nDelivered: ' + sent.join(', ') + '\nFailed: ' + failed.join(', ');
+    } else {
+      msg = '❌ Both delivery attempts failed:\n\n' + failed.join('\n');
+    }
+    alert(msg);
+  } catch(e) {
+    alert('Failed: ' + e.message);
+  }
+}
+
 function openSignInDiagnostic(empId) {
   if (!isAdmin()) { toast('Admin only'); return; }
   var emp = (ST.employees||[]).find(function(e){ return e.id === empId; });
@@ -6728,7 +6820,12 @@ function _buildEmployeeFileBody(emp, invite, ncSig, documents, compHistory, revi
   h += '<div style="display:flex;gap:6px;flex-wrap:wrap;">';
   h += '<button class="btn btn-sm" onclick="closeModal();setTimeout(function(){openEditEmployee(\''+emp.id+'\');},200);" style="background:rgba(255,255,255,.15);color:#fff;border-color:rgba(255,255,255,.3);">✏️ Edit</button>';
   h += '<button class="btn btn-sm" onclick="openSignInDiagnostic(\''+emp.id+'\')" style="background:rgba(255,255,255,.15);color:#fff;border-color:rgba(255,255,255,.3);">🔍 Check Sign-In</button>';
-  if (emp.invite_pending || !emp.onboarding_signed_at) h += '<button class="btn btn-sm" onclick="openInviteActions(\''+emp.id+'\')" style="background:var(--orange);color:#fff;border-color:var(--orange);">📲 Invite Actions ▾</button>';
+  if (emp.invite_pending || !emp.onboarding_signed_at) {
+    h += '<button class="btn btn-sm" onclick="openInviteActions(\''+emp.id+'\')" style="background:var(--orange);color:#fff;border-color:var(--orange);">📲 Invite Actions ▾</button>';
+  } else {
+    // Already onboarded — offer to send them the timeclock sign-in URL
+    h += '<button class="btn btn-sm" onclick="sendSignInLink(\''+emp.id+'\')" style="background:var(--orange);color:#fff;border-color:var(--orange);">🔗 Send Sign-In Link</button>';
+  }
   h += '</div></div></div>';
 
   // Two-column grid
