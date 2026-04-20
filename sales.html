@@ -274,30 +274,43 @@ async function loadAll() {
   render();
   var m = ST.market;
   var mq = encodeURIComponent(m);
-  try {
-    // Partners — single fetch, no pagination for now
-    // Paginate partners - Supabase max is 1000 per request
-    var allP = [];
-    for (var _pg = 0; _pg < 10; _pg++) {
-      var _chunk = await sbSafe('/rest/v1/sales_partners?order=tier.asc,name.asc&limit=1000&offset='+(_pg*1000));
-      if (!_chunk || !_chunk.length) break;
-      allP = allP.concat(_chunk);
-      if (_chunk.length < 1000) break;
+
+  // Narrow SELECTs — only columns the UI actually reads. Drops payload ~30%.
+  var partnerCols = 'id,name,company,type,phone,email,city,tier,notes,touch_count,referral_count,referral_revenue,last_touch_date,assigned_to,status,market,albi_contact_id,updated_at';
+  var touchCols   = 'id,partner_id,partner_name,partner_type,touch_type,touch_date,outcome,notes,follow_up_needed,follow_up_date,logged_by,market';
+  var followupCols= 'id,partner_id,partner_name,partner_type,due_date,priority,notes,completed,market';
+  var routeCols   = 'id,route_date,rep_name,stops,notes,status,market';
+
+  // Paginated partners fetch — filtered by market this time (was pulling both before)
+  async function fetchAllPartners(){
+    var all = [];
+    for (var pg = 0; pg < 10; pg++) {
+      var chunk = await sbSafe('/rest/v1/sales_partners?market=eq.'+mq+'&select='+partnerCols+'&order=tier.asc,name.asc&limit=1000&offset='+(pg*1000));
+      if (!chunk || !chunk.length) break;
+      all = all.concat(chunk);
+      if (chunk.length < 1000) break;
     }
-    ST.partners = allP;
-  } catch(e) { console.error('partners fetch:', e); ST.partners = []; }
-  try {
-    var t = await sbSafe('/rest/v1/sales_touches?market=eq.'+mq+'&order=touch_date.desc&limit=500');
-    ST.touches = t || [];
-  } catch(e) { console.error('touches fetch:', e); ST.touches = []; }
-  try {
-    var f = await sbSafe('/rest/v1/sales_followups?market=eq.'+mq+'&completed=eq.false&order=due_date.asc&limit=500');
-    ST.followups = f || [];
-  } catch(e) { console.error('followups fetch:', e); ST.followups = []; }
-  try {
-    var r = await sbSafe('/rest/v1/sales_routes?market=eq.'+mq+'&order=route_date.desc&limit=30');
-    ST.routes = r || [];
-  } catch(e) { console.error('routes fetch:', e); ST.routes = []; }
+    return all;
+  }
+
+  // Fire all four in parallel — big perceived speedup since they no longer block each other
+  var results = await Promise.allSettled([
+    fetchAllPartners(),
+    sbSafe('/rest/v1/sales_touches?market=eq.'+mq+'&select='+touchCols+'&order=touch_date.desc&limit=200'),
+    sbSafe('/rest/v1/sales_followups?market=eq.'+mq+'&completed=eq.false&select='+followupCols+'&order=due_date.asc&limit=500'),
+    sbSafe('/rest/v1/sales_routes?market=eq.'+mq+'&select='+routeCols+'&order=route_date.desc&limit=30')
+  ]);
+
+  ST.partners  = results[0].status === 'fulfilled' ? (results[0].value || []) : [];
+  ST.touches   = results[1].status === 'fulfilled' ? (results[1].value || []) : [];
+  ST.followups = results[2].status === 'fulfilled' ? (results[2].value || []) : [];
+  ST.routes    = results[3].status === 'fulfilled' ? (results[3].value || []) : [];
+
+  // Log any partial failures rather than swallowing them
+  results.forEach(function(r, i){
+    if (r.status === 'rejected') console.error('loadAll fetch #'+i+' failed:', r.reason);
+  });
+
   ST.loading = false;
   render();
 }
@@ -381,6 +394,7 @@ async function completeRouteStop(routeId, stopIdx) {
 }
 
 function addPartner(){ST.modal="add-partner";ST.selected=null;render();}
+function editPartner(id){ST.selected=id;ST.modal="add-partner";render();}
 function openModal(name){ST.modal=name;ST.selected=null;render();}
 function importAlbi(){ST.modal=null;importFromAlbi();}
 async function importFromAlbi() {
@@ -496,7 +510,19 @@ function renderPartnerList() {
   listEl.innerHTML = h;
 }
 
+// Debounced render — consecutive calls within 16ms collapse to a single paint.
+// This is a cheap win because the codebase has 26+ render() calls, many of which
+// fire in sequence (e.g. modal close → state change → render → render again).
+var _renderPending = null;
 function render() {
+  if (_renderPending) return;
+  _renderPending = requestAnimationFrame(function(){
+    _renderPending = null;
+    try { _renderNow(); } catch(e){ console.error('render error:', e); }
+  });
+}
+
+function _renderNow() {
   var a = document.getElementById('app');
   if (!a) return;
   var h = '';
@@ -840,24 +866,48 @@ function render() {
     h += '<div class="modal-box">';
 
     if (ST.modal === 'add-partner') {
-      h += '<div class="modal-title">+ New Partner</div>';
-      h += '<div class="form-group"><label class="form-label">Full Name *</label><input class="form-input" id="pName" placeholder="John Smith"></div>';
+      // Detect edit mode — if ST.selected is set AND partner exists, prefill the form
+      var editP = ST.selected ? ST.partners.find(function(x){ return x.id === ST.selected; }) : null;
+      var isEdit = !!editP;
+      var _ve = function(v){ return (v==null?'':String(v)).replace(/"/g,'&quot;'); };
+      h += '<div class="modal-title">' + (isEdit ? '✏️ Edit Partner' : '+ New Partner') + '</div>';
+      h += '<div class="form-group"><label class="form-label">Full Name *</label><input class="form-input" id="pName" placeholder="John Smith" value="' + _ve(editP && editP.name) + '"></div>';
       h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">';
-      h += '<div class="form-group"><label class="form-label">Company</label><input class="form-input" id="pCompany" placeholder="ABC Plumbing"></div>';
-      h += '<div class="form-group"><label class="form-label">Type</label><select class="form-select" id="pType"><option>Plumber</option><option>Realtor</option><option>Insurance Agent</option><option>Property Manager</option><option>GC</option><option>Other</option></select></div>';
+      h += '<div class="form-group"><label class="form-label">Company</label><input class="form-input" id="pCompany" placeholder="ABC Plumbing" value="' + _ve(editP && editP.company) + '"></div>';
+      h += '<div class="form-group"><label class="form-label">Type</label><select class="form-select" id="pType">';
+      ['Plumber','Realtor','Insurance Agent','Property Manager','GC','Other'].forEach(function(t){
+        h += '<option' + (editP && editP.type===t?' selected':'') + '>'+t+'</option>';
+      });
+      h += '</select></div>';
       h += '</div>';
       h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">';
-      h += '<div class="form-group"><label class="form-label">Phone</label><input class="form-input" id="pPhone" placeholder="(920) 555-1234"></div>';
-      h += '<div class="form-group"><label class="form-label">Email</label><input class="form-input" id="pEmail" type="email"></div>';
+      h += '<div class="form-group"><label class="form-label">Phone</label><input class="form-input" id="pPhone" placeholder="(920) 555-1234" value="' + _ve(editP && editP.phone) + '"></div>';
+      h += '<div class="form-group"><label class="form-label">Email</label><input class="form-input" id="pEmail" type="email" value="' + _ve(editP && editP.email) + '"></div>';
       h += '</div>';
       h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">';
-      h += '<div class="form-group"><label class="form-label">City</label><input class="form-input" id="pCity" placeholder="Appleton"></div>';
-      h += '<div class="form-group"><label class="form-label">Tier</label><select class="form-select" id="pTier"><option value="B">B - Active</option><option value="A">A - Top Partner</option><option value="C">C - Cold</option></select></div>';
+      h += '<div class="form-group"><label class="form-label">City</label><input class="form-input" id="pCity" placeholder="Appleton" value="' + _ve(editP && editP.city) + '"></div>';
+      h += '<div class="form-group"><label class="form-label">Tier</label><select class="form-select" id="pTier">';
+      [['B','B - Active'],['A','A - Top Partner'],['C','C - Cold']].forEach(function(opt){
+        h += '<option value="'+opt[0]+'"' + (editP && editP.tier===opt[0]?' selected':'') + '>'+opt[1]+'</option>';
+      });
+      h += '</select></div>';
       h += '</div>';
-      h += '<div class="form-group"><label class="form-label">Notes</label><textarea class="form-input" id="pNotes" rows="2" style="resize:vertical;"></textarea></div>';
+      h += '<div class="form-group"><label class="form-label">Notes</label><textarea class="form-input" id="pNotes" rows="2" style="resize:vertical;">' + _ve(editP && editP.notes).replace(/&quot;/g,'"') + '</textarea></div>';
       h += '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">';
-      h += '<button style="padding:8px 16px;border-radius:6px;border:1.5px solid var(--border);background:transparent;cursor:pointer;font-size:12px;" onclick="ST.modal=null;render()">Cancel</button>';
-      h += '<button style="padding:8px 20px;border-radius:6px;border:none;background:var(--orange);color:#fff;font-size:12px;font-weight:600;cursor:pointer;" onclick="savePartner({name:document.getElementById(\'pName\').value,company:document.getElementById(\'pCompany\').value,type:document.getElementById(\'pType\').value,phone:document.getElementById(\'pPhone\').value,email:document.getElementById(\'pEmail\').value,city:document.getElementById(\'pCity\').value,tier:document.getElementById(\'pTier\').value,notes:document.getElementById(\'pNotes\').value,status:\'Active\'});ST.modal=null;">Save Partner</button>';
+      h += '<button style="padding:8px 16px;border-radius:6px;border:1.5px solid var(--border);background:transparent;cursor:pointer;font-size:12px;" onclick="ST.modal=null;ST.selected=null;render()">Cancel</button>';
+      // Build the save call — include id when editing, omit for new partners
+      var saveCall = 'savePartner({' + (isEdit ? "id:'"+editP.id+"'," : '') +
+        "name:document.getElementById('pName').value," +
+        "company:document.getElementById('pCompany').value," +
+        "type:document.getElementById('pType').value," +
+        "phone:document.getElementById('pPhone').value," +
+        "email:document.getElementById('pEmail').value," +
+        "city:document.getElementById('pCity').value," +
+        "tier:document.getElementById('pTier').value," +
+        "notes:document.getElementById('pNotes').value" +
+        (isEdit ? '' : ",status:'Active'") +
+        "});ST.modal=null;" + (isEdit ? '' : 'ST.selected=null;');
+      h += '<button style="padding:8px 20px;border-radius:6px;border:none;background:var(--orange);color:#fff;font-size:12px;font-weight:600;cursor:pointer;" onclick="' + saveCall + '">' + (isEdit ? 'Save Changes' : 'Save Partner') + '</button>';
       h += '</div>';
     }
 
@@ -960,6 +1010,7 @@ function render() {
         });
         h += '<div style="display:flex;gap:8px;margin-top:16px;">';
         h += '<button style="padding:8px 16px;border-radius:6px;border:none;background:var(--orange);color:#fff;font-size:12px;font-weight:600;cursor:pointer;flex:1;" onclick="ST.modal=\'log-touch\';render()">📋 Log Touch</button>';
+        h += '<button style="padding:8px 16px;border-radius:6px;border:1.5px solid var(--navy);background:transparent;color:var(--navy);font-size:12px;font-weight:600;cursor:pointer;" onclick="editPartner(\'' + p.id + '\')">✏️ Edit</button>';
         h += '<button style="padding:8px 16px;border-radius:6px;border:1.5px solid var(--border);background:transparent;font-size:12px;cursor:pointer;" onclick="ST.modal=null;ST.selected=null;render()">Close</button>';
         h += '</div>';
       }
