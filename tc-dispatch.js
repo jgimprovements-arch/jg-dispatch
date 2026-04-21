@@ -129,6 +129,11 @@
     '.tcd-lane-body.empty{padding:16px;text-align:center;font-size:11px;color:#a0abbf;font-style:italic;}',
     '.tcd-lane-body.drag-over{background:rgba(232,93,4,.06);}',
     '.tcd-job{padding:10px 12px;border-bottom:1px solid rgba(13,45,94,.05);display:flex;align-items:center;gap:8px;cursor:grab;user-select:none;-webkit-user-select:none;touch-action:none;}',
+    // Jobs in the UNASSIGNED pool need to allow vertical scroll gestures so the
+    // user can scroll through a long list by dragging. Horizontal pan and
+    // pinch-zoom stay blocked. The long-press drag in the touch handler still
+    // fires because it kicks in after a 180ms hold, before any scroll motion.
+    '.tcd-job[data-from-pool="1"]{touch-action:pan-y;}',
     '.tcd-job:last-child{border-bottom:none;}',
     '.tcd-job.dragging{opacity:.4;}',
     '.tcd-job-name{font-size:12px;font-weight:600;color:#0d1f3c;flex:1;word-break:break-word;min-width:0;}',
