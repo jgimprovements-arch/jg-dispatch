@@ -1359,9 +1359,46 @@ function _buildModalHtml() {
       mh += '</select></div>';
       mh += '</div>';
       mh += '<div class="form-group"><label class="form-label">Notes</label><textarea class="form-input" id="pNotes" rows="2" style="resize:vertical;">' + _ve(editP && editP.notes).replace(/&quot;/g,'"') + '</textarea></div>';
+      // Assigned Sales Rep — admins get a dropdown, non-admins see read-only
+      // text so they can't reassign partners from the edit form. Mirrors the
+      // mobile partner edit sheet and the canReassign() check enforced
+      // elsewhere. Rep list sourced from JG_SHARED when available.
+      var assignedReps = [];
+      if (window.JG_SHARED && window.JG_SHARED.REPS) {
+        var seen = {};
+        Object.keys(window.JG_SHARED.REPS).forEach(function(em){
+          var n = window.JG_SHARED.REPS[em];
+          if (!seen[n]) { seen[n] = 1; assignedReps.push(n); }
+        });
+        assignedReps.sort();
+      } else {
+        assignedReps = ['Brent','David','Josh','Kristina','Rylan'];
+      }
+      var currentAssign = (editP && editP.assigned_to) || '';
+      if (isAdmin()) {
+        mh += '<div class="form-group"><label class="form-label">Assigned Sales Rep</label>';
+        mh += '<select class="form-select" id="pAssignedTo">';
+        mh += '<option value=""' + (currentAssign===''?' selected':'') + '>— Unassigned —</option>';
+        assignedReps.forEach(function(r){
+          mh += '<option value="' + _ve(r) + '"' + (currentAssign===r?' selected':'') + '>' + _ve(r) + '</option>';
+        });
+        mh += '</select></div>';
+      } else {
+        // Non-admin: read-only display. Hidden input preserves current value
+        // on save so we don't accidentally clear the assignment.
+        mh += '<div class="form-group"><label class="form-label">Assigned Sales Rep</label>';
+        mh += '<div style="padding:9px 12px;border:1.5px solid var(--border);border-radius:6px;font-size:13px;background:var(--surface);color:var(--muted);">';
+        mh += (currentAssign || 'Unassigned') + ' <span style="font-size:10px;margin-left:6px;">(admin only)</span>';
+        mh += '</div>';
+        mh += '<input type="hidden" id="pAssignedTo" value="' + _ve(currentAssign) + '">';
+        mh += '</div>';
+      }
       mh += '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">';
       mh += '<button style="padding:8px 16px;border-radius:6px;border:1.5px solid var(--border);background:transparent;cursor:pointer;font-size:12px;" onclick="ST.modal=null;ST.selected=null;render()">Cancel</button>';
-      // Build the save call — include id when editing, omit for new partners
+      // Build the save call — include id when editing, omit for new partners.
+      // assigned_to is only included when the current user is admin — matches
+      // the server-side fail-closed rule used on mobile (non-admins cannot
+      // reassign partners, even if they somehow tampered with the hidden input).
       var saveCall = 'savePartner({' + (isEdit ? "id:'"+editP.id+"'," : '') +
         "name:document.getElementById('pName').value," +
         "company:document.getElementById('pCompany').value," +
@@ -1371,6 +1408,7 @@ function _buildModalHtml() {
         "city:document.getElementById('pCity').value," +
         "tier:document.getElementById('pTier').value," +
         "notes:document.getElementById('pNotes').value" +
+        (isAdmin() ? ",assigned_to:(document.getElementById('pAssignedTo').value||null)" : '') +
         (isEdit ? '' : ",status:'Active'") +
         "});ST.modal=null;" + (isEdit ? '' : 'ST.selected=null;');
       mh += '<button style="padding:8px 20px;border-radius:6px;border:none;background:var(--orange);color:#fff;font-size:12px;font-weight:600;cursor:pointer;" onclick="' + saveCall + '">' + (isEdit ? 'Save Changes' : 'Save Partner') + '</button>';
