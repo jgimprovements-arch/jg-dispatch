@@ -355,6 +355,34 @@ function canViewMaps() {
   } catch(e) { return false; }
 }
 
+// Admin, Office, and Project Manager can approve on-call swap requests.
+// PMs who log in see ONLY the Swaps tab (all other tabs hidden).
+function canApproveSwap() {
+  try {
+    var u = JSON.parse(localStorage.getItem('jg_platform_user') || 'null');
+    if (!u) return false;
+    if (isAdmin()) return true;
+    var email = (u.email || '').toLowerCase();
+    var emp = ST.employees.find(function(e){ return e.email === email; });
+    return emp && ['Admin','Office','Project Manager'].includes(emp.role);
+  } catch(e) { return false; }
+}
+
+// True if current user is a PM (but NOT Admin/Office).
+// Used to restrict PMs to only the Swaps tab on this page.
+function isSwapOnlyPM() {
+  try {
+    if (isAdmin()) return false;
+    var u = JSON.parse(localStorage.getItem('jg_platform_user') || 'null');
+    if (!u) return false;
+    var email = (u.email || '').toLowerCase();
+    var emp = ST.employees.find(function(e){ return e.email === email; });
+    if (!emp) return false;
+    if (emp.role === 'Office' || emp.role === 'Admin') return false;
+    return emp.role === 'Project Manager';
+  } catch(e) { return false; }
+}
+
 // ── SUPABASE ──────────────────────────────────────────────────────────────
 var SB_URL = 'https://nuykvchgecpiuikoerze.supabase.co';
 var SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im51eWt2Y2hnZWNwaXVpa29lcnplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYyNjM3ODYsImV4cCI6MjA5MTgzOTc4Nn0.39hZ8DdjT_0iFJXPeAL2FXUSLw8FZBirDVzxZTO1W9s';
@@ -519,7 +547,26 @@ async function loadAll() {
 
 // ── TABS ──────────────────────────────────────────────────────────────────
 function showTab(tab, el) {
-  var adminOnly = ['employees', 'reports', 'archive', 'timeoff', 'swaps'];
+  // PM approval path: Swaps tab is open to anyone with canApproveSwap()
+  if (tab === 'swaps') {
+    if (!canApproveSwap()) {
+      toast('Swap approval requires Admin, Office, or Project Manager role');
+      return;
+    }
+    ST.tab = tab;
+    document.querySelectorAll('.tc-tab').forEach(function(t) { t.classList.remove('active'); });
+    if (el) el.classList.add('active');
+    render();
+    return;
+  }
+
+  // PMs are restricted to Swaps only — block attempts to reach other tabs
+  if (isSwapOnlyPM()) {
+    toast('As a PM you only have access to Swap requests on this page');
+    return;
+  }
+
+  var adminOnly = ['employees', 'reports', 'archive', 'timeoff'];
   var mapTabs = ['routes'];
   if (adminOnly.includes(tab) && !isAdmin()) {
     toast('Admin access required');
@@ -629,22 +676,39 @@ async function paintBadges() {
 }
 
 function render() {
+  var pmOnly = isSwapOnlyPM();
   var empTab = document.getElementById('tab-employees');
   var rptTab = document.getElementById('tab-reports');
   var routeTab    = document.getElementById('tab-routes');
   var activityTab = document.getElementById('tab-activity');
   var commTab     = document.getElementById('tab-commissions');
   var timeoffTab  = document.getElementById('tab-timeoff');
-  if (empTab)      empTab.style.display      = isAdmin() ? '' : 'none';
-  if (rptTab)      rptTab.style.display      = isAdmin() ? '' : 'none';
-  if (routeTab)    routeTab.style.display    = canViewMaps() ? '' : 'none';
-  if (activityTab) activityTab.style.display = isAdmin() ? '' : 'none';
-  if (commTab)     commTab.style.display     = _canViewCommissionsTab() ? '' : 'none';
-  if (timeoffTab)  timeoffTab.style.display  = isAdmin() ? '' : 'none';
+  var swapsTab    = document.getElementById('tab-swaps');
+  var tsTab       = document.getElementById('tab-timesheets');
+  var archTab     = document.getElementById('tab-archive');
+  if (empTab)      empTab.style.display      = (isAdmin() && !pmOnly) ? '' : 'none';
+  if (rptTab)      rptTab.style.display      = (isAdmin() && !pmOnly) ? '' : 'none';
+  if (routeTab)    routeTab.style.display    = (canViewMaps() && !pmOnly) ? '' : 'none';
+  if (activityTab) activityTab.style.display = (isAdmin() && !pmOnly) ? '' : 'none';
+  if (commTab)     commTab.style.display     = (_canViewCommissionsTab() && !pmOnly) ? '' : 'none';
+  if (timeoffTab)  timeoffTab.style.display  = (isAdmin() && !pmOnly) ? '' : 'none';
+  if (tsTab)       tsTab.style.display       = pmOnly ? 'none' : '';
+  if (archTab)     archTab.style.display     = (isAdmin() && !pmOnly) ? '' : 'none';
+  if (swapsTab)    swapsTab.style.display    = canApproveSwap() ? '' : 'none';
   var liveTab = document.getElementById('tab-live');
   if (liveTab) liveTab.style.display = 'none';
   var accessTab = document.getElementById('tab-access');
-  if (accessTab) accessTab.style.display = isAdmin() ? '' : 'none';
+  if (accessTab) accessTab.style.display = (isAdmin() && !pmOnly) ? '' : 'none';
+
+  // If a PM landed on this page and the default tab (timesheets) isn't their tab,
+  // bounce them to Swaps immediately
+  if (pmOnly && ST.tab !== 'swaps') {
+    ST.tab = 'swaps';
+    if (swapsTab) {
+      document.querySelectorAll('.tc-tab').forEach(function(t) { t.classList.remove('active'); });
+      swapsTab.classList.add('active');
+    }
+  }
 
   if (ST.tab === 'timesheets') renderTimesheets();
   else if (ST.tab === 'employees') { if (isAdmin()) renderEmployees(); }
@@ -652,7 +716,7 @@ function render() {
   else if (ST.tab === 'routes')   renderRoutes();
   else if (ST.tab === 'commissions') { if (_canViewCommissionsTab()) renderCommissions(); else { ST.tab = 'timesheets'; renderTimesheets(); } }
   else if (ST.tab === 'timeoff')  { if (isAdmin()) renderTimeOff(); }
-  else if (ST.tab === 'swaps')    { if (isAdmin()) renderSwaps(); }
+  else if (ST.tab === 'swaps')    { if (canApproveSwap()) renderSwaps(); }
   else if (ST.tab === 'archive')  { if (isAdmin()) renderArchive(); }
   else if (ST.tab === 'activity') { if (isAdmin()) renderActivity(); }
   else if (ST.tab === 'access')   { if (isAdmin()) renderAccess(); }
@@ -2883,7 +2947,7 @@ function renderTimesheets() {
 var _swapFilter = { status: 'pending' };
 
 function renderSwaps() {
-  if (!isAdmin()) { document.getElementById('tc-body').innerHTML = '<div class="card"><div class="empty" style="padding:24px;">Admin access required.</div></div>'; return; }
+  if (!canApproveSwap()) { document.getElementById('tc-body').innerHTML = '<div class="card"><div class="empty" style="padding:24px;">Admin, Office, or PM access required.</div></div>'; return; }
 
   var list = ST.swapRequests || [];
   var pending = list.filter(function(s){ return s.status === 'pending'; });
@@ -4827,7 +4891,7 @@ const ACCESS_DEFAULTS = {
   sales:          ['Project Manager','Estimator','Office','Admin'],
   sales_admin:    ['Admin'],
   timeclock:      ['Technician','Project Manager','Estimator','Office','Admin'],
-  timeclock_admin:['Office','Admin'],
+  timeclock_admin:['Project Manager','Office','Admin'],
   qa:             ['Project Manager','Estimator','Office','Admin'],
   adjuster:       ['Project Manager','Estimator','Office','Admin'],
   recon:          ['Project Manager','Estimator','Admin'],
