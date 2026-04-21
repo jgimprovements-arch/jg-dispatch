@@ -1167,12 +1167,9 @@ function markSick(nm){
   logActivity('Tech Marked Out', nm + ' marked out of dispatch', 'dispatch', nm);
   sick.add(nm);
   markLaneChanged(loc, nm);
-  const orphans=(techQ[loc][nm]?.jobs||[]).filter(jid=>
-    !Object.entries(techQ[loc]).some(([n,t])=>n!==nm&&t.jobs.includes(jid)));
   render();
   saveBoardState();
-  if(orphans.length)triggerAI(nm,orphans);
-  else showToast(nm.split(' ')[0]+' marked out — jobs already covered');
+  showToast(nm.split(' ')[0]+' marked out');
 }
 function undoSick(nm){sick.delete(nm);markLaneChanged(loc, nm);closeAI();render();saveBoardState();showToast(nm.split(' ')[0]+' restored');}
 
@@ -2542,7 +2539,7 @@ async function confirmOut(){
   closeOutModal();
   markSick(nm);
 
-  // Log out status to Supabase time_entries as an absence record
+  // Log out status to Supabase as an absence record
   try {
     var today = new Date().toISOString().split('T')[0];
     var SB_URL = 'https://nuykvchgecpiuikoerze.supabase.co';
@@ -2554,6 +2551,30 @@ async function confirmOut(){
       body: JSON.stringify({ employee_name: nm, reason: reason, date: today, market: mkt, logged_by: 'dispatch' })
     });
   } catch(e) { console.warn('Could not log absence:', e); }
+
+  // Auto clock-out: if this tech has an active time entry, close it
+  try {
+    var today = new Date().toISOString().split('T')[0];
+    var now = new Date().toISOString();
+    var SB_URL = 'https://nuykvchgecpiuikoerze.supabase.co';
+    var SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im51eWt2Y2hnZWNwaXVpa29lcnplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYyNjM3ODYsImV4cCI6MjA5MTgzOTc4Nn0.39hZ8DdjT_0iFJXPeAL2FXUSLw8FZBirDVzxZTO1W9s';
+    var activeR = await fetch(SB_URL + '/rest/v1/time_entries?employee_name=eq.' + encodeURIComponent(nm) + '&clock_out=is.null&clock_in=gte.' + today + 'T00:00:00&select=id,clock_in', {
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+    });
+    if (activeR.ok) {
+      var activeEntries = await activeR.json();
+      for (var i = 0; i < activeEntries.length; i++) {
+        var entry = activeEntries[i];
+        var dur = Math.floor((Date.now() - new Date(entry.clock_in).getTime()) / 60000);
+        await fetch(SB_URL + '/rest/v1/time_entries?id=eq.' + entry.id, {
+          method: 'PATCH',
+          headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ clock_out: now, duration_minutes: dur, status: 'complete', notes: 'Auto clock-out: marked out (' + reason + ') from dispatch board' })
+        });
+      }
+      if (activeEntries.length) logActivity('Auto Clock-Out', nm + ' auto-clocked out via dispatch Mark Out (' + reason + ')', 'dispatch', nm);
+    }
+  } catch(e) { console.warn('Could not auto clock-out:', e); }
 
   showToast(nm.split(' ')[0]+' marked out ('+reason+')');
 }
