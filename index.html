@@ -379,7 +379,7 @@ body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);min
 <div class="tabs">
   <button class="tab active" onclick="switchLoc('appleton',this)">Appleton</button>
   <button class="tab" onclick="switchLoc('stevens',this)">Stevens Point</button>
-  <button class="tab" onclick="switchToOnCall(this)" id="oncall-tab">📅 On-Call</button>
+  <button class="tab" onclick="switchToOnCall(this)" id="oncall-tab" style="position:relative;">📅 On-Call<span id="oncall-swap-badge" style="display:none;position:absolute;top:2px;right:2px;background:#c62828;color:#fff;border-radius:50%;width:18px;height:18px;font-size:10px;font-weight:700;line-height:18px;text-align:center;"></span></button>
   <button class="tab" onclick="switchToTime(this)" id="time-tab">⏱ Time</button>
 </div>
 
@@ -714,6 +714,7 @@ async function boot(){
     // so snapshot captures the actual manual assignments
     setTimeout(silentAlbiRefresh, 5000);
     loadVacationAlerts();
+    checkPendingSwaps();
     return;
   }
   stepDone('cache', '○ No cache — fetching fresh data');
@@ -734,6 +735,7 @@ async function boot(){
   render();
   hideLoader();
   loadVacationAlerts();
+  checkPendingSwaps();
 }
 
 // Silent background refresh (when serving from cache)
@@ -2634,6 +2636,24 @@ async function loadVacationAlerts(){
   } catch(e){ console.warn('Vacation alert check failed:', e); }
 }
 
+// ── PENDING SWAP BADGE ON ON-CALL TAB ────────
+async function checkPendingSwaps(){
+  var badge = document.getElementById('oncall-swap-badge');
+  if(!badge) return;
+  try {
+    var r = await sbFetch('/rest/v1/oncall_swap_requests?status=eq.pending&select=id');
+    if(!r.ok) return;
+    var reqs = await r.json();
+    var count = (reqs || []).length;
+    if(count > 0){
+      badge.textContent = count > 9 ? '9+' : count;
+      badge.style.display = 'block';
+    } else {
+      badge.style.display = 'none';
+    }
+  } catch(e){}
+}
+
 // ── INFO MODAL ────────────────────────────
 function showInfo(){
   document.getElementById('info-modal').style.display='flex';
@@ -2989,9 +3009,22 @@ function initRealtime() {
   }
 }
 
+// Live swap request notifications — separate channel so it works independently
+function initSwapRealtime(){
+  try {
+    if (!_sbClient) return;
+    _sbClient.channel('swap_request_changes')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'oncall_swap_requests' }, function() {
+        checkPendingSwaps();
+      })
+      .subscribe();
+  } catch(e) {}
+}
+
 // Initialize realtime after page loads, and poll immediately for current state
 document.addEventListener('DOMContentLoaded', function() {
   setTimeout(initRealtime, 2000); // wait for board to load first
+  setTimeout(initSwapRealtime, 3000); // swap notifications
   setTimeout(pollSharedState, 3000); // fetch current state on load
 });
 
