@@ -163,6 +163,7 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;min
   <button class="tc-tab" id="tab-routes" onclick="showTab('routes',this)">🗺 Routes & Live</button>
   <button class="tc-tab" id="tab-commissions" onclick="showTab('commissions',this)">💵 Commissions</button>
   <button class="tc-tab" id="tab-timeoff" onclick="showTab('timeoff',this)">🏖 Time Off</button>
+  <button class="tc-tab" id="tab-swaps" onclick="showTab('swaps',this)">🔄 Swaps</button>
   <button class="tc-tab" id="tab-archive" onclick="showTab('archive',this)">🗄 Archive</button>
   <button class="tc-tab" id="tab-activity" onclick="showTab('activity',this)">📜 Activity</button>
   <button class="tc-tab" id="tab-access" onclick="showTab('access',this)">🔐 Access</button>
@@ -501,12 +502,24 @@ async function loadAll() {
     if (!_toData) _toData = pendingTo || [];
   } catch(e) {}
 
+  // Load on-call swap requests (all statuses; filtering done at render time)
+  try {
+    var swaps = await sb('/rest/v1/oncall_swap_requests?archived=eq.false&select=*&order=created_at.desc&limit=500');
+    ST.swapRequests = swaps || [];
+  } catch(e) { ST.swapRequests = []; }
+
+  // Load on-call schedule (single 'current' row, JSONB keyed by period|location|role|date)
+  try {
+    var sched = await sb('/rest/v1/oncall_schedule?id=eq.current&select=data');
+    ST.oncallSchedule = (sched && sched[0] && sched[0].data) ? sched[0].data : {};
+  } catch(e) { ST.oncallSchedule = {}; }
+
   render();
 }
 
 // ── TABS ──────────────────────────────────────────────────────────────────
 function showTab(tab, el) {
-  var adminOnly = ['employees', 'reports', 'archive', 'timeoff'];
+  var adminOnly = ['employees', 'reports', 'archive', 'timeoff', 'swaps'];
   var mapTabs = ['routes'];
   if (adminOnly.includes(tab) && !isAdmin()) {
     toast('Admin access required');
@@ -529,7 +542,7 @@ function showTab(tab, el) {
 // ── PENDING APPROVAL COUNTERS (in-app badges) ─────────────────────────────
 // Single source of truth for "what needs my attention" across all UI surfaces
 async function getPendingApprovalCounts() {
-  var counts = { timecards: 0, timeoff: 0, commissions: 0, total: 0 };
+  var counts = { timecards: 0, timeoff: 0, commissions: 0, swaps: 0, total: 0 };
 
   // Timecards: look at most recent 2 pay periods, count unapproved employees
   try {
@@ -573,7 +586,12 @@ async function getPendingApprovalCounts() {
     counts.commissions = (ST.commissions || []).filter(function(c){ return c.status === 'pending'; }).length;
   } catch(e) {}
 
-  counts.total = counts.timecards + counts.timeoff + counts.commissions;
+  // Swaps: count pending swap requests
+  try {
+    counts.swaps = (ST.swapRequests || []).filter(function(s){ return s.status === 'pending'; }).length;
+  } catch(e) {}
+
+  counts.total = counts.timecards + counts.timeoff + counts.commissions + counts.swaps;
   return counts;
 }
 
@@ -598,6 +616,7 @@ async function paintBadges() {
 
   badge('tab-timesheets', c.timecards, c.timecards + ' timecard(s) awaiting approval');
   badge('tab-timeoff', c.timeoff, c.timeoff + ' time off request(s) pending');
+  badge('tab-swaps', c.swaps, c.swaps + ' swap request(s) pending');
   badge('tab-commissions', c.commissions, c.commissions + ' commission(s) pending approval');
 
   // Broadcast to other pages via localStorage (hub picks this up)
@@ -633,6 +652,7 @@ function render() {
   else if (ST.tab === 'routes')   renderRoutes();
   else if (ST.tab === 'commissions') { if (_canViewCommissionsTab()) renderCommissions(); else { ST.tab = 'timesheets'; renderTimesheets(); } }
   else if (ST.tab === 'timeoff')  { if (isAdmin()) renderTimeOff(); }
+  else if (ST.tab === 'swaps')    { if (isAdmin()) renderSwaps(); }
   else if (ST.tab === 'archive')  { if (isAdmin()) renderArchive(); }
   else if (ST.tab === 'activity') { if (isAdmin()) renderActivity(); }
   else if (ST.tab === 'access')   { if (isAdmin()) renderAccess(); }
@@ -679,10 +699,10 @@ function renderLive() {
     h += '<div class="stat-card" style="border:2px solid #2e7d32;cursor:pointer;" onclick="showTab(\'employees\',document.getElementById(\'tab-employees\'))">';
     h += '<div class="stat-val" style="color:#2e7d32;">'+(ST.pendingEmployees||[]).length+'</div><div class="stat-lbl">Pending Approval</div></div>';
   }
-  // Pending swap requests
+  // Pending swap requests — now opens Swaps tab (was: wrong tab before)
   var pendingSwaps = (ST.swapRequests||[]).filter(function(s){ return s.status==='pending'; });
   if (pendingSwaps.length) {
-    h += '<div class="stat-card" style="border:2px solid var(--orange);cursor:pointer;" onclick="showTab(\'timesheets\',document.getElementById(\'tab-timesheets\'))">';
+    h += '<div class="stat-card" style="border:2px solid var(--orange);cursor:pointer;" onclick="showTab(\'swaps\',document.getElementById(\'tab-swaps\'))">';
     h += '<div class="stat-val" style="color:var(--orange);">'+pendingSwaps.length+'</div><div class="stat-lbl">Swap Requests</div></div>';
   }
   var pendingCorr = (ST.corrections||[]).filter(function(c){ return c.status==='pending'; });
@@ -2813,35 +2833,7 @@ function renderTimesheets() {
     h += '</div>';
   }
 
-  // On-call swap requests
-  var swapList = (ST.swapRequests||[]).filter(function(s){
-    return ST.filterEmp === 'All' || s.requester_name === ST.filterEmp;
-  });
-  if (swapList.length) {
-    h += '<div class="card" style="margin-top:16px;"><div class="card-hdr" style="display:flex;align-items:center;justify-content:space-between;">';
-    h += '<div class="card-title">🔄 On-Call Swap Requests</div></div>';
-    h += '<table class="tc-table"><thead><tr><th>Requester</th><th>My Date</th><th>Role</th><th>Trading With</th><th>Their Date</th><th>Reason</th><th>Status</th><th></th></tr></thead><tbody>';
-    swapList.forEach(function(s){
-      var statusBadge = s.status==='pending' ? '<span class="badge badge-warn">Pending</span>' :
-                        s.status==='approved' ? '<span class="badge badge-green">Approved</span>' :
-                        '<span class="badge badge-gray">Dismissed</span>';
-      h += '<tr>';
-      h += '<td><strong>'+s.requester_name+'</strong><div style="font-size:10px;color:var(--muted);">'+(s.market||'')+'</div></td>';
-      h += '<td>'+fmtD(new Date(s.my_date+'T00:00:00'))+'</td>';
-      h += '<td style="font-size:11px;">'+s.my_role+'</td>';
-      h += '<td><strong>'+s.trade_with+'</strong></td>';
-      h += '<td>'+(s.their_date?fmtD(new Date(s.their_date+'T00:00:00')):'-')+'</td>';
-      h += '<td style="font-size:11px;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+s.reason+'</td>';
-      h += '<td>'+statusBadge+'</td>';
-      h += '<td style="display:flex;gap:4px;">';
-      if (s.status === 'pending') {
-        h += '<button class="btn btn-sm" style="background:#2e7d32;color:#fff;border-color:#2e7d32;" onclick="resolveSwap(\''+s.id+'\',\'approved\')">✓ Approve</button>';
-        h += '<button class="btn btn-sm btn-danger" onclick="resolveSwap(\''+s.id+'\',\'dismissed\')">✕</button>';
-      }
-      h += '</td></tr>';
-    });
-    h += '</tbody></table></div>';
-  }
+  // (Swap requests moved to dedicated 🔄 Swaps tab)
 
   // Correction requests
   var corrList = (ST.corrections||[]).filter(function(c){
@@ -2878,20 +2870,388 @@ function renderTimesheets() {
   document.getElementById('tc-body').innerHTML = h;
 }
 
-async function resolveSwap(id, status) {
-  var req = (ST.swapRequests||[]).find(function(s){ return s.id === id; });
-  await fetch(SB_URL + '/rest/v1/oncall_swap_requests?id=eq.' + id, {
-    method: 'PATCH',
-    headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ status: status, reviewed_by: 'Admin', reviewed_at: new Date().toISOString() })
+// ═════════════════════════════════════════════════════════════════════
+// ON-CALL SWAP MODULE — Phase 2 rebuild
+// Replaces the old stub resolveSwap() with a full admin surface:
+// - renderSwaps: dedicated tab with Pending / Approved / Denied / Dismissed filters
+// - _swapApprove: updates status, writes reviewed_by, MUTATES oncall_schedule,
+//                 checks OT risk, inserts notifications
+// - _swapDeny: captures denial reason, notifies requester
+// - _swapDismiss: soft archive without action
+// ═════════════════════════════════════════════════════════════════════
+
+var _swapFilter = { status: 'pending' };
+
+function renderSwaps() {
+  if (!isAdmin()) { document.getElementById('tc-body').innerHTML = '<div class="card"><div class="empty" style="padding:24px;">Admin access required.</div></div>'; return; }
+
+  var list = ST.swapRequests || [];
+  var pending = list.filter(function(s){ return s.status === 'pending'; });
+  var approved = list.filter(function(s){ return s.status === 'approved'; });
+  var denied = list.filter(function(s){ return s.status === 'denied'; });
+  var dismissed = list.filter(function(s){ return s.status === 'dismissed'; });
+
+  var h = '';
+  h += '<div class="card" style="margin-bottom:16px;">';
+  h += '<div class="card-hdr" style="display:flex;align-items:center;justify-content:space-between;">';
+  h += '<div class="card-title">🔄 On-Call Swap Requests</div>';
+  h += '<button class="btn btn-sm" onclick="loadAll()">↻ Refresh</button>';
+  h += '</div>';
+
+  // Filter pills
+  var stages = [
+    { key: 'pending',   label: '⏳ Pending',   n: pending.length,   color: '#e65100' },
+    { key: 'approved',  label: '✓ Approved',  n: approved.length,  color: '#2e7d32' },
+    { key: 'denied',    label: '✗ Denied',    n: denied.length,    color: '#c62828' },
+    { key: 'dismissed', label: '⊗ Dismissed', n: dismissed.length, color: '#6b82a0' },
+    { key: 'all',       label: 'All',          n: list.length,      color: 'var(--navy)' }
+  ];
+  h += '<div style="padding:12px 16px;display:flex;gap:8px;flex-wrap:wrap;">';
+  stages.forEach(function(s){
+    var isActive = _swapFilter.status === s.key;
+    h += '<button onclick="_swapFilter.status=\'' + s.key + '\';renderSwaps();" style="padding:8px 14px;border-radius:8px;border:1.5px solid ' + (isActive ? s.color : 'var(--border)') + ';background:' + (isActive ? 'rgba(0,0,0,.04)' : 'var(--surface)') + ';color:' + (isActive ? s.color : 'var(--muted)') + ';font-size:12px;font-weight:' + (isActive ? '700' : '500') + ';cursor:pointer;font-family:DM Sans,sans-serif;">';
+    h += s.label + ' <span style="opacity:.7;">(' + s.n + ')</span>';
+    h += '</button>';
   });
-  if (status === 'approved' && req) {
-    toast('✓ Swap approved — update the on-call calendar manually');
+  h += '</div>';
+  h += '</div>';
+
+  // Request cards
+  var filtered = _swapFilter.status === 'all' ? list : list.filter(function(s){ return s.status === _swapFilter.status; });
+
+  if (!filtered.length) {
+    h += '<div class="card"><div class="empty" style="padding:40px;text-align:center;color:var(--muted);">No ' + _swapFilter.status + ' swap requests.</div></div>';
   } else {
-    toast('Swap request dismissed');
+    filtered.forEach(function(s){
+      h += _buildSwapCard(s);
+    });
   }
-  await loadAll();
-  renderTimesheets();
+
+  document.getElementById('tc-body').innerHTML = h;
+}
+
+function _buildSwapCard(s) {
+  var statusColor = { pending:'#e65100', approved:'#2e7d32', denied:'#c62828', dismissed:'#6b82a0' }[s.status] || 'var(--muted)';
+  var statusBg = { pending:'rgba(230,81,0,.04)', approved:'rgba(46,125,50,.04)', denied:'rgba(198,40,40,.04)', dismissed:'rgba(107,130,160,.04)' }[s.status] || '#fff';
+  var statusIcon = { pending:'⏳', approved:'✓', denied:'✗', dismissed:'⊗' }[s.status] || '';
+
+  // Determine swap type (trade vs takeover)
+  var isTrade = s.their_date && s.their_date !== s.my_date;
+  var swapType = isTrade ? 'Trade' : 'Takeover';
+
+  // Schedule mismatch check (soft validation)
+  var scheduleMismatch = _swapScheduleMismatch(s);
+
+  // OT risk check for pending requests
+  var otRisk = null;
+  if (s.status === 'pending') otRisk = _swapOTRisk(s);
+
+  var fmtSD = function(iso) {
+    if (!iso) return '—';
+    var d = new Date(iso.indexOf('T') === -1 ? iso+'T12:00:00' : iso);
+    return d.toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric',year:'numeric'});
+  };
+
+  var h = '';
+  h += '<div class="card" style="margin-bottom:12px;background:' + statusBg + ';border-left:3px solid ' + statusColor + ';">';
+  h += '<div style="padding:14px 18px;">';
+
+  // Header row — requester, market, status
+  h += '<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:10px;">';
+  h += '<div>';
+  h += '<div style="font-size:15px;font-weight:700;color:var(--navy);">' + s.requester_name + '</div>';
+  h += '<div style="font-size:11px;color:var(--muted);">' + (s.requester_email || '—') + ' · ' + (s.market || '—') + ' · Submitted ' + fmtSD(s.created_at) + '</div>';
+  h += '</div>';
+  h += '<span style="font-size:11px;font-weight:700;padding:3px 10px;border-radius:5px;background:' + statusColor + ';color:#fff;text-transform:uppercase;letter-spacing:.04em;">' + statusIcon + ' ' + s.status + '</span>';
+  h += '</div>';
+
+  // Swap shape — visual diagram
+  h += '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;background:#fff;border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:10px;">';
+  h += '<div style="flex:1;min-width:180px;">';
+  h += '<div style="font-size:9px;color:var(--muted);font-weight:700;text-transform:uppercase;letter-spacing:.04em;margin-bottom:2px;">Requester gives up</div>';
+  h += '<div style="font-size:13px;font-weight:600;color:var(--navy);">' + fmtSD(s.my_date) + '</div>';
+  h += '<div style="font-size:11px;color:var(--muted);">' + s.my_role + '</div>';
+  h += '</div>';
+  h += '<div style="font-size:18px;color:var(--orange);">' + (isTrade ? '⇄' : '→') + '</div>';
+  h += '<div style="flex:1;min-width:180px;">';
+  h += '<div style="font-size:9px;color:var(--muted);font-weight:700;text-transform:uppercase;letter-spacing:.04em;margin-bottom:2px;">Covered by ' + s.trade_with + (isTrade ? ' (trading)' : ' (takeover)') + '</div>';
+  if (isTrade) {
+    h += '<div style="font-size:13px;font-weight:600;color:var(--navy);">' + fmtSD(s.their_date) + '</div>';
+    h += '<div style="font-size:11px;color:var(--muted);">' + s.my_role + ' (swap)</div>';
+  } else {
+    h += '<div style="font-size:13px;font-weight:600;color:var(--navy);">Same date</div>';
+    h += '<div style="font-size:11px;color:var(--muted);">Nothing given back</div>';
+  }
+  h += '</div>';
+  h += '<span style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:4px;background:' + (isTrade ? 'rgba(21,101,192,.1)' : 'rgba(106,27,154,.1)') + ';color:' + (isTrade ? '#1565c0' : '#6a1b9a') + ';">' + swapType + '</span>';
+  h += '</div>';
+
+  // Reason
+  if (s.reason) {
+    h += '<div style="padding:8px 12px;background:#fff;border:1px solid var(--border);border-radius:6px;margin-bottom:10px;font-size:12px;color:var(--navy);line-height:1.5;">';
+    h += '<span style="font-size:9px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;">Reason:</span> ' + s.reason;
+    h += '</div>';
+  }
+
+  // Flags — schedule mismatch, OT risk
+  var flags = [];
+  if (scheduleMismatch) flags.push({ color:'#c62828', bg:'rgba(198,40,40,.08)', icon:'⚠', text:scheduleMismatch });
+  if (otRisk) flags.push({ color:'#e65100', bg:'rgba(230,81,0,.08)', icon:'⚠', text:otRisk });
+
+  if (flags.length) {
+    h += '<div style="display:flex;flex-direction:column;gap:6px;margin-bottom:10px;">';
+    flags.forEach(function(f){
+      h += '<div style="padding:6px 10px;background:' + f.bg + ';border-left:2px solid ' + f.color + ';border-radius:4px;font-size:11px;color:' + f.color + ';font-weight:600;">' + f.icon + ' ' + f.text + '</div>';
+    });
+    h += '</div>';
+  }
+
+  // Review info for resolved requests
+  if (s.status !== 'pending' && s.reviewed_by) {
+    var verb = { approved: 'Approved', denied: 'Denied', dismissed: 'Dismissed' }[s.status] || 'Reviewed';
+    h += '<div style="font-size:11px;color:var(--muted);margin-bottom:10px;">' + verb + ' by <strong>' + s.reviewed_by + '</strong>' + (s.reviewed_at ? ' on ' + fmtSD(s.reviewed_at) : '') + '</div>';
+  }
+
+  // Action buttons (only for pending)
+  if (s.status === 'pending') {
+    h += '<div style="display:flex;gap:8px;flex-wrap:wrap;">';
+    h += '<button onclick="_swapApprove(\'' + s.id + '\')" style="padding:8px 16px;background:#2e7d32;color:#fff;border:none;border-radius:6px;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit;">✓ Approve</button>';
+    h += '<button onclick="_swapDeny(\'' + s.id + '\')" style="padding:8px 16px;background:#c62828;color:#fff;border:none;border-radius:6px;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit;">✗ Deny</button>';
+    h += '<button onclick="_swapDismiss(\'' + s.id + '\')" style="padding:8px 16px;background:var(--surface);color:var(--muted);border:1.5px solid var(--border);border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;">Dismiss</button>';
+    h += '</div>';
+  }
+
+  h += '</div></div>';
+  return h;
+}
+
+// Check whether the requester is actually on the schedule for the date+role
+// Returns null if no mismatch, or a message string if there is one.
+function _swapScheduleMismatch(s) {
+  if (!s || !s.my_date) return null;
+  var sched = ST.oncallSchedule || {};
+  var period = s.my_date.substring(0,7); // YYYY-MM
+  var locKey = (s.market || '').toLowerCase().replace(/\s+/g,'-');
+  var key = period + '|' + locKey + '|' + s.my_role + '|' + s.my_date;
+  var scheduled = sched[key];
+  if (!scheduled) {
+    return 'Schedule mismatch: no one assigned to ' + s.my_role + ' on ' + s.my_date;
+  }
+  if (scheduled !== s.requester_name) {
+    return 'Schedule mismatch: ' + scheduled + ' is assigned, not ' + s.requester_name;
+  }
+  return null;
+}
+
+// Estimate if approving this swap would push the covering person into OT
+// for the week containing the shift. Uses time_entries data.
+// Returns null if no risk, or a message string.
+function _swapOTRisk(s) {
+  if (!s || !s.my_date || !s.trade_with) return null;
+  try {
+    // Find Mon-Sun week containing my_date
+    var shiftDate = new Date(s.my_date + 'T12:00:00');
+    var dayOfWeek = shiftDate.getDay(); // 0=Sun
+    var mondayOffset = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
+    var weekStart = new Date(shiftDate); weekStart.setDate(shiftDate.getDate() + mondayOffset);
+    weekStart.setHours(0,0,0,0);
+    var weekEnd = new Date(weekStart); weekEnd.setDate(weekStart.getDate() + 7);
+
+    // Sum billable minutes for trade_with that week
+    var totalMins = 0;
+    (ST.entries || []).forEach(function(e){
+      if (e.employee_name !== s.trade_with) return;
+      if (!e.clock_in) return;
+      var d = new Date(e.clock_in);
+      if (d < weekStart || d >= weekEnd) return;
+      var emBreaks = (ST.breaks || []).filter(function(b){ return b.entry_id === e.id; });
+      if (typeof billableMins === 'function') {
+        totalMins += billableMins(e, emBreaks);
+      } else {
+        totalMins += (e.duration_minutes || 0);
+      }
+    });
+
+    // Assume on-call shift adds ~8 hours to their week (conservative)
+    var shiftHoursEstimate = 8;
+    var projectedHours = (totalMins / 60) + shiftHoursEstimate;
+    if (projectedHours > 40) {
+      return 'OT risk: ' + s.trade_with + ' already has ' + (totalMins / 60).toFixed(1) + 'h this week; this swap would push them to ~' + projectedHours.toFixed(1) + 'h.';
+    }
+  } catch(e) {}
+  return null;
+}
+
+// Approve a swap — updates status, mutates oncall_schedule, notifies
+async function _swapApprove(swapId) {
+  var s = (ST.swapRequests || []).find(function(x){ return x.id === swapId; });
+  if (!s) { toast('Swap not found'); return; }
+
+  // OT warning gate
+  var otRisk = _swapOTRisk(s);
+  if (otRisk) {
+    if (!confirm(otRisk + '\n\nApprove anyway?')) return;
+  }
+
+  try {
+    // 1. Update the swap request row
+    var nowIso = new Date().toISOString();
+    var approver = (typeof getApprovedBy === 'function') ? getApprovedBy() : 'Admin';
+    var patchR = await fetch(SB_URL + '/rest/v1/oncall_swap_requests?id=eq.' + swapId, {
+      method: 'PATCH',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'approved', reviewed_by: approver, reviewed_at: nowIso })
+    });
+    if (!patchR.ok) throw new Error('Could not update swap status');
+
+    // 2. Mutate oncall_schedule JSONB — replace requester with trade_with for my_date
+    //    If it's a trade, also replace trade_with with requester for their_date
+    var sched = Object.assign({}, ST.oncallSchedule || {});
+    var locKey = (s.market || '').toLowerCase().replace(/\s+/g, '-');
+    var myPeriod = s.my_date.substring(0,7);
+    var myKey = myPeriod + '|' + locKey + '|' + s.my_role + '|' + s.my_date;
+    sched[myKey] = s.trade_with;
+    sched[myKey + '|override'] = '1';  // matches existing breadcrumb pattern in your data
+
+    var isTrade = s.their_date && s.their_date !== s.my_date;
+    if (isTrade) {
+      var theirPeriod = s.their_date.substring(0,7);
+      var theirKey = theirPeriod + '|' + locKey + '|' + s.my_role + '|' + s.their_date;
+      sched[theirKey] = s.requester_name;
+      sched[theirKey + '|override'] = '1';
+    }
+
+    var schedR = await fetch(SB_URL + '/rest/v1/oncall_schedule?id=eq.current', {
+      method: 'PATCH',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ data: sched, updated_at: nowIso })
+    });
+    if (!schedR.ok) console.warn('Schedule write returned non-OK; swap still approved');
+
+    ST.oncallSchedule = sched;
+
+    // 3. Fire notifications — requester (their request was approved)
+    //    and covering person (heads-up they're now on the schedule)
+    var notifs = [
+      {
+        recipient_email: s.requester_email || '',
+        recipient_name: s.requester_name,
+        message: 'Your on-call swap request for ' + s.my_date + ' (' + s.my_role + ') was approved by ' + approver + '. ' + s.trade_with + ' will cover.',
+        swap_id: swapId,
+        status: 'approved',
+        read: false
+      }
+    ];
+    // If we can resolve an email for the covering person, notify them too.
+    // Free-form names mean we can't always do this — fall back to best-effort name lookup in employees table
+    var coveringEmail = null;
+    try {
+      var match = (ST.employees || []).find(function(e){ return e.name === s.trade_with; });
+      if (match && match.email) coveringEmail = match.email;
+    } catch(e) {}
+    if (coveringEmail) {
+      notifs.push({
+        recipient_email: coveringEmail,
+        recipient_name: s.trade_with,
+        message: 'You have been assigned to cover on-call on ' + s.my_date + ' (' + s.my_role + ') — swap from ' + s.requester_name + ' was approved.',
+        swap_id: swapId,
+        status: 'approved',
+        read: false
+      });
+    }
+    for (var i = 0; i < notifs.length; i++) {
+      try {
+        await fetch(SB_URL + '/rest/v1/oncall_notifications', {
+          method: 'POST',
+          headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
+          body: JSON.stringify(notifs[i])
+        });
+      } catch(e) { console.warn('Notification insert failed:', e); }
+    }
+
+    if (typeof logActivity === 'function') {
+      logActivity('Swap Approved', s.requester_name + ' → ' + s.trade_with + ' · ' + s.my_date + ' · ' + s.my_role, 'on_call', s.requester_name);
+    }
+    toast('✓ Swap approved and schedule updated');
+    await loadAll();
+    if (ST.tab === 'swaps') renderSwaps();
+  } catch(e) {
+    toast('Approval failed: ' + e.message);
+  }
+}
+
+async function _swapDeny(swapId) {
+  var s = (ST.swapRequests || []).find(function(x){ return x.id === swapId; });
+  if (!s) { toast('Swap not found'); return; }
+
+  var reason = prompt('Reason for denial (required — this will be sent to the requester):');
+  if (reason === null) return;
+  reason = reason.trim();
+  if (!reason) { toast('A denial reason is required'); return; }
+
+  try {
+    var nowIso = new Date().toISOString();
+    var approver = (typeof getApprovedBy === 'function') ? getApprovedBy() : 'Admin';
+    var patchR = await fetch(SB_URL + '/rest/v1/oncall_swap_requests?id=eq.' + swapId, {
+      method: 'PATCH',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'denied', reviewed_by: approver, reviewed_at: nowIso })
+    });
+    if (!patchR.ok) throw new Error('Could not update swap status');
+
+    // Notify requester with denial reason
+    try {
+      await fetch(SB_URL + '/rest/v1/oncall_notifications', {
+        method: 'POST',
+        headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
+        body: JSON.stringify({
+          recipient_email: s.requester_email || '',
+          recipient_name: s.requester_name,
+          message: 'Your on-call swap request for ' + s.my_date + ' was denied. Reason: ' + reason,
+          swap_id: swapId,
+          status: 'denied',
+          read: false
+        })
+      });
+    } catch(e) { console.warn('Notification insert failed:', e); }
+
+    if (typeof logActivity === 'function') {
+      logActivity('Swap Denied', s.requester_name + ' · ' + s.my_date + ' · reason: ' + reason, 'on_call', s.requester_name);
+    }
+    toast('Swap denied');
+    await loadAll();
+    if (ST.tab === 'swaps') renderSwaps();
+  } catch(e) {
+    toast('Denial failed: ' + e.message);
+  }
+}
+
+async function _swapDismiss(swapId) {
+  var s = (ST.swapRequests || []).find(function(x){ return x.id === swapId; });
+  if (!s) { toast('Swap not found'); return; }
+  if (!confirm('Dismiss this swap request? (Use this for tests, duplicates, or requests that no longer apply. No notification will be sent.)')) return;
+
+  try {
+    var nowIso = new Date().toISOString();
+    var approver = (typeof getApprovedBy === 'function') ? getApprovedBy() : 'Admin';
+    await fetch(SB_URL + '/rest/v1/oncall_swap_requests?id=eq.' + swapId, {
+      method: 'PATCH',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'dismissed', reviewed_by: approver, reviewed_at: nowIso })
+    });
+    toast('Swap dismissed');
+    await loadAll();
+    if (ST.tab === 'swaps') renderSwaps();
+  } catch(e) {
+    toast('Dismiss failed: ' + e.message);
+  }
+}
+
+// Legacy — keep as no-op in case anything still calls it
+async function resolveSwap(id, status) {
+  if (status === 'approved') return _swapApprove(id);
+  if (status === 'denied') return _swapDeny(id);
+  return _swapDismiss(id);
 }
 
 async function resolveCorrection(corrId, status, entryId) {
