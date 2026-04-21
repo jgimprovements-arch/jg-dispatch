@@ -1154,6 +1154,33 @@ async function initApp(u) {
   document.getElementById('dd-name').textContent = u.name;
   document.getElementById('dd-email').textContent = u.email;
 
+  // Instant restore: show cached clock state while we fetch fresh data
+  try {
+    var cached = JSON.parse(localStorage.getItem('jg_tc_clock_state') || 'null');
+    if (cached && (Date.now() - cached.ts) < 86400000) { // valid for 24 hours
+      var dot = document.getElementById('status-dot');
+      var label = document.getElementById('status-label');
+      var btn = document.getElementById('main-btn');
+      var breakRow = document.getElementById('break-row');
+      var durationEl = document.getElementById('duration-display');
+      var jobBadge = document.getElementById('job-badge');
+      if (cached.isSalary) {
+        if (dot) dot.className = 'clock-status-dot in';
+        if (label) { label.textContent = 'Salaried'; label.style.color = '#1565c0'; }
+        if (durationEl) { durationEl.textContent = '8h / day auto-logged'; durationEl.style.display = 'block'; durationEl.style.background = 'rgba(21,101,192,.08)'; durationEl.style.color = '#1565c0'; }
+        if (btn) { btn.className = 'clock-btn'; btn.style.cssText = 'background:linear-gradient(145deg,#1565c0,#0d47a1);color:#fff;box-shadow:0 4px 16px rgba(21,101,192,.3);width:100%;height:auto;border-radius:12px;padding:14px 20px;display:flex;flex-direction:row;gap:8px;align-items:center;justify-content:center;font-family:DM Sans,sans-serif;border:none;cursor:pointer;'; btn.innerHTML = '<span style="font-size:16px;">📋</span><span style="font-size:13px;font-weight:700;">Track a Specific Job (Optional)</span>'; }
+        if (breakRow) breakRow.style.display = 'none';
+      } else if (cached.clockedIn) {
+        if (dot) dot.className = 'clock-status-dot in';
+        if (label) label.textContent = cached.onBreak ? 'On Break' : 'Clocked In';
+        if (btn) { btn.className = 'clock-btn btn-out'; btn.innerHTML = '<span class="clock-btn-icon">■</span><span class="clock-btn-label">CLOCK OUT</span>'; }
+        if (breakRow) breakRow.style.display = 'flex';
+        if (durationEl) durationEl.style.display = 'block';
+        if (cached.jobName && jobBadge) { jobBadge.style.display = 'block'; jobBadge.textContent = '📋 ' + cached.jobName; }
+      }
+    }
+  } catch(e) {}
+
  // Lookup employee record — direct fetch for reliability
   TC.employee = { name: u.name, email: u.email }; // bare fallback
   try {
@@ -1680,6 +1707,18 @@ function renderStatus() {
     durationEl.style.display = 'none';
     jobBadge.style.display = 'none';
   }
+
+  // Cache clock state for instant restore on next page load
+  try {
+    localStorage.setItem('jg_tc_clock_state', JSON.stringify({
+      clockedIn: TC.clockedIn,
+      onBreak: TC.onBreak,
+      jobName: TC.selectedJobName || '',
+      clockInTime: TC.clockInTime || null,
+      isSalary: TC.employee && TC.employee.pay_type === 'salary',
+      ts: Date.now()
+    }));
+  } catch(e) {}
 }
 
 function renderJobs() {
