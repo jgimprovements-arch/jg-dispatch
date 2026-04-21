@@ -54,6 +54,7 @@
   // ── STATE ────────────────────────────────
   var D = {
     state: null,              // full board_state.state
+    poolLimits: {},           // per-market pagination: how many unassigned jobs to show
     employees: [],            // all active employees
     loading: false,
     error: null,
@@ -156,8 +157,11 @@
     // single scroller (position:fixed, overflow-y:auto, inset:0). Nesting a
     // second scroller causes Android to route all touch to the outer container.
     // Let the pool expand naturally and rely on the panel scroll instead.
-    '.tcd-pool-body{padding:4px 0;max-height:225px;overflow-y:auto;-webkit-overflow-scrolling:touch;}',
+    '.tcd-pool-body{padding:4px 0;}',
     '.tcd-pool-body.drag-over{background:rgba(232,93,4,.08);}',
+    '.tcd-pool-more{width:calc(100% - 16px);margin:6px 8px;padding:10px;background:rgba(232,93,4,.08);border:1px dashed rgba(232,93,4,.4);border-radius:8px;color:#e85d04;font-size:12px;font-weight:700;cursor:pointer;font-family:"DM Mono",monospace;text-transform:uppercase;letter-spacing:.04em;}',
+    '.tcd-pool-more:hover{background:rgba(232,93,4,.14);}',
+    '.tcd-pool-more:active{transform:scale(.98);}',
 
     /* Reassign modal */
     '#tcd-reassign-modal{position:fixed;inset:0;background:rgba(13,29,60,.7);z-index:600;display:none;align-items:flex-end;justify-content:center;}',
@@ -609,7 +613,13 @@
         });
       }
     } else {
-      filteredUnassigned.forEach(function(jid) {
+      // Pagination: show first N jobs, then a "Show more" button.
+      // Scroll containers don't play nice with the outer fixed-panel on Android,
+      // so we paginate instead — more reliable, cleaner UX on mobile.
+      var POOL_PAGE_SIZE = 5;
+      var poolLimit = D.poolLimits && D.poolLimits[m] ? D.poolLimits[m] : POOL_PAGE_SIZE;
+      var visible = filteredUnassigned.slice(0, poolLimit);
+      visible.forEach(function(jid) {
         var name = D.state.jobNames[jid] || jid;
         html += '<div class="tcd-job" data-job-id="' + esc(jid) + '" data-from-pool="1">';
         html += '<span class="tcd-job-handle">⠿</span>';
@@ -617,6 +627,16 @@
         html += '<button class="tcd-job-reassign" onclick="TCDispatch._open(\'' + m + '\',\'' + esc(jid).replace(/'/g,"\\'") + '\')">Assign</button>';
         html += '</div>';
       });
+      // "Show more" / "Show less" toggle if there are more jobs than shown
+      var totalFiltered = filteredUnassigned.length;
+      if (totalFiltered > POOL_PAGE_SIZE) {
+        var remaining = totalFiltered - poolLimit;
+        if (remaining > 0) {
+          html += '<button class="tcd-pool-more" onclick="TCDispatch._poolMore(\'' + m + '\')">▼ Show ' + remaining + ' more</button>';
+        } else {
+          html += '<button class="tcd-pool-more" onclick="TCDispatch._poolLess(\'' + m + '\')">▲ Show less</button>';
+        }
+      }
     }
     html += '</div></div>';
 
@@ -671,29 +691,6 @@
     }
 
     body.innerHTML = html;
-    // Scroll isolation: prevent touches inside the pool body from bubbling
-    // up to the outer panel (#tc-dispatch-panel), which would cause the whole
-    // page to scroll instead of the pool list. We intercept touchmove on the
-    // pool body and call stopPropagation so the panel never sees it.
-    body.querySelectorAll('.tcd-pool-body').forEach(function(pb) {
-      pb.addEventListener('touchstart', function(e) {
-        // Record scroll position at touch start so we can detect direction
-        pb._touchStartY = e.touches[0].clientY;
-        pb._scrollTop = pb.scrollTop;
-      }, { passive: true });
-      pb.addEventListener('touchmove', function(e) {
-        var dy = e.touches[0].clientY - (pb._touchStartY || 0);
-        var atTop = pb.scrollTop === 0;
-        var atBottom = pb.scrollTop + pb.clientHeight >= pb.scrollHeight - 1;
-        // Only stop propagation when the pool can absorb the scroll:
-        // — scrolling down and not at bottom
-        // — scrolling up and not at top
-        if ((!atBottom && dy < 0) || (!atTop && dy > 0)) {
-          e.stopPropagation();
-        }
-      }, { passive: true });
-    });
-
     // Keep focus in the search input if it was being typed in
     if (D._searchFocused) {
       var searchEl = document.getElementById('tcd-search');
@@ -791,6 +788,17 @@
       if (el) el.classList.remove('open');
     },
     refresh: load,
+    _poolMore: function(m) {
+      D.poolLimits = D.poolLimits || {};
+      var current = D.poolLimits[m] || 5;
+      D.poolLimits[m] = current + 10;  // reveal 10 more at a time
+      render();
+    },
+    _poolLess: function(m) {
+      D.poolLimits = D.poolLimits || {};
+      D.poolLimits[m] = 5;
+      render();
+    },
     _setMarket: function(m) { D.market = m; D.searchQuery=''; D.albiResults=null; render(); },
     _open: openReassign,
     _pick: pick,
