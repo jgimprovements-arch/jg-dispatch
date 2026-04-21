@@ -54,6 +54,7 @@
   // ── STATE ────────────────────────────────
   var D = {
     state: null,              // full board_state.state
+    poolLimits: {},           // per-market pagination: how many unassigned jobs to show
     employees: [],            // all active employees
     loading: false,
     error: null,
@@ -92,8 +93,6 @@
     '.tcd-stat-lbl{font-size:9px;color:#6b7a96;text-transform:uppercase;letter-spacing:.05em;margin-top:3px;font-family:"DM Mono",monospace;font-weight:600;}',
     '.tcd-empty{text-align:center;padding:40px 20px;color:#6b7a96;font-size:13px;}',
     '.tcd-refresh{font-size:10px;color:#6b7a96;font-family:"DM Mono",monospace;}',
-
-    /* Tech-read view */
     '.tcd-mylane{background:#fff;border-radius:10px;box-shadow:0 1px 3px rgba(13,45,94,.08);overflow:hidden;margin-bottom:12px;}',
     '.tcd-mylane-head{background:#0d2d5e;color:#fff;padding:12px 14px;display:flex;align-items:center;justify-content:space-between;}',
     '.tcd-mylane-name{font-size:13px;font-weight:700;}',
@@ -110,8 +109,6 @@
     '.tcd-myjob-btn{background:#e85d04;color:#fff;border:none;padding:6px 10px;border-radius:6px;font-size:11px;font-weight:700;cursor:pointer;white-space:nowrap;}',
     '.tcd-myjob-btn:disabled{background:#a0abbf;cursor:default;}',
     '.tcd-myjob-active-tag{font-size:9px;color:#2e7d32;font-weight:700;text-transform:uppercase;letter-spacing:.06em;font-family:"DM Mono",monospace;background:rgba(46,125,50,.12);padding:3px 8px;border-radius:4px;align-self:center;}',
-
-    /* PM edit view */
     '.tcd-lane{background:#fff;border-radius:10px;margin-bottom:10px;overflow:hidden;box-shadow:0 1px 3px rgba(13,45,94,.05);}',
     '.tcd-lane.me{border:2px solid #e85d04;}',
     '.tcd-lane.pm{border-left:4px solid #1565c0;}',
@@ -129,14 +126,12 @@
     '.tcd-lane-body.empty{padding:16px;text-align:center;font-size:11px;color:#a0abbf;font-style:italic;}',
     '.tcd-lane-body.drag-over{background:rgba(232,93,4,.06);}',
     '.tcd-job{padding:10px 12px;border-bottom:1px solid rgba(13,45,94,.05);display:flex;align-items:center;gap:8px;cursor:grab;user-select:none;-webkit-user-select:none;touch-action:none;}',
-
     '.tcd-job:last-child{border-bottom:none;}',
     '.tcd-job.dragging{opacity:.4;}',
     '.tcd-job-name{font-size:12px;font-weight:600;color:#0d1f3c;flex:1;word-break:break-word;min-width:0;}',
     '.tcd-job-handle{color:#a0abbf;font-size:14px;cursor:grab;flex-shrink:0;}',
     '.tcd-job-reassign{background:none;border:1px solid rgba(13,45,94,.2);color:#0d2d5e;padding:4px 8px;border-radius:5px;font-size:10px;cursor:pointer;font-weight:700;flex-shrink:0;}',
     '.tcd-job-reassign:hover{background:#0d2d5e;color:#fff;}',
-    /* Pool search */
     '.tcd-search-wrap{position:relative;padding:8px 12px 4px;}',
     '.tcd-search-input{width:100%;padding:10px 32px 10px 12px;font-size:14px;border:1px solid rgba(13,45,94,.15);border-radius:8px;background:#fff;color:#0d2d5e;font-family:"DM Sans",sans-serif;box-sizing:border-box;}',
     '.tcd-search-input:focus{outline:none;border-color:#e85d04;box-shadow:0 0 0 2px rgba(232,93,4,.15);}',
@@ -147,19 +142,14 @@
     '.tcd-job-albi{background:rgba(21,101,192,.04);border-left:3px solid #1565c0;}',
     '.tcd-job-albi .tcd-job-handle{color:#1565c0;font-weight:700;}',
     '.tcd-job-albi .tcd-job-reassign{background:#1565c0;color:#fff;border-color:#1565c0;}',
-
-    /* Unassigned pool */
     '.tcd-pool{background:#fff;border:2px dashed rgba(232,93,4,.4);border-radius:10px;margin-bottom:10px;}',
     '.tcd-pool-head{padding:10px 12px;display:flex;align-items:center;justify-content:space-between;background:rgba(232,93,4,.06);border-radius:8px 8px 0 0;}',
     '.tcd-pool-title{font-size:11px;font-weight:700;color:#e85d04;text-transform:uppercase;letter-spacing:.05em;font-family:"DM Mono",monospace;}',
-    // Pool body: no max-height. The outer panel (#tc-dispatch-panel) is the
-    // single scroller (position:fixed, overflow-y:auto, inset:0). Nesting a
-    // second scroller causes Android to route all touch to the outer container.
-    // Let the pool expand naturally and rely on the panel scroll instead.
-    '.tcd-pool-body{padding:4px 0;max-height:225px;overflow-y:auto;-webkit-overflow-scrolling:touch;}',
+    '.tcd-pool-body{padding:4px 0;}',
     '.tcd-pool-body.drag-over{background:rgba(232,93,4,.08);}',
-
-    /* Reassign modal */
+    '.tcd-pool-more{width:calc(100% - 16px);margin:6px 8px;padding:10px;background:rgba(232,93,4,.08);border:1px dashed rgba(232,93,4,.4);border-radius:8px;color:#e85d04;font-size:12px;font-weight:700;cursor:pointer;font-family:"DM Mono",monospace;text-transform:uppercase;letter-spacing:.04em;}',
+    '.tcd-pool-more:hover{background:rgba(232,93,4,.14);}',
+    '.tcd-pool-more:active{transform:scale(.98);}',
     '#tcd-reassign-modal{position:fixed;inset:0;background:rgba(13,29,60,.7);z-index:600;display:none;align-items:flex-end;justify-content:center;}',
     '#tcd-reassign-modal.open{display:flex;}',
     '.tcd-ra-sheet{background:#fff;border-radius:16px 16px 0 0;width:100%;max-width:520px;max-height:70vh;overflow-y:auto;padding:16px;padding-bottom:32px;animation:tcdSlideUp .18s ease-out;}',
@@ -172,23 +162,16 @@
     '.tcd-ra-info{flex:1;min-width:0;}',
     '.tcd-ra-name{font-size:13px;font-weight:600;}',
     '.tcd-ra-meta{font-size:10px;color:#6b7a96;font-family:"DM Mono",monospace;}',
-
-    /* Toast */
     '#tcd-toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#0d2d5e;color:#fff;padding:10px 16px;border-radius:8px;font-size:12px;z-index:1000;display:none;box-shadow:0 8px 24px rgba(0,0,0,.2);}',
     '#tcd-toast.show{display:block;animation:tcdFade .2s ease-out;}',
     '@keyframes tcdFade{from{opacity:0;transform:translate(-50%,4px)}to{opacity:1;transform:translate(-50%,0)}}',
-
-    /* Entry button in main UI */
     '#tcd-entry-btn{background:#0d2d5e;color:#fff;border:none;padding:10px 14px;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:8px;width:100%;margin-top:10px;box-shadow:0 2px 6px rgba(13,45,94,.15);}',
     '#tcd-entry-btn:hover{background:#081d40;}',
     '#tcd-entry-btn .dot{width:6px;height:6px;border-radius:50%;background:#4cdb7a;animation:tcdPulse 2s infinite;}',
     '@keyframes tcdPulse{0%,100%{opacity:1}50%{opacity:.4}}',
-
-    /* Large screen */
     '@media (min-width:768px){#tc-dispatch-panel{border-radius:14px;height:auto;max-height:90vh;margin-top:24px;margin-bottom:24px;}#tc-dispatch-head{border-radius:14px 14px 0 0;}}'
   ].join('\n');
 
-  // ── HELPERS ──────────────────────────────
   function initials(n) { return (n || '?').split(' ').map(function(w){return w[0];}).join('').toUpperCase().slice(0,2); }
   function esc(s) { return String(s || '').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
   function marketLabel(k) { return k === 'appleton' ? 'Appleton' : k === 'stevens' ? 'Stevens Point' : k; }
@@ -201,15 +184,12 @@
     toast._t = setTimeout(function() { t.classList.remove('show'); }, 2200);
   }
 
-  // ── INJECT ───────────────────────────────
   function inject() {
     if (document.getElementById('tc-dispatch-css')) return;
-
     var style = document.createElement('style');
     style.id = 'tc-dispatch-css';
     style.textContent = CSS;
     document.head.appendChild(style);
-
     var overlay = document.createElement('div');
     overlay.id = 'tc-dispatch-overlay';
     overlay.innerHTML = [
@@ -232,24 +212,19 @@
       '</div>'
     ].join('');
     document.body.appendChild(overlay);
-
     var toastEl = document.createElement('div');
     toastEl.id = 'tcd-toast';
     document.body.appendChild(toastEl);
-
     var reassign = document.createElement('div');
     reassign.id = 'tcd-reassign-modal';
     reassign.innerHTML = '<div class="tcd-ra-sheet" id="tcd-ra-sheet"></div>';
     reassign.onclick = function(e) { if (e.target === reassign) closeReassign(); };
     document.body.appendChild(reassign);
-
-    // Inject entry button after the clock card
     insertEntryButton();
   }
 
   function insertEntryButton() {
     if (document.getElementById('tcd-entry-btn')) return;
-    // Find the clock-card and insert button after it
     var card = document.querySelector('.clock-card');
     if (!card) { setTimeout(insertEntryButton, 400); return; }
     var btn = document.createElement('button');
@@ -259,17 +234,13 @@
     card.parentNode.insertBefore(btn, card.nextSibling);
   }
 
-  // ── LOAD DATA ────────────────────────────
   async function load() {
     D.loading = true;
     render();
-
     try {
       var bs = await window.sb('/rest/v1/board_state?id=eq.current&select=state,updated_at');
       D.state = (bs && bs[0] && bs[0].state) ? bs[0].state : { jobNames: {}, assignments: { appleton:{}, stevens:{} }, unassigned: { appleton:[], stevens:[] } };
       D.lastLoad = (bs && bs[0] && bs[0].updated_at) ? new Date(bs[0].updated_at) : new Date();
-
-      // Normalize shape
       D.state.jobNames = D.state.jobNames || {};
       D.state.assignments = D.state.assignments || {};
       D.state.unassigned = D.state.unassigned || {};
@@ -277,40 +248,35 @@
         D.state.assignments[m] = D.state.assignments[m] || {};
         D.state.unassigned[m] = D.state.unassigned[m] || [];
       });
-
-      // For PMs/Admins, pull the employee roster
-      // Filter: active, dispatch-eligible role, and not opted out via show_on_dispatch=false
       if (canEdit()) {
-        // HOTFIX banner — tell editors the PWA dispatch is read-only right now
-        try { toast('⚠ Mobile dispatch is read-only. Make changes on the desktop portal.'); } catch(e) {}
         var emp = await window.sb('/rest/v1/employees?active=eq.true&role=in.(Technician,%22Project%20Manager%22,Admin)&or=(show_on_dispatch.is.null,show_on_dispatch.eq.true)&select=id,name,role,market,show_on_dispatch,email');
-        // Extra client-side guard: exclude Admins unless they're the owner (Josh)
         D.employees = (emp || []).filter(function(e){
           if (e.role !== 'Admin') return true;
           var k = (e.name||'').toLowerCase();
           return k.indexOf('josh') !== -1 && k.indexOf('greil') !== -1;
         });
       }
-
       D.error = null;
     } catch (err) {
       D.error = err.message || 'Load failed';
     }
-
     D.loading = false;
     render();
   }
 
   async function saveState() {
-    // HOTFIX 2026-04-21: tc-dispatch.js temporarily blocked from writing board_state.
-    // Root cause: stale D.state on the PWA overwrites the shared board blob, wiping
-    // assignments made from index.html. Full fix (Option A: per-row dispatch_assignments
-    // table) is in progress. Until then, PWA is read-only to prevent data loss.
-    console.warn('[tc-dispatch] saveState suppressed — use desktop dispatch board.');
-    return false;
+    try {
+      var r = await window.sb('/rest/v1/board_state?id=eq.current', {
+        method: 'PATCH',
+        headers: { 'Prefer': 'return=minimal' },
+        body: JSON.stringify({ state: D.state, updated_at: new Date().toISOString() })
+      });
+      return r !== null;
+    } catch (e) {
+      return false;
+    }
   }
 
-  // ── ACTIONS ──────────────────────────────
   function findJobTech(market, jobId) {
     var a = D.state.assignments[market] || {};
     var techs = Object.keys(a);
@@ -321,46 +287,38 @@
   }
 
   async function moveJob(market, jobId, toTech) {
-    // Remove from current location
     var a = D.state.assignments[market];
     Object.keys(a).forEach(function(t) {
       a[t] = (a[t] || []).filter(function(id) { return id !== jobId; });
     });
     D.state.unassigned[market] = (D.state.unassigned[market] || []).filter(function(id) { return id !== jobId; });
-
-    // Insert at destination
     if (toTech === '__unassigned__') {
       D.state.unassigned[market].push(jobId);
     } else {
       a[toTech] = a[toTech] || [];
       a[toTech].push(jobId);
     }
-
     var ok = await saveState();
-    toast(ok ? '✓ Reassigned' : '⚠ Dispatch editing paused — use desktop portal');
+    toast(ok ? '✓ Reassigned' : '⚠ Save failed — refresh to retry');
     render();
     return ok;
   }
 
-  // ── REASSIGN MODAL ───────────────────────
   var pendingReassign = null;
   function openReassign(market, jobId) {
     pendingReassign = { market: market, jobId: jobId };
     var sheet = document.getElementById('tcd-ra-sheet');
     var jobName = D.state.jobNames[jobId] || jobId;
     var curTech = findJobTech(market, jobId);
-
     var techs = techsForMarket(market);
     var html = '<div class="tcd-ra-title">Reassign <span style="color:#e85d04">' + esc(jobName) + '</span></div>';
     html += '<div class="tcd-ra-sub">Currently: ' + (curTech ? esc(curTech) : 'Unassigned') + '</div>';
-
     if (curTech) {
       html += '<button class="tcd-ra-option pool" onclick="TCDispatch._pick(\'__unassigned__\')">';
       html += '<div class="tcd-ra-avatar" style="background:#e85d04">+</div>';
       html += '<div class="tcd-ra-info"><div class="tcd-ra-name">Move to Unassigned Pool</div><div class="tcd-ra-meta">Job returns to pool for later pickup</div></div>';
       html += '</button>';
     }
-
     techs.forEach(function(t) {
       if (t === curTech) return;
       var jobCount = (D.state.assignments[market][t] || []).length;
@@ -369,7 +327,6 @@
       html += '<div class="tcd-ra-info"><div class="tcd-ra-name">' + esc(t) + '</div><div class="tcd-ra-meta">' + jobCount + ' job' + (jobCount===1?'':'s') + ' today</div></div>';
       html += '</button>';
     });
-
     sheet.innerHTML = html;
     document.getElementById('tcd-reassign-modal').classList.add('open');
   }
@@ -387,9 +344,6 @@
   }
 
   function techsForMarket(market) {
-    // Derive tech list: employees in that market + any tech currently in the board_state
-    // Only include board_state names that also exist in our filtered D.employees
-    // (otherwise an opted-out employee would still appear via their saved lane)
     var mLabel = marketEmp(market);
     var empNames = {};
     D.employees.forEach(function(e){ if (e.name) empNames[e.name] = true; });
@@ -400,7 +354,6 @@
     return all.filter(function(n) { if (seen[n]) return false; seen[n] = true; return true; }).sort();
   }
 
-  // Look up an employee's role by name (case-insensitive). Defaults to 'Technician' if unknown.
   function roleForName(name) {
     if (!name || !D.employees || !D.employees.length) return 'Technician';
     var k = name.toLowerCase().trim();
@@ -408,9 +361,7 @@
     return match && match.role ? match.role : 'Technician';
   }
 
-  // ── RENDER ───────────────────────────────
   function render() {
-    // Role badge + subtitle
     var badge = document.getElementById('tcd-role-badge');
     var sub = document.getElementById('tcd-subtitle');
     if (badge) {
@@ -423,11 +374,9 @@
       else if (D.lastLoad) sub.textContent = 'synced ' + D.lastLoad.toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'});
       else sub.textContent = '';
     }
-
     var body = document.getElementById('tc-dispatch-body');
     var tabs = document.getElementById('tc-dispatch-tabs');
     if (!body) return;
-
     if (D.loading) {
       body.innerHTML = '<div class="tcd-empty">Loading board&hellip;</div>';
       tabs.innerHTML = '';
@@ -442,7 +391,6 @@
       body.innerHTML = '<div class="tcd-empty">No dispatch data yet.</div>';
       return;
     }
-
     if (canEdit()) {
       renderEditView(body, tabs);
     } else {
@@ -450,13 +398,10 @@
     }
   }
 
-  // ── TECH READ-ONLY VIEW ──────────────────
   function renderTechView(body, tabs) {
     tabs.innerHTML = '';
     var first = myFirst();
     var me = myName();
-
-    // Find my jobs across both markets
     var myJobs = [];
     var myMarket = '';
     ['appleton','stevens'].forEach(function(m) {
@@ -471,23 +416,19 @@
         }
       });
     });
-
     var activeJobId = window.TC.activeEntry ? window.TC.activeEntry.job_id : null;
     var selectedId = window.TC.selectedJobId;
-
     var html = '';
     html += '<div class="tcd-stats">';
     html += '<div class="tcd-stat"><div class="tcd-stat-val">' + myJobs.length + '</div><div class="tcd-stat-lbl">My Jobs</div></div>';
     html += '<div class="tcd-stat"><div class="tcd-stat-val">' + (activeJobId ? '1' : '0') + '</div><div class="tcd-stat-lbl">Active</div></div>';
     html += '<div class="tcd-stat"><div class="tcd-stat-val">' + (myMarket || '—') + '</div><div class="tcd-stat-lbl">Market</div></div>';
     html += '</div>';
-
     if (!myJobs.length) {
       html += '<div class="tcd-empty">You don\'t have any jobs assigned right now.<br><br>Ask your dispatcher if this looks wrong.</div>';
       body.innerHTML = html;
       return;
     }
-
     html += '<div class="tcd-mylane">';
     html += '<div class="tcd-mylane-head"><div><div class="tcd-mylane-name">' + esc(me || 'You') + '</div><div class="tcd-mylane-meta">' + (myMarket || '') + ' · ' + myJobs.length + ' job' + (myJobs.length===1?'':'s') + '</div></div>';
     html += '<span style="font-size:9px;color:rgba(255,255,255,.65);font-family:\'DM Mono\',monospace;">TODAY</span>';
@@ -510,7 +451,6 @@
       html += '</div>';
     });
     html += '</div></div>';
-
     body.innerHTML = html;
   }
 
@@ -525,22 +465,17 @@
     render();
   }
 
-  // ── PM EDIT VIEW ─────────────────────────
   function renderEditView(body, tabs) {
-    // Market tabs
     var markets = ['appleton','stevens'];
     tabs.innerHTML = markets.map(function(m) {
       return '<button class="tcd-tab' + (D.market === m ? ' active' : '') + '" onclick="TCDispatch._setMarket(\'' + m + '\')">' + marketLabel(m) + '</button>';
     }).join('');
-
     var m = D.market;
     var assignments = D.state.assignments[m] || {};
     var unassigned = D.state.unassigned[m] || [];
     var techs = techsForMarket(m);
-
     var totalJobs = Object.keys(assignments).reduce(function(n, t) { return n + (assignments[t] || []).length; }, 0) + unassigned.length;
     var assignedJobs = totalJobs - unassigned.length;
-
     var html = '';
     html += '<div class="tcd-stats">';
     html += '<div class="tcd-stat"><div class="tcd-stat-val">' + totalJobs + '</div><div class="tcd-stat-lbl">Total</div></div>';
@@ -548,8 +483,6 @@
     html += '<div class="tcd-stat"><div class="tcd-stat-val" style="color:#c02020">' + unassigned.length + '</div><div class="tcd-stat-lbl">Unassigned</div></div>';
     html += '<div class="tcd-stat"><div class="tcd-stat-val">' + techs.length + '</div><div class="tcd-stat-lbl">Techs</div></div>';
     html += '</div>';
-
-    // Unassigned pool with search
     var q = (D.searchQuery || '').toLowerCase().trim();
     var filteredUnassigned = unassigned;
     if (q) {
@@ -558,23 +491,19 @@
         return name.indexOf(q) !== -1 || String(jid).toLowerCase().indexOf(q) !== -1;
       });
     }
-
     html += '<div class="tcd-pool">';
     html += '<div class="tcd-pool-head">';
     html += '<span class="tcd-pool-title">🚨 Unassigned · ' + unassigned.length + '</span>';
     html += (unassigned.length && !q ? '<span style="font-size:10px;color:#6b7a96;">Tap to assign</span>' : '');
     html += '</div>';
-    // Search input
     html += '<div class="tcd-search-wrap">';
     html += '<input type="text" class="tcd-search-input" id="tcd-search" placeholder="Search jobs..." value="' + esc(D.searchQuery||'') + '" oninput="TCDispatch._search(this.value)" autocomplete="off" autocapitalize="off">';
     if (q) html += '<button class="tcd-search-clear" onclick="TCDispatch._clearSearch()">✕</button>';
     html += '</div>';
-
     html += '<div class="tcd-pool-body" data-market="' + m + '" data-pool="1">';
     if (!unassigned.length && !q) {
       html += '<div class="tcd-lane-body empty">All jobs assigned ✓</div>';
     } else if (!filteredUnassigned.length && q) {
-      // No matches in pool — offer Albi search
       html += '<div style="padding:12px;text-align:center;font-size:12px;color:#6b7a96;">';
       html += 'No matching jobs in the pool.';
       html += '</div>';
@@ -589,7 +518,6 @@
         D.albiResults.forEach(function(aj){
           var ajid = String(aj.id);
           var ajname = aj.name || ajid;
-          // Skip if already on the board (any market)
           var allMarkets = Object.keys(D.state.assignments || {});
           var alreadyAssigned = allMarkets.some(function(mk){
             var techs = D.state.assignments[mk] || {};
@@ -607,7 +535,10 @@
         });
       }
     } else {
-      filteredUnassigned.forEach(function(jid) {
+      var POOL_PAGE_SIZE = 5;
+      var poolLimit = D.poolLimits && D.poolLimits[m] ? D.poolLimits[m] : POOL_PAGE_SIZE;
+      var visible = filteredUnassigned.slice(0, poolLimit);
+      visible.forEach(function(jid) {
         var name = D.state.jobNames[jid] || jid;
         html += '<div class="tcd-job" data-job-id="' + esc(jid) + '" data-from-pool="1">';
         html += '<span class="tcd-job-handle">⠿</span>';
@@ -615,32 +546,33 @@
         html += '<button class="tcd-job-reassign" onclick="TCDispatch._open(\'' + m + '\',\'' + esc(jid).replace(/'/g,"\\'") + '\')">Assign</button>';
         html += '</div>';
       });
+      var totalFiltered = filteredUnassigned.length;
+      if (totalFiltered > POOL_PAGE_SIZE) {
+        var remaining = totalFiltered - poolLimit;
+        if (remaining > 0) {
+          html += '<button class="tcd-pool-more" onclick="TCDispatch._poolMore(\'' + m + '\')">▼ Show ' + remaining + ' more</button>';
+        } else {
+          html += '<button class="tcd-pool-more" onclick="TCDispatch._poolLess(\'' + m + '\')">▲ Show less</button>';
+        }
+      }
     }
     html += '</div></div>';
-
-    // Tech lanes — sort so PMs appear at the bottom. They supervise rather
-    // than carry the daily workload, so the techs should be what the
-    // dispatcher scans first. Within each group (techs, then PMs) we keep
-    // the incoming order from techsForMarket(m) so the display stays stable.
     var sortedTechs = techs.slice().sort(function(a, b) {
       var aIsPM = roleForName(a) === 'Project Manager' ? 1 : 0;
       var bIsPM = roleForName(b) === 'Project Manager' ? 1 : 0;
       if (aIsPM !== bIsPM) return aIsPM - bIsPM;
-      return techs.indexOf(a) - techs.indexOf(b); // stable within group
+      return techs.indexOf(a) - techs.indexOf(b);
     });
-
     if (!sortedTechs.length) {
       html += '<div class="tcd-empty">No techs found for ' + marketLabel(m) + '</div>';
     } else {
-      // Track whether we've already emitted a PM divider so it shows only once
       var pmDividerShown = false;
       sortedTechs.forEach(function(tech) {
         var jobs = assignments[tech] || [];
         var isMe = tech.toLowerCase() === (myName() || '').toLowerCase();
-        var over = jobs.length > 5; // soft cap
+        var over = jobs.length > 5;
         var techRole = roleForName(tech);
         var isPM = techRole === 'Project Manager';
-        // Insert a visual divider before the first PM lane
         if (isPM && !pmDividerShown) {
           html += '<div style="margin:14px 0 8px;padding:6px 10px;font-size:9px;font-weight:700;color:#1565c0;text-transform:uppercase;letter-spacing:.08em;border-left:3px solid #1565c0;background:rgba(21,101,192,.05);border-radius:0 6px 6px 0;font-family:\'DM Mono\',monospace;">Project Managers</div>';
           pmDividerShown = true;
@@ -667,51 +599,23 @@
         html += '</div></div>';
       });
     }
-
     body.innerHTML = html;
-    // Scroll isolation: prevent touches inside the pool body from bubbling
-    // up to the outer panel (#tc-dispatch-panel), which would cause the whole
-    // page to scroll instead of the pool list. We intercept touchmove on the
-    // pool body and call stopPropagation so the panel never sees it.
-    body.querySelectorAll('.tcd-pool-body').forEach(function(pb) {
-      pb.addEventListener('touchstart', function(e) {
-        // Record scroll position at touch start so we can detect direction
-        pb._touchStartY = e.touches[0].clientY;
-        pb._scrollTop = pb.scrollTop;
-      }, { passive: true });
-      pb.addEventListener('touchmove', function(e) {
-        var dy = e.touches[0].clientY - (pb._touchStartY || 0);
-        var atTop = pb.scrollTop === 0;
-        var atBottom = pb.scrollTop + pb.clientHeight >= pb.scrollHeight - 1;
-        // Only stop propagation when the pool can absorb the scroll:
-        // — scrolling down and not at bottom
-        // — scrolling up and not at top
-        if ((!atBottom && dy < 0) || (!atTop && dy > 0)) {
-          e.stopPropagation();
-        }
-      }, { passive: true });
-    });
-
-    // Keep focus in the search input if it was being typed in
     if (D._searchFocused) {
       var searchEl = document.getElementById('tcd-search');
       if (searchEl) {
         searchEl.focus();
-        // Restore cursor position to end of value
         var v = searchEl.value;
         searchEl.setSelectionRange(v.length, v.length);
       }
     }
   }
 
-  // ── POOL SEARCH ──────────────────────────
   var _searchDebounce = null;
   function doSearch(query) {
     D.searchQuery = query || '';
-    D.albiResults = null; // reset Albi results when query changes
+    D.albiResults = null;
     D._searchFocused = true;
     clearTimeout(_searchDebounce);
-    // Debounce render slightly so typing is smooth
     _searchDebounce = setTimeout(function(){
       render();
     }, 60);
@@ -754,7 +658,6 @@
   }
   async function addFromAlbi(jobId, jobName) {
     var m = D.market;
-    // Check if already anywhere on the board
     var allMarkets = Object.keys(D.state.assignments || {});
     var already = allMarkets.some(function(mk){
       var techs = D.state.assignments[mk] || {};
@@ -762,14 +665,12 @@
       return (D.state.unassigned[mk]||[]).indexOf(jobId) !== -1;
     });
     if (!already) {
-      // Add to pool + set name
       D.state.unassigned[m] = D.state.unassigned[m] || [];
       D.state.unassigned[m].push(jobId);
       D.state.jobNames = D.state.jobNames || {};
       D.state.jobNames[jobId] = jobName;
       await saveState();
     }
-    // Clear search and open the existing reassign sheet so PM can pick a tech
     D.searchQuery = '';
     D.albiResults = null;
     D._searchFocused = false;
@@ -777,7 +678,6 @@
     openReassign(m, jobId);
   }
 
-  // ── PUBLIC API ───────────────────────────
   window.TCDispatch = {
     open: function() {
       inject();
@@ -789,6 +689,17 @@
       if (el) el.classList.remove('open');
     },
     refresh: load,
+    _poolMore: function(m) {
+      D.poolLimits = D.poolLimits || {};
+      var current = D.poolLimits[m] || 5;
+      D.poolLimits[m] = current + 10;
+      render();
+    },
+    _poolLess: function(m) {
+      D.poolLimits = D.poolLimits || {};
+      D.poolLimits[m] = 5;
+      render();
+    },
     _setMarket: function(m) { D.market = m; D.searchQuery=''; D.albiResults=null; render(); },
     _open: openReassign,
     _pick: pick,
@@ -800,10 +711,8 @@
     _state: function() { return D; }
   };
 
-  // Inject entry button on ready
   inject();
 
-  // Re-inject entry button if timeclock re-renders
   var reInjectTimer = null;
   var observer = new MutationObserver(function() {
     clearTimeout(reInjectTimer);
@@ -813,5 +722,5 @@
     observer.observe(document.body, { childList: true, subtree: false });
   }
 
-  }); // ready
+  });
 })();
