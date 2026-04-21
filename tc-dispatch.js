@@ -85,7 +85,7 @@
     '.tcd-tab{padding:11px 14px;font-size:12px;font-weight:600;color:#6b7a96;background:none;border:none;cursor:pointer;border-bottom:2px solid transparent;white-space:nowrap;font-family:"DM Sans",sans-serif;}',
     '.tcd-tab.active{color:#e85d04;border-bottom-color:#e85d04;}',
     '.tcd-tab:hover{color:#0d1f3c;}',
-    '#tc-dispatch-body{padding:12px;flex:1;background:#f0ede8;}',
+    '#tc-dispatch-body{padding:12px;background:#f0ede8;}',
     '.tcd-stats{display:flex;gap:8px;margin-bottom:12px;overflow-x:auto;-webkit-overflow-scrolling:touch;}',
     '.tcd-stat{background:#fff;border:1px solid rgba(13,45,94,.1);border-radius:8px;padding:8px 12px;flex-shrink:0;min-width:82px;}',
     '.tcd-stat-val{font-size:18px;font-weight:700;color:#0d2d5e;font-family:"DM Mono",monospace;line-height:1;}',
