@@ -3015,6 +3015,28 @@ function _buildSwapCard(s) {
     var d = new Date(iso.indexOf('T') === -1 ? iso+'T12:00:00' : iso);
     return d.toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric',year:'numeric'});
   };
+  // Compact format for range display (no weekday — keeps range strings readable)
+  var fmtSDshort = function(iso) {
+    if (!iso) return '—';
+    var d = new Date(iso.indexOf('T') === -1 ? iso+'T12:00:00' : iso);
+    return d.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});
+  };
+
+  // Range detection
+  var myIsRange = s.my_end_date && s.my_end_date !== s.my_date;
+  var myRangeLabel = myIsRange ? (fmtSDshort(s.my_date) + ' → ' + fmtSDshort(s.my_end_date)) : fmtSD(s.my_date);
+  var theirIsRange = s.their_end_date && s.their_end_date !== s.their_date;
+  var theirRangeLabel = s.their_date ? (theirIsRange ? (fmtSDshort(s.their_date) + ' → ' + fmtSDshort(s.their_end_date)) : fmtSD(s.their_date)) : '';
+
+  // Day count labels for ranges
+  var daysBetween = function(startIso, endIso) {
+    if (!startIso || !endIso) return 1;
+    var s1 = new Date(startIso + 'T12:00:00');
+    var s2 = new Date(endIso + 'T12:00:00');
+    return Math.round((s2 - s1) / 86400000) + 1;
+  };
+  var myDayCount = myIsRange ? daysBetween(s.my_date, s.my_end_date) : 1;
+  var theirDayCount = theirIsRange ? daysBetween(s.their_date, s.their_end_date) : (s.their_date ? 1 : 0);
 
   var h = '';
   h += '<div class="card" style="margin-bottom:12px;background:' + statusBg + ';border-left:3px solid ' + statusColor + ';">';
@@ -3032,18 +3054,18 @@ function _buildSwapCard(s) {
   // Swap shape — visual diagram
   h += '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;background:#fff;border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:10px;">';
   h += '<div style="flex:1;min-width:180px;">';
-  h += '<div style="font-size:9px;color:var(--muted);font-weight:700;text-transform:uppercase;letter-spacing:.04em;margin-bottom:2px;">Requester gives up</div>';
-  h += '<div style="font-size:13px;font-weight:600;color:var(--navy);">' + fmtSD(s.my_date) + '</div>';
+  h += '<div style="font-size:9px;color:var(--muted);font-weight:700;text-transform:uppercase;letter-spacing:.04em;margin-bottom:2px;">Requester gives up' + (myDayCount > 1 ? ' · ' + myDayCount + ' days' : '') + '</div>';
+  h += '<div style="font-size:13px;font-weight:600;color:var(--navy);">' + myRangeLabel + '</div>';
   h += '<div style="font-size:11px;color:var(--muted);">' + s.my_role + '</div>';
   h += '</div>';
   h += '<div style="font-size:18px;color:var(--orange);">' + (isTrade ? '⇄' : '→') + '</div>';
   h += '<div style="flex:1;min-width:180px;">';
-  h += '<div style="font-size:9px;color:var(--muted);font-weight:700;text-transform:uppercase;letter-spacing:.04em;margin-bottom:2px;">Covered by ' + s.trade_with + (isTrade ? ' (trading)' : ' (takeover)') + '</div>';
+  h += '<div style="font-size:9px;color:var(--muted);font-weight:700;text-transform:uppercase;letter-spacing:.04em;margin-bottom:2px;">Covered by ' + s.trade_with + (isTrade ? ' (trading)' : ' (takeover)') + (theirDayCount > 1 ? ' · ' + theirDayCount + ' days' : '') + '</div>';
   if (isTrade) {
-    h += '<div style="font-size:13px;font-weight:600;color:var(--navy);">' + fmtSD(s.their_date) + '</div>';
+    h += '<div style="font-size:13px;font-weight:600;color:var(--navy);">' + theirRangeLabel + '</div>';
     h += '<div style="font-size:11px;color:var(--muted);">' + s.my_role + ' (swap)</div>';
   } else {
-    h += '<div style="font-size:13px;font-weight:600;color:var(--navy);">Same date</div>';
+    h += '<div style="font-size:13px;font-weight:600;color:var(--navy);">Same date' + (myDayCount > 1 ? ' range' : '') + '</div>';
     h += '<div style="font-size:11px;color:var(--muted);">Nothing given back</div>';
   }
   h += '</div>';
@@ -3108,40 +3130,65 @@ function _swapScheduleMismatch(s) {
 }
 
 // Estimate if approving this swap would push the covering person into OT
-// for the week containing the shift. Uses time_entries data.
+// for the week(s) containing the shift(s). Uses time_entries data.
+// For multi-day swaps: checks every week touched by the range.
 // Returns null if no risk, or a message string.
 function _swapOTRisk(s) {
   if (!s || !s.my_date || !s.trade_with) return null;
   try {
-    // Find Mon-Sun week containing my_date
-    var shiftDate = new Date(s.my_date + 'T12:00:00');
-    var dayOfWeek = shiftDate.getDay(); // 0=Sun
-    var mondayOffset = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
-    var weekStart = new Date(shiftDate); weekStart.setDate(shiftDate.getDate() + mondayOffset);
-    weekStart.setHours(0,0,0,0);
-    var weekEnd = new Date(weekStart); weekEnd.setDate(weekStart.getDate() + 7);
+    var OT_PER_SHIFT_HOURS = 8; // conservative estimate added to covering person's week
 
-    // Sum billable minutes for trade_with that week
-    var totalMins = 0;
-    (ST.entries || []).forEach(function(e){
-      if (e.employee_name !== s.trade_with) return;
-      if (!e.clock_in) return;
-      var d = new Date(e.clock_in);
-      if (d < weekStart || d >= weekEnd) return;
-      var emBreaks = (ST.breaks || []).filter(function(b){ return b.entry_id === e.id; });
-      if (typeof billableMins === 'function') {
-        totalMins += billableMins(e, emBreaks);
-      } else {
-        totalMins += (e.duration_minutes || 0);
+    // Build list of all dates being covered
+    var dates = [];
+    var cur = new Date(s.my_date + 'T12:00:00');
+    var endIso = s.my_end_date || s.my_date;
+    var stop = new Date(endIso + 'T12:00:00');
+    while (cur <= stop) {
+      dates.push(new Date(cur));
+      cur.setDate(cur.getDate() + 1);
+    }
+
+    // Group dates by Mon-Sun week
+    var weeks = {};
+    dates.forEach(function(d) {
+      var dow = d.getDay();
+      var mondayOffset = dow === 0 ? -6 : 1 - dow;
+      var mon = new Date(d); mon.setDate(d.getDate() + mondayOffset); mon.setHours(0,0,0,0);
+      var weekKey = mon.toISOString().split('T')[0];
+      if (!weeks[weekKey]) {
+        weeks[weekKey] = { start: mon, shiftCount: 0 };
       }
+      weeks[weekKey].shiftCount++;
     });
 
-    // Assume on-call shift adds ~8 hours to their week (conservative)
-    var shiftHoursEstimate = 8;
-    var projectedHours = (totalMins / 60) + shiftHoursEstimate;
-    if (projectedHours > 40) {
-      return 'OT risk: ' + s.trade_with + ' already has ' + (totalMins / 60).toFixed(1) + 'h this week; this swap would push them to ~' + projectedHours.toFixed(1) + 'h.';
-    }
+    // For each week, sum trade_with's existing hours + projected shift hours
+    var worstRisk = null;
+    Object.keys(weeks).forEach(function(weekKey) {
+      var w = weeks[weekKey];
+      var wEnd = new Date(w.start); wEnd.setDate(w.start.getDate() + 7);
+      var totalMins = 0;
+      (ST.entries || []).forEach(function(e){
+        if (e.employee_name !== s.trade_with) return;
+        if (!e.clock_in) return;
+        var ed = new Date(e.clock_in);
+        if (ed < w.start || ed >= wEnd) return;
+        var emBreaks = (ST.breaks || []).filter(function(b){ return b.entry_id === e.id; });
+        if (typeof billableMins === 'function') {
+          totalMins += billableMins(e, emBreaks);
+        } else {
+          totalMins += (e.duration_minutes || 0);
+        }
+      });
+      var projected = (totalMins / 60) + (w.shiftCount * OT_PER_SHIFT_HOURS);
+      if (projected > 40) {
+        var weekLabel = w.start.toLocaleDateString('en-US',{month:'short',day:'numeric'});
+        var msg = 'OT risk: ' + s.trade_with + ' already has ' + (totalMins / 60).toFixed(1) + 'h the week of ' + weekLabel + '; this swap would push them to ~' + projected.toFixed(1) + 'h.';
+        if (!worstRisk || projected > worstRisk.projected) {
+          worstRisk = { projected: projected, msg: msg };
+        }
+      }
+    });
+    return worstRisk ? worstRisk.msg : null;
   } catch(e) {}
   return null;
 }
@@ -3168,21 +3215,47 @@ async function _swapApprove(swapId) {
     });
     if (!patchR.ok) throw new Error('Could not update swap status');
 
-    // 2. Mutate oncall_schedule JSONB — replace requester with trade_with for my_date
-    //    If it's a trade, also replace trade_with with requester for their_date
+    // 2. Mutate oncall_schedule JSONB — replace requester with trade_with for
+    //    every date in my_date..my_end_date (inclusive). If it's a trade, also
+    //    replace trade_with with requester for every date in their_date..their_end_date.
+    //    Matches the dispatch writer's key format: 'YYYY-MM|loc|role|YYYY-MM-DD'
     var sched = Object.assign({}, ST.oncallSchedule || {});
-    var locKey = (s.market || '').toLowerCase().replace(/\s+/g, '-');
-    var myPeriod = s.my_date.substring(0,7);
-    var myKey = myPeriod + '|' + locKey + '|' + s.my_role + '|' + s.my_date;
-    sched[myKey] = s.trade_with;
-    sched[myKey + '|override'] = '1';  // matches existing breadcrumb pattern in your data
+    // NOTE: dispatch uses 'appleton' or 'stevens' (not 'stevens-point' — confirmed in index.html)
+    var locKey = (s.market || '').toLowerCase().includes('point') ? 'stevens' : 'appleton';
 
-    var isTrade = s.their_date && s.their_date !== s.my_date;
+    // Helper: enumerate dates from startIso to endIso inclusive
+    function _datesInRange(startIso, endIso) {
+      var out = [];
+      if (!startIso) return out;
+      var end = endIso || startIso;
+      var cur = new Date(startIso + 'T12:00:00');
+      var stop = new Date(end + 'T12:00:00');
+      while (cur <= stop) {
+        out.push(cur.toISOString().split('T')[0]);
+        cur.setDate(cur.getDate() + 1);
+      }
+      return out;
+    }
+
+    // Apply to every "my" date
+    var myDates = _datesInRange(s.my_date, s.my_end_date);
+    myDates.forEach(function(dIso) {
+      var period = dIso.substring(0, 7);
+      var key = period + '|' + locKey + '|' + s.my_role + '|' + dIso;
+      sched[key] = s.trade_with;
+      sched[key + '|override'] = '1';
+    });
+
+    // If trade, apply to every "their" date too
+    var isTrade = s.their_date && !(s.their_date === s.my_date && !s.their_end_date && !s.my_end_date);
     if (isTrade) {
-      var theirPeriod = s.their_date.substring(0,7);
-      var theirKey = theirPeriod + '|' + locKey + '|' + s.my_role + '|' + s.their_date;
-      sched[theirKey] = s.requester_name;
-      sched[theirKey + '|override'] = '1';
+      var theirDates = _datesInRange(s.their_date, s.their_end_date);
+      theirDates.forEach(function(dIso) {
+        var period = dIso.substring(0, 7);
+        var key = period + '|' + locKey + '|' + s.my_role + '|' + dIso;
+        sched[key] = s.requester_name;
+        sched[key + '|override'] = '1';
+      });
     }
 
     var schedR = await fetch(SB_URL + '/rest/v1/oncall_schedule?id=eq.current', {
@@ -3196,11 +3269,13 @@ async function _swapApprove(swapId) {
 
     // 3. Fire notifications — requester (their request was approved)
     //    and covering person (heads-up they're now on the schedule)
+    var myIsRange = s.my_end_date && s.my_end_date !== s.my_date;
+    var myRangeLabel = myIsRange ? (s.my_date + ' through ' + s.my_end_date) : s.my_date;
     var notifs = [
       {
         recipient_email: s.requester_email || '',
         recipient_name: s.requester_name,
-        message: 'Your on-call swap request for ' + s.my_date + ' (' + s.my_role + ') was approved by ' + approver + '. ' + s.trade_with + ' will cover.',
+        message: 'Your on-call swap request for ' + myRangeLabel + ' (' + s.my_role + ') was approved by ' + approver + '. ' + s.trade_with + ' will cover.',
         swap_id: swapId,
         status: 'approved',
         read: false
@@ -3217,7 +3292,7 @@ async function _swapApprove(swapId) {
       notifs.push({
         recipient_email: coveringEmail,
         recipient_name: s.trade_with,
-        message: 'You have been assigned to cover on-call on ' + s.my_date + ' (' + s.my_role + ') — swap from ' + s.requester_name + ' was approved.',
+        message: 'You have been assigned to cover on-call for ' + myRangeLabel + ' (' + s.my_role + ') — swap from ' + s.requester_name + ' was approved.',
         swap_id: swapId,
         status: 'approved',
         read: false
@@ -3263,7 +3338,9 @@ async function _swapDeny(swapId) {
     });
     if (!patchR.ok) throw new Error('Could not update swap status');
 
-    // Notify requester with denial reason
+    // Notify requester with denial reason + range label
+    var denyIsRange = s.my_end_date && s.my_end_date !== s.my_date;
+    var denyRangeLabel = denyIsRange ? (s.my_date + ' through ' + s.my_end_date) : s.my_date;
     try {
       await fetch(SB_URL + '/rest/v1/oncall_notifications', {
         method: 'POST',
@@ -3271,13 +3348,22 @@ async function _swapDeny(swapId) {
         body: JSON.stringify({
           recipient_email: s.requester_email || '',
           recipient_name: s.requester_name,
-          message: 'Your on-call swap request for ' + s.my_date + ' was denied. Reason: ' + reason,
+          message: 'Your on-call swap request for ' + denyRangeLabel + ' was denied. Reason: ' + reason,
           swap_id: swapId,
           status: 'denied',
           read: false
         })
       });
     } catch(e) { console.warn('Notification insert failed:', e); }
+
+    // Also update the request row with the denial reason so tech can see it in their My Swaps list
+    try {
+      await fetch(SB_URL + '/rest/v1/oncall_swap_requests?id=eq.' + swapId, {
+        method: 'PATCH',
+        headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ review_notes: reason })
+      });
+    } catch(e) {}
 
     if (typeof logActivity === 'function') {
       logActivity('Swap Denied', s.requester_name + ' · ' + s.my_date + ' · reason: ' + reason, 'on_call', s.requester_name);
