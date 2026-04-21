@@ -373,6 +373,9 @@ body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);min
   </div>
 </div>
 
+<!-- Upcoming Time-Off Alert Banner -->
+<div id="vacation-alert-banner" style="display:none;background:rgba(21,101,192,.08);border-bottom:2px solid #1565c0;padding:8px 16px;font-size:12px;color:#0d2d5e;"></div>
+
 <div class="tabs">
   <button class="tab active" onclick="switchLoc('appleton',this)">Appleton</button>
   <button class="tab" onclick="switchLoc('stevens',this)">Stevens Point</button>
@@ -653,6 +656,17 @@ let sick=new Set(), tsIdMap={};
 let loc='appleton';
 let dragJob=null,dragSrc=null,dragPool=false,ph=null;
 
+// ── ACTIVITY LOGGING ─────────────────────
+async function logActivity(action, detail, category, employeeName){
+  try {
+    await fetch(SB_URL+'/rest/v1/platform_activity',{
+      method:'POST',
+      headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json','Prefer':'return=minimal'},
+      body:JSON.stringify({action:action,detail:detail,category:category||'dispatch',employee_name:employeeName||null,performed_by:'dispatch-board',ts:new Date().toISOString()})
+    });
+  } catch(e){ console.warn('logActivity failed:',e); }
+}
+
 // ── BOOT ──────────────────────────────────
 window.addEventListener('load', ()=>{
   tick(); setInterval(tick,30000);
@@ -699,6 +713,7 @@ async function boot(){
     // Wait for board state to fully restore before refreshing Albi
     // so snapshot captures the actual manual assignments
     setTimeout(silentAlbiRefresh, 5000);
+    loadVacationAlerts();
     return;
   }
   stepDone('cache', '○ No cache — fetching fresh data');
@@ -718,6 +733,7 @@ async function boot(){
   await loadBoardState();
   render();
   hideLoader();
+  loadVacationAlerts();
 }
 
 // Silent background refresh (when serving from cache)
@@ -2577,6 +2593,45 @@ async function confirmOut(){
   } catch(e) { console.warn('Could not auto clock-out:', e); }
 
   showToast(nm.split(' ')[0]+' marked out ('+reason+')');
+}
+
+// ── UPCOMING TIME-OFF ALERTS ─────────────────
+async function loadVacationAlerts(){
+  var banner = document.getElementById('vacation-alert-banner');
+  if(!banner) return;
+  try {
+    var today = new Date();
+    today.setHours(0,0,0,0);
+    var lookAhead = new Date(today);
+    lookAhead.setDate(lookAhead.getDate() + 3);
+    var todayStr = today.toISOString().split('T')[0];
+    var lookAheadStr = lookAhead.toISOString().split('T')[0];
+    var r = await fetch(SB_URL + '/rest/v1/vacation_requests?status=eq.approved&start_date=lte.' + lookAheadStr + '&end_date=gte.' + todayStr + '&order=start_date.asc&select=employee_name,start_date,end_date,days_requested,reason', {
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+    });
+    if(!r.ok) return;
+    var reqs = await r.json();
+    if(!reqs || !reqs.length){ banner.style.display='none'; return; }
+    var fmtD = function(iso){
+      var d = new Date(iso+'T12:00:00');
+      return d.toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'});
+    };
+    var html = '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">';
+    html += '<span style="font-weight:700;color:#1565c0;">🏖 Upcoming Time Off</span>';
+    reqs.forEach(function(v){
+      var startD = new Date(v.start_date+'T12:00:00');
+      var isToday = startD.toISOString().split('T')[0] === todayStr;
+      var isTomorrow = startD.toISOString().split('T')[0] === new Date(today.getTime()+86400000).toISOString().split('T')[0];
+      var urgency = isToday ? 'background:#c62828;color:#fff;' : isTomorrow ? 'background:#e65100;color:#fff;' : 'background:rgba(21,101,192,.15);color:#0d2d5e;';
+      var when = isToday ? 'TODAY' : isTomorrow ? 'TOMORROW' : fmtD(v.start_date);
+      var label = v.employee_name.split(' ')[0] + ' — ' + when;
+      if(v.days_requested > 1) label += ' (' + v.days_requested + 'd)';
+      html += '<span style="padding:3px 10px;border-radius:6px;font-size:11px;font-weight:700;white-space:nowrap;' + urgency + '">' + label + '</span>';
+    });
+    html += '</div>';
+    banner.innerHTML = html;
+    banner.style.display = 'block';
+  } catch(e){ console.warn('Vacation alert check failed:', e); }
 }
 
 // ── INFO MODAL ────────────────────────────
