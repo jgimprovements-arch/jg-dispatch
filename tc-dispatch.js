@@ -129,11 +129,7 @@
     '.tcd-lane-body.empty{padding:16px;text-align:center;font-size:11px;color:#a0abbf;font-style:italic;}',
     '.tcd-lane-body.drag-over{background:rgba(232,93,4,.06);}',
     '.tcd-job{padding:10px 12px;border-bottom:1px solid rgba(13,45,94,.05);display:flex;align-items:center;gap:8px;cursor:grab;user-select:none;-webkit-user-select:none;touch-action:none;}',
-    // Jobs in the UNASSIGNED pool need to allow vertical scroll gestures so the
-    // user can scroll through a long list by dragging. Horizontal pan and
-    // pinch-zoom stay blocked. The long-press drag in the touch handler still
-    // fires because it kicks in after a 180ms hold, before any scroll motion.
-    '.tcd-job[data-from-pool="1"]{touch-action:pan-y;}',
+
     '.tcd-job:last-child{border-bottom:none;}',
     '.tcd-job.dragging{opacity:.4;}',
     '.tcd-job-name{font-size:12px;font-weight:600;color:#0d1f3c;flex:1;word-break:break-word;min-width:0;}',
@@ -153,24 +149,15 @@
     '.tcd-job-albi .tcd-job-reassign{background:#1565c0;color:#fff;border-color:#1565c0;}',
 
     /* Unassigned pool */
-    '.tcd-pool{background:#fff;border:2px dashed rgba(232,93,4,.4);border-radius:10px;margin-bottom:10px;position:relative;}',
+    '.tcd-pool{background:#fff;border:2px dashed rgba(232,93,4,.4);border-radius:10px;margin-bottom:10px;}',
     '.tcd-pool-head{padding:10px 12px;display:flex;align-items:center;justify-content:space-between;background:rgba(232,93,4,.06);border-radius:8px 8px 0 0;}',
     '.tcd-pool-title{font-size:11px;font-weight:700;color:#e85d04;text-transform:uppercase;letter-spacing:.05em;font-family:"DM Mono",monospace;}',
-    // Pool body: taller on mobile so the user can scroll through a long list
-    // without the dispatch column below jumping away from them. 60vh ~ 8-10 jobs
-    // depending on phone. overflow-y:auto keeps the scroll inside this card.
-    '.tcd-pool-body{padding:4px 0;max-height:60vh;overflow-y:auto;-webkit-overflow-scrolling:touch;scroll-behavior:smooth;}',
+    // Pool body: no max-height. The outer panel (#tc-dispatch-panel) is the
+    // single scroller (position:fixed, overflow-y:auto, inset:0). Nesting a
+    // second scroller causes Android to route all touch to the outer container.
+    // Let the pool expand naturally and rely on the panel scroll instead.
+    '.tcd-pool-body{padding:4px 0;max-height:225px;overflow-y:auto;-webkit-overflow-scrolling:touch;}',
     '.tcd-pool-body.drag-over{background:rgba(232,93,4,.08);}',
-    // Fade indicator at the bottom of the pool-body — signals "scroll for more"
-    // when the list is longer than the visible area. Rendered as a ::after on
-    // the parent wrapper so it stays fixed while content scrolls behind it.
-    '.tcd-pool::after{content:"";position:absolute;left:2px;right:2px;bottom:2px;height:24px;background:linear-gradient(to bottom,rgba(255,255,255,0),rgba(255,255,255,0.95));pointer-events:none;border-radius:0 0 8px 8px;}',
-    '.tcd-pool.tcd-pool-short::after{display:none;}', // hide fade when list fits
-    // Thicker scrollbar inside the pool so it's obvious the list scrolls
-    '.tcd-pool-body::-webkit-scrollbar{width:6px;}',
-    '.tcd-pool-body::-webkit-scrollbar-track{background:transparent;}',
-    '.tcd-pool-body::-webkit-scrollbar-thumb{background:rgba(232,93,4,.3);border-radius:3px;}',
-    '.tcd-pool-body::-webkit-scrollbar-thumb:hover{background:rgba(232,93,4,.5);}',
 
     /* Reassign modal */
     '#tcd-reassign-modal{position:fixed;inset:0;background:rgba(13,29,60,.7);z-index:600;display:none;align-items:flex-end;justify-content:center;}',
@@ -684,19 +671,29 @@
     }
 
     body.innerHTML = html;
-    // Hide the "scroll for more" fade when the pool content already fits
-    // (short lists shouldn't hint at hidden content that doesn't exist).
-    var _pools = body.querySelectorAll('.tcd-pool');
-    _pools.forEach(function(pool) {
-      var poolBody = pool.querySelector('.tcd-pool-body');
-      if (!poolBody) return;
-      // scrollHeight > clientHeight means content overflows → keep fade
-      if (poolBody.scrollHeight <= poolBody.clientHeight + 2) {
-        pool.classList.add('tcd-pool-short');
-      } else {
-        pool.classList.remove('tcd-pool-short');
-      }
+    // Scroll isolation: prevent touches inside the pool body from bubbling
+    // up to the outer panel (#tc-dispatch-panel), which would cause the whole
+    // page to scroll instead of the pool list. We intercept touchmove on the
+    // pool body and call stopPropagation so the panel never sees it.
+    body.querySelectorAll('.tcd-pool-body').forEach(function(pb) {
+      pb.addEventListener('touchstart', function(e) {
+        // Record scroll position at touch start so we can detect direction
+        pb._touchStartY = e.touches[0].clientY;
+        pb._scrollTop = pb.scrollTop;
+      }, { passive: true });
+      pb.addEventListener('touchmove', function(e) {
+        var dy = e.touches[0].clientY - (pb._touchStartY || 0);
+        var atTop = pb.scrollTop === 0;
+        var atBottom = pb.scrollTop + pb.clientHeight >= pb.scrollHeight - 1;
+        // Only stop propagation when the pool can absorb the scroll:
+        // — scrolling down and not at bottom
+        // — scrolling up and not at top
+        if ((!atBottom && dy < 0) || (!atTop && dy > 0)) {
+          e.stopPropagation();
+        }
+      }, { passive: true });
     });
+
     // Keep focus in the search input if it was being typed in
     if (D._searchFocused) {
       var searchEl = document.getElementById('tcd-search');
