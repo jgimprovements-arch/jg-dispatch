@@ -414,7 +414,6 @@ body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);min
     <span id="oc-month-label" style="font-size:12px;font-weight:600;color:var(--text);min-width:140px;text-align:center;"></span>
     <button onclick="nextOCMonth()" style="padding:4px 10px;border-radius:6px;border:1.5px solid var(--border-mid);background:var(--surface);color:var(--text);cursor:pointer;font-size:12px;">▶</button>
     <button onclick="saveOCData()" style="padding:4px 14px;border-radius:6px;border:none;background:var(--surface);border:1.5px solid var(--border-mid);color:var(--text);cursor:pointer;font-size:12px;font-weight:600;">💾 Save</button>
-    <button onclick="pushOCToTSheets()" style="padding:4px 14px;border-radius:6px;border:none;background:var(--accent);color:#fff;cursor:pointer;font-size:12px;font-weight:600;">↑ Push to T-Sheets</button>
   </div>
   <!-- SWAP REQUESTS PANEL -->
   <div id="oc-swap-panel" style="margin-bottom:16px;display:none;">
@@ -455,7 +454,7 @@ body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);min
     <input id="out-reason-other" type="text" placeholder="Describe reason..." style="display:none;width:100%;padding:8px;border-radius:6px;border:1.5px solid var(--border-mid);background:var(--surface);color:var(--text);font-size:12px;margin-bottom:8px;box-sizing:border-box;">
     <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px;">
       <button onclick="closeOutModal()" style="padding:6px 14px;border-radius:6px;border:1.5px solid var(--border-mid);background:transparent;color:var(--text);cursor:pointer;font-size:12px;">Cancel</button>
-      <button onclick="confirmOut()" style="padding:6px 14px;border-radius:6px;border:none;background:var(--danger);color:#fff;cursor:pointer;font-size:12px;font-weight:600;">Mark Out + Push to T-Sheets</button>
+      <button onclick="confirmOut()" style="padding:6px 14px;border-radius:6px;border:none;background:var(--danger);color:#fff;cursor:pointer;font-size:12px;font-weight:600;">Mark Out</button>
     </div>
   </div>
 </div>
@@ -472,7 +471,7 @@ body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);min
       <div style="background:rgba(255,255,255,0.07);border-radius:8px;padding:14px;">
         <div style="font-size:13px;font-weight:700;color:#f5a623;margin-bottom:6px;">🔄 Loading & Refreshing</div>
         <div style="font-size:12px;color:#cdd8e3;line-height:1.7;">
-          The board loads live jobs from <b>Albi</b> and techs from <b>T-Sheets</b> automatically on open. Jobs are cached for 10 hours for fast reloads. Click <b>↻ Refresh</b> in the top right to force a fresh pull from both systems. A banner at the top shows when cached data is being served.
+          The board loads live jobs from <b>Albi</b> and techs from the <b>employees table</b> automatically on open. Jobs are cached for 10 hours for fast reloads. Click <b>↻ Refresh</b> in the top right to force a fresh pull. A banner at the top shows when cached data is being served.
         </div>
       </div>
 
@@ -522,7 +521,7 @@ body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);min
       <div style="background:rgba(255,255,255,0.07);border-radius:8px;padding:14px;">
         <div style="font-size:13px;font-weight:700;color:#f5a623;margin-bottom:6px;">📅 On-Call Tab</div>
         <div style="font-size:12px;color:#cdd8e3;line-height:1.7;">
-          Click the <b>📅 On-Call</b> tab to manage the monthly on-call rotation schedule. Each day has three role slots: <b>On-Call Tech</b>, <b>Backup Tech</b>, and <b>On-Call PM</b> — for both Appleton and Stevens Point. Use ◀ ▶ to navigate months. Click <b>💾 Save</b> to persist the schedule in the browser. Click <b>↑ Push to T-Sheets</b> to create all-day "On Call" schedule events in T-Sheets for every assigned day.
+          Click the <b>📅 On-Call</b> tab to manage the monthly on-call rotation schedule. Each day has three role slots: <b>On-Call Tech</b>, <b>Backup Tech</b>, and <b>On-Call PM</b> — for both Appleton and Stevens Point. Use ◀ ▶ to navigate months. Click <b>💾 Save</b> to persist the schedule.
         </div>
       </div>
 
@@ -535,7 +534,7 @@ body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);min
 
       <div style="background:rgba(255,255,255,0.05);border-radius:8px;padding:10px 14px;border:1px solid rgba(255,255,255,0.1);">
         <div style="font-size:11px;color:#7a9ab8;line-height:1.6;">
-          <b>Built for JG Restoration</b> · Appleton & Stevens Point, WI · Data sources: Albi (jobs) + T-Sheets (techs & scheduling) · Board URL: jgimprovements-arch.github.io/jg-dispatch
+          <b>Built for JG Restoration</b> · Appleton & Stevens Point, WI · Data sources: Albi (jobs) + Supabase (techs & scheduling) · Board URL: jgimprovements-arch.github.io/jg-dispatch
         </div>
       </div>
 
@@ -2556,33 +2555,7 @@ async function confirmOut(){
     });
   } catch(e) { console.warn('Could not log absence:', e); }
 
-  // Push to T-Sheets as a blocked time event
-  const uid = techQ[loc]?.[nm]?.tsId;
-  if(uid){
-    const today = new Date().toISOString().split('T')[0];
-    const start = today+'T07:30:00-06:00';
-    const end   = today+'T17:00:00-06:00';
-    try{
-      await fetch(TS_PROXY+'?path=schedule_events',{
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({data:[{
-          assigned_user_ids:[uid],
-          start, end,
-          active:true,
-          draft:false,
-          schedule_calendar_id:'20981',
-          title: reason+' – '+nm.split(' ')[0],
-          notes: nm+' is out: '+reason
-        }]})
-      });
-      showToast(nm.split(' ')[0]+' marked out ('+reason+') — pushed to T-Sheets');
-    } catch {
-      showToast(nm.split(' ')[0]+' marked out ('+reason+')');
-    }
-  } else {
-    showToast(nm.split(' ')[0]+' marked out ('+reason+')');
-  }
+  showToast(nm.split(' ')[0]+' marked out ('+reason+')');
 }
 
 // ── INFO MODAL ────────────────────────────
