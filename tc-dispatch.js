@@ -148,11 +148,24 @@
     '.tcd-job-albi .tcd-job-reassign{background:#1565c0;color:#fff;border-color:#1565c0;}',
 
     /* Unassigned pool */
-    '.tcd-pool{background:#fff;border:2px dashed rgba(232,93,4,.4);border-radius:10px;margin-bottom:10px;}',
+    '.tcd-pool{background:#fff;border:2px dashed rgba(232,93,4,.4);border-radius:10px;margin-bottom:10px;position:relative;}',
     '.tcd-pool-head{padding:10px 12px;display:flex;align-items:center;justify-content:space-between;background:rgba(232,93,4,.06);border-radius:8px 8px 0 0;}',
     '.tcd-pool-title{font-size:11px;font-weight:700;color:#e85d04;text-transform:uppercase;letter-spacing:.05em;font-family:"DM Mono",monospace;}',
-    '.tcd-pool-body{padding:4px 0;max-height:220px;overflow-y:auto;-webkit-overflow-scrolling:touch;}',
+    // Pool body: taller on mobile so the user can scroll through a long list
+    // without the dispatch column below jumping away from them. 60vh ~ 8-10 jobs
+    // depending on phone. overflow-y:auto keeps the scroll inside this card.
+    '.tcd-pool-body{padding:4px 0;max-height:60vh;overflow-y:auto;-webkit-overflow-scrolling:touch;scroll-behavior:smooth;}',
     '.tcd-pool-body.drag-over{background:rgba(232,93,4,.08);}',
+    // Fade indicator at the bottom of the pool-body — signals "scroll for more"
+    // when the list is longer than the visible area. Rendered as a ::after on
+    // the parent wrapper so it stays fixed while content scrolls behind it.
+    '.tcd-pool::after{content:"";position:absolute;left:2px;right:2px;bottom:2px;height:24px;background:linear-gradient(to bottom,rgba(255,255,255,0),rgba(255,255,255,0.95));pointer-events:none;border-radius:0 0 8px 8px;}',
+    '.tcd-pool.tcd-pool-short::after{display:none;}', // hide fade when list fits
+    // Thicker scrollbar inside the pool so it's obvious the list scrolls
+    '.tcd-pool-body::-webkit-scrollbar{width:6px;}',
+    '.tcd-pool-body::-webkit-scrollbar-track{background:transparent;}',
+    '.tcd-pool-body::-webkit-scrollbar-thumb{background:rgba(232,93,4,.3);border-radius:3px;}',
+    '.tcd-pool-body::-webkit-scrollbar-thumb:hover{background:rgba(232,93,4,.5);}',
 
     /* Reassign modal */
     '#tcd-reassign-modal{position:fixed;inset:0;background:rgba(13,29,60,.7);z-index:600;display:none;align-items:flex-end;justify-content:center;}',
@@ -615,16 +628,33 @@
     }
     html += '</div></div>';
 
-    // Tech lanes
-    if (!techs.length) {
+    // Tech lanes — sort so PMs appear at the bottom. They supervise rather
+    // than carry the daily workload, so the techs should be what the
+    // dispatcher scans first. Within each group (techs, then PMs) we keep
+    // the incoming order from techsForMarket(m) so the display stays stable.
+    var sortedTechs = techs.slice().sort(function(a, b) {
+      var aIsPM = roleForName(a) === 'Project Manager' ? 1 : 0;
+      var bIsPM = roleForName(b) === 'Project Manager' ? 1 : 0;
+      if (aIsPM !== bIsPM) return aIsPM - bIsPM;
+      return techs.indexOf(a) - techs.indexOf(b); // stable within group
+    });
+
+    if (!sortedTechs.length) {
       html += '<div class="tcd-empty">No techs found for ' + marketLabel(m) + '</div>';
     } else {
-      techs.forEach(function(tech) {
+      // Track whether we've already emitted a PM divider so it shows only once
+      var pmDividerShown = false;
+      sortedTechs.forEach(function(tech) {
         var jobs = assignments[tech] || [];
         var isMe = tech.toLowerCase() === (myName() || '').toLowerCase();
         var over = jobs.length > 5; // soft cap
         var techRole = roleForName(tech);
         var isPM = techRole === 'Project Manager';
+        // Insert a visual divider before the first PM lane
+        if (isPM && !pmDividerShown) {
+          html += '<div style="margin:14px 0 8px;padding:6px 10px;font-size:9px;font-weight:700;color:#1565c0;text-transform:uppercase;letter-spacing:.08em;border-left:3px solid #1565c0;background:rgba(21,101,192,.05);border-radius:0 6px 6px 0;font-family:\'DM Mono\',monospace;">Project Managers</div>';
+          pmDividerShown = true;
+        }
         html += '<div class="tcd-lane' + (isMe ? ' me' : '') + (isPM ? ' pm' : '') + '">';
         html += '<div class="tcd-lane-head">';
         html += '<div class="tcd-lane-head-l"><div class="tcd-lane-avatar' + (isPM ? ' pm' : '') + '">' + initials(tech) + '</div>';
@@ -649,6 +679,19 @@
     }
 
     body.innerHTML = html;
+    // Hide the "scroll for more" fade when the pool content already fits
+    // (short lists shouldn't hint at hidden content that doesn't exist).
+    var _pools = body.querySelectorAll('.tcd-pool');
+    _pools.forEach(function(pool) {
+      var poolBody = pool.querySelector('.tcd-pool-body');
+      if (!poolBody) return;
+      // scrollHeight > clientHeight means content overflows → keep fade
+      if (poolBody.scrollHeight <= poolBody.clientHeight + 2) {
+        pool.classList.add('tcd-pool-short');
+      } else {
+        pool.classList.remove('tcd-pool-short');
+      }
+    });
     // Keep focus in the search input if it was being typed in
     if (D._searchFocused) {
       var searchEl = document.getElementById('tcd-search');
