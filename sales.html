@@ -251,6 +251,139 @@ function setTypeFilter(t){ST.filterType=t;render();}
 function setTierFilter(t){ST.filterTier=t;render();}
 function setRepFilter(r){ST.filterRep=r||'All';render();}
 
+// ── BULK SELECTION & DELETE ───────────────────────────────────────────────
+// Selection mode toggles checkboxes on partner rows. Small-team tool, no
+// permission gating — anyone who can see the Partners tab can delete.
+// Batched DELETE requests keep Supabase rate limits happy on bigger deletes.
+
+function _selCount() {
+  var n = 0;
+  if (ST.selectedIds) for (var k in ST.selectedIds) if (ST.selectedIds[k]) n++;
+  return n;
+}
+
+function enterSelectionMode() {
+  ST.selectionMode = true;
+  ST.selectedIds = {};
+  ST._lastSelectIdx = -1;
+  render();
+}
+
+function exitSelectionMode() {
+  ST.selectionMode = false;
+  ST.selectedIds = {};
+  ST._lastSelectIdx = -1;
+  render();
+}
+
+function clearSelection() {
+  ST.selectedIds = {};
+  ST._lastSelectIdx = -1;
+  renderPartnerList();
+  _updateBulkBar();
+}
+
+// Toggle a single row's selected state. Supports Shift+click to select
+// a range from the last-interacted row to this one (Gmail-style).
+function toggleRowSelection(pid, idx, evt) {
+  if (!ST.selectionMode) return;
+  var isShift = evt && (evt.shiftKey || evt.metaKey);
+  if (isShift && ST._lastSelectIdx >= 0 && ST._lastSelectIdx !== idx) {
+    // Range-select: everything between last and current, inclusive
+    var fp = filteredPartners();
+    var lo = Math.min(ST._lastSelectIdx, idx);
+    var hi = Math.max(ST._lastSelectIdx, idx);
+    var mark = !ST.selectedIds[pid];
+    for (var i = lo; i <= hi; i++) {
+      if (fp[i]) ST.selectedIds[fp[i].id] = mark;
+      if (!mark) delete ST.selectedIds[fp[i].id];
+    }
+  } else {
+    if (ST.selectedIds[pid]) delete ST.selectedIds[pid];
+    else ST.selectedIds[pid] = true;
+  }
+  ST._lastSelectIdx = idx;
+  renderPartnerList();
+  _updateBulkBar();
+}
+
+function selectAllVisible() {
+  var fp = filteredPartners();
+  fp.forEach(function(p) { ST.selectedIds[p.id] = true; });
+  renderPartnerList();
+  _updateBulkBar();
+}
+
+// Update the bulk action bar count + delete button without a full re-render.
+// Called from the selection helpers after each change.
+function _updateBulkBar() {
+  var n = _selCount();
+  var cnt = document.getElementById('bulk-count');
+  var btn = document.getElementById('bulk-delete-btn');
+  if (cnt) cnt.textContent = n + ' selected';
+  if (btn) {
+    btn.textContent = '🗑 Delete ' + n;
+    btn.style.background = n ? 'var(--red)' : 'rgba(192,32,32,.3)';
+    btn.style.cursor = n ? 'pointer' : 'not-allowed';
+  }
+}
+
+async function bulkDeleteSelected() {
+  var ids = [];
+  for (var k in ST.selectedIds) if (ST.selectedIds[k]) ids.push(k);
+  if (!ids.length) return;
+  var names = ids.slice(0,5).map(function(id){
+    var p = ST.partners.find(function(x){ return x.id === id; });
+    return p ? p.name : id;
+  });
+  var preview = names.join('\n  • ');
+  if (ids.length > 5) preview += '\n  • ...and ' + (ids.length - 5) + ' more';
+  if (!confirm('Delete ' + ids.length + ' partner' + (ids.length===1?'':'s') + '?\n\n  • ' + preview + '\n\nThis cannot be undone.')) return;
+
+  // Batch deletes 50 at a time. Supabase's PostgREST accepts in.(uuid1,uuid2,...)
+  // for batch deletes which is much faster than N individual DELETE requests.
+  var BATCH = 50;
+  var deleted = 0;
+  var failed = 0;
+  for (var i = 0; i < ids.length; i += BATCH) {
+    var batch = ids.slice(i, i + BATCH);
+    var inList = batch.map(function(id){ return '"' + id + '"'; }).join(',');
+    try {
+      var r = await fetch(SB_URL + '/rest/v1/sales_partners?id=in.(' + inList + ')', {
+        method: 'DELETE',
+        headers: {'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY}
+      });
+      if (r.ok) deleted += batch.length;
+      else failed += batch.length;
+    } catch(e) {
+      failed += batch.length;
+    }
+  }
+
+  // Update local state — remove deleted records from the client cache so the
+  // UI updates immediately without a full reload.
+  if (deleted > 0) {
+    var toDelete = {};
+    ids.forEach(function(id){ toDelete[id] = true; });
+    ST.partners = ST.partners.filter(function(p){ return !toDelete[p.id]; });
+  }
+
+  ST.selectionMode = false;
+  ST.selectedIds = {};
+  ST._lastSelectIdx = -1;
+
+  if (failed > 0) {
+    alert('Deleted ' + deleted + ' of ' + ids.length + ' partners. ' + failed + ' failed — check console for details.');
+  } else {
+    // Use the existing toast mechanism if available, else a subtle alert-free status update
+    var msg = deleted + ' partner' + (deleted===1?'':'s') + ' deleted';
+    if (typeof showErr === 'function' && typeof showOk === 'function') showOk(msg);
+    else console.log(msg);
+  }
+  render();
+}
+// ──────────────────────────────────────────────────────────────────────────
+
 // Rep filter: admins see a dropdown of all reps + Unassigned; regular reps
 // see a simple "My Partners" toggle pill (same pattern mobile uses).
 function mkRepFilter() {
@@ -324,6 +457,9 @@ var ST = {
   filterTier: 'All',
   filterRep: 'All',  // 'All' | 'Mine' | 'Unassigned' | <rep name>. Admin-only control.
   searchQ: '',
+  selectionMode: false,  // when true, partner rows show checkboxes instead of click-to-open
+  selectedIds: {},       // {id: true} for O(1) lookup of checked rows
+  _lastSelectIdx: -1,    // index of the last row interacted with, for Shift+click range select
   today: new Date().toISOString().split('T')[0],
   apiKey: localStorage.getItem('jg_key')||''
 };
@@ -793,12 +929,21 @@ function renderPartnerList() {
   if (!fp.length) {
     h = '<div style="text-align:center;padding:40px;color:var(--muted);">No partners found.</div>';
   }
-  fp.forEach(function(p) {
+  fp.forEach(function(p, idx) {
     var lastTouch = p.last_touch_date ? fmtDate(p.last_touch_date) : 'Never';
     var daysSince = p.last_touch_date ? Math.round((new Date() - new Date(p.last_touch_date+'T00:00:00'))/(1000*60*60*24)) : 999;
     var stale = daysSince > 30;
     var pid = p.id;
-    h += '<div class="partner-card" onclick="ST.selected=\''+pid+'\';ST.modal=\'partner-detail\';render()">';
+    var isChecked = ST.selectedIds && ST.selectedIds[pid];
+    // Row click behavior depends on mode: normal = open detail, selection = toggle checkbox
+    var rowClick = ST.selectionMode
+      ? 'toggleRowSelection(\'' + pid + '\',' + idx + ',event)'
+      : 'ST.selected=\'' + pid + '\';ST.modal=\'partner-detail\';render()';
+    var rowBg = isChecked ? 'background:rgba(232,93,4,.06);border-color:rgba(232,93,4,.3);' : '';
+    h += '<div class="partner-card" style="' + rowBg + '" onclick="' + rowClick + '">';
+    if (ST.selectionMode) {
+      h += '<input type="checkbox" ' + (isChecked?'checked':'') + ' onclick="event.stopPropagation();toggleRowSelection(\'' + pid + '\',' + idx + ',event)" style="width:18px;height:18px;accent-color:var(--orange);cursor:pointer;flex-shrink:0;">';
+    }
     h += '<div class="partner-avatar" style="background:'+tierColor(p.tier||'C')+';">'+partnerInitials(p.name)+'</div>';
     h += '<div style="flex:1;min-width:0;">';
     h += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:3px;">';
@@ -814,7 +959,9 @@ function renderPartnerList() {
     h += '<div style="font-size:10px;color:var(--muted);">'+(p.touch_count||0)+' touches · '+(p.referral_count||0)+' refs</div>';
     h += '</div>';
     if(p.assigned_to) h += '<span style="font-size:9px;padding:1px 7px;border-radius:4px;background:rgba(13,45,94,.08);color:var(--navy);font-weight:600;margin-right:4px;">👤 '+p.assigned_to+'</span>';
-    h += '<button style="padding:5px 12px;border-radius:6px;border:none;background:var(--orange);color:#fff;font-size:11px;font-weight:600;cursor:pointer;" onclick="event.stopPropagation();ST.modal=\'log-touch\';ST.selected=\''+pid+'\';render()">Log Touch</button>';
+    if (!ST.selectionMode) {
+      h += '<button style="padding:5px 12px;border-radius:6px;border:none;background:var(--orange);color:#fff;font-size:11px;font-weight:600;cursor:pointer;" onclick="event.stopPropagation();ST.modal=\'log-touch\';ST.selected=\''+pid+'\';render()">Log Touch</button>';
+    }
     h += '</div>';
   });
   listEl.innerHTML = h;
@@ -926,7 +1073,23 @@ function _renderNow() {
     h += mkTypeFilters();
     h += mkTierFilters();
     h += mkRepFilter();
+    // Selection-mode toggle. When ON, rows display checkboxes and clicks toggle selection
+    // instead of opening the partner detail. Action bar appears below.
+    if (ST.selectionMode) {
+      h += '<button onclick="exitSelectionMode()" style="padding:6px 12px;border-radius:6px;border:1.5px solid var(--border);background:var(--surface);color:var(--txt);font-size:12px;font-weight:600;font-family:DM Sans,sans-serif;cursor:pointer;">✕ Cancel selection</button>';
+    } else {
+      h += '<button onclick="enterSelectionMode()" style="padding:6px 12px;border-radius:6px;border:1.5px solid var(--border);background:var(--surface);color:var(--txt);font-size:12px;font-weight:600;font-family:DM Sans,sans-serif;cursor:pointer;">☑ Select</button>';
+    }
     h += '<button class="btn btn-gold" style="margin-left:auto;" onclick="addPartner()">+ Add Partner</button>';
+    h += '</div>';
+
+    // Selection action bar — visible when at least one row is checked.
+    // id="bulk-action-bar" so renderPartnerList can update count without a full render.
+    h += '<div id="bulk-action-bar" style="display:' + (ST.selectionMode ? 'flex' : 'none') + ';align-items:center;gap:12px;padding:10px 14px;background:rgba(232,93,4,.08);border:1.5px solid rgba(232,93,4,.25);border-radius:8px;margin-bottom:12px;">';
+    h += '<span id="bulk-count" style="font-size:13px;font-weight:700;color:var(--navy);">' + _selCount() + ' selected</span>';
+    h += '<button onclick="selectAllVisible()" style="padding:5px 12px;border-radius:6px;border:1.5px solid var(--border);background:#fff;color:var(--navy);font-size:11px;font-weight:600;cursor:pointer;font-family:DM Sans,sans-serif;">Select all visible</button>';
+    h += '<button onclick="clearSelection()" style="padding:5px 12px;border-radius:6px;border:1.5px solid var(--border);background:#fff;color:var(--navy);font-size:11px;font-weight:600;cursor:pointer;font-family:DM Sans,sans-serif;">Clear</button>';
+    h += '<button id="bulk-delete-btn" onclick="bulkDeleteSelected()" style="margin-left:auto;padding:6px 14px;border-radius:6px;border:none;background:' + (_selCount() ? 'var(--red)' : 'rgba(192,32,32,.3)') + ';color:#fff;font-size:12px;font-weight:700;cursor:' + (_selCount() ? 'pointer' : 'not-allowed') + ';font-family:DM Sans,sans-serif;">🗑 Delete ' + _selCount() + '</button>';
     h += '</div>';
 
     var fp = filteredPartners();
@@ -958,12 +1121,20 @@ function _renderNow() {
     if (!fp.length) {
       h += '<div style="text-align:center;padding:40px;color:var(--muted);">No partners found. Add your first partner or import from Albi.</div>';
     }
-    fp.forEach(function(p) {
+    fp.forEach(function(p, idx) {
       var lastTouch = p.last_touch_date ? fmtDate(p.last_touch_date) : 'Never';
       var daysSince = p.last_touch_date ? Math.round((new Date() - new Date(p.last_touch_date + 'T00:00:00')) / (1000*60*60*24)) : 999;
       var stale = daysSince > 30;
       var pid = p.id;
-      h += '<div class="partner-card" onclick="ST.selected=\'' + pid + '\';ST.modal=\'partner-detail\';render()">';
+      var isChecked = ST.selectedIds && ST.selectedIds[pid];
+      var rowClick = ST.selectionMode
+        ? 'toggleRowSelection(\'' + pid + '\',' + idx + ',event)'
+        : 'ST.selected=\'' + pid + '\';ST.modal=\'partner-detail\';render()';
+      var rowBg = isChecked ? 'background:rgba(232,93,4,.06);border-color:rgba(232,93,4,.3);' : '';
+      h += '<div class="partner-card" style="' + rowBg + '" onclick="' + rowClick + '">';
+      if (ST.selectionMode) {
+        h += '<input type="checkbox" ' + (isChecked?'checked':'') + ' onclick="event.stopPropagation();toggleRowSelection(\'' + pid + '\',' + idx + ',event)" style="width:18px;height:18px;accent-color:var(--orange);cursor:pointer;flex-shrink:0;">';
+      }
       h += '<div class="partner-avatar" style="background:' + tierColor(p.tier||'C') + ';">' + partnerInitials(p.name) + '</div>';
       h += '<div style="flex:1;min-width:0;">';
       h += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:3px;">';
@@ -978,7 +1149,9 @@ function _renderNow() {
       h += '<div style="font-size:11px;font-weight:600;color:' + (stale ? 'var(--danger)' : 'var(--muted)') + ';">' + lastTouch + '</div>';
       h += '<div style="font-size:10px;color:var(--muted);">' + (p.touch_count||0) + ' touches · ' + (p.referral_count||0) + ' refs</div>';
       h += '</div>';
-      h += '<button style="padding:5px 12px;border-radius:6px;border:none;background:var(--orange);color:#fff;font-size:11px;font-weight:600;cursor:pointer;" onclick="event.stopPropagation();ST.modal=\'log-touch\';ST.selected=\'' + pid + '\';render()">Log Touch</button>';
+      if (!ST.selectionMode) {
+        h += '<button style="padding:5px 12px;border-radius:6px;border:none;background:var(--orange);color:#fff;font-size:11px;font-weight:600;cursor:pointer;" onclick="event.stopPropagation();ST.modal=\'log-touch\';ST.selected=\'' + pid + '\';render()">Log Touch</button>';
+      }
       h += '</div>';
     });
     h += '</div>'; // end partner-list
