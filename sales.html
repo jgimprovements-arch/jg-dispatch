@@ -365,11 +365,14 @@ async function loadAll() {
   var m = ST.market;
   var mq = encodeURIComponent(m);
 
-  // Narrow SELECTs — only columns the UI actually reads. Drops payload ~30%.
+  // Narrow SELECT for partners only — large table (6,000+ rows), payload matters.
+  // Three smaller tables (touches, followups, routes) now fetch all columns.
+  // Reason: desktop had explicit column lists that drifted from the Supabase
+  // schema (follow_up_needed, priority, etc. were requested but don't exist),
+  // causing 400 Bad Request. Mobile has always fetched without select= and
+  // never hit this problem. Small tables = small payload = not worth the risk
+  // of future drift. Partners stays narrowed because that payload does matter.
   var partnerCols = 'id,name,company,type,phone,email,city,tier,notes,touch_count,referral_count,referral_revenue,last_touch_date,assigned_to,status,market,albi_contact_id,updated_at';
-  var touchCols   = 'id,partner_id,partner_name,partner_type,touch_type,touch_date,outcome,notes,follow_up_needed,follow_up_date,logged_by,market';
-  var followupCols= 'id,partner_id,partner_name,partner_type,due_date,priority,notes,completed,market';
-  var routeCols   = 'id,route_date,rep_name,stops,notes,status,market';
 
   // Paginated partners fetch — filtered by market this time (was pulling both before)
   async function fetchAllPartners(){
@@ -386,9 +389,9 @@ async function loadAll() {
   // Fire all four in parallel — big perceived speedup since they no longer block each other
   var results = await Promise.allSettled([
     fetchAllPartners(),
-    sbSafe('/rest/v1/sales_touches?market=eq.'+mq+'&select='+touchCols+'&order=touch_date.desc&limit=200'),
-    sbSafe('/rest/v1/sales_followups?market=eq.'+mq+'&completed=eq.false&select='+followupCols+'&order=due_date.asc&limit=500'),
-    sbSafe('/rest/v1/sales_routes?market=eq.'+mq+'&select='+routeCols+'&order=route_date.desc&limit=30')
+    sbSafe('/rest/v1/sales_touches?market=eq.'+mq+'&order=touch_date.desc&limit=200'),
+    sbSafe('/rest/v1/sales_followups?market=eq.'+mq+'&completed=eq.false&order=due_date.asc&limit=500'),
+    sbSafe('/rest/v1/sales_routes?market=eq.'+mq+'&order=route_date.desc&limit=30')
   ]);
 
   ST.partners  = results[0].status === 'fulfilled' ? (results[0].value || []) : [];
