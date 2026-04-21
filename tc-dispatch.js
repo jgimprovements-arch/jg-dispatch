@@ -191,7 +191,7 @@
   // ── HELPERS ──────────────────────────────
   function initials(n) { return (n || '?').split(' ').map(function(w){return w[0];}).join('').toUpperCase().slice(0,2); }
   function esc(s) { return String(s || '').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
-  function marketLabel(k) { return k === 'appleton' ? 'Appleton' : k === 'stevens_point' ? 'Stevens Point' : k; }
+  function marketLabel(k) { return k === 'appleton' ? 'Appleton' : k === 'stevens' ? 'Stevens Point' : k; }
   function marketEmp(m) { return m === 'appleton' ? 'Appleton' : 'Stevens Point'; }
   function toast(msg) {
     var t = document.getElementById('tcd-toast');
@@ -266,14 +266,14 @@
 
     try {
       var bs = await window.sb('/rest/v1/board_state?id=eq.current&select=state,updated_at');
-      D.state = (bs && bs[0] && bs[0].state) ? bs[0].state : { jobNames: {}, assignments: { appleton:{}, stevens_point:{} }, unassigned: { appleton:[], stevens_point:[] } };
+      D.state = (bs && bs[0] && bs[0].state) ? bs[0].state : { jobNames: {}, assignments: { appleton:{}, stevens:{} }, unassigned: { appleton:[], stevens:[] } };
       D.lastLoad = (bs && bs[0] && bs[0].updated_at) ? new Date(bs[0].updated_at) : new Date();
 
       // Normalize shape
       D.state.jobNames = D.state.jobNames || {};
       D.state.assignments = D.state.assignments || {};
       D.state.unassigned = D.state.unassigned || {};
-      ['appleton','stevens_point'].forEach(function(m) {
+      ['appleton','stevens'].forEach(function(m) {
         D.state.assignments[m] = D.state.assignments[m] || {};
         D.state.unassigned[m] = D.state.unassigned[m] || [];
       });
@@ -461,7 +461,7 @@
     // Find my jobs across both markets
     var myJobs = [];
     var myMarket = '';
-    ['appleton','stevens_point'].forEach(function(m) {
+    ['appleton','stevens'].forEach(function(m) {
       var a = D.state.assignments[m] || {};
       Object.keys(a).forEach(function(tech) {
         var tFirst = tech.split(' ')[0].toLowerCase();
@@ -530,7 +530,7 @@
   // ── PM EDIT VIEW ─────────────────────────
   function renderEditView(body, tabs) {
     // Market tabs
-    var markets = ['appleton','stevens_point'];
+    var markets = ['appleton','stevens'];
     tabs.innerHTML = markets.map(function(m) {
       return '<button class="tcd-tab' + (D.market === m ? ' active' : '') + '" onclick="TCDispatch._setMarket(\'' + m + '\')">' + marketLabel(m) + '</button>';
     }).join('');
@@ -731,7 +731,7 @@
     D.albiResults = null;
     render();
     try {
-      var locId = D.market === 'stevens_point' ? 1477 : 222;
+      var locId = D.market === 'stevens' ? 1477 : 222;
       var res = await fetch('https://jg-proxy-v2.vercel.app/api/albi', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
