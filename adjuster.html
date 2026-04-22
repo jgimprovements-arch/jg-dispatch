@@ -501,7 +501,7 @@ async function runPass1(){
     ];
     const r=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',
       headers:{'Content-Type':'application/json','x-api-key':S.apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-      body:JSON.stringify({model:'claude-sonnet-4-6',max_tokens:16000,system:PROMPT,
+      body:JSON.stringify({model:'claude-sonnet-4-6',max_tokens:64000,system:PROMPT,
         messages:[{role:'user',content:msgContent}]})});
     if(!r.ok){const er=await r.json().catch(()=>null);throw new Error(er?.error?.message||'API error '+r.status)}
     S.prog='Parsing...';draw();
@@ -526,7 +526,7 @@ async function runPass2(){
       [{type:'document',source:{type:'base64',media_type:'application/pdf',data:S.encB64}},{type:'text',text:'ABOVE: Encircle mitigation report (same as initial review)'},{type:'document',source:{type:'base64',media_type:'application/pdf',data:cx}},{type:'text',text:'ABOVE: CORRECTED Xactimate estimate. Verify corrections. Score it. Return ONLY valid JSON.'}];
     const r=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',
       headers:{'Content-Type':'application/json','x-api-key':S.apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-      body:JSON.stringify({model:'claude-sonnet-4-6',max_tokens:16000,system:RECHECK_PROMPT,
+      body:JSON.stringify({model:'claude-sonnet-4-6',max_tokens:64000,system:RECHECK_PROMPT,
         messages:[{role:'user',content:recheckEncContent}]})});
     if(!r.ok){const er=await r.json().catch(()=>null);throw new Error(er?.error?.message||'API error '+r.status)}
     S.prog='Parsing...';draw();
@@ -564,7 +564,7 @@ async function generateRebuild(){
       [{type:'document',source:{type:'base64',media_type:'application/pdf',data:S.encB64}},{type:'text',text:'ABOVE: Encircle mitigation report showing all rooms, damage, and work performed'},{type:'document',source:{type:'base64',media_type:'application/pdf',data:estB64}},{type:'text',text:'ABOVE: Xactimate mitigation estimate showing all demolition/tearout. Generate the RECONSTRUCTION estimate to rebuild everything that was removed. Return ONLY valid JSON.'}];
     const r=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',
       headers:{'Content-Type':'application/json','x-api-key':S.apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-      body:JSON.stringify({model:'claude-sonnet-4-6',max_tokens:16000,system:REBUILD_PROMPT,
+      body:JSON.stringify({model:'claude-sonnet-4-6',max_tokens:64000,system:REBUILD_PROMPT,
         messages:[{role:'user',content:rebEncContent}]})});
     if(!r.ok){const er=await r.json().catch(()=>null);throw new Error(er?.error?.message||'API error '+r.status)}
     const d=await r.json();const t=d.content.filter(b=>b.type==='text').map(b=>b.text).join('');
@@ -984,31 +984,50 @@ async function runAdjusterAnalysis(){
     const[e,x]=await Promise.all([b64(S.enc),b64(S.est)]);
     S.encB64=e;
     
-    // Handle large Encircle PDFs
-    let encContent;
-    try{
-      const pdfLib=await import('https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.0.379/pdf.min.mjs');
-      pdfLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.0.379/pdf.worker.min.mjs';
-      const encBytes=Uint8Array.from(atob(e),c=>c.charCodeAt(0));
-      const encDoc=await pdfLib.getDocument({data:encBytes}).promise;
-      if(encDoc.numPages>100){
-        S.prog='Extracting text from '+encDoc.numPages+'-page Encircle report...';draw();
-        let allText='';
-        for(let i=1;i<=encDoc.numPages;i++){const pg=await encDoc.getPage(i);const tc=await pg.getTextContent();allText+=tc.items.map(it=>it.str).join(' ')+'\\n'}
-        encContent={type:'text',text:'ENCIRCLE REPORT (extracted text):\\n'+allText};
-        S.encText=allText;
-      }
-    }catch(pe){}
+    // Helper: extract text from PDF if over page limit
+    async function pdfToText(b64Data, label, maxPages){
+      try{
+        const pdfLib=await import('https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.0.379/pdf.min.mjs');
+        pdfLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.0.379/pdf.worker.min.mjs';
+        const bytes=Uint8Array.from(atob(b64Data),c=>c.charCodeAt(0));
+        const doc=await pdfLib.getDocument({data:bytes}).promise;
+        const pages=doc.numPages;
+        const b64Size=Math.round(b64Data.length/1024);
+        console.log(label+': '+pages+' pages, ~'+b64Size+'KB base64');
+        if(pages>maxPages||b64Size>500){
+          S.prog='Extracting text from '+pages+'-page '+label+'...';draw();
+          let txt='';
+          for(let i=1;i<=pages;i++){const pg=await doc.getPage(i);const tc=await pg.getTextContent();txt+=tc.items.map(it=>it.str).join(' ')+'\n'}
+          return{extracted:true,text:txt,pages:pages};
+        }
+        return{extracted:false,pages:pages};
+      }catch(pe){console.log(label+' PDF check skipped:',pe.message);return{extracted:false};}
+    }
+    
+    // Check all PDFs — extract text if over 30 pages or 500KB base64
+    const encCheck=await pdfToText(e,'Encircle',30);
+    const estCheck=await pdfToText(x,'JG Estimate',40);
+    let adjB64=null,adjCheck={extracted:false};
+    if(S.adjEst){
+      adjB64=await b64(S.adjEst);
+      adjCheck=await pdfToText(adjB64,'Adjuster Estimate',40);
+    }
+    
+    // Save for later passes
+    if(encCheck.extracted)S.encText=encCheck.text;
     
     const msgContent=[];
-    if(encContent){msgContent.push(encContent)}else{msgContent.push({type:'document',source:{type:'base64',media_type:'application/pdf',data:e}})}
+    if(encCheck.extracted){msgContent.push({type:'text',text:'ENCIRCLE REPORT ('+encCheck.pages+' pages, extracted text):\n'+encCheck.text})}
+    else{msgContent.push({type:'document',source:{type:'base64',media_type:'application/pdf',data:e}})}
     msgContent.push({type:'text',text:'ABOVE: JG Restoration Encircle field documentation'});
-    msgContent.push({type:'document',source:{type:'base64',media_type:'application/pdf',data:x}});
+    
+    if(estCheck.extracted){msgContent.push({type:'text',text:'JG XACTIMATE ESTIMATE ('+estCheck.pages+' pages, extracted text):\n'+estCheck.text})}
+    else{msgContent.push({type:'document',source:{type:'base64',media_type:'application/pdf',data:x}})}
     msgContent.push({type:'text',text:'ABOVE: JG Restoration original Xactimate estimate'});
     
     if(S.adjEst){
-      const adjB64=await b64(S.adjEst);
-      msgContent.push({type:'document',source:{type:'base64',media_type:'application/pdf',data:adjB64}});
+      if(adjCheck.extracted){msgContent.push({type:'text',text:'ADJUSTER REVISED ESTIMATE ('+adjCheck.pages+' pages, extracted text):\n'+adjCheck.text})}
+      else{msgContent.push({type:'document',source:{type:'base64',media_type:'application/pdf',data:adjB64}})}
       msgContent.push({type:'text',text:'ABOVE: Adjuster revised Xactimate estimate. Compare against JG estimate and defend every item the adjuster removed, reduced, or changed.'});
     }
     if(S.adjEmail.trim()){
@@ -1026,7 +1045,7 @@ async function runAdjusterAnalysis(){
     S.prog='AI analyzing disputes (30-60 sec)...';draw();
     const r=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',
       headers:{'Content-Type':'application/json','x-api-key':S.apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-      body:JSON.stringify({model:'claude-sonnet-4-6',max_tokens:16000,system:enrichedPrompt,
+      body:JSON.stringify({model:'claude-sonnet-4-6',max_tokens:64000,system:enrichedPrompt,
         messages:[{role:'user',content:msgContent}]})});
     if(!r.ok){const er=await r.json().catch(()=>null);throw new Error(er?.error?.message||'API error '+r.status)}
     S.prog='Parsing...';draw();
@@ -1156,7 +1175,7 @@ async function regenerateAdjusterResponse(){
     
     const r=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',
       headers:{'Content-Type':'application/json','x-api-key':S.apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-      body:JSON.stringify({model:'claude-sonnet-4-6',max_tokens:4000,
+      body:JSON.stringify({model:'claude-sonnet-4-6',max_tokens:8000,
         messages:[{role:'user',content:regenPrompt}]})});
     if(!r.ok)throw new Error('API error '+r.status);
     const d=await r.json();
