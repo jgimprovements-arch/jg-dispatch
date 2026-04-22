@@ -660,6 +660,16 @@ if ('serviceWorker' in navigator) {
 
   <!-- FOLLOW-UPS -->
   <div class="screen" id="screen-followups">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;gap:8px;">
+      <div style="flex:1;">
+        <div style="font-size:18px;font-weight:700;color:var(--navy);line-height:1.1;">Follow-ups</div>
+        <div id="fu-subtitle" style="font-size:11px;color:var(--muted);margin-top:2px;">—</div>
+      </div>
+      <button onclick="openAddFollowupSA()" style="background:var(--orange);border:none;color:#fff;padding:9px 16px;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit;display:flex;align-items:center;gap:6px;flex-shrink:0;">
+        <span style="font-size:15px;line-height:1;">+</span>
+        <span>Add</span>
+      </button>
+    </div>
     <div id="fu-list"></div>
   </div>
 
@@ -849,6 +859,35 @@ if ('serviceWorker' in navigator) {
 
     <div class="field-label">Notes</div>
     <textarea class="field-input" id="lt-notes" rows="3" placeholder="What was discussed?" style="resize:none;"></textarea>
+
+    <!-- Follow-up scheduling block. The date/priority/assigned-to fields
+         are always visible (not hidden behind a reveal) because on mobile
+         conditional reveals are fiddly and the sheet is already scrollable.
+         These fields are only applied if the toggle is checked. -->
+    <div style="margin-top:14px;padding:12px 14px;background:rgba(245,166,35,.08);border-radius:12px;border:1px solid rgba(245,166,35,.25);">
+      <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:13px;font-weight:700;color:var(--navy);">
+        <input type="checkbox" id="lt-fu-enable" style="width:18px;height:18px;accent-color:var(--orange);flex-shrink:0;">
+        <span>Schedule follow-up</span>
+      </label>
+      <div style="margin-top:10px;">
+        <div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">Due Date</div>
+        <input type="date" class="field-input" id="lt-fu-date" style="margin:0;">
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px;">
+        <div>
+          <div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">Priority</div>
+          <select class="field-select" id="lt-fu-priority" style="margin:0;">
+            <option>Normal</option>
+            <option>High</option>
+            <option>Low</option>
+          </select>
+        </div>
+        <div>
+          <div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">Assigned</div>
+          <select class="field-select" id="lt-fu-assigned" style="margin:0;"></select>
+        </div>
+      </div>
+    </div>
 
     <button class="submit-btn" onclick="submitLogTouch()">Save Touch</button>
   </div>
@@ -2327,20 +2366,41 @@ function renderRoutes() {
 // ── FOLLOW-UPS ────────────────────────────────────────────────────────────
 function renderFollowups() {
   var el = document.getElementById('fu-list');
+  var sub = document.getElementById('fu-subtitle');
+  if (sub) {
+    sub.textContent = APP.followups.length ? (APP.followups.length + ' open') : 'All clear';
+  }
   if (!APP.followups.length) {
     el.innerHTML = '<div class="empty" style="padding-top:60px;">🎉<br><br>All caught up on follow-ups!</div>';
     return;
   }
+  // Sort by priority (High → Normal → Low), then by due_date ascending within priority.
+  var PRI_ORDER = { 'High': 0, 'Normal': 1, 'Low': 2 };
+  var sorted = APP.followups.slice().sort(function(a, b){
+    var pa = PRI_ORDER[a.priority || 'Normal'];
+    var pb = PRI_ORDER[b.priority || 'Normal'];
+    if (pa !== pb) return pa - pb;
+    return (a.due_date || '').localeCompare(b.due_date || '');
+  });
   var now = new Date(); now.setHours(0,0,0,0);
-  el.innerHTML = APP.followups.map(function(f) {
+  el.innerHTML = sorted.map(function(f) {
     var days = Math.floor((now - new Date(f.due_date)) / 86400000);
     var isOverdue = days > 0;
     var color = isOverdue ? '#c62828' : days === 0 ? '#e85d04' : '#2e7d32';
     var daysTxt = isOverdue ? days + 'd overdue' : days === 0 ? 'Today' : 'In ' + Math.abs(days) + 'd';
+    // Priority badge colors — red / navy / gray.
+    var priBg, priCol;
+    if (f.priority === 'High') { priBg = 'rgba(192,32,32,.12)'; priCol = '#c62828'; }
+    else if (f.priority === 'Low') { priBg = 'rgba(107,122,150,.12)'; priCol = '#6b7a96'; }
+    else { priBg = 'rgba(13,45,94,.10)'; priCol = '#0d2d5e'; }
     return '<div class="fu-card">' +
       '<div class="fu-info">' +
-        '<div class="fu-name">' + (f.partner_name||'Unknown') + '</div>' +
-        '<div class="fu-reason">' + (f.reason||f.notes||'—') + '</div>' +
+        '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:3px;">' +
+          '<span class="fu-name">' + _teMob(f.partner_name||'Unknown') + '</span>' +
+          '<span style="font-size:9px;font-weight:700;padding:2px 6px;border-radius:4px;background:' + priBg + ';color:' + priCol + ';">' + _teMob(f.priority||'Normal') + '</span>' +
+        '</div>' +
+        '<div class="fu-reason">' + _teMob(f.reason||f.notes||'—') + '</div>' +
+        (f.assigned_to ? '<div style="font-size:10px;color:var(--muted);margin-top:3px;">👤 ' + _teMob(f.assigned_to) + '</div>' : '') +
       '</div>' +
       '<div class="fu-days" style="color:' + color + ';">' + daysTxt + '</div>' +
       '<button class="fu-done-btn" onclick="completeFU(\'' + f.id + '\')">Done ✓</button>' +
@@ -2360,6 +2420,176 @@ async function completeFU(id) {
   toast('✓ Follow-up completed');
 }
 
+// ══════════════════════════════════════════════════════════════════════════
+// ── ADD FOLLOWUP (MOBILE) ─────────────────────────────────────────────────
+// Bottom sheet for creating a new follow-up from the Follow-ups screen.
+// Also reused: the rep-options helper is called by the Log Touch sheet's
+// follow-up block for its "Assigned" dropdown.
+// ══════════════════════════════════════════════════════════════════════════
+
+// Build <option> tags for every rep in JG_SHARED.REPS, with the given
+// currentVal pre-selected. Returns an HTML string. Used by openLogTouch
+// to populate lt-fu-assigned and by openAddFollowupSA to populate
+// af-assigned. Single source of truth prevents drift.
+function _mobileRepOptions(currentVal) {
+  var repsMap = (window.JG_SHARED && window.JG_SHARED.REPS) || {};
+  var seen = {}; var reps = [];
+  Object.keys(repsMap).forEach(function(em){
+    var n = repsMap[em]; if (n && !seen[n]) { seen[n] = 1; reps.push(n); }
+  });
+  reps.sort();
+  if (!reps.length) reps = ['Brent','David','Josh','Kristina','Rylan'];
+  var html = '';
+  reps.forEach(function(r){
+    html += '<option value="' + _teMob(r) + '"' + (currentVal === r ? ' selected' : '') + '>' + _teMob(r) + '</option>';
+  });
+  return html;
+}
+
+// State for the partner-picker inside the Add Followup sheet
+var _afPartnerId = null;
+var _afPartnerName = '';
+
+function openAddFollowupSA() {
+  _afPartnerId = null;
+  _afPartnerName = '';
+
+  var overlay = document.createElement('div');
+  overlay.className = 'sheet-overlay open';
+  overlay.style.zIndex = '700';
+
+  var sheet = document.createElement('div');
+  sheet.className = 'sheet';
+  sheet.style.transform = 'translateY(0)';
+
+  // Default due date: 3 days from today (matches desktop default).
+  var defaultDate = new Date(); defaultDate.setDate(defaultDate.getDate() + 3);
+  var defaultDateStr = defaultDate.toISOString().split('T')[0];
+
+  var html = '<div class="sheet-handle"></div>';
+  html += '<div class="sheet-title">🔔 Add Follow-up</div>';
+
+  // Partner picker — reuses the lt-search pattern but with its own IDs.
+  html += '<div class="field-label">Partner</div>';
+  html += '<input type="text" id="af-search" class="field-input" placeholder="Type to search partners..." autocomplete="off" autocapitalize="off" autocorrect="off" oninput="_afSearch(this.value)" style="margin:0;">';
+  html += '<div id="af-results" style="display:none;max-height:220px;overflow-y:auto;background:#fff;border:1.5px solid var(--border);border-radius:10px;margin-top:4px;"></div>';
+  html += '<div id="af-selected" style="display:none;padding:10px 14px;background:rgba(232,93,4,.06);border-radius:10px;margin-top:6px;font-weight:600;color:var(--navy);font-size:13px;"></div>';
+
+  html += '<div class="field-label">Due Date</div><input type="date" id="af-date" class="field-input" value="' + defaultDateStr + '" style="margin:0;">';
+
+  html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px;">';
+  html += '<div>';
+  html += '<div class="field-label" style="margin-top:0;">Priority</div>';
+  html += '<select id="af-priority" class="field-select" style="margin:0;"><option>Normal</option><option>High</option><option>Low</option></select>';
+  html += '</div>';
+  html += '<div>';
+  html += '<div class="field-label" style="margin-top:0;">Assigned</div>';
+  html += '<select id="af-assigned" class="field-select" style="margin:0;">' + _mobileRepOptions(APP.repName) + '</select>';
+  html += '</div>';
+  html += '</div>';
+
+  html += '<div class="field-label">Reason / Notes</div>';
+  html += '<textarea id="af-reason" class="field-input" rows="3" placeholder="e.g. Check in on referral" style="resize:none;"></textarea>';
+
+  html += '<div style="display:flex;gap:8px;margin-top:16px;">';
+  html += '<button id="af-cancel" style="flex:1;padding:13px;border-radius:12px;border:1.5px solid var(--border);background:transparent;color:var(--navy);font-size:14px;font-weight:700;font-family:inherit;cursor:pointer;">Cancel</button>';
+  html += '<button id="af-save" style="flex:2;padding:13px;border-radius:12px;border:none;background:var(--orange);color:#fff;font-size:14px;font-weight:700;font-family:inherit;cursor:pointer;">Save Follow-up</button>';
+  html += '</div>';
+
+  sheet.innerHTML = html;
+  overlay.appendChild(sheet);
+  document.body.appendChild(overlay);
+  overlay.offsetHeight; // force layout for transition
+
+  var close = function(){
+    overlay.classList.remove('open');
+    setTimeout(function(){ if (overlay.parentNode) overlay.remove(); }, 320);
+  };
+  overlay.addEventListener('click', function(e){ if (e.target === overlay) close(); });
+  sheet.querySelector('#af-cancel').addEventListener('click', close);
+
+  sheet.querySelector('#af-save').addEventListener('click', async function(){
+    if (!_afPartnerId) { toast('Select a partner first'); return; }
+    var body = {
+      partner_id:   _afPartnerId,
+      partner_name: _afPartnerName,
+      due_date:     sheet.querySelector('#af-date').value,
+      priority:     sheet.querySelector('#af-priority').value || 'Normal',
+      reason:       sheet.querySelector('#af-reason').value || '',
+      notes:        '',
+      market:       APP.repMarket || 'Appleton',
+      assigned_to:  sheet.querySelector('#af-assigned').value || APP.repName
+    };
+    try {
+      var r = await fetch(SB_URL + '/rest/v1/sales_followups', {
+        method: 'POST',
+        headers: {'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json','Prefer':'return=representation'},
+        body: JSON.stringify(body)
+      });
+      if (!r.ok) {
+        var errTxt = await r.text();
+        toast('Save failed: ' + errTxt.slice(0, 80));
+        return;
+      }
+      // Append the new followup to local state and re-render without a full reload
+      try {
+        var created = await r.json();
+        if (created && created.length) APP.followups.push(created[0]);
+      } catch(e) { /* shrug — loadAll will pick it up eventually */ }
+      close();
+      toast('✓ Follow-up added');
+      renderFollowups();
+      renderHome();
+    } catch(e) {
+      toast('Save failed: ' + (e.message || 'network error'));
+    }
+  });
+}
+
+// Partner search inside the Add Followup sheet. Simple prefix/contains
+// filter over APP.partners. Shows top 8 matches.
+function _afSearch(q) {
+  var results = document.getElementById('af-results');
+  var selected = document.getElementById('af-selected');
+  if (!q || !q.trim()) {
+    results.style.display = 'none';
+    results.innerHTML = '';
+    return;
+  }
+  var qLc = q.toLowerCase().trim();
+  var matches = APP.partners.filter(function(p){
+    return (p.name||'').toLowerCase().indexOf(qLc) !== -1
+        || (p.company||'').toLowerCase().indexOf(qLc) !== -1;
+  }).slice(0, 8);
+  if (!matches.length) {
+    results.innerHTML = '<div style="padding:12px 14px;color:var(--muted);font-size:13px;">No matches</div>';
+    results.style.display = 'block';
+    return;
+  }
+  results.innerHTML = matches.map(function(p){
+    return '<div onclick="_afPick(\'' + p.id + '\',\'' + _teMob(p.name).replace(/'/g, '&#39;') + '\')" style="padding:10px 14px;border-bottom:1px solid var(--border);cursor:pointer;">'
+      + '<div style="font-size:13px;font-weight:600;color:var(--navy);">' + _teMob(p.name) + '</div>'
+      + '<div style="font-size:11px;color:var(--muted);">' + _teMob(p.company||'') + (p.city ? ' · ' + _teMob(p.city) : '') + '</div>'
+      + '</div>';
+  }).join('');
+  results.style.display = 'block';
+}
+
+function _afPick(pid, pname) {
+  _afPartnerId = pid;
+  _afPartnerName = pname;
+  var results = document.getElementById('af-results');
+  var selected = document.getElementById('af-selected');
+  var search = document.getElementById('af-search');
+  if (results) { results.style.display = 'none'; results.innerHTML = ''; }
+  if (search) search.value = '';
+  if (selected) {
+    selected.textContent = '✓ ' + pname;
+    selected.style.display = 'block';
+  }
+}
+
+
 // ── LOG TOUCH ─────────────────────────────────────────────────────────────
 function openLogTouch(partnerId) {
   APP.ltPartnerId = null;
@@ -2369,6 +2599,23 @@ function openLogTouch(partnerId) {
   document.getElementById('lt-results').style.display = 'none';
   document.getElementById('lt-selected-display').style.display = 'none';
   document.getElementById('lt-notes').value = '';
+
+  // Reset follow-up block every time the sheet opens. Default state:
+  // toggle off, date +7 days, priority Normal, assigned to current rep.
+  var fuEnable = document.getElementById('lt-fu-enable');
+  var fuDate   = document.getElementById('lt-fu-date');
+  var fuPri    = document.getElementById('lt-fu-priority');
+  var fuAss    = document.getElementById('lt-fu-assigned');
+  if (fuEnable) fuEnable.checked = false;
+  if (fuDate) {
+    var d = new Date(); d.setDate(d.getDate() + 7);
+    fuDate.value = d.toISOString().split('T')[0];
+  }
+  if (fuPri) fuPri.value = 'Normal';
+  if (fuAss) {
+    fuAss.innerHTML = _mobileRepOptions(APP.repName);
+  }
+
   if (partnerId) {
     var p = APP.partners.find(function(x){ return x.id === partnerId; });
     if (p) selectLtPartner(p.id, p.name, p.type||'');
@@ -2455,6 +2702,47 @@ async function submitLogTouch() {
     closeLogTouch();
     toast('✓ Touch logged for ' + APP.ltPartnerName);
     APP.touches.push(data);
+
+    // If "Schedule follow-up" was ticked, create the followup record. Uses
+    // allowlist body matching real schema. Don't block the touch save on
+    // this — if it fails, the touch is still recorded.
+    var fuEnable = document.getElementById('lt-fu-enable');
+    if (fuEnable && fuEnable.checked) {
+      var fuDate = document.getElementById('lt-fu-date').value;
+      var fuPri  = document.getElementById('lt-fu-priority').value || 'Normal';
+      var fuAss  = document.getElementById('lt-fu-assigned').value || APP.repName;
+      if (fuDate) {
+        var fuBody = {
+          partner_id:   APP.ltPartnerId,
+          partner_name: APP.ltPartnerName,
+          partner_type: APP.ltPartnerType || '',
+          due_date:     fuDate,
+          priority:     fuPri,
+          reason:       'Follow up from ' + data.touch_type + ' on ' + today,
+          notes:        data.notes || '',
+          market:       market,
+          assigned_to:  fuAss
+        };
+        try {
+          var fuResp = await fetch(SB_URL + '/rest/v1/sales_followups', {
+            method: 'POST',
+            headers: {'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json','Prefer':'return=representation'},
+            body: JSON.stringify(fuBody)
+          });
+          if (fuResp.ok) {
+            var created = await fuResp.json();
+            if (created && created.length) APP.followups.push(created[0]);
+            renderFollowups();
+          } else {
+            var fuErrTxt = await fuResp.text();
+            toast('Follow-up save failed: ' + fuErrTxt.slice(0, 60));
+          }
+        } catch(e) {
+          toast('Follow-up save error');
+        }
+      }
+    }
+
     renderHome();
   } catch(e) { toast('Error saving touch'); }
 }

@@ -261,6 +261,27 @@ function _ve(v) {
     .replace(/'/g, '&#39;');
 }
 
+// Single source of truth for building the rep-assignment dropdown options.
+// Used by add-followup, add-route, and log-touch modals. Pulls from
+// JG_SHARED.REPS (canonical list) with a hard-coded fallback. Returns an
+// HTML string of <option> tags with currentVal pre-selected.
+function _repOptions(currentVal, placeholder) {
+  var repsMap = (window.JG_SHARED && window.JG_SHARED.REPS) || REPS || {};
+  var seen = {};
+  var reps = [];
+  Object.keys(repsMap).forEach(function(em){
+    var n = repsMap[em];
+    if (n && !seen[n]) { seen[n] = 1; reps.push(n); }
+  });
+  reps.sort();
+  if (!reps.length) reps = ['Brent','David','Josh','Kristina','Rylan']; // last-resort fallback
+  var html = '<option value=""' + (!currentVal ? ' selected' : '') + '>' + (placeholder || '— Select rep —') + '</option>';
+  reps.forEach(function(r){
+    html += '<option value="' + _ve(r) + '"' + (currentVal === r ? ' selected' : '') + '>' + _ve(r) + '</option>';
+  });
+  return html;
+}
+
 function setTypeFilter(t){ST.filterType=t;render();}
 function setTierFilter(t){ST.filterTier=t;render();}
 function setRepFilter(r){ST.filterRep=r||'All';render();}
@@ -642,15 +663,18 @@ async function logTouch(data) {
   // Auto-create follow-up if needed — writes to sales_followups, NOT sales_touches.
   // Same allowlist approach as the touch body. If this POST 400s, the user sees
   // the error but the touch has already been saved, so no data is lost.
+  // priority + assigned_to honor the form selections (added 2026-04-22).
   if(data.follow_up_needed && data.follow_up_date) {
     var followupBody = {
       partner_id:   data.partner_id,
       partner_name: data.partner_name,
+      partner_type: data.partner_type || '',
       due_date:     data.follow_up_date,
+      priority:     data.follow_up_priority || 'Normal',
       reason:       'Follow up from ' + data.touch_type + ' on ' + data.touch_date,
       notes:        data.notes || '',
       market:       ST.market,
-      assigned_to:  rep
+      assigned_to:  data.follow_up_assigned || rep
     };
     await sb('/rest/v1/sales_followups', {method:'POST',headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json','Prefer':'return=minimal'},body:JSON.stringify(followupBody)});
   }
@@ -1439,19 +1463,34 @@ function _renderNow() {
 
     function renderFUSection(list, label) {
       if (!list.length) return '';
+      // Sort by priority: High → Normal → Low. Ties broken by due_date
+      // ascending (earlier-due first within same priority).
+      var PRI_ORDER = { 'High': 0, 'Normal': 1, 'Low': 2 };
+      list = list.slice().sort(function(a, b){
+        var pa = PRI_ORDER[a.priority || 'Normal'];
+        var pb = PRI_ORDER[b.priority || 'Normal'];
+        if (pa !== pb) return pa - pb;
+        return (a.due_date || '').localeCompare(b.due_date || '');
+      });
       var out = '<div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin:14px 0 8px;font-family:DM Mono,monospace;">' + label + ' (' + list.length + ')</div>';
       list.forEach(function(f) {
         var days = daysUntil(f.due_date);
         var ov = days < 0;
         var pri = (f.priority||'normal').toLowerCase();
+        // Priority badge colors: High = red, Normal = navy, Low = gray.
+        var priBg, priCol;
+        if (f.priority === 'High') { priBg = 'rgba(192,32,32,.12)'; priCol = 'var(--danger)'; }
+        else if (f.priority === 'Low') { priBg = 'rgba(107,122,150,.12)'; priCol = 'var(--muted)'; }
+        else { priBg = 'rgba(13,45,94,.08)'; priCol = 'var(--navy)'; }
         out += '<div class="followup-card ' + pri + (ov ? ' overdue' : '') + '">';
         out += '<div style="flex:1;min-width:0;">';
         out += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:3px;">';
         out += '<span style="font-size:13px;font-weight:700;color:var(--navy);">' + (f.partner_name||'Unknown') + '</span>';
         if (f.partner_type) out += '<span class="type-badge" style="background:' + typeColor(f.partner_type) + ';color:#fff;">' + f.partner_type + '</span>';
-        out += '<span style="font-size:9px;font-weight:700;padding:1px 6px;border-radius:4px;background:' + (f.priority==='High'?'rgba(192,32,32,.1)':'rgba(13,45,94,.08)') + ';color:' + (f.priority==='High'?'var(--danger)':'var(--navy)') + ';">' + (f.priority||'Normal') + '</span>';
+        out += '<span style="font-size:9px;font-weight:700;padding:1px 6px;border-radius:4px;background:' + priBg + ';color:' + priCol + ';">' + (f.priority||'Normal') + '</span>';
         out += '</div>';
         out += '<div style="font-size:11px;color:var(--muted);">' + (f.reason||f.notes||'—') + '</div>';
+        if (f.assigned_to) out += '<div style="font-size:10px;color:var(--muted);margin-top:2px;">👤 ' + f.assigned_to + '</div>';
         out += '</div>';
         out += '<div style="text-align:right;flex-shrink:0;margin-right:8px;">';
         out += '<div style="font-size:12px;font-weight:700;color:' + (ov?'var(--danger)':days===0?'var(--orange)':'var(--navy)') + ';">' + (ov ? Math.abs(days)+'d overdue' : days===0 ? 'Today' : 'In '+days+'d') + '</div>';
@@ -1811,10 +1850,20 @@ function _buildModalHtml() {
       mh += '</div>';
       mh += '<div class="form-group"><label class="form-label">Outcome</label><select class="form-select" id="tOutcome"><option>Positive</option><option>Neutral</option><option>No Answer</option><option>Left VM</option><option>Not Interested</option></select></div>';
       mh += '<div class="form-group"><label class="form-label">Notes</label><textarea class="form-input" id="tNotes" rows="3" style="resize:vertical;" placeholder="What was discussed?"></textarea></div>';
-      mh += '<div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;padding:10px 12px;background:rgba(245,166,35,.06);border-radius:8px;border:1px solid rgba(245,166,35,.2);">';
+      // Follow-up section. Priority and assigned-to are always visible next
+      // to the checkbox+date. They're only applied if "Schedule follow-up"
+      // is checked; otherwise they're ignored. Layout: row 1 has the toggle
+      // and date; row 2 has priority + assigned-to side by side.
+      mh += '<div style="padding:10px 12px;background:rgba(245,166,35,.06);border-radius:8px;border:1px solid rgba(245,166,35,.2);margin-bottom:14px;">';
+      mh += '<div style="display:flex;align-items:center;gap:10px;">';
       mh += '<input type="checkbox" id="tFollowup" style="width:16px;height:16px;accent-color:var(--orange);">';
       mh += '<label for="tFollowup" style="font-size:12px;font-weight:600;cursor:pointer;">Schedule follow-up</label>';
       mh += '<input class="form-input" type="date" id="tFollowupDate" style="width:160px;margin-left:auto;" value="' + new Date(Date.now()+7*86400000).toISOString().split('T')[0] + '">';
+      mh += '</div>';
+      mh += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px;">';
+      mh += '<div><label style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;display:block;margin-bottom:4px;">Priority</label><select class="form-select" id="tFollowupPriority" style="padding:6px 10px;font-size:12px;"><option>Normal</option><option>High</option><option>Low</option></select></div>';
+      mh += '<div><label style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;display:block;margin-bottom:4px;">Assigned To</label><select class="form-select" id="tFollowupAssigned" style="padding:6px 10px;font-size:12px;">' + _repOptions(currentRepName(), '— Select rep —') + '</select></div>';
+      mh += '</div>';
       mh += '</div>';
       mh += '<div style="display:flex;gap:8px;justify-content:flex-end;">';
       mh += '<button style="padding:8px 16px;border-radius:6px;border:1.5px solid var(--border);background:transparent;cursor:pointer;font-size:12px;" onclick="ST.modal=null;ST.selected=null;render()">Cancel</button>';
@@ -1887,7 +1936,7 @@ function _buildModalHtml() {
       mh += '<div class="modal-title">🚗 Plan Route</div>';
       mh += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">';
       mh += '<div class="form-group"><label class="form-label">Date</label><input class="form-input" type="date" id="rDate" value="' + ST.today + '"></div>';
-      mh += '<div class="form-group"><label class="form-label">Rep Name</label><input class="form-input" id="rRep" placeholder="Your name"></div>';
+      mh += '<div class="form-group"><label class="form-label">Rep Name</label><select class="form-select" id="rRep">' + _repOptions(currentRepName(), '— Select rep —') + '</select></div>';
       mh += '</div>';
       mh += '<div class="form-group"><label class="form-label">Select Stops (click to add)</label>';
       mh += '<div style="max-height:240px;overflow-y:auto;border:1.5px solid var(--border);border-radius:6px;">';
@@ -1914,7 +1963,10 @@ function _buildModalHtml() {
       mh += '<div class="form-group"><label class="form-label">Priority</label><select class="form-select" id="fuPriority"><option>Normal</option><option>High</option><option>Low</option></select></div>';
       mh += '</div>';
       mh += '<div class="form-group"><label class="form-label">Reason / Notes</label><input class="form-input" id="fuReason" placeholder="e.g. Check in on referral"></div>';
-      mh += '<div class="form-group"><label class="form-label">Assigned To</label><input class="form-input" id="fuAssigned" placeholder="Your name"></div>';
+      // Assigned To is now a dropdown sourced from the canonical rep list.
+      // Pre-selects the current rep as the sensible default — they can change
+      // it to hand the follow-up to someone else before saving.
+      mh += '<div class="form-group"><label class="form-label">Assigned To</label><select class="form-select" id="fuAssigned">' + _repOptions(currentRepName(), '— Select rep —') + '</select></div>';
       mh += '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">';
       mh += '<button style="padding:8px 16px;border-radius:6px;border:1.5px solid var(--border);background:transparent;cursor:pointer;font-size:12px;" onclick="ST.modal=null;render()">Cancel</button>';
       mh += '<button style="padding:8px 20px;border-radius:6px;border:none;background:var(--orange);color:#fff;font-size:12px;font-weight:600;cursor:pointer;" onclick="submitFollowup()">Save</button>';
@@ -2094,6 +2146,11 @@ function submitTouch() {
     var sel = document.getElementById('tPartner').value.split('|');
     pid = sel[0]; pname = sel[1]||''; ptype = sel[2]||'';
   }
+  // Optional follow-up fields — only present in the DOM if the user ticked
+  // "Schedule follow-up" (checkbox). Read with null-safe defaults so the
+  // call still works if the elements are missing for any reason.
+  var fuPri = document.getElementById('tFollowupPriority');
+  var fuAss = document.getElementById('tFollowupAssigned');
   logTouch({
     partner_id: pid, partner_name: pname, partner_type: ptype,
     touch_type: document.getElementById('tType').value,
@@ -2101,7 +2158,9 @@ function submitTouch() {
     outcome: document.getElementById('tOutcome').value,
     notes: document.getElementById('tNotes').value,
     follow_up_needed: document.getElementById('tFollowup').checked,
-    follow_up_date: document.getElementById('tFollowupDate').value
+    follow_up_date: document.getElementById('tFollowupDate').value,
+    follow_up_priority: fuPri ? fuPri.value : 'Normal',
+    follow_up_assigned: fuAss ? fuAss.value : ''
   });
   ST.modal = null; ST.selected = null;
 }
