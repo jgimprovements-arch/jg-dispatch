@@ -1713,7 +1713,11 @@ function _buildModalHtml() {
       // Detect edit mode — if ST.selected is set AND partner exists, prefill the form
       var editP = ST.selected ? ST.partners.find(function(x){ return x.id === ST.selected; }) : null;
       var isEdit = !!editP;
-      var _ve = function(v){ return (v==null?'':String(v)).replace(/"/g,'&quot;'); };
+      // (Formerly had a local `var _ve = ...` here. Removed because var
+      // hoisting caused it to shadow the global _ve across the ENTIRE
+      // _buildModalHtml function, breaking other modal branches that
+      // didn't happen to run through the add-partner code path. The
+      // global _ve at file scope handles this case and is stricter.)
       mh += '<div class="modal-title">' + (isEdit ? '✏️ Edit Partner' : '+ New Partner') + '</div>';
       mh += '<div class="form-group"><label class="form-label">Full Name *</label><input class="form-input" id="pName" placeholder="John Smith" value="' + _ve(editP && editP.name) + '"></div>';
       mh += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">';
@@ -1736,7 +1740,16 @@ function _buildModalHtml() {
       });
       mh += '</select></div>';
       mh += '</div>';
-      mh += '<div class="form-group"><label class="form-label">Notes</label><textarea class="form-input" id="pNotes" rows="2" style="resize:vertical;">' + _ve(editP && editP.notes).replace(/&quot;/g,'"') + '</textarea></div>';
+      // For textarea CONTENT (text between the tags, not an attribute value)
+      // we only need to escape characters that would break HTML parsing:
+      // &, <, and >. Quotes and apostrophes are safe inside element content.
+      var _te = function(s){
+        return String(s==null?'':s)
+          .replace(/&/g,'&amp;')
+          .replace(/</g,'&lt;')
+          .replace(/>/g,'&gt;');
+      };
+      mh += '<div class="form-group"><label class="form-label">Notes</label><textarea class="form-input" id="pNotes" rows="2" style="resize:vertical;">' + _te(editP && editP.notes) + '</textarea></div>';
       // Assigned Sales Rep — admins get a dropdown, non-admins see read-only
       // text so they can't reassign partners from the edit form. Mirrors the
       // mobile partner edit sheet and the canReassign() check enforced
@@ -1851,7 +1864,14 @@ function _buildModalHtml() {
             mh += '<option' + (editT.outcome === o ? ' selected' : '') + '>' + _ve(o) + '</option>';
           });
           mh += '</select></div>';
-          mh += '<div class="form-group"><label class="form-label">Notes</label><textarea class="form-input" id="etNotes" rows="3" style="resize:vertical;">' + _ve(editT.notes||'').replace(/&quot;/g,'"') + '</textarea></div>';
+          // Textarea content — see _te comment near the add-partner notes field.
+          var _te = function(s){
+            return String(s==null?'':s)
+              .replace(/&/g,'&amp;')
+              .replace(/</g,'&lt;')
+              .replace(/>/g,'&gt;');
+          };
+          mh += '<div class="form-group"><label class="form-label">Notes</label><textarea class="form-input" id="etNotes" rows="3" style="resize:vertical;">' + _te(editT.notes||'') + '</textarea></div>';
           // Read-only context footer — these fields aren't editable on purpose
           // (changing who/when would rewrite history). Shown greyed out.
           mh += '<div style="font-size:10px;color:var(--muted);padding:8px 2px 4px;border-top:1px solid var(--border);margin-top:6px;">Partner and logged-by cannot be changed here. To move a touch to a different partner, delete and re-log it.</div>';
