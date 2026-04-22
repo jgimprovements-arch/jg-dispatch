@@ -1872,16 +1872,73 @@ function openJobSheet(id, name, isSwitching) {
     btn.style.background = 'linear-gradient(135deg,#1565c0,#0d47a1)';
     btn.onclick = async function() {
       closeJobSheet();
-      await fetch(SB_URL + '/rest/v1/time_entries?id=eq.' + TC.activeEntry.id, {
-        method: 'PATCH',
-        headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ job_id: id, job_name: name })
-      });
-      TC.activeEntry.job_id = id;
-      TC.activeEntry.job_name = name;
-      renderJobs();
-      renderStatus();
-      toast('✓ Switched to: ' + name);
+      if (!TC.activeEntry) { toast('Not clocked in'); return; }
+      // BUG FIX 2026-04-22: previously this PATCHed job_id on the current entry,
+      // which caused the entire day's time to be reattributed to the new job
+      // (losing all hours on the prior job). Now we properly close the current
+      // entry and create a new one — preserving per-job time attribution.
+      try {
+        var loc = await getLocation();
+        var now = new Date().toISOString();
+        var duration = Math.floor((Date.now() - TC.clockInTime) / 60000);
+        var priorJobName = TC.selectedJobName || TC.activeEntry.job_name || '(unknown)';
+
+        // 1. Close the current entry cleanly
+        var cr = await fetch(SB_URL + '/rest/v1/time_entries?id=eq.' + TC.activeEntry.id, {
+          method: 'PATCH',
+          headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            clock_out: now,
+            duration_minutes: duration,
+            clock_out_lat: loc ? loc.lat : null,
+            clock_out_lng: loc ? loc.lng : null,
+            status: 'complete',
+            notes: 'Job switch → ' + name
+          })
+        });
+        if (!cr.ok) { toast('Switch failed — try again'); return; }
+
+        logActivity('Job Switch', 'Switched from ' + priorJobName + ' to ' + name, 'time_clock');
+
+        // 2. Open a new entry for the new job
+        var newEntry = {
+          employee_id:   TC.employee ? TC.employee.id : null,
+          employee_name: TC.employee ? TC.employee.name : '',
+          job_id:        id || null,
+          job_name:      name,
+          clock_in:      now,
+          clock_in_lat:  loc ? loc.lat : null,
+          clock_in_lng:  loc ? loc.lng : null,
+          status:        'active',
+          market:        TC.employee ? (TC.employee.market || 'Appleton') : 'Appleton',
+          notes:         'Switched from ' + priorJobName
+        };
+        var ncr = await fetch(SB_URL + '/rest/v1/time_entries', {
+          method: 'POST',
+          headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=representation' },
+          body: JSON.stringify(newEntry)
+        });
+        if (!ncr.ok) {
+          toast('New entry failed — prior job closed, tap job to clock in');
+          TC.clockedIn = false;
+          TC.activeEntry = null;
+          renderStatus(); renderJobs();
+          return;
+        }
+        var rows = await ncr.json();
+        TC.activeEntry     = rows[0];
+        TC.clockInTime     = Date.now();
+        TC.selectedJobId   = id;
+        TC.selectedJobName = name;
+        try { startPinging(); } catch(e) {}
+        renderJobs();
+        renderStatus();
+        try { renderEntries(); } catch(e) {}
+        toast('✓ Switched to: ' + name);
+      } catch (err) {
+        console.error('Job switch error:', err);
+        toast('Switch failed — try again');
+      }
     };
   } else {
     title.textContent = 'Clock In';
@@ -4166,7 +4223,7 @@ function showAnniversaryCelebration(name, years) {
 }
 
 </script>
-<script src="tc-dispatch.js?v=20260419-1"></script>
+<script src="tc-dispatch.js?v=20260422-jobswitch"></script>
 <script src="presence.js?v=20260419-1"></script>
 <!-- Sidebar only on tablet/desktop (>1024px). Mobile timeclock stays full-screen. -->
 <script>
