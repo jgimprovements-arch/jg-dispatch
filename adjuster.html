@@ -342,6 +342,8 @@ OVERHEAD AND PROFIT KNOWLEDGE (Verisk Official Whitepaper):
 Xactimate unit prices NEVER include general O&P. Verisk states: general overhead is not included in unit pricing but is added as a percentage of the total bid along with profit. This constitutes general contractor O&P. The building cost data is not designed to be inclusive of sales tax, general O&P, or job-related O&P within unit prices. These are added in Estimate Parameters. DEFENSE LANGUAGE: Per Verisk official whitepaper, Xactimate unit prices exclude general overhead and profit. Denial of 10+10 on GC reconstruction is contradicted by Xactimate pricing methodology. O&P RULES: Applies to ALL reconstruction. Does NOT apply to mitigation, mold, contents, or board-up.`;
 
 let S={apiKey:localStorage.getItem('jg_key')||'',mode:'adjuster',proj:'',enc:null,est:null,busy:false,prog:'',err:null,result:null,resp:{},reviewer:'',sev:'ALL',done:false,reb:false,ec:'',adjEst:null,adjEmail:'',adjResult:null,adjResp:{},adjDone:false,adjLetterEdited:null,adjNotes:{},
+  // NEW: Adjuster intel lookup
+  adjName:'', carrier:'', intelPreview:null, intelBusy:false, intelRaw:null,
   // NEW: Two-pass state
   phase:'upload', // upload -> review -> recheck_upload -> recheck_result -> signoff -> done
   correctedEst:null, recheckResult:null, recheckBusy:false,
@@ -1038,11 +1040,17 @@ async function runAdjusterAnalysis(){
     }
     
     S.prog='Loading historical intel...';draw();
-    // Pull adjuster/carrier name from email hint if available
-    var adjHint = (S.adjEmail||'').match(/from[:\s]+([A-Z][a-z]+ [A-Z][a-z]+)/i);
-    var adjNameHint = adjHint ? adjHint[1] : '';
-    var carrierHint = (S.adjEmail||'').match(/(allstate|state farm|farmers|liberty mutual|travelers|nationwide|usaa|progressive|erie|american family|cincinnati|westbend|acuity|society|secura|grinnell|pekin|germantown)/i);
-    var carrierNameHint = carrierHint ? carrierHint[0] : '';
+    // Use manually-entered adjuster name & carrier first, fall back to regex from email
+    var adjNameHint = (S.adjName||'').trim();
+    var carrierNameHint = (S.carrier||'').trim();
+    if(!adjNameHint){
+      var adjHint = (S.adjEmail||'').match(/from[:\s]+([A-Z][a-z]+ [A-Z][a-z]+)/i);
+      adjNameHint = adjHint ? adjHint[1] : '';
+    }
+    if(!carrierNameHint){
+      var carrierHint = (S.adjEmail||'').match(/(allstate|state farm|farmers|liberty mutual|travelers|nationwide|usaa|progressive|erie|american family|cincinnati|westbend|acuity|society|secura|grinnell|pekin|germantown)/i);
+      carrierNameHint = carrierHint ? carrierHint[0] : '';
+    }
     const historicalIntel = await fetchHistoricalIntel(adjNameHint, carrierNameHint);
     const enrichedPrompt = ADJUSTER_PROMPT + historicalIntel;
     S.prog='AI analyzing disputes (30-60 sec)...';draw();
@@ -1224,8 +1232,8 @@ async function saveRebuttalToSupabase() {
     const conceded = (ar.disputed_items||[]).filter(d => S.adjResp[d.id] === 'concede');
     const payload = {
       project_name:    S.proj || '',
-      adjuster_name:   ar.adjuster_info?.name || '',
-      carrier:         ar.adjuster_info?.company || '',
+      adjuster_name:   (S.adjName||'').trim() || ar.adjuster_info?.name || '',
+      carrier:         (S.carrier||'').trim() || ar.adjuster_info?.company || '',
       claim_number:    ar.adjuster_info?.claim_number || '',
       adjuster_email:  ar.adjuster_info?.email || '',
       jg_total:        ar.summary?.jg_total || '',
@@ -1345,6 +1353,73 @@ async function fetchHistoricalIntel(adjusterName, carrier) {
 
     return intel.length ? '\n\nHISTORICAL INTELLIGENCE FROM PAST REBUTTALS:\n' + intel.join('\n') + '\n\nUse this to strengthen defenses. Be extra firm on codes previously won against this adjuster/carrier.' : '';
   } catch(e) { console.warn('Intel fetch failed:', e); return ''; }
+}
+
+// ══ PREVIEW ADJUSTER INTEL (for UI display before running full analysis) ══
+async function previewAdjusterIntel() {
+  var adjName = (S.adjName||'').trim();
+  var carrier = (S.carrier||'').trim();
+  if (!adjName && !carrier) {
+    S.err = 'Enter an adjuster name or carrier to preview intel.';
+    draw(); return;
+  }
+  S.intelBusy = true; S.err = null; S.intelPreview = null; draw();
+  try {
+    var rows = [];
+    var r = await fetch(SB_URL + '/rest/v1/adjuster_rebuttals?order=created_at.desc&limit=200&select=*', {
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+    });
+    if (!r.ok) {
+      var errTxt = await r.text();
+      if (r.status === 404 || errTxt.indexOf('adjuster_rebuttals') >= 0) {
+        S.intelPreview = { error: 'table_missing', message: 'The adjuster_rebuttals table does not exist in Supabase yet. Run the SQL migration to create it, then use the tool on a few claims to build up pattern data.' };
+      } else {
+        S.intelPreview = { error: 'fetch_failed', message: 'Supabase returned ' + r.status + ': ' + errTxt };
+      }
+      S.intelBusy = false; draw(); return;
+    }
+    rows = await r.json();
+
+    var adjLow = adjName.toLowerCase();
+    var carrLow = carrier.toLowerCase();
+    var adjRows = adjLow ? rows.filter(function(r){ return (r.adjuster_name||'').toLowerCase().includes(adjLow); }) : [];
+    var carrRows = carrLow ? rows.filter(function(r){ return (r.carrier||'').toLowerCase().includes(carrLow); }) : [];
+
+    function aggregate(subset) {
+      var defended = subset.reduce(function(s,r){ return s+(r.items_defended||0); }, 0);
+      var conceded = subset.reduce(function(s,r){ return s+(r.items_conceded||0); }, 0);
+      var total = defended + conceded;
+      var disputedCodes = {};
+      var wonCodes = {};
+      subset.forEach(function(r) {
+        (r.defended_items||[]).forEach(function(it){ if(it.code){ wonCodes[it.code]=(wonCodes[it.code]||0)+1; disputedCodes[it.code]=(disputedCodes[it.code]||0)+1; } });
+        (r.conceded_items||[]).forEach(function(it){ if(it.code){ disputedCodes[it.code]=(disputedCodes[it.code]||0)+1; } });
+      });
+      var topDisputed = Object.entries(disputedCodes).sort(function(a,b){return b[1]-a[1];}).slice(0,8);
+      var topWon = Object.entries(wonCodes).sort(function(a,b){return b[1]-a[1];}).slice(0,8);
+      return {
+        claimCount: subset.length,
+        defended: defended,
+        conceded: conceded,
+        winRate: total ? Math.round(defended/total*100) : null,
+        topDisputed: topDisputed,
+        topWon: topWon,
+        recentClaims: subset.slice(0,5).map(function(r){
+          return { project: r.project_name, adj: r.adjuster_name, carr: r.carrier, disputed: r.total_disputed, defended: r.items_defended, conceded: r.items_conceded, date: (r.created_at||'').slice(0,10) };
+        })
+      };
+    }
+
+    S.intelPreview = {
+      totalRowsInDB: rows.length,
+      adj: adjName ? { name: adjName, stats: aggregate(adjRows) } : null,
+      carr: carrier ? { name: carrier, stats: aggregate(carrRows) } : null
+    };
+  } catch(e) {
+    console.error('previewAdjusterIntel failed:', e);
+    S.intelPreview = { error: 'exception', message: e.message };
+  }
+  S.intelBusy = false; draw();
 }
 
 // ══ ADJUSTER SIGN-OFF ══
@@ -1467,7 +1542,58 @@ function draw(){
     </div>`;
 
     h+=`<div style="margin-bottom:14px"><label style="display:block;font-size:11px;color:var(--dim);margin-bottom:4px;font-family:'JetBrains Mono',monospace;text-transform:uppercase">Albi Project Name <span style="color:var(--red)">* required</span></label><input type="text" id="projIn" value="${S.proj}" placeholder="e.g. Wang-2798-WTR" style="width:100%;max-width:400px"></div>`;
-    
+
+    // ── Adjuster Intel Lookup ──
+    h+=`<div style="margin-bottom:16px;padding:14px 16px;border-radius:10px;background:var(--purpD);border:1px solid rgba(106,27,154,0.25)">`;
+    h+=`  <div class="mono" style="font-size:11px;font-weight:700;color:var(--purp);text-transform:uppercase;margin-bottom:10px">🎯 Adjuster Pattern Lookup</div>`;
+    h+=`  <div style="display:grid;grid-template-columns:1fr 1fr auto;gap:10px;align-items:end">`;
+    h+=`    <div><label style="display:block;font-size:10px;color:var(--dim);margin-bottom:3px;font-family:'DM Mono',monospace;text-transform:uppercase">Adjuster Name</label><input type="text" id="adjNameIn" oninput="S.adjName=this.value" value="${S.adjName}" placeholder="e.g. John Smith" style="width:100%"></div>`;
+    h+=`    <div><label style="display:block;font-size:10px;color:var(--dim);margin-bottom:3px;font-family:'DM Mono',monospace;text-transform:uppercase">Carrier</label><input type="text" id="carrierIn" oninput="S.carrier=this.value" value="${S.carrier}" placeholder="e.g. State Farm" style="width:100%"></div>`;
+    h+=`    <button onclick="previewAdjusterIntel()" ${S.intelBusy?'disabled':''} style="padding:10px 18px;border-radius:6px;border:none;background:${S.intelBusy?'var(--mut)':'var(--purp)'};color:#fff;font-size:11px;font-weight:700;cursor:pointer;font-family:'DM Mono',monospace;white-space:nowrap">${S.intelBusy?'Loading...':'Preview Intel'}</button>`;
+    h+=`  </div>`;
+    h+=`  <p style="font-size:10px;color:var(--dim);margin-top:8px;line-height:1.5">Looks up historical patterns from past rebuttals — win rates, most-challenged codes, successful defense codes. Optional but recommended.</p>`;
+
+    // Intel results card
+    if(S.intelPreview){
+      var ip = S.intelPreview;
+      if(ip.error){
+        h+=`<div style="margin-top:12px;padding:12px;background:var(--redD);border:1px solid rgba(192,32,32,0.3);border-radius:6px"><div class="mono" style="font-size:11px;color:var(--red);font-weight:700;margin-bottom:4px">⚠ ${ip.error==='table_missing'?'DATABASE NOT SET UP':'INTEL FETCH FAILED'}</div><div style="font-size:11px;color:var(--txt);line-height:1.5">${ip.message}</div></div>`;
+      } else {
+        h+=`<div style="margin-top:12px;padding:12px;background:#fff;border:1px solid var(--brd);border-radius:6px">`;
+        h+=`<div class="mono" style="font-size:10px;color:var(--dim);margin-bottom:8px">Database: ${ip.totalRowsInDB} total past rebuttal${ip.totalRowsInDB!==1?'s':''}</div>`;
+
+        function renderStats(label, entry){
+          if(!entry) return '';
+          var st = entry.stats;
+          var out = '<div style="margin-bottom:10px;padding-bottom:10px;border-bottom:1px solid var(--brd)">';
+          out += '<div class="mono" style="font-size:11px;font-weight:700;color:var(--purp);margin-bottom:6px">'+label.toUpperCase()+': '+entry.name+'</div>';
+          if(st.claimCount===0){
+            out += '<div style="font-size:11px;color:var(--dim);font-style:italic">No historical data found. Build up by logging future rebuttals.</div>';
+          } else {
+            out += '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:8px">';
+            out += '<div><div style="font-size:18px;font-weight:700;color:var(--navy)">'+st.claimCount+'</div><div style="font-size:9px;color:var(--dim);text-transform:uppercase">Past Disputes</div></div>';
+            out += '<div><div style="font-size:18px;font-weight:700;color:var(--grn)">'+(st.winRate!==null?st.winRate+'%':'—')+'</div><div style="font-size:9px;color:var(--dim);text-transform:uppercase">Win Rate</div></div>';
+            out += '<div><div style="font-size:18px;font-weight:700;color:var(--grn)">'+st.defended+'</div><div style="font-size:9px;color:var(--dim);text-transform:uppercase">Defended</div></div>';
+            out += '<div><div style="font-size:18px;font-weight:700;color:var(--wrn)">'+st.conceded+'</div><div style="font-size:9px;color:var(--dim);text-transform:uppercase">Conceded</div></div>';
+            out += '</div>';
+            if(st.topDisputed.length){
+              out += '<div style="font-size:11px;margin-bottom:4px"><span style="color:var(--dim);font-weight:600">Most Challenged Codes:</span> <span class="mono" style="color:var(--red)">'+st.topDisputed.map(function(c){return c[0]+' ('+c[1]+'x)';}).join(', ')+'</span></div>';
+            }
+            if(st.topWon.length){
+              out += '<div style="font-size:11px"><span style="color:var(--dim);font-weight:600">Successfully Defended:</span> <span class="mono" style="color:var(--grn)">'+st.topWon.map(function(c){return c[0]+' ('+c[1]+'x won)';}).join(', ')+'</span></div>';
+            }
+          }
+          out += '</div>';
+          return out;
+        }
+
+        h+=renderStats('Adjuster', ip.adj);
+        h+=renderStats('Carrier', ip.carr);
+        h+=`</div>`;
+      }
+    }
+    h+=`</div>`;
+
     h+=`<div class="mono" style="font-size:12px;font-weight:700;color:var(--red);margin:16px 0 8px;text-transform:uppercase">Adjuster's Pushback</div>`;
     h+=`<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:12px"><div style="border:2px dashed ${S.adjEst?'var(--red)':'var(--brd)'};border-radius:10px;padding:${S.adjEst?'16px':'24px 16px'};text-align:${S.adjEst?'left':'center'};cursor:pointer;background:${S.adjEst?'var(--s1)':'transparent'};transition:border-color .15s,background .15s" onclick="document.getElementById('adjF').click()" ondragover="dragOver(event)" ondragleave="dragLeave(event)" ondrop="dropFile(event,'adjEst')"><input type="file" id="adjF" accept=".pdf" style="display:none" onchange="if(this.files[0]){S.adjEst=this.files[0];draw()}">${S.adjEst?'<div style="display:flex;align-items:center;gap:10px"><span style="font-size:22">⚖️</span><div><p style="font-size:12px;font-weight:600;color:var(--red)">Adjuster estimate loaded</p><p style="font-size:11px;color:var(--dim);margin-top:2px">'+S.adjEst.name+'</p></div></div>':'<div style="font-size:24px;opacity:.4;margin-bottom:6px">⚖️</div><p style="font-size:12px;font-weight:600">Adjuster Xactimate</p><p style="font-size:11px;color:var(--dim);margin-top:4px">Drop PDF here or click to browse</p>'}</div>`;
     h+=`<div style="border:2px dashed var(--brd);border-radius:10px;padding:16px"><label style="display:block;font-size:12px;font-weight:600;margin-bottom:6px">OR paste adjuster email</label><textarea id="adjEmailIn" oninput="S.adjEmail=this.value" placeholder="Paste adjuster's email or notes here..." style="min-height:80px;border-color:var(--brd)">${S.adjEmail}</textarea></div></div>`;
