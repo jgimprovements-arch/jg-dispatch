@@ -460,6 +460,14 @@ var ST = {
   selectionMode: false,  // when true, partner rows show checkboxes instead of click-to-open
   selectedIds: {},       // {id: true} for O(1) lookup of checked rows
   _lastSelectIdx: -1,    // index of the last row interacted with, for Shift+click range select
+  // Touches tab organization — filters, search, grouping. All default to
+  // "no filter" so the unfiltered view is the same as before.
+  touchFilterRep:     'All',   // 'All' | <rep name>
+  touchFilterType:    'All',   // 'All' | 'Call' | 'Visit' | 'Drop-in' | 'Text' | 'Email' | 'Event'
+  touchFilterOutcome: 'All',   // 'All' | 'Positive' | 'Neutral' | 'No Answer' | 'Left VM' | 'Not Interested'
+  touchFilterRange:   'All',   // 'All' | 'today' | '7d' | '30d' | '90d'
+  touchSearchQ:       '',
+  touchGroupBy:       'none',  // 'none' | 'rep' | 'date' | 'partner' | 'outcome'
   today: new Date().toISOString().split('T')[0],
   apiKey: localStorage.getItem('jg_key')||''
 };
@@ -1015,6 +1023,7 @@ function render() {
 function _bgSignature() {
   return [
     ST.tab, ST.market, ST.filterType, ST.filterTier, ST.filterRep, ST.searchQ,
+    ST.touchFilterRep, ST.touchFilterType, ST.touchFilterOutcome, ST.touchFilterRange, ST.touchSearchQ, ST.touchGroupBy,
     ST.partners.length, ST.touches.length, ST.followups.length, ST.routes.length,
     ST.loading ? 1 : 0,
     ST.selected || ''
@@ -1204,23 +1213,167 @@ function _renderNow() {
     h += '<div class="sales-stat"><div class="sales-stat-val">' + ST.touches.length + '</div><div class="sales-stat-lbl">Total Logged</div></div>';
     h += '</div>';
 
-    var visibleTouches = isAdmin() ? ST.touches : ST.touches.filter(function(t){return t.logged_by===currentRepName();});
-    visibleTouches.slice(0,50).forEach(function(t) {
-      h += '<div class="touch-row">';
-      h += '<div class="touch-icon" style="background:rgba(13,45,94,.08);">' + touchIcon(t.touch_type) + '</div>';
-      h += '<div style="flex:1;min-width:0;">';
-      h += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:2px;">';
-      h += '<span style="font-size:13px;font-weight:700;color:var(--navy);">' + (t.partner_name||'Unknown') + '</span>';
-      h += '<span style="font-size:10px;padding:1px 7px;border-radius:4px;background:rgba(13,45,94,.08);color:var(--navy);font-weight:600;">' + (t.touch_type||'') + '</span>';
-      h += '<span style="font-size:10px;font-weight:600;color:' + outcomeColor(t.outcome) + ';">' + (t.outcome||'') + '</span>';
-      h += '</div>';
-      h += '<div style="font-size:11px;color:var(--muted);">' + (t.notes||'—') + '</div>';
-      h += '</div>';
-      h += '<div style="text-align:right;flex-shrink:0;">';
-      h += '<div style="font-size:12px;font-weight:600;color:var(--navy);">' + fmtDate(t.touch_date) + '</div>';
-      h += '<div style="font-size:10px;color:var(--muted);">' + (t.logged_by||'') + '</div>';
-      h += '</div></div>';
+    // ── Filter / search / group-by row ─────────────────────────────────────
+    // Rep list sourced from JG_SHARED when available (same pattern as the
+    // Partners rep filter). Deduplicated.
+    var touchReps = [];
+    var _seen = {};
+    var _repsMap = (window.JG_SHARED && window.JG_SHARED.REPS) || REPS;
+    Object.keys(_repsMap).forEach(function(em){
+      var n = _repsMap[em];
+      if (!_seen[n]) { _seen[n] = 1; touchReps.push(n); }
     });
+    touchReps.sort();
+
+    // Small helper for the filter dropdowns — same visual style used elsewhere
+    // (navy fill when active, gray-white when "All"). Keeps the bar consistent.
+    function _tchFilterSelect(id, currentVal, allLabel, options, activeFn) {
+      var active = activeFn ? activeFn(currentVal) : (currentVal && currentVal !== 'All');
+      var bg = active ? 'var(--navy)' : 'var(--surface)';
+      var col = active ? '#fff' : 'var(--txt)';
+      var bc = active ? 'var(--navy)' : 'var(--border)';
+      var chev = active ? 'white' : '%236b7a96';
+      var opts = '<option value="All"' + (currentVal==='All'?' selected':'') + '>' + allLabel + '</option>';
+      options.forEach(function(o){
+        var val = typeof o === 'string' ? o : o.value;
+        var lbl = typeof o === 'string' ? o : o.label;
+        opts += '<option value="' + val + '"' + (currentVal===val?' selected':'') + '>' + lbl + '</option>';
+      });
+      return '<select onchange="ST.' + id + '=this.value;render()" style="padding:6px 28px 6px 12px;border-radius:6px;border:1.5px solid ' + bc + ';font-size:12px;font-weight:600;font-family:DM Sans,sans-serif;background:' + bg + ';color:' + col + ';cursor:pointer;outline:none;appearance:none;-webkit-appearance:none;background-image:url(\'data:image/svg+xml;utf8,<svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;10&quot; height=&quot;10&quot; viewBox=&quot;0 0 10 10&quot;><path d=&quot;M2 3l3 4 3-4&quot; stroke=&quot;' + chev + '&quot; stroke-width=&quot;1.5&quot; fill=&quot;none&quot; stroke-linecap=&quot;round&quot; stroke-linejoin=&quot;round&quot;/></svg>\');background-repeat:no-repeat;background-position:right 8px center;">' + opts + '</select>';
+    }
+
+    h += '<div style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;align-items:center;">';
+    h += '<input style="padding:7px 12px;border-radius:6px;border:1.5px solid var(--border);font-size:12px;font-family:DM Sans,sans-serif;outline:none;width:200px;" placeholder="Search notes, partner..." value="' + _ve(ST.touchSearchQ) + '" oninput="ST.touchSearchQ=this.value;render()">';
+    h += _tchFilterSelect('touchFilterRep',     ST.touchFilterRep,     'All reps',     touchReps);
+    h += _tchFilterSelect('touchFilterType',    ST.touchFilterType,    'All types',    ['Call','Visit','Drop-in','Text','Email','Event']);
+    h += _tchFilterSelect('touchFilterOutcome', ST.touchFilterOutcome, 'All outcomes', ['Positive','Neutral','No Answer','Left VM','Not Interested']);
+    h += _tchFilterSelect('touchFilterRange',   ST.touchFilterRange,   'All time',     [
+      {value:'today', label:'Today'}, {value:'7d', label:'Last 7 days'},
+      {value:'30d', label:'Last 30 days'}, {value:'90d', label:'Last 90 days'}
+    ]);
+    // Group-by has a distinct visual treatment — always shows "Group: X" label
+    // even when set to 'none' so the user can discover it.
+    var gbActive = ST.touchGroupBy && ST.touchGroupBy !== 'none';
+    var gbBg = gbActive ? '#e85d04' : 'var(--surface)';
+    var gbCol = gbActive ? '#fff' : 'var(--txt)';
+    var gbBc = gbActive ? '#e85d04' : 'var(--border)';
+    var gbChev = gbActive ? 'white' : '%236b7a96';
+    h += '<select onchange="ST.touchGroupBy=this.value;render()" title="Group rows by" style="margin-left:auto;padding:6px 28px 6px 12px;border-radius:6px;border:1.5px solid ' + gbBc + ';font-size:12px;font-weight:600;font-family:DM Sans,sans-serif;background:' + gbBg + ';color:' + gbCol + ';cursor:pointer;outline:none;appearance:none;-webkit-appearance:none;background-image:url(\'data:image/svg+xml;utf8,<svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;10&quot; height=&quot;10&quot; viewBox=&quot;0 0 10 10&quot;><path d=&quot;M2 3l3 4 3-4&quot; stroke=&quot;' + gbChev + '&quot; stroke-width=&quot;1.5&quot; fill=&quot;none&quot; stroke-linecap=&quot;round&quot; stroke-linejoin=&quot;round&quot;/></svg>\');background-repeat:no-repeat;background-position:right 8px center;">';
+    h += '<option value="none"' + (ST.touchGroupBy==='none'?' selected':'') + '>No grouping</option>';
+    h += '<option value="rep"'    + (ST.touchGroupBy==='rep'?' selected':'')    + '>Group by rep</option>';
+    h += '<option value="date"'   + (ST.touchGroupBy==='date'?' selected':'')   + '>Group by date</option>';
+    h += '<option value="partner"'+ (ST.touchGroupBy==='partner'?' selected':'')+ '>Group by partner</option>';
+    h += '<option value="outcome"'+ (ST.touchGroupBy==='outcome'?' selected':'')+ '>Group by outcome</option>';
+    h += '</select>';
+    h += '</div>';
+
+    // ── Apply filters ──────────────────────────────────────────────────────
+    // Visibility: ALL reps see ALL touches now (was admin-only previously).
+    // Team-transparency shift — matches the open-reassignment decision.
+    var filteredTouches = ST.touches.slice();
+    if (ST.touchFilterRep !== 'All') {
+      filteredTouches = filteredTouches.filter(function(t){ return t.logged_by === ST.touchFilterRep; });
+    }
+    if (ST.touchFilterType !== 'All') {
+      filteredTouches = filteredTouches.filter(function(t){ return t.touch_type === ST.touchFilterType; });
+    }
+    if (ST.touchFilterOutcome !== 'All') {
+      filteredTouches = filteredTouches.filter(function(t){ return t.outcome === ST.touchFilterOutcome; });
+    }
+    if (ST.touchFilterRange !== 'All') {
+      var cutoff = new Date();
+      if (ST.touchFilterRange === 'today') {
+        cutoff = new Date(ST.today + 'T00:00:00');
+      } else if (ST.touchFilterRange === '7d') {
+        cutoff.setDate(cutoff.getDate() - 7);
+      } else if (ST.touchFilterRange === '30d') {
+        cutoff.setDate(cutoff.getDate() - 30);
+      } else if (ST.touchFilterRange === '90d') {
+        cutoff.setDate(cutoff.getDate() - 90);
+      }
+      filteredTouches = filteredTouches.filter(function(t){
+        return t.touch_date && new Date(t.touch_date + 'T00:00:00') >= cutoff;
+      });
+    }
+    if (ST.touchSearchQ && ST.touchSearchQ.trim()) {
+      var q = ST.touchSearchQ.toLowerCase().trim();
+      filteredTouches = filteredTouches.filter(function(t){
+        return (t.partner_name||'').toLowerCase().indexOf(q) !== -1
+            || (t.notes||'').toLowerCase().indexOf(q) !== -1
+            || (t.logged_by||'').toLowerCase().indexOf(q) !== -1;
+      });
+    }
+
+    // Result count hint
+    var totalShown = filteredTouches.length;
+    var hideCount = ST.touches.length - totalShown;
+    if (hideCount > 0) {
+      h += '<div style="font-size:11px;color:var(--muted);margin-bottom:10px;font-style:italic;">Showing ' + totalShown + ' of ' + ST.touches.length + ' touches (' + hideCount + ' hidden by filters).</div>';
+    }
+
+    if (!filteredTouches.length) {
+      h += '<div style="text-align:center;padding:40px;color:var(--muted);font-size:13px;">No touches match these filters.</div>';
+    } else {
+      // ── Render function for a single touch row (used by both grouped and flat paths) ──
+      function _renderTouchRow(t) {
+        var canEditTouch = isAdmin() || (t.logged_by === currentRepName());
+        var row = '<div class="touch-row">';
+        row += '<div class="touch-icon" style="background:rgba(13,45,94,.08);">' + touchIcon(t.touch_type) + '</div>';
+        row += '<div style="flex:1;min-width:0;">';
+        row += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:2px;">';
+        row += '<span style="font-size:13px;font-weight:700;color:var(--navy);">' + _ve(t.partner_name||'Unknown') + '</span>';
+        row += '<span style="font-size:10px;padding:1px 7px;border-radius:4px;background:rgba(13,45,94,.08);color:var(--navy);font-weight:600;">' + _ve(t.touch_type||'') + '</span>';
+        row += '<span style="font-size:10px;font-weight:600;color:' + outcomeColor(t.outcome) + ';">' + _ve(t.outcome||'') + '</span>';
+        row += '</div>';
+        row += '<div style="font-size:11px;color:var(--muted);">' + _ve(t.notes||'—') + '</div>';
+        row += '</div>';
+        row += '<div style="text-align:right;flex-shrink:0;">';
+        row += '<div style="font-size:12px;font-weight:600;color:var(--navy);">' + fmtDate(t.touch_date) + '</div>';
+        row += '<div style="font-size:10px;color:var(--muted);">' + _ve(t.logged_by||'') + '</div>';
+        row += '</div>';
+        if (canEditTouch) {
+          row += '<button title="Edit touch" style="margin-left:8px;padding:6px 10px;border-radius:6px;border:1.5px solid var(--border);background:var(--surface);color:var(--navy);font-size:12px;cursor:pointer;flex-shrink:0;" onclick="ST.selected=\'' + t.id + '\';ST.modal=\'edit-touch\';render()">✏️</button>';
+        }
+        row += '</div>';
+        return row;
+      }
+
+      if (ST.touchGroupBy === 'none') {
+        // Flat list — sorted by date desc (already comes back sorted from the API).
+        filteredTouches.forEach(function(t){ h += _renderTouchRow(t); });
+      } else {
+        // Build groups, then render section headers + rows under each.
+        var groups = {};
+        filteredTouches.forEach(function(t){
+          var key;
+          if (ST.touchGroupBy === 'rep')     key = t.logged_by || '(Unknown rep)';
+          else if (ST.touchGroupBy === 'date')    key = t.touch_date || '(No date)';
+          else if (ST.touchGroupBy === 'partner') key = t.partner_name || '(Unknown partner)';
+          else if (ST.touchGroupBy === 'outcome') key = t.outcome || '(No outcome)';
+          else key = '(Other)';
+          if (!groups[key]) groups[key] = [];
+          groups[key].push(t);
+        });
+        // Sort group keys. For date, reverse-chrono; for everything else, alphabetical.
+        var sortedKeys = Object.keys(groups);
+        if (ST.touchGroupBy === 'date') {
+          sortedKeys.sort(function(a,b){ return b.localeCompare(a); });
+        } else {
+          sortedKeys.sort();
+        }
+        sortedKeys.forEach(function(key){
+          var groupTouches = groups[key];
+          // Section header
+          var displayKey = (ST.touchGroupBy === 'date' && key !== '(No date)') ? fmtDate(key) : key;
+          h += '<div style="margin:18px 0 8px;display:flex;align-items:center;gap:10px;">';
+          h += '<span style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:.05em;">' + _ve(displayKey) + '</span>';
+          h += '<span style="font-size:10px;color:var(--muted);font-weight:600;background:rgba(13,45,94,.06);padding:2px 8px;border-radius:10px;">' + groupTouches.length + '</span>';
+          h += '<div style="flex:1;height:1px;background:var(--border);"></div>';
+          h += '</div>';
+          groupTouches.forEach(function(t){ h += _renderTouchRow(t); });
+        });
+      }
+    }
   }
 
   // ── ROUTES TAB ────────────────────────────────────────────────────────────
@@ -1642,6 +1795,60 @@ function _buildModalHtml() {
       mh += '</div>';
     }
 
+    if (ST.modal === 'edit-touch') {
+      // Find the touch being edited. ST.selected holds the touch id here
+      // (same slot we use for partner selection elsewhere — context-dependent).
+      var editT = ST.selected ? ST.touches.find(function(x){ return x.id === ST.selected; }) : null;
+      if (!editT) {
+        // Touch vanished (maybe deleted by someone else, or stale state). Bail gracefully.
+        mh += '<div class="modal-title">Touch not found</div>';
+        mh += '<div style="font-size:13px;color:var(--muted);margin-bottom:16px;">This touch may have been removed. Try refreshing the page.</div>';
+        mh += '<div style="display:flex;justify-content:flex-end;"><button style="padding:8px 16px;border-radius:6px;border:1.5px solid var(--border);background:transparent;cursor:pointer;font-size:12px;" onclick="ST.modal=null;ST.selected=null;render()">Close</button></div>';
+      } else {
+        // Permission gate — belt and suspenders since the button is hidden already.
+        var canEditThis = isAdmin() || (editT.logged_by === currentRepName());
+        if (!canEditThis) {
+          mh += '<div class="modal-title">🔒 Not allowed</div>';
+          mh += '<div style="font-size:13px;color:var(--muted);margin-bottom:16px;">You can only edit touches you logged yourself.</div>';
+          mh += '<div style="display:flex;justify-content:flex-end;"><button style="padding:8px 16px;border-radius:6px;border:1.5px solid var(--border);background:transparent;cursor:pointer;font-size:12px;" onclick="ST.modal=null;ST.selected=null;render()">Close</button></div>';
+        } else {
+          mh += '<div class="modal-title">✏️ Edit Touch</div>';
+          mh += '<div style="background:rgba(13,45,94,.06);border-radius:8px;padding:10px 14px;margin-bottom:14px;font-size:12px;color:var(--muted);">';
+          mh += '<b style="color:var(--navy);">' + (editT.partner_name||'Unknown') + '</b> · logged by ' + (editT.logged_by||'—');
+          mh += '</div>';
+          // Editable fields — type, date, outcome, notes. Prefilled from current values.
+          // Options built dynamically so the current value is pre-selected even if
+          // it's something unusual that isn't in the default dropdown list.
+          var typeOpts = ['Call','Visit','Drop-in','Text','Email','Event'];
+          if (editT.touch_type && typeOpts.indexOf(editT.touch_type) === -1) typeOpts.unshift(editT.touch_type);
+          var outcomeOpts = ['Positive','Neutral','No Answer','Left VM','Not Interested'];
+          if (editT.outcome && outcomeOpts.indexOf(editT.outcome) === -1) outcomeOpts.unshift(editT.outcome);
+
+          mh += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">';
+          mh += '<div class="form-group"><label class="form-label">Type</label><select class="form-select" id="etType">';
+          typeOpts.forEach(function(o){
+            mh += '<option' + (editT.touch_type === o ? ' selected' : '') + '>' + _ve(o) + '</option>';
+          });
+          mh += '</select></div>';
+          mh += '<div class="form-group"><label class="form-label">Date</label><input class="form-input" type="date" id="etDate" value="' + _ve(editT.touch_date||'') + '"></div>';
+          mh += '</div>';
+          mh += '<div class="form-group"><label class="form-label">Outcome</label><select class="form-select" id="etOutcome">';
+          outcomeOpts.forEach(function(o){
+            mh += '<option' + (editT.outcome === o ? ' selected' : '') + '>' + _ve(o) + '</option>';
+          });
+          mh += '</select></div>';
+          mh += '<div class="form-group"><label class="form-label">Notes</label><textarea class="form-input" id="etNotes" rows="3" style="resize:vertical;">' + _ve(editT.notes||'').replace(/&quot;/g,'"') + '</textarea></div>';
+          // Read-only context footer — these fields aren't editable on purpose
+          // (changing who/when would rewrite history). Shown greyed out.
+          mh += '<div style="font-size:10px;color:var(--muted);padding:8px 2px 4px;border-top:1px solid var(--border);margin-top:6px;">Partner and logged-by cannot be changed here. To move a touch to a different partner, delete and re-log it.</div>';
+          mh += '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px;">';
+          mh += '<button style="padding:8px 16px;border-radius:6px;border:1.5px solid var(--border);background:transparent;cursor:pointer;font-size:12px;" onclick="ST.modal=null;ST.selected=null;render()">Cancel</button>';
+          mh += '<button style="padding:8px 20px;border-radius:6px;border:none;background:var(--orange);color:#fff;font-size:12px;font-weight:600;cursor:pointer;" onclick="submitEditTouch()">Save Changes</button>';
+          mh += '</div>';
+        }
+      }
+    }
+
     if (ST.modal === 'add-route') {
       mh += '<div class="modal-title">🚗 Plan Route</div>';
       mh += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">';
@@ -1863,6 +2070,50 @@ function submitTouch() {
     follow_up_date: document.getElementById('tFollowupDate').value
   });
   ST.modal = null; ST.selected = null;
+}
+
+// Edit an existing touch. Only the four permitted fields (type, date,
+// outcome, notes) are sent in the PATCH — allowlist pattern matching
+// logTouch. Partner, logged_by, and market are untouched.
+async function submitEditTouch() {
+  var tid = ST.selected;
+  if (!tid) { ST.modal=null; render(); return; }
+  var existing = ST.touches.find(function(x){ return x.id === tid; });
+  if (!existing) { ST.modal=null; ST.selected=null; render(); return; }
+
+  // Server-side guard (the button is already hidden for unauthorized users,
+  // but we check again here in case someone calls submitEditTouch from console).
+  if (!isAdmin() && existing.logged_by !== currentRepName()) {
+    showErr('You can only edit touches you logged yourself.');
+    return;
+  }
+
+  var patchBody = {
+    touch_type: document.getElementById('etType').value,
+    touch_date: document.getElementById('etDate').value,
+    outcome:    document.getElementById('etOutcome').value,
+    notes:      document.getElementById('etNotes').value || ''
+  };
+
+  var resp = await sb('/rest/v1/sales_touches?id=eq.' + tid, {
+    method: 'PATCH',
+    headers: {'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json','Prefer':'return=minimal'},
+    body: JSON.stringify(patchBody)
+  });
+  // sb() returns [] on error and shows the red banner; bail if that happened.
+  // (sb() returns a Promise-wrapped value; on PATCH with Prefer:return=minimal
+  //  the success case resolves to [] too, so we can't distinguish success/fail
+  //  by the return value alone. Rely on the banner for error signalling.)
+
+  // Optimistic local update so the UI reflects changes immediately without
+  // waiting on loadAll. If the PATCH actually failed, loadAll will overwrite
+  // this with the real server state.
+  Object.assign(existing, patchBody);
+  ST.modal = null;
+  ST.selected = null;
+  render();
+  // Refresh from server to pick up the real state + any triggers that ran.
+  await loadAll();
 }
 
 function submitRoute() {
