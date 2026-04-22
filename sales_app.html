@@ -596,6 +596,9 @@ if ('serviceWorker' in navigator) {
       <button class="hdr-dropdown-item" onclick="showScreen('contacts');toggleHdrDropdown()">
         <span>📇</span> Contacts
       </button>
+      <button class="hdr-dropdown-item" onclick="showScreen('touches');toggleHdrDropdown()">
+        <span>📋</span> Touches
+      </button>
       <button class="hdr-dropdown-item" onclick="showInstallHelp();toggleHdrDropdown()">
         <span>📲</span> Add to Home Screen
       </button>
@@ -674,6 +677,26 @@ if ('serviceWorker' in navigator) {
       <input type="text" placeholder="Search contacts..." id="contacts-search-input" oninput="filterContactsSA(this.value)" autocomplete="off" autocapitalize="off" autocorrect="off">
     </div>
     <div id="contacts-list-sa"></div>
+  </div>
+
+  <!-- TOUCHES (accessed via header menu, mirrors Contacts pattern) -->
+  <div class="screen" id="screen-touches">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">
+      <button onclick="showScreen('home')" style="background:rgba(13,45,94,.06);border:none;width:36px;height:36px;border-radius:50%;font-size:18px;cursor:pointer;color:var(--navy);display:flex;align-items:center;justify-content:center;flex-shrink:0;padding:0;">←</button>
+      <div style="flex:1;">
+        <div style="font-size:18px;font-weight:700;color:var(--navy);line-height:1.1;">Touches</div>
+        <div id="touches-subtitle" style="font-size:11px;color:var(--muted);margin-top:2px;">All team activity</div>
+      </div>
+      <button onclick="openTouchFilters()" id="touch-filter-btn" style="background:var(--surface);border:1.5px solid var(--border);border-radius:10px;padding:7px 14px;font-size:12px;font-weight:700;color:var(--navy);cursor:pointer;font-family:inherit;display:flex;align-items:center;gap:6px;">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>
+        <span id="touch-filter-label">Filter</span>
+      </button>
+    </div>
+    <div class="search-bar">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#6b7a96" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+      <input type="text" placeholder="Search notes, partner..." id="touches-search-input" oninput="filterTouchesSA(this.value)" autocomplete="off" autocapitalize="off" autocorrect="off">
+    </div>
+    <div id="touches-list-sa"></div>
   </div>
 
 </div>
@@ -886,7 +909,14 @@ var APP = {
   screen: 'home',
   ltPartnerId: null,
   ltPartnerName: '',
-  ltPartnerType: ''
+  ltPartnerType: '',
+  // Touches screen state
+  touchesSearch: '',
+  touchFilterRep:     'All',
+  touchFilterType:    'All',
+  touchFilterOutcome: 'All',
+  touchFilterRange:   'All',
+  editTouchId: null
 };
 
 // ── PERMISSIONS ───────────────────────────────────────────────────────────
@@ -999,9 +1029,11 @@ async function loadAll() {
   }
   APP.partners = allP;
 
-  // Touches this week
-  var weekAgo = new Date(); weekAgo.setDate(weekAgo.getDate() - 7);
-  var t = await sb('/rest/v1/sales_touches?logged_by=eq.' + encodeURIComponent(APP.repName) + '&touch_date=gte.' + weekAgo.toISOString().split('T')[0] + '&limit=200');
+  // Touches — load ALL reps' recent touches. Home stat ("Touches This Week")
+  // filters to current rep at render time. Touches tab shows all.
+  // Limit 200 covers a comfortable week+ of team activity; adjust if the team
+  // scales and older touches start falling off the visible window.
+  var t = await sb('/rest/v1/sales_touches?order=touch_date.desc&limit=200');
   APP.touches = t || [];
 
   // Routes
@@ -1042,7 +1074,14 @@ function renderHome() {
   // Stats
   var myPartners = APP.partners.filter(function(p){ return p.assigned_to === APP.repName; });
   document.getElementById('stat-partners').textContent = myPartners.length;
-  document.getElementById('stat-touches').textContent = APP.touches.length;
+  // "Touches This Week" stat is still rep-scoped and time-scoped. Previously
+  // the loadAll query pre-filtered by rep+week; now we fetch all touches
+  // (for the Touches tab) and filter client-side for this stat.
+  var weekAgoStr = (function(){ var d = new Date(); d.setDate(d.getDate()-7); return d.toISOString().split('T')[0]; })();
+  var myWeekTouches = APP.touches.filter(function(t){
+    return t.logged_by === APP.repName && t.touch_date && t.touch_date >= weekAgoStr;
+  });
+  document.getElementById('stat-touches').textContent = myWeekTouches.length;
 
   // Today's route
   var todayRoute = APP.routes.find(function(r){ return r.route_date === today; });
@@ -1432,6 +1471,335 @@ function contactToast(msg) {
 }
 
 
+// ══════════════════════════════════════════════════════════════════════════
+// ── TOUCHES SCREEN ────────────────────────────────────────────────────────
+// Mobile equivalent of the desktop Touches tab. Everyone sees everyone's
+// touches. Filter via the "Filter" button in the header (opens a bottom
+// sheet with dropdowns). Edit via the ✏️ button on each row — permission
+// is admin-OR-own-touch, matching desktop.
+// ══════════════════════════════════════════════════════════════════════════
+
+function filterTouchesSA(v) {
+  APP.touchesSearch = v || '';
+  renderTouchesSA();
+}
+
+// Helper: can the current user edit this touch?
+// Admin always; otherwise only if logged_by matches the current rep.
+function _canEditTouchSA(t) {
+  if (_isAdmin()) return true;
+  return t && t.logged_by === APP.repName;
+}
+
+// Subtitle helper — shows what's filtering the list right now.
+function _touchFilterSummary() {
+  var parts = [];
+  if (APP.touchFilterRep     !== 'All') parts.push(APP.touchFilterRep);
+  if (APP.touchFilterType    !== 'All') parts.push(APP.touchFilterType);
+  if (APP.touchFilterOutcome !== 'All') parts.push(APP.touchFilterOutcome);
+  if (APP.touchFilterRange   !== 'All') {
+    var rangeLabels = {today:'today','7d':'7 days','30d':'30 days','90d':'90 days'};
+    parts.push(rangeLabels[APP.touchFilterRange] || APP.touchFilterRange);
+  }
+  return parts.length ? parts.join(' · ') : '';
+}
+
+// Escape untrusted text going into HTML content. Mobile doesn't have a
+// global _ve like desktop; minimal escape here for safety on notes/names.
+function _teMob(s) {
+  return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function renderTouchesSA() {
+  var list = document.getElementById('touches-list-sa');
+  var sub  = document.getElementById('touches-subtitle');
+  var btn  = document.getElementById('touch-filter-btn');
+  var lbl  = document.getElementById('touch-filter-label');
+  if (!list) return;
+
+  // Apply filters
+  var q = (APP.touchesSearch||'').toLowerCase().trim();
+  var filtered = APP.touches.slice();
+  if (APP.touchFilterRep !== 'All') {
+    filtered = filtered.filter(function(t){ return t.logged_by === APP.touchFilterRep; });
+  }
+  if (APP.touchFilterType !== 'All') {
+    filtered = filtered.filter(function(t){ return t.touch_type === APP.touchFilterType; });
+  }
+  if (APP.touchFilterOutcome !== 'All') {
+    filtered = filtered.filter(function(t){ return t.outcome === APP.touchFilterOutcome; });
+  }
+  if (APP.touchFilterRange !== 'All') {
+    var cutoff = new Date();
+    if (APP.touchFilterRange === 'today') {
+      cutoff = new Date(new Date().toISOString().split('T')[0] + 'T00:00:00');
+    } else if (APP.touchFilterRange === '7d')  cutoff.setDate(cutoff.getDate() - 7);
+    else if (APP.touchFilterRange === '30d') cutoff.setDate(cutoff.getDate() - 30);
+    else if (APP.touchFilterRange === '90d') cutoff.setDate(cutoff.getDate() - 90);
+    filtered = filtered.filter(function(t){ return t.touch_date && new Date(t.touch_date + 'T00:00:00') >= cutoff; });
+  }
+  if (q) {
+    filtered = filtered.filter(function(t){
+      return (t.partner_name||'').toLowerCase().indexOf(q) !== -1
+          || (t.notes||'').toLowerCase().indexOf(q) !== -1
+          || (t.logged_by||'').toLowerCase().indexOf(q) !== -1;
+    });
+  }
+
+  // Update subtitle and filter button visual state
+  var filterSummary = _touchFilterSummary();
+  var activeCount   = [APP.touchFilterRep, APP.touchFilterType, APP.touchFilterOutcome, APP.touchFilterRange].filter(function(v){ return v !== 'All'; }).length;
+  if (sub) {
+    if (filterSummary) {
+      sub.textContent = filtered.length + ' of ' + APP.touches.length + ' · ' + filterSummary;
+    } else {
+      sub.textContent = APP.touches.length + ' total · all team activity';
+    }
+  }
+  if (btn && lbl) {
+    if (activeCount > 0) {
+      btn.style.background = 'var(--orange)';
+      btn.style.color = '#fff';
+      btn.style.borderColor = 'var(--orange)';
+      lbl.textContent = 'Filters (' + activeCount + ')';
+    } else {
+      btn.style.background = 'var(--surface)';
+      btn.style.color = 'var(--navy)';
+      btn.style.borderColor = 'var(--border)';
+      lbl.textContent = 'Filter';
+    }
+  }
+
+  if (!filtered.length) {
+    list.innerHTML = '<div style="text-align:center;padding:40px 20px;color:var(--muted);font-size:14px;">' + (q || filterSummary ? 'No touches match these filters.' : 'No touches logged yet.') + '</div>';
+    return;
+  }
+
+  // Render rows. Sorted by touch_date DESC — the query already returns them
+  // this way. Use a compact card layout matching the partner-row visual.
+  var html = '';
+  filtered.forEach(function(t) {
+    var canEdit = _canEditTouchSA(t);
+    var outcomeColor = {
+      'Positive':'#2e7d32','Neutral':'#6b7a96','No Answer':'#c62828',
+      'Left VM':'#e65100','Not Interested':'#c62828'
+    }[t.outcome] || '#6b7a96';
+
+    html += '<div style="background:var(--surface);border-radius:12px;padding:12px 14px;margin-bottom:8px;border:1px solid var(--border);box-shadow:0 1px 4px rgba(13,45,94,.05);">';
+    // Top row: partner name + edit pencil
+    html += '<div style="display:flex;align-items:flex-start;gap:10px;">';
+    html += '<div style="flex:1;min-width:0;">';
+    html += '<div style="font-size:14px;font-weight:700;color:var(--navy);line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + _teMob(t.partner_name||'Unknown') + '</div>';
+    // Meta row: type + outcome + date
+    html += '<div style="display:flex;align-items:center;gap:8px;margin-top:4px;flex-wrap:wrap;">';
+    html += '<span style="font-size:10px;font-weight:700;padding:2px 7px;border-radius:4px;background:rgba(13,45,94,.08);color:var(--navy);">' + _teMob(t.touch_type||'') + '</span>';
+    if (t.outcome) html += '<span style="font-size:10px;font-weight:700;color:' + outcomeColor + ';">' + _teMob(t.outcome) + '</span>';
+    html += '<span style="font-size:10px;color:var(--muted);margin-left:auto;">' + fmtDate(t.touch_date) + '</span>';
+    html += '</div>';
+    // Notes
+    if (t.notes) {
+      html += '<div style="font-size:12px;color:var(--muted);margin-top:6px;line-height:1.4;">' + _teMob(t.notes) + '</div>';
+    }
+    // Logged by
+    html += '<div style="font-size:10px;color:#a0abbf;margin-top:6px;">— ' + _teMob(t.logged_by||'—') + '</div>';
+    html += '</div>';
+    // Edit button (column-aligned with partner name, stays at top-right)
+    if (canEdit) {
+      html += '<button onclick="openEditTouchSA(\'' + t.id + '\')" style="background:rgba(13,45,94,.06);border:none;width:36px;height:36px;border-radius:50%;font-size:14px;cursor:pointer;color:var(--navy);display:flex;align-items:center;justify-content:center;flex-shrink:0;padding:0;" title="Edit">✏️</button>';
+    }
+    html += '</div>';
+    html += '</div>';
+  });
+  list.innerHTML = html;
+}
+
+// ── FILTER SHEET ──────────────────────────────────────────────────────────
+// Bottom sheet with four stacked selects: Rep, Type, Outcome, Date range.
+// Uses native <select> so iOS pops the wheel picker and Android gets the
+// native dialog. Values apply immediately on change.
+function openTouchFilters() {
+  // De-dupe rep list from JG_SHARED.REPS
+  var repsMap = (window.JG_SHARED && window.JG_SHARED.REPS) || {};
+  var seen = {}; var reps = [];
+  Object.keys(repsMap).forEach(function(em){
+    var n = repsMap[em]; if (n && !seen[n]) { seen[n] = 1; reps.push(n); }
+  });
+  reps.sort();
+
+  var overlay = document.createElement('div');
+  overlay.className = 'sheet-overlay open';
+  overlay.style.zIndex = '700';
+
+  var sheet = document.createElement('div');
+  sheet.className = 'sheet';
+  sheet.style.transform = 'translateY(0)';
+
+  // Helper: build a native select with "All" + options, current selection pre-picked
+  function mkSelect(id, currentVal, allLabel, options) {
+    var opts = '<option value="All"' + (currentVal === 'All' ? ' selected' : '') + '>' + allLabel + '</option>';
+    options.forEach(function(o){
+      var val = typeof o === 'string' ? o : o.value;
+      var lbl = typeof o === 'string' ? o : o.label;
+      opts += '<option value="' + val + '"' + (currentVal === val ? ' selected' : '') + '>' + lbl + '</option>';
+    });
+    return '<select id="' + id + '" class="field-select" style="width:100%;">' + opts + '</select>';
+  }
+
+  var html = '<div class="sheet-handle"></div>';
+  html += '<div class="sheet-title">Filter Touches</div>';
+  html += '<div class="field-label">Rep</div>' + mkSelect('tf-rep', APP.touchFilterRep, 'All reps', reps);
+  html += '<div class="field-label">Type</div>' + mkSelect('tf-type', APP.touchFilterType, 'All types', ['Call','Visit','Drop-in','Text','Email','Event']);
+  html += '<div class="field-label">Outcome</div>' + mkSelect('tf-outcome', APP.touchFilterOutcome, 'All outcomes', ['Positive','Neutral','No Answer','Left VM','Not Interested']);
+  html += '<div class="field-label">Date range</div>' + mkSelect('tf-range', APP.touchFilterRange, 'All time', [
+    {value:'today',label:'Today'},{value:'7d',label:'Last 7 days'},
+    {value:'30d',label:'Last 30 days'},{value:'90d',label:'Last 90 days'}
+  ]);
+
+  html += '<div style="display:flex;gap:8px;margin-top:20px;">';
+  html += '<button id="tf-clear" style="flex:1;padding:13px;border-radius:12px;border:1.5px solid var(--border);background:transparent;color:var(--navy);font-size:14px;font-weight:700;font-family:inherit;cursor:pointer;">Clear all</button>';
+  html += '<button id="tf-apply" style="flex:2;padding:13px;border-radius:12px;border:none;background:var(--orange);color:#fff;font-size:14px;font-weight:700;font-family:inherit;cursor:pointer;">Apply</button>';
+  html += '</div>';
+
+  sheet.innerHTML = html;
+  overlay.appendChild(sheet);
+  document.body.appendChild(overlay);
+  overlay.offsetHeight; // force layout so transition takes
+
+  var close = function(){
+    overlay.classList.remove('open');
+    setTimeout(function(){ if (overlay.parentNode) overlay.remove(); }, 320);
+  };
+
+  // Dismiss on overlay click (but not sheet click)
+  overlay.addEventListener('click', function(e){ if (e.target === overlay) close(); });
+
+  sheet.querySelector('#tf-clear').addEventListener('click', function(){
+    APP.touchFilterRep = 'All';
+    APP.touchFilterType = 'All';
+    APP.touchFilterOutcome = 'All';
+    APP.touchFilterRange = 'All';
+    close();
+    renderTouchesSA();
+  });
+
+  sheet.querySelector('#tf-apply').addEventListener('click', function(){
+    APP.touchFilterRep     = sheet.querySelector('#tf-rep').value;
+    APP.touchFilterType    = sheet.querySelector('#tf-type').value;
+    APP.touchFilterOutcome = sheet.querySelector('#tf-outcome').value;
+    APP.touchFilterRange   = sheet.querySelector('#tf-range').value;
+    close();
+    renderTouchesSA();
+  });
+}
+
+// ── EDIT TOUCH SHEET ──────────────────────────────────────────────────────
+// Opens a bottom sheet prefilled with the touch's current values. On save,
+// PATCHes only the four editable fields (same allowlist as desktop).
+// Partner, logged_by, and market are NOT editable — changing them would
+// rewrite history and those cases are better handled by delete + re-log.
+function openEditTouchSA(touchId) {
+  var t = APP.touches.find(function(x){ return x.id === touchId; });
+  if (!t) { toast('Touch not found'); return; }
+  if (!_canEditTouchSA(t)) { toast('You can only edit touches you logged'); return; }
+  APP.editTouchId = touchId;
+
+  var overlay = document.createElement('div');
+  overlay.className = 'sheet-overlay open';
+  overlay.style.zIndex = '700';
+
+  var sheet = document.createElement('div');
+  sheet.className = 'sheet';
+  sheet.style.transform = 'translateY(0)';
+
+  // Build type & outcome selects — include current value even if non-standard
+  var typeOpts = ['Call','Visit','Drop-in','Text','Email','Event'];
+  if (t.touch_type && typeOpts.indexOf(t.touch_type) === -1) typeOpts.unshift(t.touch_type);
+  var outcomeOpts = ['Positive','Neutral','No Answer','Left VM','Not Interested'];
+  if (t.outcome && outcomeOpts.indexOf(t.outcome) === -1) outcomeOpts.unshift(t.outcome);
+
+  var html = '<div class="sheet-handle"></div>';
+  html += '<div class="sheet-title">✏️ Edit Touch</div>';
+  // Context header — partner + logged-by
+  html += '<div style="background:rgba(13,45,94,.06);border-radius:10px;padding:10px 14px;margin-bottom:14px;">';
+  html += '<div style="font-size:13px;font-weight:700;color:var(--navy);">' + _teMob(t.partner_name||'Unknown') + '</div>';
+  html += '<div style="font-size:11px;color:var(--muted);margin-top:2px;">Logged by ' + _teMob(t.logged_by||'—') + '</div>';
+  html += '</div>';
+
+  html += '<div class="field-label">Type</div><select id="et-type" class="field-select">';
+  typeOpts.forEach(function(o){
+    html += '<option' + (t.touch_type === o ? ' selected' : '') + '>' + _teMob(o) + '</option>';
+  });
+  html += '</select>';
+
+  html += '<div class="field-label">Date</div><input id="et-date" class="field-input" type="date" value="' + _teMob(t.touch_date||'') + '">';
+
+  html += '<div class="field-label">Outcome</div><select id="et-outcome" class="field-select">';
+  outcomeOpts.forEach(function(o){
+    html += '<option' + (t.outcome === o ? ' selected' : '') + '>' + _teMob(o) + '</option>';
+  });
+  html += '</select>';
+
+  html += '<div class="field-label">Notes</div><textarea id="et-notes" class="field-input" rows="4" style="resize:none;">' + _teMob(t.notes||'') + '</textarea>';
+
+  html += '<div style="font-size:10px;color:var(--muted);margin:10px 2px 0;line-height:1.4;">Partner and logged-by cannot be changed here. To move a touch to a different partner, delete and re-log it.</div>';
+
+  html += '<div style="display:flex;gap:8px;margin-top:16px;">';
+  html += '<button id="et-cancel" style="flex:1;padding:13px;border-radius:12px;border:1.5px solid var(--border);background:transparent;color:var(--navy);font-size:14px;font-weight:700;font-family:inherit;cursor:pointer;">Cancel</button>';
+  html += '<button id="et-save" style="flex:2;padding:13px;border-radius:12px;border:none;background:var(--orange);color:#fff;font-size:14px;font-weight:700;font-family:inherit;cursor:pointer;">Save Changes</button>';
+  html += '</div>';
+
+  sheet.innerHTML = html;
+  overlay.appendChild(sheet);
+  document.body.appendChild(overlay);
+  overlay.offsetHeight;
+
+  var close = function(){
+    overlay.classList.remove('open');
+    setTimeout(function(){ if (overlay.parentNode) overlay.remove(); }, 320);
+    APP.editTouchId = null;
+  };
+
+  overlay.addEventListener('click', function(e){ if (e.target === overlay) close(); });
+  sheet.querySelector('#et-cancel').addEventListener('click', close);
+
+  sheet.querySelector('#et-save').addEventListener('click', async function(){
+    var touch = APP.touches.find(function(x){ return x.id === APP.editTouchId; });
+    if (!touch) { close(); return; }
+    // Belt-and-suspenders permission check (button is hidden otherwise).
+    if (!_canEditTouchSA(touch)) { toast('Not authorized'); close(); return; }
+
+    // Allowlist PATCH body — only the four editable fields.
+    var patchBody = {
+      touch_type: sheet.querySelector('#et-type').value,
+      touch_date: sheet.querySelector('#et-date').value,
+      outcome:    sheet.querySelector('#et-outcome').value,
+      notes:      sheet.querySelector('#et-notes').value || ''
+    };
+
+    try {
+      var r = await fetch(SB_URL + '/rest/v1/sales_touches?id=eq.' + APP.editTouchId, {
+        method: 'PATCH',
+        headers: {'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json','Prefer':'return=minimal'},
+        body: JSON.stringify(patchBody)
+      });
+      if (!r.ok) {
+        var errTxt = await r.text();
+        toast('Save failed: ' + errTxt.slice(0, 80));
+        return;
+      }
+      // Optimistic local update so the list reflects the change immediately.
+      Object.assign(touch, patchBody);
+      close();
+      toast('✓ Touch updated');
+      renderTouchesSA();
+    } catch(e) {
+      toast('Save failed: ' + (e.message || 'network error'));
+    }
+  });
+}
+
+
+// ══════════════════════════════════════════════════════════════════════════
 // ── RECURRING ROUTES ──────────────────────────────────────────────────────
 var _pendingRecurring = []; // templates due today waiting for confirmation
 var _recurringIdx = 0;
@@ -2057,7 +2425,9 @@ async function submitLogTouch() {
   var data = {
     partner_id: APP.ltPartnerId,
     partner_name: APP.ltPartnerName,
-    partner_type: APP.ltPartnerType,
+    // partner_type intentionally omitted — not a column on sales_touches.
+    // Same PGRST204 bug that killed desktop touch logging. The partner type
+    // can be derived from the partner_id lookup at read time if needed.
     touch_type: document.getElementById('lt-type').value,
     touch_date: today,
     outcome: document.getElementById('lt-outcome').value,
@@ -2090,7 +2460,7 @@ async function submitLogTouch() {
 }
 
 // ── NAV ───────────────────────────────────────────────────────────────────
-var SA_SCREENS = ['home', 'partners', 'routes', 'followups', 'contacts'];
+var SA_SCREENS = ['home', 'partners', 'routes', 'followups', 'contacts', 'touches'];
 // Screens available via left/right swipe (bottom-nav visible ones)
 var SA_SWIPE_SCREENS = ['home', 'partners', 'routes', 'followups'];
 var _saSwipeStartX = 0;
@@ -2111,7 +2481,7 @@ function saSwipeEnd(e) {
   var dy = e.changedTouches[0].clientY - _saSwipeStartY;
   if (Math.abs(dx) < 50 || Math.abs(dy) > Math.abs(dx)) return;
   // If on contacts screen, swipe right goes home; swipe left does nothing (it's a menu-only screen)
-  if (APP.screen === 'contacts') {
+  if (APP.screen === 'contacts' || APP.screen === 'touches') {
     if (dx > 0) showScreen('home', 'right');
     return;
   }
@@ -2194,6 +2564,10 @@ function showScreen(name, direction) {
         // Don't auto-focus on mobile — it pops the keyboard unexpectedly
         // if (el) el.focus();
       }, 350);
+    }
+    if (name === 'touches') {
+      // APP.touches is populated by loadAll at login time; just render.
+      renderTouchesSA();
     }
   }, 300);
 }
