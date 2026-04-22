@@ -362,6 +362,17 @@ function extractJSON(text){
   // Find first [ and last ] for array
   const aStart=t.indexOf('[');const aEnd=t.lastIndexOf(']');
   if(aStart!==-1&&aEnd>aStart){try{return JSON.parse(t.substring(aStart,aEnd+1))}catch(e){}}
+  // Truncated response repair — try closing open brackets/braces
+  if(start!==-1){
+    let chunk=t.substring(start);
+    // Remove trailing partial key/value (after last comma or colon)
+    chunk=chunk.replace(/,\s*"[^"]*"?\s*:?\s*[^,\}\]]*$/,'');
+    // Count open vs close braces/brackets and append missing closers
+    let ob=0,cb=0,osb=0,csb=0;
+    for(let i=0;i<chunk.length;i++){if(chunk[i]==='{')ob++;if(chunk[i]==='}')cb++;if(chunk[i]==='[')osb++;if(chunk[i]===']')csb++;}
+    chunk+=']'.repeat(Math.max(0,osb-csb))+('}'.repeat(Math.max(0,ob-cb)));
+    try{return JSON.parse(chunk)}catch(e){}
+  }
   throw new Error('Could not parse AI response as JSON. Response started with: '+t.substring(0,100))
 }
 function sc(s){return{HIGH:'#E53935',MEDIUM:'#FB8C00',LOW:'#1E88E5'}[s]||'#708194'}
@@ -490,7 +501,7 @@ async function runPass1(){
     ];
     const r=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',
       headers:{'Content-Type':'application/json','x-api-key':S.apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-      body:JSON.stringify({model:'claude-sonnet-4-6',max_tokens:8000,system:PROMPT,
+      body:JSON.stringify({model:'claude-sonnet-4-6',max_tokens:16000,system:PROMPT,
         messages:[{role:'user',content:msgContent}]})});
     if(!r.ok){const er=await r.json().catch(()=>null);throw new Error(er?.error?.message||'API error '+r.status)}
     S.prog='Parsing...';draw();
@@ -515,7 +526,7 @@ async function runPass2(){
       [{type:'document',source:{type:'base64',media_type:'application/pdf',data:S.encB64}},{type:'text',text:'ABOVE: Encircle mitigation report (same as initial review)'},{type:'document',source:{type:'base64',media_type:'application/pdf',data:cx}},{type:'text',text:'ABOVE: CORRECTED Xactimate estimate. Verify corrections. Score it. Return ONLY valid JSON.'}];
     const r=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',
       headers:{'Content-Type':'application/json','x-api-key':S.apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-      body:JSON.stringify({model:'claude-sonnet-4-6',max_tokens:8000,system:RECHECK_PROMPT,
+      body:JSON.stringify({model:'claude-sonnet-4-6',max_tokens:16000,system:RECHECK_PROMPT,
         messages:[{role:'user',content:recheckEncContent}]})});
     if(!r.ok){const er=await r.json().catch(()=>null);throw new Error(er?.error?.message||'API error '+r.status)}
     S.prog='Parsing...';draw();
@@ -553,7 +564,7 @@ async function generateRebuild(){
       [{type:'document',source:{type:'base64',media_type:'application/pdf',data:S.encB64}},{type:'text',text:'ABOVE: Encircle mitigation report showing all rooms, damage, and work performed'},{type:'document',source:{type:'base64',media_type:'application/pdf',data:estB64}},{type:'text',text:'ABOVE: Xactimate mitigation estimate showing all demolition/tearout. Generate the RECONSTRUCTION estimate to rebuild everything that was removed. Return ONLY valid JSON.'}];
     const r=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',
       headers:{'Content-Type':'application/json','x-api-key':S.apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-      body:JSON.stringify({model:'claude-sonnet-4-6',max_tokens:8000,system:REBUILD_PROMPT,
+      body:JSON.stringify({model:'claude-sonnet-4-6',max_tokens:16000,system:REBUILD_PROMPT,
         messages:[{role:'user',content:rebEncContent}]})});
     if(!r.ok){const er=await r.json().catch(()=>null);throw new Error(er?.error?.message||'API error '+r.status)}
     const d=await r.json();const t=d.content.filter(b=>b.type==='text').map(b=>b.text).join('');
@@ -1015,11 +1026,13 @@ async function runAdjusterAnalysis(){
     S.prog='AI analyzing disputes (30-60 sec)...';draw();
     const r=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',
       headers:{'Content-Type':'application/json','x-api-key':S.apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-      body:JSON.stringify({model:'claude-sonnet-4-6',max_tokens:8000,system:enrichedPrompt,
+      body:JSON.stringify({model:'claude-sonnet-4-6',max_tokens:16000,system:enrichedPrompt,
         messages:[{role:'user',content:msgContent}]})});
     if(!r.ok){const er=await r.json().catch(()=>null);throw new Error(er?.error?.message||'API error '+r.status)}
     S.prog='Parsing...';draw();
-    const d=await r.json();const t=d.content.filter(b=>b.type==='text').map(b=>b.text).join('');
+    const d=await r.json();
+    if(d.stop_reason==='max_tokens')S.err='Warning: AI response was truncated. Some disputed items may be missing.';
+    const t=d.content.filter(b=>b.type==='text').map(b=>b.text).join('');
     S.adjResult=extractJSON(t);
     S.adjResult.disputed_items=(S.adjResult.disputed_items||[]).map((d,i)=>({...d,id:d.id||'DISP-'+String(i+1).padStart(3,'0')}));
     S.phase='adj_review';S.prog='';
