@@ -487,12 +487,18 @@ function showErr(msg) {
   if (!el) {
     el = document.createElement('div');
     el.id = 'sb-err';
-    el.style.cssText = 'position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:#c0392b;color:#fff;padding:10px 20px;border-radius:8px;font-size:12px;font-weight:600;z-index:9999;max-width:600px;text-align:center;box-shadow:0 4px 20px rgba(0,0,0,.3);';
+    // Persistent until clicked so the user can actually read the Supabase
+    // error text. Max-width relaxed so full 400-response bodies (column
+    // names, constraint violations, etc.) fit on screen.
+    el.style.cssText = 'position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:#c0392b;color:#fff;padding:12px 22px;border-radius:8px;font-size:12px;font-weight:600;z-index:9999;max-width:900px;text-align:left;box-shadow:0 4px 20px rgba(0,0,0,.3);cursor:pointer;word-break:break-word;line-height:1.4;';
+    el.title = 'Click to dismiss';
+    el.onclick = function(){ el.style.display = 'none'; };
     document.body.appendChild(el);
   }
-  el.textContent = msg;
+  el.textContent = '✕  ' + msg;
   el.style.display = 'block';
-  setTimeout(function(){ el.style.display = 'none'; }, 6000);
+  // No auto-dismiss — user clicks to close. Previously 6s auto-hide hid
+  // error text before it could be read.
 }
 
 async function loadAll() {
@@ -576,17 +582,23 @@ async function savePartner(data) {
 }
 
 async function logTouch(data) {
-  data.market = ST.market;
   var rep = currentRepName();
-  data.logged_by = rep;
 
-  // Pull follow-up flags OUT of the touch payload. These fields don't exist
-  // on sales_touches (they'd cause a 400 and silent-fail the whole POST).
-  // They're used below to decide whether to create a sales_followups record.
-  var _followUpNeeded = data.follow_up_needed;
-  var _followUpDate   = data.follow_up_date;
-  delete data.follow_up_needed;
-  delete data.follow_up_date;
+  // Build POST body explicitly from a known-good column list. Previously the
+  // code was passing the entire `data` object which contained fields that
+  // don't exist in the real sales_touches schema (partner_type, follow_up_needed,
+  // follow_up_date), causing PGRST204 / 400 Bad Request and silent-failing
+  // every touch save. Allowlist > denylist — future drift won't break us.
+  var touchBody = {
+    partner_id:   data.partner_id,
+    partner_name: data.partner_name,
+    touch_type:   data.touch_type,
+    touch_date:   data.touch_date,
+    outcome:      data.outcome,
+    notes:        data.notes || '',
+    logged_by:    rep,
+    market:       ST.market
+  };
 
   // Auto-assign partner if unclaimed (first touch claims it)
   if (data.partner_id) {
@@ -597,7 +609,7 @@ async function logTouch(data) {
       });
     }
   }
-  await sb('/rest/v1/sales_touches', {method:'POST',headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json','Prefer':'return=minimal'},body:JSON.stringify(data)});
+  await sb('/rest/v1/sales_touches', {method:'POST',headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json','Prefer':'return=minimal'},body:JSON.stringify(touchBody)});
   // Update partner last_touch_date and touch_count
   if(data.partner_id) {
     await sb('/rest/v1/sales_partners?id=eq.'+data.partner_id, {
@@ -606,12 +618,19 @@ async function logTouch(data) {
     });
   }
   // Auto-create follow-up if needed — writes to sales_followups, NOT sales_touches.
-  if(_followUpNeeded && _followUpDate) {
-    await sb('/rest/v1/sales_followups', {method:'POST',headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json','Prefer':'return=minimal'},body:JSON.stringify({
-      partner_id:data.partner_id, partner_name:data.partner_name, partner_type:data.partner_type||'',
-      due_date:_followUpDate, reason:'Follow up from '+data.touch_type+' on '+data.touch_date,
-      notes:data.notes||'', market:ST.market, assigned_to:data.logged_by
-    })});
+  // Same allowlist approach as the touch body. If this POST 400s, the user sees
+  // the error but the touch has already been saved, so no data is lost.
+  if(data.follow_up_needed && data.follow_up_date) {
+    var followupBody = {
+      partner_id:   data.partner_id,
+      partner_name: data.partner_name,
+      due_date:     data.follow_up_date,
+      reason:       'Follow up from ' + data.touch_type + ' on ' + data.touch_date,
+      notes:        data.notes || '',
+      market:       ST.market,
+      assigned_to:  rep
+    };
+    await sb('/rest/v1/sales_followups', {method:'POST',headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json','Prefer':'return=minimal'},body:JSON.stringify(followupBody)});
   }
   await loadAll();
 }
