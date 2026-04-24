@@ -922,7 +922,31 @@ async function loadBoardState(){
     }
   }
 
-  if(state.sick?.length) state.sick.forEach(nm=>sick.add(nm));
+  // ── SICK LIST: derive from absence_records (today only) ──
+  // Source of truth is absence_records, not state.sick. This fixes the
+  // "stuck on sick list" bug where state.sick never auto-cleared between days.
+  // Anyone with an absence_records row dated today = unavailable. Tomorrow they
+  // auto-clear because the date no longer matches.
+  try {
+    const absDate = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Chicago' });
+    const absRes = await sbFetch('/rest/v1/absence_records?date=eq.' + absDate + '&select=employee_name,reason');
+    if (absRes && absRes.ok) {
+      const absRows = await absRes.json();
+      (absRows || []).forEach(r => {
+        if (r && r.employee_name) {
+          sick.add(r.employee_name);
+          if (r.reason) sickReasons[r.employee_name] = r.reason;
+        }
+      });
+      console.log('[absence] loaded ' + (absRows?.length || 0) + ' unavailable techs for ' + absDate);
+    } else {
+      console.warn('[absence] fetch failed, falling back to state.sick');
+      if(state.sick?.length) state.sick.forEach(nm=>sick.add(nm));
+    }
+  } catch(e) {
+    console.warn('[absence] load error, falling back to state.sick:', e);
+    if(state.sick?.length) state.sick.forEach(nm=>sick.add(nm));
+  }
   if(state.overrides) Object.assign(jobOverrides, state.overrides);
   if(state.startTimes) Object.assign(techStartTimes, state.startTimes);
 
