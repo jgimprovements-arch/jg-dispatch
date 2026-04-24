@@ -863,7 +863,9 @@ function restoreBoardStateLocal(){
         }
       }
     }
-    if(state.sick?.length) state.sick.forEach(nm=>sick.add(nm));
+    // SICK LIST: no longer read from state.sick (stale, never auto-clears).
+    // loadBoardState() will populate sick from absence_records as source of truth.
+    // Leaving the old array intact in localStorage for back-compat; just don't read it.
     if(state.overrides) Object.assign(jobOverrides, state.overrides);
     if(state.startTimes) Object.assign(techStartTimes, state.startTimes);
     if(restored>0) updateSyncBadge(state.ts||Date.now());
@@ -927,6 +929,8 @@ async function loadBoardState(){
   // "stuck on sick list" bug where state.sick never auto-cleared between days.
   // Anyone with an absence_records row dated today = unavailable. Tomorrow they
   // auto-clear because the date no longer matches.
+  // If the absence query fails, fail OPEN (show everyone available) rather than
+  // falling back to the stale state.sick array — that was the original bug.
   try {
     const absDate = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Chicago' });
     const absRes = await sbFetch('/rest/v1/absence_records?date=eq.' + absDate + '&select=employee_name,reason');
@@ -940,12 +944,10 @@ async function loadBoardState(){
       });
       console.log('[absence] loaded ' + (absRows?.length || 0) + ' unavailable techs for ' + absDate);
     } else {
-      console.warn('[absence] fetch failed, falling back to state.sick');
-      if(state.sick?.length) state.sick.forEach(nm=>sick.add(nm));
+      console.warn('[absence] fetch failed — showing all techs available (will retry on next load)');
     }
   } catch(e) {
-    console.warn('[absence] load error, falling back to state.sick:', e);
-    if(state.sick?.length) state.sick.forEach(nm=>sick.add(nm));
+    console.warn('[absence] load error — showing all techs available:', e);
   }
   if(state.overrides) Object.assign(jobOverrides, state.overrides);
   if(state.startTimes) Object.assign(techStartTimes, state.startTimes);
@@ -2865,18 +2867,12 @@ function mergeRemoteState(state){
       }
     }
   }
-  // Sick flags: if a local sick edit happened inside the freshness window,
-  // skip the remote merge entirely to protect the just-made local change.
-  // Otherwise treat the remote's sick list as authoritative for this save:
-  // accept adds AND removes, instead of purely accumulating.
-  var sickLocallyFresh = (Date.now() - (laneLocalChange['__sick__']||0)) < LANE_LOCAL_WINDOW;
-  if(!sickLocallyFresh){
-    var remoteSet = new Set(Array.isArray(state.sick) ? state.sick : []);
-    // Add anyone the remote has that we don't
-    remoteSet.forEach(nm=>{ if(!sick.has(nm)) { sick.add(nm); result.changed++; } });
-    // Remove anyone we have that the remote says isn't out anymore
-    [...sick].forEach(nm=>{ if(!remoteSet.has(nm)) { sick.delete(nm); result.changed++; } });
-  }
+  // Sick flags: state.sick is no longer the source of truth — absence_records is.
+  // We intentionally do NOT merge state.sick here. The sick Set is populated
+  // from absence_records on load and maintained locally via markSick/undoSick.
+  // Realtime updates to state.sick are ignored to prevent stale data from
+  // re-adding techs who are no longer absent today.
+  // (Was previously causing "Christina stuck on sick list" bug.)
   return result;
 }
 
