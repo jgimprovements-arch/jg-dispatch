@@ -790,6 +790,232 @@ function getBoardStatePayload(){
 }
 
 let saveTimer = null;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// _V2 DUAL-WRITE LAYER (added 2026-04-26 for dispatch rebuild)
+// ─────────────────────────────────────────────────────────────────────────────
+// While the rebuild is in progress, every save writes to BOTH the legacy
+// board_state JSONB blob AND the new dispatch_assignments_v2 / dispatch_unassigned_v2
+// per-row tables. Reads still come from board_state by default. To test reads
+// from _v2 tables, append ?v2=1 to the URL.
+//
+// Cutover plan: once the _v2 read path is verified, the JSONB write here is
+// dropped and the read flag becomes the default.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const V2_ENABLED = true; // master switch for dual-writing
+const V2_READ_MODE = (function(){
+  try {
+    const urlFlag = new URLSearchParams(window.location.search).get('v2');
+    if (urlFlag === '1') return true;
+    if (urlFlag === '0') return false;
+    return localStorage.getItem('jg_v2_reads') === '1';
+  } catch(e) { return false; }
+})();
+
+// Map internal market key ('appleton'/'stevens') to canonical _v2 value
+function _v2Market(loc){
+  return loc === 'stevens' ? 'stevens_point' : 'appleton';
+}
+function _fromV2Market(m){
+  return m === 'stevens_point' ? 'stevens' : 'appleton';
+}
+
+// Get current user's display name for created_by/updated_by audit trail
+function _v2Actor(){
+  try {
+    const u = JSON.parse(localStorage.getItem('jg_platform_user') || 'null');
+    if (u && u.name) return u.name;
+  } catch(e) {}
+  return 'dispatch-' + (window._myBoardId || 'unknown');
+}
+
+// Push current in-memory state to _v2 tables.
+// Strategy: full reconciliation — diff what's in memory vs what's in DB,
+// write only the changes. Avoids hammering Supabase with every keystroke.
+async function syncToV2(){
+  if (!V2_ENABLED) return;
+  try {
+    // 1) Build desired state from memory
+    const desiredAssigns = []; // {tech_id, job_id, market, position}
+    const desiredUnassigned = []; // {job_id, market, position}
+
+    for (const loc of ['appleton','stevens']) {
+      const v2mkt = _v2Market(loc);
+      // Assignments
+      const techNames = Object.keys(techQ[loc] || {});
+      for (const nm of techNames) {
+        const tech = techQ[loc][nm];
+        if (!tech || !tech.id) continue; // skip techs without UUIDs (shouldn't happen)
+        (tech.jobs || []).forEach((jid, idx) => {
+          desiredAssigns.push({
+            tech_id: tech.id,
+            job_id: String(jid),
+            market: v2mkt,
+            position: idx
+          });
+        });
+      }
+      // Unassigned pool
+      (unassigned[loc] || []).forEach((jid, idx) => {
+        if (!jobs[jid]) return; // skip stale IDs
+        desiredUnassigned.push({
+          job_id: String(jid),
+          market: v2mkt,
+          position: idx
+        });
+      });
+    }
+
+    // 2) Pull current DB state for both markets
+    const [aRes, uRes] = await Promise.all([
+      sbFetch('/rest/v1/dispatch_assignments_v2?select=id,tech_id,job_id,market,position'),
+      sbFetch('/rest/v1/dispatch_unassigned_v2?select=id,job_id,market,position')
+    ]);
+    if (!aRes.ok || !uRes.ok) {
+      console.warn('[v2-sync] fetch failed', aRes.status, uRes.status);
+      return;
+    }
+    const dbAssigns = await aRes.json();
+    const dbUnassigned = await uRes.json();
+
+    // 3) Compute diffs
+    // Assignments: identity = (tech_id, job_id, market). Position can update.
+    const assignKey = (a) => a.tech_id + '|' + a.job_id + '|' + a.market;
+    const dbAssignMap = new Map(dbAssigns.map(r => [assignKey(r), r]));
+    const desiredAssignKeys = new Set(desiredAssigns.map(assignKey));
+
+    const assignsToInsert = desiredAssigns.filter(a => !dbAssignMap.has(assignKey(a)));
+    const assignsToDelete = dbAssigns.filter(r => !desiredAssignKeys.has(assignKey(r)));
+    const assignsToUpdate = desiredAssigns.filter(a => {
+      const existing = dbAssignMap.get(assignKey(a));
+      return existing && existing.position !== a.position;
+    });
+
+    // Unassigned: identity = (job_id, market). Position can update.
+    const unKey = (u) => u.job_id + '|' + u.market;
+    const dbUnMap = new Map(dbUnassigned.map(r => [unKey(r), r]));
+    const desiredUnKeys = new Set(desiredUnassigned.map(unKey));
+
+    const unToInsert = desiredUnassigned.filter(u => !dbUnMap.has(unKey(u)));
+    const unToDelete = dbUnassigned.filter(r => !desiredUnKeys.has(unKey(r)));
+    const unToUpdate = desiredUnassigned.filter(u => {
+      const existing = dbUnMap.get(unKey(u));
+      return existing && existing.position !== u.position;
+    });
+
+    const actor = _v2Actor();
+
+    // 4) Apply diffs (deletes first to free unique constraints, then inserts/updates)
+    const ops = [];
+
+    if (assignsToDelete.length) {
+      const ids = assignsToDelete.map(r => r.id);
+      ops.push(sbFetch('/rest/v1/dispatch_assignments_v2?id=in.(' + ids.join(',') + ')', { method: 'DELETE' }));
+    }
+    if (unToDelete.length) {
+      const ids = unToDelete.map(r => r.id);
+      ops.push(sbFetch('/rest/v1/dispatch_unassigned_v2?id=in.(' + ids.join(',') + ')', { method: 'DELETE' }));
+    }
+    if (assignsToInsert.length) {
+      const rows = assignsToInsert.map(a => ({...a, created_by: actor, updated_by: actor}));
+      ops.push(sbFetch('/rest/v1/dispatch_assignments_v2', {
+        method: 'POST',
+        body: JSON.stringify(rows)
+      }));
+    }
+    if (unToInsert.length) {
+      const rows = unToInsert.map(u => ({...u, added_by: actor}));
+      ops.push(sbFetch('/rest/v1/dispatch_unassigned_v2', {
+        method: 'POST',
+        body: JSON.stringify(rows)
+      }));
+    }
+    // Updates: PATCH each row by identity
+    for (const a of assignsToUpdate) {
+      const existing = dbAssignMap.get(assignKey(a));
+      ops.push(sbFetch('/rest/v1/dispatch_assignments_v2?id=eq.' + existing.id, {
+        method: 'PATCH',
+        body: JSON.stringify({ position: a.position, updated_by: actor })
+      }));
+    }
+    for (const u of unToUpdate) {
+      const existing = dbUnMap.get(unKey(u));
+      ops.push(sbFetch('/rest/v1/dispatch_unassigned_v2?id=eq.' + existing.id, {
+        method: 'PATCH',
+        body: JSON.stringify({ position: u.position })
+      }));
+    }
+
+    if (ops.length === 0) {
+      console.log('[v2-sync] no changes');
+      return;
+    }
+    await Promise.all(ops);
+    console.log('[v2-sync] +' + assignsToInsert.length + ' assigns, -' + assignsToDelete.length + ' assigns, ~' + assignsToUpdate.length + ' assigns; +' + unToInsert.length + '/-' + unToDelete.length + '/~' + unToUpdate.length + ' unassigned');
+  } catch(e) {
+    console.warn('[v2-sync] error:', e);
+  }
+}
+
+// Load board state from _v2 tables (used when V2_READ_MODE is true).
+// Returns true if data was restored, false otherwise.
+async function loadFromV2(){
+  try {
+    const [aRes, uRes] = await Promise.all([
+      sbFetch('/rest/v1/dispatch_assignments_v2?select=tech_id,job_id,market,position&order=market,tech_id,position'),
+      sbFetch('/rest/v1/dispatch_unassigned_v2?select=job_id,market,position&order=market,position')
+    ]);
+    if (!aRes.ok || !uRes.ok) {
+      console.warn('[v2-read] fetch failed', aRes.status, uRes.status);
+      return false;
+    }
+    const dbAssigns = await aRes.json();
+    const dbUnassigned = await uRes.json();
+
+    // Build name lookup from techQ (uuid -> {loc, name})
+    const uuidToTech = {};
+    for (const loc of ['appleton','stevens']) {
+      for (const [nm, tech] of Object.entries(techQ[loc] || {})) {
+        if (tech.id) uuidToTech[tech.id] = { loc, name: nm };
+      }
+    }
+
+    // Group assignments by tech, sorted by position
+    const techAssigns = {}; // uuid -> [job_id...]
+    dbAssigns.forEach(r => {
+      if (!techAssigns[r.tech_id]) techAssigns[r.tech_id] = [];
+      techAssigns[r.tech_id].push(r.job_id);
+    });
+
+    let restored = 0;
+    for (const [uuid, jids] of Object.entries(techAssigns)) {
+      const t = uuidToTech[uuid];
+      if (!t) continue; // tech not on board (terminated, hidden, etc.)
+      if (techQ[t.loc] && techQ[t.loc][t.name]) {
+        techQ[t.loc][t.name].jobs = jids;
+        restored += jids.length;
+      }
+    }
+
+    // Unassigned pool
+    const unGrouped = { appleton: [], stevens: [] };
+    dbUnassigned.forEach(r => {
+      const loc = _fromV2Market(r.market);
+      unGrouped[loc].push(r.job_id);
+    });
+    for (const loc of ['appleton','stevens']) {
+      if (unGrouped[loc].length) unassigned[loc] = unGrouped[loc];
+    }
+
+    console.log('[v2-read] loaded ' + restored + ' assigned jobs, ' + dbUnassigned.length + ' unassigned');
+    return restored > 0 || dbUnassigned.length > 0;
+  } catch(e) {
+    console.warn('[v2-read] error:', e);
+    return false;
+  }
+}
+
 function saveBoardState(){
   // CRITICAL: Never save during initial boot — only after user has actually
   // modified the board locally. Otherwise the boot-time render() calls will
@@ -811,6 +1037,8 @@ function saveBoardState(){
         body: JSON.stringify({id:'current', state: stateWithDate, updated_at: new Date().toISOString()})
       });
     }catch(e){}
+    // Dual-write to _v2 tables (rebuild in progress)
+    syncToV2();
     // Also save to localStorage as backup
     try{
       localStorage.setItem('jg_board_state_v1', JSON.stringify(stateWithDate));
@@ -878,6 +1106,33 @@ function restoreBoardStateLocal(){
 async function loadBoardState(){
   // Only run on initial load — never overwrite after user has made changes
   if(lastLocalChange > 0) return false;
+
+  // _v2 read path (when ?v2=1 is set or localStorage flag is on)
+  if (V2_READ_MODE) {
+    console.log('[v2-read] mode active');
+    const restored = await loadFromV2();
+    // Sick list still comes from absence_records — handled below
+    // Skip board_state path entirely
+    try {
+      const absDate = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Chicago' });
+      const absRes = await sbFetch('/rest/v1/absence_records?date=eq.' + absDate + '&select=employee_name,reason');
+      if (absRes && absRes.ok) {
+        const absRows = await absRes.json();
+        (absRows || []).forEach(r => {
+          if (r && r.employee_name) {
+            sick.add(r.employee_name);
+            if (r.reason) sickReasons[r.employee_name] = r.reason;
+          }
+        });
+        console.log('[absence] loaded ' + (absRows?.length || 0) + ' unavailable techs (v2 mode)');
+      }
+    } catch(e) { console.warn('[absence] v2 mode load error:', e); }
+    if (restored) {
+      updateSyncBadge(Date.now());
+      showToast('✓ Board restored from _v2');
+    }
+    return restored;
+  }
 
   const now = new Date();
   const dispatchDay = new Date(now);
@@ -1144,6 +1399,7 @@ async function lookupTSIds(){
       // Preserve existing assignments across refresh
       const existingJobs = prevTechQ?.[lane]?.[nm]?.jobs || [];
       techQ[lane][nm] = {
+        id: e.id, // employee UUID — used for _v2 dispatch_assignments_v2.tech_id
         tsId: null, // legacy field, kept for compatibility with code that references it
         initials: initials.toUpperCase(),
         color: AV_COLORS[colorIdx % AV_COLORS.length],
