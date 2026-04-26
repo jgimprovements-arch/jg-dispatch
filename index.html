@@ -1069,9 +1069,9 @@ async function loadClockedInJobs(){
   }
   try {
     const today = _getDispatchToday();
-    // Fetch active time_entries (clock_out IS NULL) for today
-    // Trying multiple possible job-id columns since the schema may use job_id, albi_project_id, or job_albi_id
-    const r = await sbFetch('/rest/v1/time_entries?clock_out=is.null&clock_in=gte.' + today + 'T00:00:00&select=*');
+    // time_entries.job_id is TEXT matching Albi job IDs.
+    // Active session = clock_out IS NULL.
+    const r = await sbFetch('/rest/v1/time_entries?clock_out=is.null&clock_in=gte.' + today + 'T00:00:00&select=job_id,employee_name');
     if (!r.ok) {
       console.warn('[clocked-in] fetch failed', r.status);
       return;
@@ -1079,21 +1079,13 @@ async function loadClockedInJobs(){
     const entries = await r.json();
     const counts = {};
     entries.forEach(e => {
-      // Try common column names — first match wins
-      const jid = e.job_id || e.albi_project_id || e.job_albi_id || e.project_id;
-      if (jid) {
-        const key = String(jid);
+      if (e.job_id) {
+        const key = String(e.job_id);
         counts[key] = (counts[key] || 0) + 1;
       }
     });
     _clockedInJobs = counts;
-    // Debug: log first time so we can see which column has the job ID
-    if (entries.length && !window._clockedInDebugged) {
-      console.log('[clocked-in] sample time_entry row keys:', Object.keys(entries[0]));
-      window._clockedInDebugged = true;
-    }
     console.log('[clocked-in] ' + entries.length + ' active sessions, ' + Object.keys(counts).length + ' jobs');
-    // Apply to existing cards without full re-render
     _applyClockedInToCards();
   } catch(e) {
     console.warn('[clocked-in] error:', e);
