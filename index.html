@@ -957,19 +957,12 @@ async function setBoardDate(newDate){
   const input = document.getElementById('board-date-input');
   if (input) input.value = newDate;
   _updateDateContextBanner();
-  // Reload board for the new date
-  // Clear all in-memory assignments before reloading from v2
+  // Clear all in-memory state before reloading — loadFromV2 will repopulate
   for (const l of ['appleton','stevens']) {
     for (const nm in (techQ[l]||{})) {
       if (techQ[l][nm]) techQ[l][nm].jobs = [];
     }
-  }
-  // Reset unassigned to all valid jobs (will be filtered down by loadFromV2)
-  for (const l of ['appleton','stevens']) {
-    unassigned[l] = Object.keys(jobs).filter(jid => {
-      const j = jobs[jid];
-      return j && (j.location === LOCATIONS[l].label || j.market === l);
-    });
+    unassigned[l] = []; // loadFromV2 will rebuild based on date
   }
   await loadFromV2();
   await loadClockedInJobs(); // refresh active-clock indicators (only meaningful for today)
@@ -1333,8 +1326,10 @@ async function loadFromV2(){
     }
 
     // Unassigned pool — only when viewing today.
-    // For non-today dates, the pool shows all jobs that aren't assigned on this date
-    // so dispatchers can see what's available to schedule.
+    // For non-today dates, the pool shows what's currently unassigned today
+    // (the NULL-dated unassigned rows) minus anything already pre-scheduled
+    // to this specific future/past date by anyone. Conservative: you can only
+    // pre-schedule from what's not already on today's tech lanes.
     if (_isViewingToday()) {
       const unGrouped = { appleton: [], stevens: [] };
       dbUnassigned.forEach(r => {
@@ -1345,17 +1340,27 @@ async function loadFromV2(){
         if (unGrouped[loc].length) unassigned[loc] = unGrouped[loc];
       }
     } else {
-      // Non-today view: pool = all known jobs minus what's assigned on this date
-      const assignedOnDate = new Set(dbAssigns.map(r => r.job_id));
-      for (const loc of ['appleton','stevens']) {
-        unassigned[loc] = Object.keys(jobs).filter(jid => {
-          const j = jobs[jid];
-          if (!j) return false;
-          if (assignedOnDate.has(jid)) return false;
-          // Match jobs to markets — check both potential property names
-          const lbl = LOCATIONS[loc] && LOCATIONS[loc].label;
-          return j.location === lbl || j.market === loc;
+      // Non-today view: pool = today's unassigned (NULL-dated rows) minus
+      // anything already assigned on this specific date.
+      // Fetch the today-unassigned pool to use as the source list.
+      try {
+        const todayUnRes = await sbFetch('/rest/v1/dispatch_unassigned_v2?select=job_id,market');
+        const todayUn = todayUnRes.ok ? await todayUnRes.json() : [];
+        const assignedOnDate = new Set(dbAssigns.map(r => r.job_id));
+        const grouped = { appleton: [], stevens: [] };
+        todayUn.forEach(r => {
+          if (assignedOnDate.has(r.job_id)) return; // already scheduled this date
+          const loc = _fromV2Market(r.market);
+          // Only include if the job actually exists in the in-memory map
+          if (!jobs[r.job_id]) return;
+          grouped[loc].push(r.job_id);
         });
+        for (const loc of ['appleton','stevens']) {
+          unassigned[loc] = grouped[loc];
+        }
+      } catch(e) {
+        console.warn('[v2-read] non-today unassigned fetch failed:', e);
+        for (const loc of ['appleton','stevens']) unassigned[loc] = [];
       }
     }
 
