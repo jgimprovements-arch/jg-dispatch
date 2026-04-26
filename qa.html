@@ -58,6 +58,8 @@ input[type=file]{display:none}
 .qa-upload-zone{border:2px dashed var(--brd);border-radius:8px;padding:26px 16px;text-align:center;cursor:pointer;transition:all .15s;background:transparent;}
 .qa-upload-zone:hover{border-color:var(--orange);background:rgba(232,93,4,.04);}
 .qa-upload-zone.loaded{border-style:solid;border-color:var(--grn);background:rgba(46,125,50,.04);text-align:left;padding:12px 16px;}
+.qa-upload-zone.dragover{border-color:var(--orange);background:rgba(232,93,4,.12);transform:scale(1.01);box-shadow:0 0 0 4px rgba(232,93,4,.15);}
+.qa-drop-inline.dragover{border-color:var(--orange)!important;background:rgba(232,93,4,.12)!important;}
 .qa-btn{padding:8px 18px;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;border:none;font-family:'DM Sans',sans-serif;transition:all .15s;white-space:nowrap;}
 .qa-btn-primary{background:var(--orange);color:#fff;}
 .qa-btn-primary:hover{background:#c94a00;}
@@ -217,6 +219,8 @@ You will be GIVEN structured extraction data. Use it as your source of truth —
 
 JUDGMENT RULES (apply these — the code filter handles edge cases):
 
+LABOR MINIMUMS ARE NEVER BILLABLE — do NOT flag missing minimum-hour charges, trip charges, 1-hour minimums, half-hour minimums, or any minimum labor gap. JG bills actual hours from the activity log, never a floor. Skip these entirely.
+
 UNDERBILLING — flag aggressively:
 - Equipment days: if Encircle shows equipment onsite N days but estimate bills < N days
 - Equipment count: if Encircle photos show more units than billed
@@ -360,6 +364,17 @@ function applyBillingRules(extracted, audit) {
     // Drop foam blocks/risers as separate material — not a JG billing item
     if (!drop && /foam block|foam riser|riser block/.test(desc)) {
       drop = 'Suppressed: foam blocks not a JG billing item';
+    }
+
+    // Labor minimum rule — JG does not bill minimum/min-charge labor lines.
+    // If AI flags a minimum-hours, min-charge, trip-charge, or 1-hour-minimum gap, suppress.
+    if (!drop) {
+      const code = (g.xact_code || '').toUpperCase();
+      const isLaborCode = code.includes('LAB') || /\bWTR LAB\b|\bWTR LABA\b|\bLAB MIN\b/.test(code);
+      const minIndicators = /\bmin(imum)?\b|\bmin charge\b|\btrip charge\b|\b1[ -]?hour minimum\b|\bhalf[ -]?hour minimum\b|\b\.5[ -]?hour\b|\b0\.5 hour\b/i;
+      if ((isLaborCode || /\blabor\b/i.test(desc)) && minIndicators.test(desc)) {
+        drop = 'Suppressed: labor minimums not allowed per JG billing policy';
+      }
     }
 
     if (drop) {
@@ -582,7 +597,7 @@ async function runAlbiAutomation(){
 // ══ PASS 1: Initial Review ══
 async function runPass1(){
   S.proj=document.getElementById('projIn')?.value||S.proj;
-  if(!S.proj.trim()){S.err='Albi project name is required.';draw();return}
+  if(!S.proj.trim()){S.proj='UNTITLED-'+new Date().toISOString().slice(0,10).replace(/-/g,'')+'-'+Math.floor(Math.random()*900+100)}
   if(!S.enc||!S.est||!S.apiKey||S.busy)return;
   S.busy=true;S.err=null;S.result=null;S.resp={};S.done=false;S.albiSteps=[];S.albiDone=false;S.recheckResult=null;S.correctedEst=null;S.extracted=null;draw();
   try{
@@ -760,6 +775,38 @@ function dlReport(){
 
 function reset(){S.enc=null;S.est=null;S.extracted=null;S.encPdfDoc=null;S.encPageCount=0;S.busy=false;S.prog='';S.err=null;S.result=null;S.resp={};S.reviewer='';S.sev='ALL';S.done=false;S.reb=false;S.ec='';S.proj='';S.phase='upload';S.correctedEst=null;S.recheckResult=null;S.recheckBusy=false;S.encB64=null;S.encText=null;S.rebuildResult=null;S.adjEst=null;S.adjEmail='';S.adjResult=null;S.adjResp={};S.adjDone=false;S.adjLetterEdited=null;S.adjNotes={};S.rebuildBusy=false;S.albiSteps=[];S.albiProg='';S.albiDone=false;draw()}
 
+
+// ══ DRAG-AND-DROP HELPERS ══
+// Applies native drag-drop wiring to a zone. Called from inline ondragover/etc attrs
+// or after render via setupDropZones().
+function _onDragOver(e) {
+  e.preventDefault();
+  e.stopPropagation();
+  e.currentTarget.classList.add('dragover');
+}
+function _onDragLeave(e) {
+  e.preventDefault();
+  e.stopPropagation();
+  e.currentTarget.classList.remove('dragover');
+}
+function _handleDrop(e, target) {
+  e.preventDefault();
+  e.stopPropagation();
+  e.currentTarget.classList.remove('dragover');
+  const f = e.dataTransfer?.files?.[0];
+  if (!f) return;
+  if (!/\.pdf$/i.test(f.name)) {
+    S.err = 'Only PDF files accepted (got: ' + f.name + ')';
+    draw();
+    return;
+  }
+  // Routing by target: 'enc' | 'est' | 'cor' | 'adj'
+  if (target === 'enc') { S.enc = f; }
+  else if (target === 'est') { S.est = f; }
+  else if (target === 'cor') { S.correctedEst = f; S.recheckResult = null; S.phase = 'recheck_upload'; }
+  else if (target === 'adj') { S.adjEst = f; }
+  draw();
+}
 
 // ══ ENCIRCLE PAGE THUMBNAIL CACHE ══
 // Renders a specific page of the cached Encircle PDF as a data URL, on demand.
@@ -1185,7 +1232,7 @@ Return ONLY valid JSON:
 // ══ ADJUSTER REBUTTAL ANALYSIS ══
 async function runAdjusterAnalysis(){
   S.proj=document.getElementById('projIn')?.value||S.proj;
-  if(!S.proj.trim()){S.err='Albi project name is required.';draw();return}
+  if(!S.proj.trim()){S.proj='UNTITLED-'+new Date().toISOString().slice(0,10).replace(/-/g,'')+'-'+Math.floor(Math.random()*900+100)}
   if(!S.enc||!S.est||!S.apiKey||S.busy)return;
   if(!S.adjEst&&!S.adjEmail.trim()){S.err='Upload adjuster estimate or paste their email.';draw();return}
   S.busy=true;S.err=null;S.adjResult=null;S.adjResp={};S.adjDone=false;S.adjNotes={};S.adjLetterEdited=null;draw();
@@ -1566,15 +1613,15 @@ function draw(){
 
   // ══ ADJUSTER REBUTTAL UPLOAD PHASE ══
   if(S.mode==='adjuster'&&S.phase==='upload'){
-    h+=`<div style="margin-bottom:14px"><label style="display:block;font-size:11px;color:var(--dim);margin-bottom:4px;font-family:'DM Mono',monospace;text-transform:uppercase">Albi Project Name <span style="color:var(--red)">* required</span></label><input type="text" id="projIn" value="${S.proj}" placeholder="e.g. Wang-2798-WTR" style="width:100%;max-width:400px"></div>`;
+    h+=`<div style="margin-bottom:14px"><label style="display:block;font-size:11px;color:var(--dim);margin-bottom:4px;font-family:'DM Mono',monospace;text-transform:uppercase">Albi Project Name <span style="color:var(--dim);font-weight:400;text-transform:none">— optional, recommended for Albi push</span></label><input type="text" id="projIn" value="${S.proj}" placeholder="e.g. Wang-2798-WTR" style="width:100%;max-width:400px"></div>`;
     
     h+=`<div class="mono" style="font-size:12px;font-weight:700;color:var(--red);margin:16px 0 8px;text-transform:uppercase">Adjuster's Pushback</div>`;
-    h+=`<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:12px"><div style="border:2px dashed ${S.adjEst?'var(--red)':'var(--brd)'};border-radius:10px;padding:${S.adjEst?'16px':'24px 16px'};text-align:${S.adjEst?'left':'center'};cursor:pointer;background:${S.adjEst?'var(--s1)':'transparent'}" onclick="document.getElementById('adjF').click()"><input type="file" id="adjF" accept=".pdf" onchange="if(this.files[0]){S.adjEst=this.files[0];draw()}">${S.adjEst?'<div style="display:flex;align-items:center;gap:10px"><span style="font-size:22">⚖️</span><div><p style="font-size:12px;font-weight:600;color:var(--red)">Adjuster estimate loaded</p><p style="font-size:11px;color:var(--dim);margin-top:2px">'+S.adjEst.name+'</p></div></div>':'<div style="font-size:24px;opacity:.4;margin-bottom:6px">⚖️</div><p style="font-size:12px;font-weight:600">Adjuster Xactimate</p><p style="font-size:11px;color:var(--dim);margin-top:4px">Their revised estimate PDF</p>'}</div>`;
+    h+=`<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:12px"><div class="qa-drop-inline" style="border:2px dashed ${S.adjEst?'var(--red)':'var(--brd)'};border-radius:10px;padding:${S.adjEst?'16px':'24px 16px'};text-align:${S.adjEst?'left':'center'};cursor:pointer;background:${S.adjEst?'var(--s1)':'transparent'};transition:all .15s" onclick="document.getElementById('adjF').click()" ondragover="_onDragOver(event)" ondragleave="_onDragLeave(event)" ondrop="_handleDrop(event,'adj')"><input type="file" id="adjF" accept=".pdf" onchange="if(this.files[0]){S.adjEst=this.files[0];draw()}">${S.adjEst?'<div style="display:flex;align-items:center;gap:10px"><span style="font-size:22">⚖️</span><div><p style="font-size:12px;font-weight:600;color:var(--red)">Adjuster estimate loaded</p><p style="font-size:11px;color:var(--dim);margin-top:2px">'+S.adjEst.name+'</p></div></div>':'<div style="font-size:24px;opacity:.4;margin-bottom:6px">⚖️</div><p style="font-size:12px;font-weight:600">Adjuster Xactimate</p><p style="font-size:11px;color:var(--dim);margin-top:4px">Drag or click — their revised estimate PDF</p>'}</div>`;
     h+=`<div style="border:2px dashed var(--brd);border-radius:10px;padding:16px"><label style="display:block;font-size:12px;font-weight:600;margin-bottom:6px">OR paste adjuster email</label><textarea id="adjEmailIn" oninput="S.adjEmail=this.value" placeholder="Paste adjuster's email or notes here..." style="min-height:80px;border-color:var(--brd)">${S.adjEmail}</textarea></div></div>`;
     
     h+=`<div class="mono" style="font-size:12px;font-weight:700;color:var(--blu);margin:16px 0 8px;text-transform:uppercase">Your Documentation</div>`;
-    h+=`<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:16px"><div class="qa-upload-zone ${S.enc?'loaded':''}" onclick="document.getElementById('encF').click()"><input type="file" id="encF" accept=".pdf" onchange="if(this.files[0]){S.enc=this.files[0];draw()}">${S.enc?'<div style="display:flex;align-items:center;gap:10px"><span style="font-size:22">📋</span><div><p style="font-size:12px;font-weight:600;color:var(--grn)">Encircle loaded</p><p style="font-size:11px;color:var(--dim);margin-top:2px">'+S.enc.name+'</p></div></div>':'<div style="font-size:24px;opacity:.4;margin-bottom:6px">📋</div><p style="font-size:12px;font-weight:600">Encircle report</p><p style="font-size:11px;color:var(--dim);margin-top:4px">Your field documentation</p>'}</div>`;
-    h+=`<div class="qa-upload-zone ${S.enc?'loaded':''}" onclick="document.getElementById('estF').click()"><input type="file" id="estF" accept=".pdf" onchange="if(this.files[0]){S.est=this.files[0];draw()}">${S.est?'<div style="display:flex;align-items:center;gap:10px"><span style="font-size:22">📊</span><div><p style="font-size:12px;font-weight:600;color:var(--grn)">Your estimate loaded</p><p style="font-size:11px;color:var(--dim);margin-top:2px">'+S.est.name+'</p></div></div>':'<div style="font-size:24px;opacity:.4;margin-bottom:6px">📊</div><p style="font-size:12px;font-weight:600">Your Xactimate estimate</p><p style="font-size:11px;color:var(--dim);margin-top:4px">Original submitted estimate</p>'}</div></div>`;
+    h+=`<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:16px"><div class="qa-upload-zone ${S.enc?'loaded':''}" onclick="document.getElementById('encF').click()" ondragover="_onDragOver(event)" ondragleave="_onDragLeave(event)" ondrop="_handleDrop(event,'enc')"><input type="file" id="encF" accept=".pdf" onchange="if(this.files[0]){S.enc=this.files[0];draw()}">${S.enc?'<div style="display:flex;align-items:center;gap:10px"><span style="font-size:22">📋</span><div><p style="font-size:12px;font-weight:600;color:var(--grn)">Encircle loaded</p><p style="font-size:11px;color:var(--dim);margin-top:2px">'+S.enc.name+'</p></div></div>':'<div style="font-size:24px;opacity:.4;margin-bottom:6px">📋</div><p style="font-size:12px;font-weight:600">Encircle report</p><p style="font-size:11px;color:var(--dim);margin-top:4px">Drag PDF or click to browse</p>'}</div>`;
+    h+=`<div class="qa-upload-zone ${S.est?'loaded':''}" onclick="document.getElementById('estF').click()" ondragover="_onDragOver(event)" ondragleave="_onDragLeave(event)" ondrop="_handleDrop(event,'est')"><input type="file" id="estF" accept=".pdf" onchange="if(this.files[0]){S.est=this.files[0];draw()}">${S.est?'<div style="display:flex;align-items:center;gap:10px"><span style="font-size:22">📊</span><div><p style="font-size:12px;font-weight:600;color:var(--grn)">Your estimate loaded</p><p style="font-size:11px;color:var(--dim);margin-top:2px">'+S.est.name+'</p></div></div>':'<div style="font-size:24px;opacity:.4;margin-bottom:6px">📊</div><p style="font-size:12px;font-weight:600">Your Xactimate estimate</p><p style="font-size:11px;color:var(--dim);margin-top:4px">Drag PDF or click to browse</p>'}</div></div>`;
     
     const canRun=S.enc&&S.est&&(S.adjEst||S.adjEmail.trim())&&!S.busy;
     h+=`<button style="width:100%;padding:14px;border-radius:8px;border:none;font-family:'DM Mono',monospace;font-size:14px;font-weight:700;cursor:pointer;background:${canRun?'linear-gradient(135deg,#E53935,#C62828)':'var(--mut)'};color:${canRun?'#fff':'var(--dim)'}" onclick="runAdjusterAnalysis()" ${S.busy?'disabled':''}>${S.busy?'Analyzing disputes...':'Build Rebuttal ⟶'}</button>`;
@@ -1641,9 +1688,9 @@ function draw(){
 
   // ══ PHASE: UPLOAD (QA REVIEW) ══
   if(S.mode==='qa'&&S.phase==='upload'){
-    h+=`<div style="margin-bottom:14px"><label style="display:block;font-size:11px;color:var(--dim);margin-bottom:4px;font-family:'DM Mono',monospace;text-transform:uppercase">Albi Project Name <span style="color:var(--red)">* required</span></label><input type="text" id="projIn" value="${S.proj}" placeholder="e.g. Wang-2798-WTR" style="width:100%;max-width:400px"></div>`;
-    h+=`<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:16px"><div class="qa-upload-zone ${S.enc?'loaded':''}" onclick="document.getElementById('encF').click()"><input type="file" id="encF" accept=".pdf" onchange="if(this.files[0]){S.enc=this.files[0];draw()}">${S.enc?'<div style="display:flex;align-items:center;gap:10px"><span style="font-size:22">📋</span><div><p style="font-size:12px;font-weight:600;color:var(--grn)">Encircle loaded</p><p style="font-size:11px;color:var(--dim);margin-top:2px">'+S.enc.name+'</p></div></div>':'<div style="font-size:28px;opacity:.4;margin-bottom:8px">📋</div><p style="font-size:13px;font-weight:600">Encircle report</p><p style="font-size:11px;color:var(--dim);margin-top:4px">Field documentation PDF</p>'}</div>`;
-    h+=`<div class="qa-upload-zone ${S.enc?'loaded':''}" onclick="document.getElementById('estF').click()"><input type="file" id="estF" accept=".pdf" onchange="if(this.files[0]){S.est=this.files[0];draw()}">${S.est?'<div style="display:flex;align-items:center;gap:10px"><span style="font-size:22">📊</span><div><p style="font-size:12px;font-weight:600;color:var(--grn)">Estimate loaded</p><p style="font-size:11px;color:var(--dim);margin-top:2px">'+S.est.name+'</p></div></div>':'<div style="font-size:28px;opacity:.4;margin-bottom:8px">📊</div><p style="font-size:13px;font-weight:600">Original Xactimate estimate</p><p style="font-size:11px;color:var(--dim);margin-top:4px">Submitted estimate PDF</p>'}</div></div>`;
+    h+=`<div style="margin-bottom:14px"><label style="display:block;font-size:11px;color:var(--dim);margin-bottom:4px;font-family:'DM Mono',monospace;text-transform:uppercase">Albi Project Name <span style="color:var(--dim);font-weight:400;text-transform:none">— optional, recommended for Albi push</span></label><input type="text" id="projIn" value="${S.proj}" placeholder="e.g. Wang-2798-WTR" style="width:100%;max-width:400px"></div>`;
+    h+=`<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:16px"><div class="qa-upload-zone ${S.enc?'loaded':''}" onclick="document.getElementById('encF').click()" ondragover="_onDragOver(event)" ondragleave="_onDragLeave(event)" ondrop="_handleDrop(event,'enc')"><input type="file" id="encF" accept=".pdf" onchange="if(this.files[0]){S.enc=this.files[0];draw()}">${S.enc?'<div style="display:flex;align-items:center;gap:10px"><span style="font-size:22">📋</span><div><p style="font-size:12px;font-weight:600;color:var(--grn)">Encircle loaded</p><p style="font-size:11px;color:var(--dim);margin-top:2px">'+S.enc.name+'</p></div></div>':'<div style="font-size:28px;opacity:.4;margin-bottom:8px">📋</div><p style="font-size:13px;font-weight:600">Encircle report</p><p style="font-size:11px;color:var(--dim);margin-top:4px">Drag PDF or click to browse</p>'}</div>`;
+    h+=`<div class="qa-upload-zone ${S.est?'loaded':''}" onclick="document.getElementById('estF').click()" ondragover="_onDragOver(event)" ondragleave="_onDragLeave(event)" ondrop="_handleDrop(event,'est')"><input type="file" id="estF" accept=".pdf" onchange="if(this.files[0]){S.est=this.files[0];draw()}">${S.est?'<div style="display:flex;align-items:center;gap:10px"><span style="font-size:22">📊</span><div><p style="font-size:12px;font-weight:600;color:var(--grn)">Estimate loaded</p><p style="font-size:11px;color:var(--dim);margin-top:2px">'+S.est.name+'</p></div></div>':'<div style="font-size:28px;opacity:.4;margin-bottom:8px">📊</div><p style="font-size:13px;font-weight:600">Original Xactimate estimate</p><p style="font-size:11px;color:var(--dim);margin-top:4px">Drag PDF or click to browse</p>'}</div></div>`;
     h+=`<button style="width:100%;padding:14px;border-radius:8px;border:none;font-family:'DM Mono',monospace;font-size:14px;font-weight:700;cursor:pointer;background:${S.enc&&S.est&&!S.busy?'linear-gradient(135deg,var(--acc),#C97A08)':'var(--mut)'};color:${S.enc&&S.est&&!S.busy?'#000':'var(--dim)'}" onclick="runPass1()" ${S.busy?'disabled':''}>${S.busy?'Analyzing...':'Run QA Review — Pass 1 ⟶'}</button>`;
     if(S.busy&&S.prog)h+=`<div style="margin-top:12px;padding:12px;border-radius:6px;background:var(--s1);border:1px solid rgba(232,147,12,0.2);display:flex;align-items:center;gap:10px"><div style="width:16px;height:16px;border:2px solid var(--acc);border-top-color:transparent;border-radius:50%;animation:spin .8s linear infinite;flex-shrink:0"></div><span style="font-size:12px;color:var(--acc);font-family:'DM Mono',monospace">${S.prog}</span></div>`;
     if(S.err)h+=`<div style="margin-top:12px;padding:10px;border-radius:6px;background:var(--redD);border:1px solid rgba(229,57,53,0.2);color:var(--red);font-size:12px">${S.err}</div>`;
@@ -1681,7 +1728,7 @@ function draw(){
   // ══ PHASE: RECHECK UPLOAD ══
   else if(S.phase==='recheck_upload'||S.phase==='recheck_result'){
     h+=`<div style="background:var(--s1);border:1px solid var(--acc);border-radius:10px;padding:20px;margin-bottom:16px"><div class="mono" style="font-size:14px;font-weight:700;margin-bottom:8px;color:var(--acc)">Pass 2 — Upload Corrected Estimate</div><p style="font-size:13px;color:var(--dim);margin-bottom:16px">Upload the corrected Xactimate estimate. The AI will verify that the corrections from Pass 1 were actually made before allowing sign-off.</p>`;
-    h+=`<div style="border:2px dashed ${S.correctedEst?'var(--grn)':'var(--brd)'};border-radius:10px;padding:${S.correctedEst?'16px':'32px 16px'};text-align:${S.correctedEst?'left':'center'};cursor:pointer;background:${S.correctedEst?'var(--s2)':'transparent'};margin-bottom:16px" onclick="document.getElementById('corF').click()"><input type="file" id="corF" accept=".pdf" onchange="if(this.files[0]){S.correctedEst=this.files[0];S.recheckResult=null;S.phase='recheck_upload';draw()}">${S.correctedEst?'<div style="display:flex;align-items:center;gap:10px"><span style="font-size:22">📊</span><div><p style="font-size:12px;font-weight:600;color:var(--grn)">Corrected estimate loaded</p><p style="font-size:11px;color:var(--dim);margin-top:2px">'+S.correctedEst.name+'</p></div></div>':'<div style="font-size:28px;opacity:.4;margin-bottom:8px">📊</div><p style="font-size:13px;font-weight:600">Corrected Xactimate Estimate</p><p style="font-size:11px;color:var(--dim);margin-top:4px">Upload the fixed estimate PDF</p>'}</div>`;
+    h+=`<div class="qa-drop-inline" style="border:2px dashed ${S.correctedEst?'var(--grn)':'var(--brd)'};border-radius:10px;padding:${S.correctedEst?'16px':'32px 16px'};text-align:${S.correctedEst?'left':'center'};cursor:pointer;background:${S.correctedEst?'var(--s2)':'transparent'};margin-bottom:16px;transition:all .15s" onclick="document.getElementById('corF').click()" ondragover="_onDragOver(event)" ondragleave="_onDragLeave(event)" ondrop="_handleDrop(event,'cor')"><input type="file" id="corF" accept=".pdf" onchange="if(this.files[0]){S.correctedEst=this.files[0];S.recheckResult=null;S.phase='recheck_upload';draw()}">${S.correctedEst?'<div style="display:flex;align-items:center;gap:10px"><span style="font-size:22">📊</span><div><p style="font-size:12px;font-weight:600;color:var(--grn)">Corrected estimate loaded</p><p style="font-size:11px;color:var(--dim);margin-top:2px">'+S.correctedEst.name+'</p></div></div>':'<div style="font-size:28px;opacity:.4;margin-bottom:8px">📊</div><p style="font-size:13px;font-weight:600">Corrected Xactimate Estimate</p><p style="font-size:11px;color:var(--dim);margin-top:4px">Drag PDF or click to browse</p>'}</div>`;
     h+=`<button style="width:100%;padding:14px;border-radius:8px;border:none;font-family:'DM Mono',monospace;font-size:14px;font-weight:700;cursor:${S.correctedEst&&!S.recheckBusy?'pointer':'not-allowed'};background:${S.correctedEst&&!S.recheckBusy?'linear-gradient(135deg,var(--grn),#2E7D32)':'var(--mut)'};color:${S.correctedEst&&!S.recheckBusy?'#fff':'var(--dim)'}" onclick="runPass2()" ${S.recheckBusy?'disabled':''}>${S.recheckBusy?'Verifying corrections...':'Verify Corrected Estimate ⟶'}</button></div>`;
     if(S.recheckBusy&&S.prog)h+=`<div style="padding:12px;border-radius:6px;background:var(--s1);border:1px solid rgba(67,160,71,0.2);display:flex;align-items:center;gap:10px;margin-bottom:16px"><div style="width:16px;height:16px;border:2px solid var(--grn);border-top-color:transparent;border-radius:50%;animation:spin .8s linear infinite;flex-shrink:0"></div><span style="font-size:12px;color:var(--grn);font-family:'DM Mono',monospace">${S.prog}</span></div>`;
     if(S.err)h+=`<div style="padding:10px;border-radius:6px;background:var(--redD);border:1px solid rgba(229,57,53,0.2);color:var(--red);font-size:12px;margin-bottom:16px">${S.err}</div>`;
