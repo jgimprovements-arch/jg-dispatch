@@ -1144,11 +1144,14 @@ setInterval(loadClockedInJobs, 30000);
 async function syncToV2(){
   if (!V2_ENABLED) return;
   try {
-    // Today writes NULL for scheduled_date (legacy compatibility + simpler queries).
+    // Today writes NULL for scheduled_date (day-of dispatching = NULL date).
     // Future/past dates write explicit DATE values.
+    // Today's view shows BOTH NULL-dated rows AND today-dated rows
+    // (so pre-scheduled work auto-appears when its date arrives).
     const dateForWrite = _isViewingToday() ? null : currentBoardDate;
+    const todayStr = _getDispatchToday();
     const dateFilter = _isViewingToday()
-      ? '&scheduled_date=is.null'
+      ? '&or=(scheduled_date.is.null,scheduled_date.eq.' + todayStr + ')'
       : '&scheduled_date=eq.' + currentBoardDate;
 
     // 1) Build desired state from memory
@@ -1202,8 +1205,17 @@ async function syncToV2(){
     const dbUnassigned = results[1] ? await results[1].json() : [];
 
     // 3) Compute diffs
-    // Assignments: identity = (tech_id, job_id, market, scheduled_date). Position can update.
-    const assignKey = (a) => a.tech_id + '|' + a.job_id + '|' + a.market + '|' + (a.scheduled_date || '');
+    // Assignments: identity = (tech_id, job_id, market, scheduled_date_or_today_collapse).
+    // On today's view, NULL-dated and today-dated rows are treated as the same
+    // identity (so a pre-scheduled row that arrived today doesn't get rewritten as NULL).
+    // Position can update.
+    const todayCollapse = _isViewingToday() ? todayStr : null;
+    const collapseDate = (d) => {
+      // On today's view, both NULL and today's date map to the same key
+      if (todayCollapse && (d === null || d === undefined || d === todayCollapse)) return '_today';
+      return d || '';
+    };
+    const assignKey = (a) => a.tech_id + '|' + a.job_id + '|' + a.market + '|' + collapseDate(a.scheduled_date);
     const dbAssignMap = new Map(dbAssigns.map(r => [assignKey(r), r]));
     const desiredAssignKeys = new Set(desiredAssigns.map(assignKey));
 
@@ -1282,13 +1294,16 @@ async function syncToV2(){
 
 // Load board state from _v2 tables (used when V2_READ_MODE is true).
 // Returns true if data was restored, false otherwise.
-// DATE-SCOPED: only loads assignments matching currentBoardDate.
-// Today = scheduled_date IS NULL. Future/past = scheduled_date = currentBoardDate.
+// DATE-SCOPED:
+//   Today = scheduled_date IS NULL OR scheduled_date = today_date (merged view)
+//   Future/past = scheduled_date = currentBoardDate
+// This means pre-scheduled work auto-appears when its date arrives.
 async function loadFromV2(){
   try {
-    // Build the date filter — today loads NULL-dated rows (legacy), other dates use eq filter
+    const todayStr = _getDispatchToday();
+    // Build the date filter — today merges NULL-dated rows + today-dated rows
     const dateFilter = _isViewingToday()
-      ? '&scheduled_date=is.null'
+      ? '&or=(scheduled_date.is.null,scheduled_date.eq.' + todayStr + ')'
       : '&scheduled_date=eq.' + currentBoardDate;
 
     // Fetch assignments for current date + unassigned pool (only meaningful for today)
@@ -1301,8 +1316,7 @@ async function loadFromV2(){
     } else {
       fetches.push(Promise.resolve({ ok: true, json: async () => [] }));
     }
-    // Future-scheduled count (anything past today)
-    const todayStr = _getDispatchToday();
+    // Future-scheduled count (anything past today) — todayStr already declared above
     fetches.push(sbFetch('/rest/v1/dispatch_assignments_v2?select=id&scheduled_date=gt.' + todayStr));
 
     const [aRes, uRes, fRes] = await Promise.all(fetches);
