@@ -30,6 +30,7 @@
 
     { section: 'TIME' },
     { label: 'Time Clock / Payroll',icon: '⏱',  url: 'timeclock_admin.html' },
+    { label: 'Time Reports',        icon: '📊',  url: 'time_reports.html' },
     { label: 'Clock In/Out',        icon: '🕐',  url: 'timeclock.html' },
 
     { section: 'SALES' },
