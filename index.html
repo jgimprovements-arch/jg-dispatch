@@ -105,12 +105,81 @@ body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);min
 .tl-card-resize{position:absolute;bottom:0;left:0;right:0;height:8px;cursor:s-resize;background:rgba(255,255,255,.15);display:flex;align-items:center;justify-content:center;}
 .tl-card-resize::after{content:'⋯';font-size:10px;color:rgba(255,255,255,.5);}
 .lane-body.drag-over{background:rgba(232,93,4,.05);}
-.job-card{border-radius:7px;border:1px solid var(--border);padding:10px 12px;margin-bottom:4px;border-left:3px solid #ccc;background:var(--surface);cursor:grab;user-select:none;transition:opacity .15s;}
+.job-card{position:relative;border-radius:7px;border:1px solid var(--border);padding:10px 12px;margin-bottom:4px;border-left:3px solid #ccc;background:var(--surface);cursor:grab;user-select:none;transition:opacity .15s;}
 .job-card:active{cursor:grabbing;}
 .job-card.dragging{opacity:.2;}
 .job-card.drag-placeholder{border:1.5px dashed var(--border-mid);background:rgba(13,45,94,.03);height:68px;cursor:default;}
 .job-card.orphan{border-left-color:var(--danger)!important;background:var(--danger-bg)!important;animation:blink 1.4s ease-in-out infinite;}
 @keyframes blink{0%,100%{opacity:1}50%{opacity:.65}}
+
+/* Clocked-in pulse indicator on job cards (someone is actively working) */
+.clocked-in-pulse{
+  position:absolute;
+  top:8px;
+  right:24px;
+  width:8px;
+  height:8px;
+  border-radius:50%;
+  background:#2d7a3a;
+  box-shadow:0 0 0 0 rgba(45,122,58,.7);
+  animation:clocked-pulse 1.8s ease-in-out infinite;
+  pointer-events:none;
+  z-index:5;
+}
+@keyframes clocked-pulse{
+  0%   { box-shadow:0 0 0 0   rgba(45,122,58,.6); transform:scale(1); }
+  50%  { box-shadow:0 0 0 6px rgba(45,122,58,0);  transform:scale(1.15); }
+  100% { box-shadow:0 0 0 0   rgba(45,122,58,0);  transform:scale(1); }
+}
+.clocked-in-count{
+  position:absolute;
+  top:5px;
+  right:34px;
+  background:#2d7a3a;
+  color:#fff;
+  font-size:9px;
+  font-weight:700;
+  padding:1px 5px;
+  border-radius:8px;
+  pointer-events:none;
+  z-index:5;
+}
+
+/* Future-date assignment visual cue */
+.future-badge{
+  display:inline-flex;
+  align-items:center;
+  gap:3px;
+  font-size:9px;
+  font-weight:700;
+  background:rgba(245,166,35,.15);
+  color:var(--warn);
+  padding:1px 6px;
+  border-radius:8px;
+  font-family:'DM Mono',monospace;
+}
+
+/* When viewing a future/past date, dim the board slightly + show a banner */
+.viewing-other-date .board,
+.viewing-other-date .pool-section{
+  opacity:.95;
+}
+.date-context-banner{
+  display:none;
+  background:linear-gradient(90deg,rgba(245,166,35,.15),rgba(245,166,35,.05));
+  border:1px solid rgba(245,166,35,.3);
+  border-radius:8px;
+  padding:6px 14px;
+  font-size:11px;
+  color:var(--text);
+  margin-bottom:8px;
+  align-items:center;
+  gap:10px;
+}
+.date-context-banner.show{display:flex;}
+.date-context-banner.past{background:linear-gradient(90deg,rgba(107,122,150,.15),rgba(107,122,150,.05));border-color:rgba(107,122,150,.3);}
+.date-context-banner-label{font-weight:700;color:var(--warn);}
+.date-context-banner.past .date-context-banner-label{color:var(--muted);}
 .jc-water{border-left-color:var(--water);background:var(--water-bg);}
 .jc-fire{border-left-color:var(--fire);background:var(--fire-bg);}
 .jc-mold{border-left-color:var(--mold);background:var(--mold-bg);}
@@ -326,6 +395,12 @@ body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);min
   </div>
   <div class="hdr-r">
     <div class="clk" id="clk"></div>
+    <div id="board-date-picker" style="display:flex;align-items:center;gap:4px;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.18);border-radius:6px;padding:3px 6px;">
+      <button onclick="shiftBoardDate(-1)" title="Previous day" style="background:transparent;border:none;color:rgba(255,255,255,.7);cursor:pointer;font-size:14px;line-height:1;padding:2px 6px;">◀</button>
+      <input type="date" id="board-date-input" onchange="setBoardDate(this.value)" style="background:transparent;border:none;color:#fff;font-size:11px;font-family:'DM Mono',monospace;outline:none;color-scheme:dark;cursor:pointer;width:120px;">
+      <button onclick="shiftBoardDate(1)" title="Next day" style="background:transparent;border:none;color:rgba(255,255,255,.7);cursor:pointer;font-size:14px;line-height:1;padding:2px 6px;">▶</button>
+      <button onclick="setBoardDateToday()" id="board-date-today-btn" title="Jump to today" style="background:rgba(245,166,35,.15);border:1px solid rgba(245,166,35,.4);color:var(--gold);cursor:pointer;font-size:9px;font-weight:600;padding:2px 6px;border-radius:3px;margin-left:2px;display:none;">TODAY</button>
+    </div>
     <button class="btn btn-ghost" onclick="refreshAll()">↻ Refresh</button>
     <button class="btn btn-ghost" style="font-size:10px;" onclick="showInfo()">ℹ Help</button>
     <span id="sync-badge" style="font-size:10px;color:var(--muted);padding:4px 8px;"></span>
@@ -339,6 +414,7 @@ body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);min
   <div class="stat"><div class="stat-lbl">Unassigned</div><div class="stat-val" id="s3">—</div></div>
   <div class="stat"><div class="stat-lbl">Techs Active</div><div class="stat-val" id="s4">—</div></div>
   <div class="stat"><div class="stat-lbl">Techs Out</div><div class="stat-val red" id="s5">0</div></div>
+  <div class="stat"><div class="stat-lbl">Scheduled Ahead</div><div class="stat-val" id="s-ahead" style="color:var(--gold);">0</div></div>
   <div class="stat"><div class="stat-lbl">Waste Flags</div><div class="stat-val red" id="s6">0</div></div>
   <div class="job-search-wrap">
     <span class="job-search-icon">🔍</span>
@@ -382,7 +458,13 @@ body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);min
 
 <div class="main">
   <div class="api-err" id="api-err"></div>
-  <div id="dispatch-view"><div class="board-wrap"><div class="board" id="board"></div></div>
+  <div id="dispatch-view">
+    <div class="date-context-banner" id="date-context-banner">
+      <span class="date-context-banner-label" id="date-context-label"></span>
+      <span id="date-context-message" style="flex:1;color:var(--muted);"></span>
+      <button onclick="setBoardDateToday()" style="background:var(--gold);color:var(--navy);border:none;border-radius:4px;padding:3px 10px;font-size:10px;font-weight:600;cursor:pointer;">Back to today</button>
+    </div>
+    <div class="board-wrap"><div class="board" id="board"></div></div>
 
   <div class="ai-panel" id="ai-panel">
     <div class="ai-hd">
@@ -702,6 +784,8 @@ async function boot(){
     if (V2_READ_MODE) {
       await loadBoardState();
     }
+    _initBoardDatePicker();
+    await loadClockedInJobs();
     render();
     hideLoader();
     // Wait for board state to fully restore before refreshing Albi
@@ -724,8 +808,18 @@ async function boot(){
   saveCache();
   // Restore manual assignments from Supabase (fresh load, no cache)
   await loadBoardState();
+  _initBoardDatePicker();
+  await loadClockedInJobs();
   render();
   hideLoader();
+}
+
+function _initBoardDatePicker(){
+  const input = document.getElementById('board-date-input');
+  if (input && !input.value) {
+    input.value = currentBoardDate;
+  }
+  _updateDateContextBanner();
 }
 
 // Silent background refresh (when serving from cache)
@@ -823,6 +917,103 @@ function _fromV2Market(m){
   return m === 'stevens_point' ? 'stevens' : 'appleton';
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// BOARD DATE — which date the board is currently showing
+// ─────────────────────────────────────────────────────────────────────────────
+// The "dispatch day" rolls over at 5am Central (so a 1am sick-call still
+// counts as yesterday's dispatch day). currentBoardDate tracks which date
+// the user is currently viewing (defaults to the dispatch day, can shift to
+// future/past dates via the date picker in the header).
+
+function _getDispatchToday(){
+  // Today's dispatch day in YYYY-MM-DD (Central time, 5am rollover)
+  const now = new Date();
+  const central = new Date(now.toLocaleString('en-US', { timeZone: 'America/Chicago' }));
+  if (central.getHours() < 5) central.setDate(central.getDate() - 1);
+  return central.toISOString().split('T')[0];
+}
+
+let currentBoardDate = _getDispatchToday();
+
+function _isViewingToday(){
+  return currentBoardDate === _getDispatchToday();
+}
+function _isViewingPast(){
+  return currentBoardDate < _getDispatchToday();
+}
+function _isViewingFuture(){
+  return currentBoardDate > _getDispatchToday();
+}
+function _formatDateForDisplay(yyyymmdd){
+  const [y,m,d] = yyyymmdd.split('-').map(Number);
+  const date = new Date(y, m-1, d);
+  return date.toLocaleDateString('en-US', { weekday:'short', month:'short', day:'numeric' });
+}
+
+async function setBoardDate(newDate){
+  if (!newDate || newDate === currentBoardDate) return;
+  currentBoardDate = newDate;
+  // Update the picker UI
+  const input = document.getElementById('board-date-input');
+  if (input) input.value = newDate;
+  _updateDateContextBanner();
+  // Reload board for the new date
+  // Clear all in-memory assignments before reloading from v2
+  for (const l of ['appleton','stevens']) {
+    for (const nm in (techQ[l]||{})) {
+      if (techQ[l][nm]) techQ[l][nm].jobs = [];
+    }
+  }
+  // Reset unassigned to all valid jobs (will be filtered down by loadFromV2)
+  for (const l of ['appleton','stevens']) {
+    unassigned[l] = Object.keys(jobs).filter(jid => {
+      const j = jobs[jid];
+      return j && (j.location === LOCATIONS[l].label || j.market === l);
+    });
+  }
+  await loadFromV2();
+  await loadClockedInJobs(); // refresh active-clock indicators (only meaningful for today)
+  render();
+}
+
+async function shiftBoardDate(deltaDays){
+  const [y,m,d] = currentBoardDate.split('-').map(Number);
+  const date = new Date(y, m-1, d);
+  date.setDate(date.getDate() + deltaDays);
+  const newDate = date.toISOString().split('T')[0];
+  await setBoardDate(newDate);
+}
+
+async function setBoardDateToday(){
+  await setBoardDate(_getDispatchToday());
+}
+
+function _updateDateContextBanner(){
+  const banner = document.getElementById('date-context-banner');
+  const label = document.getElementById('date-context-label');
+  const msg = document.getElementById('date-context-message');
+  const todayBtn = document.getElementById('board-date-today-btn');
+  const body = document.body;
+  if (!banner || !label || !msg) return;
+  if (_isViewingToday()) {
+    banner.classList.remove('show','past');
+    body.classList.remove('viewing-other-date');
+    if (todayBtn) todayBtn.style.display = 'none';
+  } else if (_isViewingFuture()) {
+    banner.classList.add('show'); banner.classList.remove('past');
+    label.textContent = '📅 SCHEDULED FOR ' + _formatDateForDisplay(currentBoardDate).toUpperCase();
+    msg.textContent = 'Drag jobs onto techs to pre-schedule for this date. Today is unaffected.';
+    body.classList.add('viewing-other-date');
+    if (todayBtn) todayBtn.style.display = 'inline-block';
+  } else {
+    banner.classList.add('show','past');
+    label.textContent = '🔒 VIEWING PAST · ' + _formatDateForDisplay(currentBoardDate).toUpperCase();
+    msg.textContent = 'Read-only historical view. Changes here will write to that past date.';
+    body.classList.add('viewing-other-date');
+    if (todayBtn) todayBtn.style.display = 'inline-block';
+  }
+}
+
 // Get current user's display name for created_by/updated_by audit trail
 function _v2Actor(){
   try {
@@ -832,14 +1023,116 @@ function _v2Actor(){
   return 'dispatch-' + (window._myBoardId || 'unknown');
 }
 
-// Push current in-memory state to _v2 tables.
+// ─────────────────────────────────────────────────────────────────────────────
+// CLOCKED-IN INDICATOR — pulse on job cards when a tech is actively working
+// ─────────────────────────────────────────────────────────────────────────────
+// Polls time_entries every 30s for clock_out IS NULL entries (active sessions).
+// Realtime channel also subscribes for instant updates on clock_in/clock_out.
+// _clockedInJobs maps job_id -> count of techs currently clocked in.
+
+let _clockedInJobs = {}; // { '1864213': 2, '1890382': 1, ... }
+let _clockedInChannel = null;
+
+async function loadClockedInJobs(){
+  // Only meaningful when viewing today
+  if (!_isViewingToday()) {
+    _clockedInJobs = {};
+    return;
+  }
+  try {
+    const today = _getDispatchToday();
+    // Fetch active time_entries (clock_out IS NULL) for today
+    // Trying multiple possible job-id columns since the schema may use job_id, albi_project_id, or job_albi_id
+    const r = await sbFetch('/rest/v1/time_entries?clock_out=is.null&clock_in=gte.' + today + 'T00:00:00&select=*');
+    if (!r.ok) {
+      console.warn('[clocked-in] fetch failed', r.status);
+      return;
+    }
+    const entries = await r.json();
+    const counts = {};
+    entries.forEach(e => {
+      // Try common column names — first match wins
+      const jid = e.job_id || e.albi_project_id || e.job_albi_id || e.project_id;
+      if (jid) {
+        const key = String(jid);
+        counts[key] = (counts[key] || 0) + 1;
+      }
+    });
+    _clockedInJobs = counts;
+    // Debug: log first time so we can see which column has the job ID
+    if (entries.length && !window._clockedInDebugged) {
+      console.log('[clocked-in] sample time_entry row keys:', Object.keys(entries[0]));
+      window._clockedInDebugged = true;
+    }
+    console.log('[clocked-in] ' + entries.length + ' active sessions, ' + Object.keys(counts).length + ' jobs');
+    // Apply to existing cards without full re-render
+    _applyClockedInToCards();
+  } catch(e) {
+    console.warn('[clocked-in] error:', e);
+  }
+}
+
+function _applyClockedInToCards(){
+  // Remove all existing pulse indicators
+  document.querySelectorAll('.clocked-in-pulse, .clocked-in-count').forEach(el => el.remove());
+  // Add to current cards
+  document.querySelectorAll('.job-card[data-job-id]').forEach(card => {
+    const jid = card.dataset.jobId;
+    const count = _clockedInJobs[jid];
+    if (count) {
+      const pulse = document.createElement('div');
+      pulse.className = 'clocked-in-pulse';
+      pulse.title = count > 1 ? count + ' techs clocked in' : 'Tech clocked in';
+      card.appendChild(pulse);
+      if (count > 1) {
+        const badge = document.createElement('div');
+        badge.className = 'clocked-in-count';
+        badge.textContent = count;
+        card.appendChild(badge);
+      }
+    }
+  });
+}
+
+function _initClockedInRealtime(){
+  if (_clockedInChannel) return;
+  if (!_sbClient) return; // wait for sb client
+  _clockedInChannel = _sbClient
+    .channel('time_entries_changes')
+    .on('postgres_changes', {
+      event: '*',
+      schema: 'public',
+      table: 'time_entries'
+    }, function() {
+      // Debounce: rapid clock-ins shouldn't hammer the load
+      clearTimeout(window._clockedInDebounce);
+      window._clockedInDebounce = setTimeout(loadClockedInJobs, 500);
+    })
+    .subscribe();
+}
+
+// Periodic refresh as backup (in case realtime drops)
+setInterval(loadClockedInJobs, 30000);
+
+
 // Strategy: full reconciliation — diff what's in memory vs what's in DB,
 // write only the changes. Avoids hammering Supabase with every keystroke.
+//
+// DATE-SCOPED: only operates on rows for currentBoardDate. Other dates' data
+// is untouched. Today uses NULL date (legacy + simpler queries); future dates
+// use explicit DATE values.
 async function syncToV2(){
   if (!V2_ENABLED) return;
   try {
+    // Today writes NULL for scheduled_date (legacy compatibility + simpler queries).
+    // Future/past dates write explicit DATE values.
+    const dateForWrite = _isViewingToday() ? null : currentBoardDate;
+    const dateFilter = _isViewingToday()
+      ? '&scheduled_date=is.null'
+      : '&scheduled_date=eq.' + currentBoardDate;
+
     // 1) Build desired state from memory
-    const desiredAssigns = []; // {tech_id, job_id, market, position}
+    const desiredAssigns = []; // {tech_id, job_id, market, position, scheduled_date}
     const desiredUnassigned = []; // {job_id, market, position}
 
     for (const loc of ['appleton','stevens']) {
@@ -854,36 +1147,43 @@ async function syncToV2(){
             tech_id: tech.id,
             job_id: String(jid),
             market: v2mkt,
+            position: idx,
+            scheduled_date: dateForWrite
+          });
+        });
+      }
+      // Unassigned pool — only sync when viewing today.
+      // For other dates, unassigned represents "available to schedule" not actual rows in DB.
+      if (_isViewingToday()) {
+        (unassigned[loc] || []).forEach((jid, idx) => {
+          if (!jobs[jid]) return; // skip stale IDs
+          desiredUnassigned.push({
+            job_id: String(jid),
+            market: v2mkt,
             position: idx
           });
         });
       }
-      // Unassigned pool
-      (unassigned[loc] || []).forEach((jid, idx) => {
-        if (!jobs[jid]) return; // skip stale IDs
-        desiredUnassigned.push({
-          job_id: String(jid),
-          market: v2mkt,
-          position: idx
-        });
-      });
     }
 
-    // 2) Pull current DB state for both markets
-    const [aRes, uRes] = await Promise.all([
-      sbFetch('/rest/v1/dispatch_assignments_v2?select=id,tech_id,job_id,market,position'),
-      sbFetch('/rest/v1/dispatch_unassigned_v2?select=id,job_id,market,position')
-    ]);
-    if (!aRes.ok || !uRes.ok) {
-      console.warn('[v2-sync] fetch failed', aRes.status, uRes.status);
+    // 2) Pull current DB state for THIS DATE only (other dates untouched)
+    const fetches = [
+      sbFetch('/rest/v1/dispatch_assignments_v2?select=id,tech_id,job_id,market,position,scheduled_date' + dateFilter)
+    ];
+    if (_isViewingToday()) {
+      fetches.push(sbFetch('/rest/v1/dispatch_unassigned_v2?select=id,job_id,market,position'));
+    }
+    const results = await Promise.all(fetches);
+    if (!results[0].ok || (results[1] && !results[1].ok)) {
+      console.warn('[v2-sync] fetch failed', results[0].status, results[1]?.status);
       return;
     }
-    const dbAssigns = await aRes.json();
-    const dbUnassigned = await uRes.json();
+    const dbAssigns = await results[0].json();
+    const dbUnassigned = results[1] ? await results[1].json() : [];
 
     // 3) Compute diffs
-    // Assignments: identity = (tech_id, job_id, market). Position can update.
-    const assignKey = (a) => a.tech_id + '|' + a.job_id + '|' + a.market;
+    // Assignments: identity = (tech_id, job_id, market, scheduled_date). Position can update.
+    const assignKey = (a) => a.tech_id + '|' + a.job_id + '|' + a.market + '|' + (a.scheduled_date || '');
     const dbAssignMap = new Map(dbAssigns.map(r => [assignKey(r), r]));
     const desiredAssignKeys = new Set(desiredAssigns.map(assignKey));
 
@@ -900,7 +1200,7 @@ async function syncToV2(){
     const desiredUnKeys = new Set(desiredUnassigned.map(unKey));
 
     const unToInsert = desiredUnassigned.filter(u => !dbUnMap.has(unKey(u)));
-    const unToDelete = dbUnassigned.filter(r => !desiredUnKeys.has(unKey(r)));
+    const unToDelete = _isViewingToday() ? dbUnassigned.filter(r => !desiredUnKeys.has(unKey(r))) : [];
     const unToUpdate = desiredUnassigned.filter(u => {
       const existing = dbUnMap.get(unKey(u));
       return existing && existing.position !== u.position;
@@ -962,18 +1262,43 @@ async function syncToV2(){
 
 // Load board state from _v2 tables (used when V2_READ_MODE is true).
 // Returns true if data was restored, false otherwise.
+// DATE-SCOPED: only loads assignments matching currentBoardDate.
+// Today = scheduled_date IS NULL. Future/past = scheduled_date = currentBoardDate.
 async function loadFromV2(){
   try {
-    const [aRes, uRes] = await Promise.all([
-      sbFetch('/rest/v1/dispatch_assignments_v2?select=tech_id,job_id,market,position&order=market,tech_id,position'),
-      sbFetch('/rest/v1/dispatch_unassigned_v2?select=job_id,market,position&order=market,position')
-    ]);
+    // Build the date filter — today loads NULL-dated rows (legacy), other dates use eq filter
+    const dateFilter = _isViewingToday()
+      ? '&scheduled_date=is.null'
+      : '&scheduled_date=eq.' + currentBoardDate;
+
+    // Fetch assignments for current date + unassigned pool (only meaningful for today)
+    // Also fetch a count of future-scheduled assignments for the stats badge
+    const fetches = [
+      sbFetch('/rest/v1/dispatch_assignments_v2?select=tech_id,job_id,market,position&order=market,tech_id,position' + dateFilter)
+    ];
+    if (_isViewingToday()) {
+      fetches.push(sbFetch('/rest/v1/dispatch_unassigned_v2?select=job_id,market,position&order=market,position'));
+    } else {
+      fetches.push(Promise.resolve({ ok: true, json: async () => [] }));
+    }
+    // Future-scheduled count (anything past today)
+    const todayStr = _getDispatchToday();
+    fetches.push(sbFetch('/rest/v1/dispatch_assignments_v2?select=id&scheduled_date=gt.' + todayStr));
+
+    const [aRes, uRes, fRes] = await Promise.all(fetches);
     if (!aRes.ok || !uRes.ok) {
       console.warn('[v2-read] fetch failed', aRes.status, uRes.status);
       return false;
     }
     const dbAssigns = await aRes.json();
     const dbUnassigned = await uRes.json();
+    let futureCount = 0;
+    if (fRes && fRes.ok) {
+      try { futureCount = (await fRes.json()).length; } catch(e){}
+    }
+    // Update the stats badge
+    const aheadEl = document.getElementById('s-ahead');
+    if (aheadEl) aheadEl.textContent = futureCount;
 
     // Build name lookup from techQ (uuid -> {loc, name})
     const uuidToTech = {};
@@ -990,6 +1315,13 @@ async function loadFromV2(){
       techAssigns[r.tech_id].push(r.job_id);
     });
 
+    // Reset all tech jobs first (assignments differ per date)
+    for (const loc of ['appleton','stevens']) {
+      for (const nm in (techQ[loc]||{})) {
+        if (techQ[loc][nm]) techQ[loc][nm].jobs = [];
+      }
+    }
+
     let restored = 0;
     for (const [uuid, jids] of Object.entries(techAssigns)) {
       const t = uuidToTech[uuid];
@@ -1000,17 +1332,34 @@ async function loadFromV2(){
       }
     }
 
-    // Unassigned pool
-    const unGrouped = { appleton: [], stevens: [] };
-    dbUnassigned.forEach(r => {
-      const loc = _fromV2Market(r.market);
-      unGrouped[loc].push(r.job_id);
-    });
-    for (const loc of ['appleton','stevens']) {
-      if (unGrouped[loc].length) unassigned[loc] = unGrouped[loc];
+    // Unassigned pool — only when viewing today.
+    // For non-today dates, the pool shows all jobs that aren't assigned on this date
+    // so dispatchers can see what's available to schedule.
+    if (_isViewingToday()) {
+      const unGrouped = { appleton: [], stevens: [] };
+      dbUnassigned.forEach(r => {
+        const loc = _fromV2Market(r.market);
+        unGrouped[loc].push(r.job_id);
+      });
+      for (const loc of ['appleton','stevens']) {
+        if (unGrouped[loc].length) unassigned[loc] = unGrouped[loc];
+      }
+    } else {
+      // Non-today view: pool = all known jobs minus what's assigned on this date
+      const assignedOnDate = new Set(dbAssigns.map(r => r.job_id));
+      for (const loc of ['appleton','stevens']) {
+        unassigned[loc] = Object.keys(jobs).filter(jid => {
+          const j = jobs[jid];
+          if (!j) return false;
+          if (assignedOnDate.has(jid)) return false;
+          // Match jobs to markets — check both potential property names
+          const lbl = LOCATIONS[loc] && LOCATIONS[loc].label;
+          return j.location === lbl || j.market === loc;
+        });
+      }
     }
 
-    console.log('[v2-read] loaded ' + restored + ' assigned jobs, ' + dbUnassigned.length + ' unassigned');
+    console.log('[v2-read] date=' + currentBoardDate + ' loaded ' + restored + ' assigned jobs');
     return restored > 0 || dbUnassigned.length > 0;
   } catch(e) {
     console.warn('[v2-read] error:', e);
@@ -1633,7 +1982,15 @@ async function pushTech(nm, locOverride){
 function toISO(d,h){const hr=Math.floor(h),mn=Math.round((h-hr)*60);return `${d}T${String(hr).padStart(2,'0')}:${String(mn).padStart(2,'0')}:00-06:00`;}
 
 // ── RENDER ────────────────────────────────
-function render(){renderBoard();renderPool();updateStats();saveBoardState();
+function render(){
+  renderBoard();
+  renderPool();
+  updateStats();
+  saveBoardState();
+  // Apply clocked-in pulse indicators (only meaningful for today)
+  if (typeof _applyClockedInToCards === 'function') {
+    setTimeout(_applyClockedInToCards, 0); // run after DOM is fully laid out
+  }
   // Re-apply job search if active
   var si = document.getElementById('job-search-input');
   if (si && si.value) filterBoardBySearch(si.value);
@@ -3277,6 +3634,8 @@ function initRealtime() {
           _rtPollingFallback = false;
           var badge = document.getElementById('sync-badge');
           if (badge) badge.title = 'Live sync active';
+          // Also initialize the time_entries realtime subscription for clock-in indicators
+          _initClockedInRealtime();
         } else if (status === 'CLOSED' || status === 'CHANNEL_ERROR') {
           console.warn('Realtime disconnected — retrying in ' + (_rtRetryDelay/1000) + 's');
           _v2RtRefresh();
