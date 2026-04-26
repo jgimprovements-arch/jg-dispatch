@@ -474,25 +474,13 @@ body {
   <img src="https://jgimprovements-arch.github.io/jg-dispatch/logo.png" alt="JG Restoration" style="width:200px;height:200px;object-fit:contain;border-radius:32px;margin-bottom:16px;filter:drop-shadow(0 4px 20px rgba(0,0,0,.3));">
   <div class="login-title">JG Time Clock</div>
 
-  <!-- Email/password form (default) -->
-  <div id="login-email-form" style="width:100%;max-width:280px;">
-    <input id="login-email-input" type="email" placeholder="Your email address"
-      style="width:100%;padding:13px 16px;border-radius:12px;border:1.5px solid rgba(255,255,255,.2);background:rgba(255,255,255,.1);color:#fff;font-size:15px;font-family:'DM Sans',sans-serif;outline:none;margin-bottom:10px;box-sizing:border-box;"
-      oninput="document.getElementById('login-err').textContent=''">
-    <input id="login-pass-input" type="password" placeholder="Password"
-      style="width:100%;padding:13px 16px;border-radius:12px;border:1.5px solid rgba(255,255,255,.2);background:rgba(255,255,255,.1);color:#fff;font-size:15px;font-family:'DM Sans',sans-serif;outline:none;margin-bottom:14px;box-sizing:border-box;"
-      onkeydown="if(event.key==='Enter')emailSignIn()">
-    <button onclick="emailSignIn()"
-      style="width:100%;padding:14px;border-radius:12px;border:none;background:var(--orange);color:#fff;font-size:15px;font-weight:700;cursor:pointer;font-family:'DM Sans',sans-serif;margin-bottom:14px;">
-      Sign In
-    </button>
-    <div style="text-align:center;font-size:12px;color:rgba(255,255,255,.5);margin-bottom:12px;">— or —</div>
+  <div id="login-email-form" style="width:100%;max-width:280px;display:flex;flex-direction:column;align-items:center;">
     <div id="g_id_onload" data-client_id="209231675110-6id8vr3ehcocg4df7tvpc89jsmrvhogk.apps.googleusercontent.com" data-ux_mode="popup" data-callback="tcGoogleCb" data-auto_prompt="false"></div>
     <div class="g_id_signin" data-type="standard" data-size="large" data-theme="outline" data-text="sign_in_with" data-shape="pill" data-logo_alignment="left" data-width="280"></div>
   </div>
 
   <div class="login-err" id="login-err"></div>
-  <div class="login-note">Sign in with your invite email or Google account</div>
+  <div class="login-note">Sign in with the Google account on file with the office</div>
 </div>
 
 <!-- APP -->
@@ -947,53 +935,11 @@ var TC = {
 };
 
 // AUTH -
-// Email + password sign-in via Supabase Auth
+// Email/password sign-in DEPRECATED 2026-04-26. Google is the only path now.
+// Stub kept to avoid runtime errors if any handler still references it.
 async function emailSignIn() {
-  var email = (document.getElementById('login-email-input') || {}).value || '';
-  var pass  = (document.getElementById('login-pass-input')  || {}).value || '';
   var errEl = document.getElementById('login-err');
-  if (!email || !pass) { if(errEl) errEl.textContent = 'Enter your email and password.'; return; }
-
-  var btn = document.querySelector('#login-email-form button');
-  if (btn) { btn.textContent = 'Signing in...'; btn.disabled = true; }
-
-  try {
-    var r = await fetch('https://nuykvchgecpiuikoerze.supabase.co/auth/v1/token?grant_type=password', {
-      method: 'POST',
-      headers: { 'apikey': 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im51eWt2Y2hnZWNwaXVpa29lcnplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYyNjM3ODYsImV4cCI6MjA5MTgzOTc4Nn0.39hZ8DdjT_0iFJXPeAL2FXUSLw8FZBirDVzxZTO1W9s', 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email: email.trim().toLowerCase(), password: pass })
-    });
-    var data = await r.json();
-    if (!r.ok || !data.user) throw new Error(data.error_description || data.msg || 'Invalid email or password');
-
-    // Gate on employees table — Supabase Auth pass alone isn't enough
-    // Check either `email` or `personal_email` column
-    var emailLow = email.trim().toLowerCase();
-    var e = encodeURIComponent(emailLow);
-    var filter = 'or=(email.eq.' + e + ',personal_email.eq.' + e + ')';
-    var empR = await fetch(SB_URL + '/rest/v1/employees?' + filter + '&select=active,pending_approval,name,email,personal_email', {
-      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
-    });
-    var empRows = await empR.json();
-    var emp = empRows && empRows[0] ? empRows[0] : null;
-    if (!emp) throw new Error('Your account is not in the employee roster. Contact the office.');
-    if (emp.active === false && !emp.pending_approval) throw new Error('Your account has been disabled. Contact the office.');
-
-    var u = {
-      name: data.user.user_metadata?.name || emp.name || email.split('@')[0],
-      email: emailLow,
-      picture: '',
-      access_token: data.access_token,
-      auth_method: 'email'
-    };
-    localStorage.setItem(TC_KEY, JSON.stringify(u));
-    localStorage.setItem(TC_EXP, String(Date.now() + 43200000));
-    initApp(u);
-  } catch(e) {
-    if (errEl) errEl.textContent = e.message;
-  }
-
-  if (btn) { btn.textContent = 'Sign In'; btn.disabled = false; }
+  if (errEl) errEl.textContent = 'Use the Google sign-in button.';
 }
 
 window.tcGoogleCb = async function(r) {
@@ -1181,10 +1127,13 @@ async function initApp(u) {
     }
   } catch(e) {}
 
- // Lookup employee record — direct fetch for reliability
+ // Lookup employee record — match on either email or personal_email column
+ // (techs may sign in with their @jg-restoration.com OR their personal Gmail)
   TC.employee = { name: u.name, email: u.email }; // bare fallback
   try {
-    var empR = await fetch(SB_URL + '/rest/v1/employees?email=eq.' + encodeURIComponent(u.email) + '&select=*', {
+    var emailEnc = encodeURIComponent(u.email);
+    var lookupFilter = 'or=(email.eq.' + emailEnc + ',personal_email.eq.' + emailEnc + ')';
+    var empR = await fetch(SB_URL + '/rest/v1/employees?' + lookupFilter + '&select=*', {
       headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
     });
     if (empR.ok) {
@@ -1198,16 +1147,15 @@ async function initApp(u) {
           return;
         }
       } else {
-        // Not found — auto-create
-        var createR = await fetch(SB_URL + '/rest/v1/employees', {
-          method: 'POST',
-          headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=representation' },
-          body: JSON.stringify({ name: u.name, email: u.email, role: 'Technician', market: 'Appleton', active: true })
-        });
-        if (createR.ok) {
-          var created = await createR.json();
-          if (created && created[0]) TC.employee = created[0];
-        }
+        // Not found in roster — kick back to login with a clear error.
+        // (Auto-create disabled 2026-04-26 — it was creating duplicate rows
+        //  for techs signing in with personal Gmail when their work email was on file.)
+        localStorage.removeItem(TC_KEY);
+        localStorage.removeItem(TC_EXP);
+        document.getElementById('login-screen').style.display = 'flex';
+        document.getElementById('app').style.display = 'none';
+        document.getElementById('login-err').textContent = 'Your email is not in the employee roster. Contact the office at (920) 428-4200.';
+        return;
       }
     }
   } catch(e) { console.warn('Employee fetch failed:', e.message); }
@@ -1569,49 +1517,77 @@ async function loadJobs() {
   renderJobs();
 }
 // SCHEDULE
+// Reads from dispatch_assignments_v2 (NULL-dated + today-dated rows = today's effective schedule).
+// GATED: schedule is hidden until tech has clocked in at least once today.
+// This prevents techs from previewing the day's work before starting their shift.
 async function loadSchedule() {
   var el = document.getElementById('schedule-list');
   var marketEl = document.getElementById('schedule-market');
   if (!el) return;
 
+  if (!TC.employee || !TC.employee.id) {
+    el.innerHTML = '<div class="empty" style="padding:16px 0;">No employee data</div>';
+    return;
+  }
+
   try {
-    // Pull board_state to find this tech's assigned jobs
-    var bs = await sb('/rest/v1/board_state?id=eq.current&select=state');
-    if (!bs || !bs[0] || !bs[0].state) {
-      el.innerHTML = '<div class="empty" style="padding:16px 0;">No schedule data</div>';
+    // 1) Check if this tech has clocked in at all today
+    // (clock_in >= today's start, regardless of whether they're currently clocked out)
+    var today = new Date().toISOString().split('T')[0];
+    var clockChecks = await sb(
+      '/rest/v1/time_entries?employee_id=eq.' + TC.employee.id +
+      '&clock_in=gte.' + today + 'T00:00:00&select=id&limit=1'
+    );
+    var hasClockedInToday = Array.isArray(clockChecks) && clockChecks.length > 0;
+
+    if (!hasClockedInToday) {
+      // GATE: schedule locked until first clock-in
+      el.innerHTML =
+        '<div style="padding:24px 16px;text-align:center;border:1.5px dashed var(--border);border-radius:10px;background:rgba(13,45,94,.02);">' +
+        '<div style="font-size:30px;margin-bottom:8px;">🔒</div>' +
+        '<div style="font-size:13px;font-weight:600;color:var(--navy);margin-bottom:4px;">Schedule unlocks at clock-in</div>' +
+        '<div style="font-size:11px;color:var(--muted);line-height:1.5;">Punch in below to see your jobs for today.</div>' +
+        '</div>';
+      if (marketEl) marketEl.textContent = '';
       return;
     }
-    var state = bs[0].state;
-    var jobNames = state.jobNames || {};
-    var assignments = state.assignments || {};
-    var techName = TC.employee ? TC.employee.name : '';
-    var firstName = techName.split(' ')[0].toLowerCase();
 
-    // Find this employee's jobs across both markets
-    var myJobs = [];
-    var myMarket = '';
-    Object.keys(assignments).forEach(function(market) {
-      Object.keys(assignments[market] || {}).forEach(function(tech) {
-        var techFirst = tech.split(' ')[0].toLowerCase();
-        if (techFirst === firstName || tech.toLowerCase().includes(firstName)) {
-          myMarket = market === 'appleton' ? 'Appleton' : 'Stevens Point';
-          (assignments[market][tech] || []).forEach(function(jobId) {
-            var name = jobNames[jobId] || jobId;
-            myJobs.push({ id: jobId, name: name });
-          });
-        }
-      });
+    // 2) Pull tech's assignments from dispatch_assignments_v2 for today
+    //    (matches NULL-dated rows OR today-dated rows = "effective today schedule")
+    var assigns = await sb(
+      '/rest/v1/dispatch_assignments_v2?tech_id=eq.' + TC.employee.id +
+      '&or=(scheduled_date.is.null,scheduled_date.eq.' + today + ')' +
+      '&select=job_id,market,position,scheduled_date&order=position'
+    );
+
+    if (!assigns || !assigns.length) {
+      el.innerHTML = '<div class="empty" style="padding:16px 0;">No jobs assigned today</div>';
+      if (marketEl) marketEl.textContent = '';
+      return;
+    }
+
+    // 3) Resolve job names. Try the legacy board_state JSONB cache first
+    //    (renamed to board_state_deprecated_2026_04_26 at cutover). Falls back to job_id if missing.
+    var jobNames = {};
+    try {
+      var bs = await sb('/rest/v1/board_state_deprecated_2026_04_26?id=eq.current&select=state');
+      if (bs && bs[0] && bs[0].state && bs[0].state.jobNames) {
+        jobNames = bs[0].state.jobNames;
+      }
+    } catch(e) { /* table may have been dropped — fall back to job_id */ }
+
+    // 4) Determine market for the badge (use the first assignment's market)
+    var v2mkt = assigns[0].market;
+    var displayMkt = v2mkt === 'stevens_point' ? 'Stevens Point' : 'Appleton';
+    if (marketEl) marketEl.textContent = displayMkt;
+
+    // 5) Build the schedule list
+    var myJobs = assigns.map(function(a) {
+      return { id: a.job_id, name: jobNames[a.job_id] || a.job_id, scheduled_date: a.scheduled_date };
     });
 
-    if (marketEl) marketEl.textContent = myMarket || '';
-
-    if (!myJobs.length) {
-      el.innerHTML = '<div class="empty" style="padding:16px 0;">No jobs assigned today</div>';
-      return;
-    }
-
-    // Mark which job is currently active
     var activeJobId = TC.activeEntry ? TC.activeEntry.job_id : null;
+    var esc = function(s){ return String(s).replace(/'/g,"&#39;"); };
 
     el.innerHTML = myJobs.map(function(j) {
       var isActive = j.id === activeJobId;
@@ -1619,11 +1595,14 @@ async function loadSchedule() {
       var dotClass = isActive ? 'active' : '';
       var cardClass = isActive ? 'active-job' : '';
       var action = isActive ? '● Active' : (isCurrent ? '✓ Selected' : 'Tap to clock in');
-      var esc = function(s){ return s.replace(/'/g,"&#39;"); };
+      // Mark pre-scheduled jobs (scheduled_date set = was planned ahead)
+      var preBadge = j.scheduled_date
+        ? '<span style="display:inline-block;font-size:9px;background:rgba(245,166,35,.15);color:#b06a00;padding:1px 6px;border-radius:8px;font-weight:700;margin-left:6px;">SCHEDULED</span>'
+        : '';
       return '<div class="schedule-job ' + cardClass + '" onclick="selectJob(\'' + j.id + '\',\'' + esc(j.name) + '\',\'\')">' +
         '<div class="schedule-job-dot ' + dotClass + '"></div>' +
         '<div class="schedule-job-info">' +
-          '<div class="schedule-job-name">' + j.name + '</div>' +
+          '<div class="schedule-job-name">' + j.name + preBadge + '</div>' +
         '</div>' +
         '<div class="schedule-job-action">' + action + '</div>' +
       '</div>';
@@ -2112,6 +2091,8 @@ async function clockIn() {
     } else {
       toast('Clocked in' + (loc ? ' with GPS' : ''));
     }
+    // Schedule was gated until first clock-in — reveal it now
+    loadSchedule();
   } else {
     console.error('Clock in result:', result);
     toast('Error clocking in — check connection and try again');
