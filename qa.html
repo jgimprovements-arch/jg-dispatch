@@ -725,6 +725,93 @@ async function runPass2(){
 function setResp(id,a){if(!S.resp[id])S.resp[id]={};S.resp[id].a=a;draw()}
 function setJust(id,v){if(!S.resp[id])S.resp[id]={};S.resp[id].j=v}
 
+// ══ FALSE POSITIVE REPORTING ══
+// One-click feedback loop: estimator clicks 🚩 on a gap, reason is collected,
+// a pre-formatted payload is copied to clipboard for pasting into chat with the
+// rule maintainer (Josh, or AI assistant). No backend — friction-free continuous
+// improvement. The estimator is prompted for a one-line reason, then the full
+// gap context + reason is on their clipboard, ready to paste anywhere.
+function reportFalsePositive(gapId){
+  const g=(S.result?.gaps||[]).find(x=>x.id===gapId);
+  if(!g){console.warn('Gap not found:',gapId);return}
+  const reason=prompt(
+    'Why was this gap flagged incorrectly?\n\n'+
+    'Examples:\n'+
+    '• "WTR GRMB already covers this — composite line item"\n'+
+    '• "Customer moved their own contents"\n'+
+    '• "Cat 1 water — PPE not required"\n'+
+    '• "Equipment was actually onsite that long, photos missing in Encircle"\n\n'+
+    'Be specific so the rule can be tightened.',
+    ''
+  );
+  if(reason===null)return; // user cancelled
+  if(!reason.trim()){alert('Reason required to file a false positive report.');return}
+
+  const payload=
+    '═══ FALSE POSITIVE REPORT ═══\n'+
+    'Date: '+new Date().toLocaleString()+'\n'+
+    'Project: '+(S.proj||'(untitled)')+'\n'+
+    'Reviewer: '+(document.getElementById('revIn')?.value||S.reviewer||'(unknown)')+'\n'+
+    'QA Tool Grade: '+(S.result?.score?.grade||'?')+' ('+(S.result?.score?.capture_rate||'?')+'% capture)\n'+
+    '\n'+
+    '── GAP THAT SHOULD NOT HAVE BEEN FLAGGED ──\n'+
+    'ID: '+g.id+'\n'+
+    'Severity: '+g.severity+'\n'+
+    'Category: '+g.category+'\n'+
+    'Xactimate Code: '+g.xact_code+'\n'+
+    'Description: '+g.description+'\n'+
+    'Recommended Qty: '+(g.recommended_qty||'')+' '+(g.unit||'')+'\n'+
+    'Estimated Value: '+g.estimated_value+'\n'+
+    'Encircle Evidence (p.'+(g.encircle_page||'?')+'): '+(g.encircle_evidence||'')+'\n'+
+    'Estimate Current: '+(g.xactimate_current||'')+'\n'+
+    'Standard Cited: '+(g.standard_reference||'(none)')+'\n'+
+    '\n'+
+    '── WHY THIS IS A FALSE POSITIVE ──\n'+
+    reason+'\n'+
+    '\n'+
+    '── SUGGESTED RULE UPDATE ──\n'+
+    '(Paste this whole block into a chat with the QA rule maintainer. They will'+
+    ' update the AUDIT_PROMPT or applyBillingRules() in qa.html.)\n'+
+    '═══════════════════════════';
+
+  // Copy to clipboard. Modern API first, fallback to textarea trick.
+  const fallback=()=>{
+    const ta=document.createElement('textarea');
+    ta.value=payload;
+    ta.style.position='fixed';ta.style.left='-9999px';
+    document.body.appendChild(ta);
+    ta.select();
+    try{document.execCommand('copy')}catch(e){}
+    document.body.removeChild(ta);
+  };
+  try{
+    if(navigator.clipboard?.writeText){
+      navigator.clipboard.writeText(payload).then(()=>showToast('🚩 False positive copied — paste it to Josh or the AI assistant'),()=>{fallback();showToast('🚩 Copied (fallback) — paste it to Josh')});
+    }else{fallback();showToast('🚩 Copied — paste it to Josh or the AI assistant')}
+  }catch(e){fallback();showToast('🚩 Copied — paste it to Josh or the AI assistant')}
+
+  // Mark on the gap that it was reported (UI feedback)
+  if(!S.resp[gapId])S.resp[gapId]={};
+  S.resp[gapId].fp_reported=true;
+  S.resp[gapId].fp_reason=reason;
+  draw();
+}
+
+// Lightweight toast — appears at bottom of viewport, fades after 4 seconds
+function showToast(msg){
+  let t=document.getElementById('jg-toast');
+  if(!t){
+    t=document.createElement('div');
+    t.id='jg-toast';
+    t.style.cssText='position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:var(--navy);color:#fff;padding:12px 20px;border-radius:8px;font-family:\'DM Mono\',monospace;font-size:13px;font-weight:600;box-shadow:0 4px 16px rgba(0,0,0,0.3);z-index:9999;opacity:0;transition:opacity .2s;border:1px solid var(--gold);max-width:90vw;text-align:center';
+    document.body.appendChild(t);
+  }
+  t.textContent=msg;
+  t.style.opacity='1';
+  clearTimeout(t._timer);
+  t._timer=setTimeout(()=>{t.style.opacity='0'},4000);
+}
+
 function moveToRecheck(){
   const gs=gapStats();
   if(!gs.ok)return;
@@ -1717,7 +1804,7 @@ function draw(){
     h+=`<div class="qa-filter-bar">`;['ALL','HIGH','MEDIUM','LOW'].forEach(sv=>{const ct=sv==='ALL'?gaps.length:gaps.filter(g=>g.severity===sv).length;h+=`<button class="qa-filter-btn ${S.sev===sv?'on':''}" onclick="S.sev='${sv}';draw()">${sv} <span style="opacity:.7">(${ct})</span></button>`});h+=`</div>`;
 
     filt.forEach(g=>{const rr=S.resp[g.id]||{};const dn=rr.a&&(rr.a==='C'||(rr.a==='J'&&rr.j?.trim()));
-    h+=`<div style="background:var(--s1);border:1px solid ${dn?'rgba(67,160,71,0.4)':'var(--brd)'};border-radius:10px;overflow:hidden;margin-bottom:10px;border-left:4px solid ${dn?'var(--grn)':sc(g.severity)}"><div style="padding:14px 16px"><div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px"><div style="flex:1"><div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap"><span class="mono" style="font-size:11px;color:var(--dim);font-weight:600">${g.id}</span><span class="badge" style="color:${sc(g.severity)};background:${sc(g.severity)}15;border:1px solid ${sc(g.severity)}30">${g.severity}</span><span class="badge" style="color:var(--dim);background:#70819415;border:1px solid #70819430">${cl(g.category)}</span><span class="mono" style="font-size:13px;color:var(--blu);font-weight:700">${g.xact_code}</span>${dn?`<span class="badge" style="color:${rr.a==='C'?'var(--grn)':'var(--wrn)'};background:${rr.a==='C'?'var(--grn)':'var(--wrn)'}15;border:1px solid ${rr.a==='C'?'var(--grn)':'var(--wrn)'}30">${rr.a==='C'?'Will correct':'Justified'}</span>`:''}</div><p style="font-size:14px;font-weight:600">${g.description}</p></div><div style="text-align:right;margin-left:12px;flex-shrink:0"><div style="font-size:16px;font-weight:700;color:var(--acc);font-family:'DM Mono',monospace">${g.estimated_value}</div><div style="font-size:11px;color:var(--dim)">${g.recommended_qty||''} ${g.unit||''}</div></div></div><div style="display:grid;grid-template-columns:${g.encircle_page?'160px 1fr 1fr':'1fr 1fr'};gap:12px;font-size:12px;color:var(--dim);margin-bottom:4px;align-items:start">${g.encircle_page?`<div id="thumb_${g.id}" style="min-height:80px;background:var(--s2);border-radius:4px;display:flex;align-items:center;justify-content:center;color:var(--dim);font-size:10px;font-family:'DM Mono',monospace">Loading p.${g.encircle_page}…</div>`:''}<div><strong style="color:var(--grn)">Encircle${g.encircle_page?' (p.'+g.encircle_page+')':''}: </strong>${g.encircle_evidence||''}</div><div><strong style="color:var(--wrn)">Estimate: </strong>${g.xactimate_current||''}</div></div>${g.standard_reference?`<div style="font-size:11px;background:rgba(30,136,229,0.06);border:1px solid rgba(30,136,229,0.15);border-radius:6px;padding:8px 10px;margin-bottom:4px"><div style="font-family:'DM Mono',monospace;color:#64B5F6;font-weight:700;margin-bottom:4px">⚖ ${g.standard_reference}</div>${g.standard_text?`<div style="color:#90CAF9;line-height:1.5">${g.standard_text}</div>`:''}</div>`:''}<div style="background:var(--s2);border-radius:8px;padding:12px 14px;margin-top:12px;border:1px solid ${dn?'rgba(67,160,71,0.3)':'rgba(251,140,0,0.4)'}"><div style="font-size:11px;font-weight:700;font-family:'DM Mono',monospace;margin-bottom:8px;text-transform:uppercase;letter-spacing:.06em;color:${dn?'var(--grn)':'var(--wrn)'}">${dn?'✓ Addressed':'⚠ Response required'}</div><div><button class="act-btn ${rr.a==='C'?'sc':''}" onclick="setResp('${g.id}','C')">✓ Will correct</button><button class="act-btn ${rr.a==='J'?'sj':''}" onclick="setResp('${g.id}','J')">Justify variance</button></div>${rr.a==='J'?`<textarea id="just_${g.id}" oninput="setJust('${g.id}',this.value)" placeholder="Required: Explain why..." style="margin-top:10px;border-color:${rr.j?.trim()?'rgba(67,160,71,0.4)':'var(--wrn)'}">${rr.j||''}</textarea>`:''}</div></div></div>`});
+    h+=`<div style="background:var(--s1);border:1px solid ${dn?'rgba(67,160,71,0.4)':'var(--brd)'};border-radius:10px;overflow:hidden;margin-bottom:10px;border-left:4px solid ${dn?'var(--grn)':sc(g.severity)}"><div style="padding:14px 16px"><div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px"><div style="flex:1"><div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap"><span class="mono" style="font-size:11px;color:var(--dim);font-weight:600">${g.id}</span><span class="badge" style="color:${sc(g.severity)};background:${sc(g.severity)}15;border:1px solid ${sc(g.severity)}30">${g.severity}</span><span class="badge" style="color:var(--dim);background:#70819415;border:1px solid #70819430">${cl(g.category)}</span><span class="mono" style="font-size:13px;color:var(--blu);font-weight:700">${g.xact_code}</span>${dn?`<span class="badge" style="color:${rr.a==='C'?'var(--grn)':'var(--wrn)'};background:${rr.a==='C'?'var(--grn)':'var(--wrn)'}15;border:1px solid ${rr.a==='C'?'var(--grn)':'var(--wrn)'}30">${rr.a==='C'?'Will correct':'Justified'}</span>`:''}</div><p style="font-size:14px;font-weight:600">${g.description}</p></div><div style="text-align:right;margin-left:12px;flex-shrink:0"><div style="font-size:16px;font-weight:700;color:var(--acc);font-family:'DM Mono',monospace">${g.estimated_value}</div><div style="font-size:11px;color:var(--dim)">${g.recommended_qty||''} ${g.unit||''}</div></div></div><div style="display:grid;grid-template-columns:${g.encircle_page?'160px 1fr 1fr':'1fr 1fr'};gap:12px;font-size:12px;color:var(--dim);margin-bottom:4px;align-items:start">${g.encircle_page?`<div id="thumb_${g.id}" style="min-height:80px;background:var(--s2);border-radius:4px;display:flex;align-items:center;justify-content:center;color:var(--dim);font-size:10px;font-family:'DM Mono',monospace">Loading p.${g.encircle_page}…</div>`:''}<div><strong style="color:var(--grn)">Encircle${g.encircle_page?' (p.'+g.encircle_page+')':''}: </strong>${g.encircle_evidence||''}</div><div><strong style="color:var(--wrn)">Estimate: </strong>${g.xactimate_current||''}</div></div>${g.standard_reference?`<div style="font-size:11px;background:rgba(30,136,229,0.06);border:1px solid rgba(30,136,229,0.15);border-radius:6px;padding:8px 10px;margin-bottom:4px"><div style="font-family:'DM Mono',monospace;color:#64B5F6;font-weight:700;margin-bottom:4px">⚖ ${g.standard_reference}</div>${g.standard_text?`<div style="color:#90CAF9;line-height:1.5">${g.standard_text}</div>`:''}</div>`:''}<div style="background:var(--s2);border-radius:8px;padding:12px 14px;margin-top:12px;border:1px solid ${dn?'rgba(67,160,71,0.3)':'rgba(251,140,0,0.4)'}"><div style="font-size:11px;font-weight:700;font-family:'DM Mono',monospace;margin-bottom:8px;text-transform:uppercase;letter-spacing:.06em;color:${dn?'var(--grn)':'var(--wrn)'}">${dn?'✓ Addressed':'⚠ Response required'}</div><div><button class="act-btn ${rr.a==='C'?'sc':''}" onclick="setResp('${g.id}','C')">✓ Will correct</button><button class="act-btn ${rr.a==='J'?'sj':''}" onclick="setResp('${g.id}','J')">Justify variance</button><button class="act-btn" style="${rr.fp_reported?'background:rgba(229,57,53,0.12);border-color:rgba(229,57,53,0.5);color:#E53935':'opacity:.7'}" onclick="reportFalsePositive('${g.id}')" title="${rr.fp_reported?'Reported: '+(rr.fp_reason||'').replace(/\"/g,'&quot;'):'Flag this as a false positive — copies a report to clipboard for the rule maintainer'}">${rr.fp_reported?'🚩 Reported':'🚩 False positive'}</button></div>${rr.a==='J'?`<textarea id="just_${g.id}" oninput="setJust('${g.id}',this.value)" placeholder="Required: Explain why..." style="margin-top:10px;border-color:${rr.j?.trim()?'rgba(67,160,71,0.4)':'var(--wrn)'}">${rr.j||''}</textarea>`:''}</div></div></div>`});
 
     // Rebuild
 
