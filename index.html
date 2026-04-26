@@ -811,14 +811,9 @@ let saveTimer = null;
 // ─────────────────────────────────────────────────────────────────────────────
 
 const V2_ENABLED = true; // master switch for dual-writing
-const V2_READ_MODE = (function(){
-  try {
-    const urlFlag = new URLSearchParams(window.location.search).get('v2');
-    if (urlFlag === '1') return true;
-    if (urlFlag === '0') return false;
-    return localStorage.getItem('jg_v2_reads') === '1';
-  } catch(e) { return false; }
-})();
+// CUTOVER 2026-04-26: V2_READ_MODE is now always true. _v2 tables are source of truth.
+// To roll back: set this to false and re-enable the JSONB write path in saveBoardState.
+const V2_READ_MODE = true;
 
 // Map internal market key ('appleton'/'stevens') to canonical _v2 value
 function _v2Market(loc){
@@ -1036,15 +1031,16 @@ function saveBoardState(){
       ...payload,
       ts: Date.now()
     };
-    // Save to Supabase
-    try{
-      await sbFetch('/rest/v1/board_state', {
-        method: 'POST',
-        prefer: 'resolution=merge-duplicates',
-        body: JSON.stringify({id:'current', state: stateWithDate, updated_at: new Date().toISOString()})
-      });
-    }catch(e){}
-    // Dual-write to _v2 tables (rebuild in progress)
+    // CUTOVER 2026-04-26: legacy board_state JSONB write disabled.
+    // _v2 tables are now source of truth. To roll back, restore the sbFetch POST below.
+    // try{
+    //   await sbFetch('/rest/v1/board_state', {
+    //     method: 'POST',
+    //     prefer: 'resolution=merge-duplicates',
+    //     body: JSON.stringify({id:'current', state: stateWithDate, updated_at: new Date().toISOString()})
+    //   });
+    // }catch(e){}
+    // Write to _v2 tables (now primary)
     syncToV2();
     // Also save to localStorage as backup
     try{
@@ -3140,36 +3136,23 @@ function mergeRemoteState(state){
 }
 
 async function pollSharedState(){
-  try{
-    const r = await sbFetch('/rest/v1/board_state?id=eq.current&select=state,updated_at');
-    if(!r.ok) return;
-    const rows = await r.json();
-    if(!rows.length || !rows[0].state) return;
-    const state = rows[0].state;
-    if(!state.ts) return;
-    // Dedupe: don't re-apply the same snapshot
-    if(state.ts <= lastSyncTs) return;
-    lastSyncTs = state.ts;
-    const today = new Date().toISOString().split('T')[0];
-    if(state.date !== today){ updateSyncBadge(state.ts); return; }
-    const fromOther = state.savedBy && state.savedBy !== 'dispatch-board-' + (window._myBoardId||'');
-    if(fromOther){
-      const res = mergeRemoteState(state);
-      if(res.changed){ render(); showToast('🔄 Board updated'); }
-    }
-    updateSyncBadge(state.ts);
-  }catch(e){}
+  // CUTOVER 2026-04-26: deprecated. Realtime + _v2RtRefresh covers this.
+  // Keeping the function as a no-op so existing setInterval/setTimeout references don't error.
+  return;
 }
 
 async function clearBoardState(){
   if(!confirm('Reset the entire board for all users? This cannot be undone.')) return;
   try{
-    await sbFetch('/rest/v1/board_state?id=eq.current', {
-      method: 'PATCH',
-      body: JSON.stringify({state: {}, updated_at: new Date().toISOString()})
-    });
+    // CUTOVER 2026-04-26: clear _v2 tables instead of PATCHing board_state.
+    // Truncate dispatch_assignments_v2 (history trigger fires on each delete, audit trail preserved)
+    // Truncate dispatch_unassigned_v2
+    await Promise.all([
+      sbFetch('/rest/v1/dispatch_assignments_v2?id=neq.00000000-0000-0000-0000-000000000000', { method: 'DELETE' }),
+      sbFetch('/rest/v1/dispatch_unassigned_v2?id=neq.00000000-0000-0000-0000-000000000000', { method: 'DELETE' })
+    ]);
     localStorage.removeItem('jg_board_state_v1');
-    // Clear all assignments
+    // Clear all assignments locally
     for(const l of ['appleton','stevens']){
       for(const nm of Object.keys(techQ[l]||{})){
         const jobs_bak = techQ[l][nm].jobs;
@@ -3240,44 +3223,63 @@ function initRealtime() {
       }
     }
 
-    _realtimeChannel = _sbClient
-      .channel('board_state_changes')
-      .on('postgres_changes', {
-        event: 'UPDATE',
-        schema: 'public',
-        table: 'board_state',
-        filter: 'id=eq.current'
-      }, function(payload) {
-        var data = payload.new;
-        if (!data || !data.state) return;
-        var state = data.state;
-        if (!state.ts) return;
-        if (state.ts <= lastSyncTs) return;
-        lastSyncTs = state.ts;
-        var today = new Date().toISOString().split('T')[0];
-        if (state.date !== today) { updateSyncBadge(state.ts); return; }
-        var fromOther = state.savedBy && state.savedBy !== 'dispatch-board-' + (window._myBoardId||'');
-        if (fromOther) {
-          var res = mergeRemoteState(state);
-          if (res.changed) {
-            render();
-            showToast('🔄 Board updated' + (res.skipped ? ' (' + res.skipped + ' of your edits preserved)' : ''));
+    // CUTOVER 2026-04-26: subscribe to _v2 tables instead of board_state.
+    // On any change to dispatch_assignments_v2 or dispatch_unassigned_v2, reload from _v2 and re-render.
+    // Debounced to avoid thrashing during rapid bulk changes.
+    var _v2RtDebounce = null;
+    function _v2RtRefresh() {
+      clearTimeout(_v2RtDebounce);
+      _v2RtDebounce = setTimeout(async function() {
+        try {
+          // Don't clobber local state if user just made a change (within 2s)
+          if (lastLocalChange > 0 && (Date.now() - lastLocalChange) < 2000) return;
+          // Snapshot existing assignments before reload
+          const before = JSON.stringify(getBoardStatePayload().assignments);
+          // Clear and reload from _v2
+          for (const l of ['appleton','stevens']) {
+            for (const nm in (techQ[l]||{})) {
+              if (techQ[l][nm]) techQ[l][nm].jobs = [];
+            }
+            unassigned[l] = [];
           }
+          await loadFromV2();
+          const after = JSON.stringify(getBoardStatePayload().assignments);
+          if (before !== after) {
+            render();
+            showToast('🔄 Board updated');
+          }
+        } catch(e) {
+          console.warn('[v2-realtime] refresh error:', e);
         }
-        updateSyncBadge(state.ts);
+      }, 300);
+    }
+
+    _realtimeChannel = _sbClient
+      .channel('dispatch_v2_changes')
+      .on('postgres_changes', {
+        event: '*',
+        schema: 'public',
+        table: 'dispatch_assignments_v2'
+      }, function(payload) {
+        _v2RtRefresh();
+      })
+      .on('postgres_changes', {
+        event: '*',
+        schema: 'public',
+        table: 'dispatch_unassigned_v2'
+      }, function(payload) {
+        _v2RtRefresh();
       })
       .subscribe(function(status) {
         if (status === 'SUBSCRIBED') {
-          console.log('Realtime connected');
-          _rtRetryDelay = 5000; // reset backoff on success
+          console.log('Realtime connected (v2)');
+          _rtRetryDelay = 5000;
           _rtPollingFallback = false;
           var badge = document.getElementById('sync-badge');
           if (badge) badge.title = 'Live sync active';
         } else if (status === 'CLOSED' || status === 'CHANNEL_ERROR') {
           console.warn('Realtime disconnected — retrying in ' + (_rtRetryDelay/1000) + 's');
-          // Poll immediately to catch any missed updates
-          pollSharedState();
-          // Schedule reconnect with exponential backoff (max 60s)
+          _v2RtRefresh();
           if (_rtRetryTimer) clearTimeout(_rtRetryTimer);
           _rtRetryTimer = setTimeout(function() {
             console.log('Attempting realtime reconnect...');
