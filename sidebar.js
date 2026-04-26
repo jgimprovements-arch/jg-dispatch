@@ -27,6 +27,7 @@
 
     { section: 'OPERATIONS' },
     { label: 'Dispatch',            icon: '📋',  url: 'index.html' },
+    { label: 'Rebuild Scheduler',   icon: '🔨',  url: 'rebuild.html' },
 
     { section: 'TIME' },
     { label: 'Time Clock / Payroll',icon: '⏱',  url: 'timeclock_admin.html' },
