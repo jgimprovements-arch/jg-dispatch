@@ -824,18 +824,40 @@ function _initBoardDatePicker(){
 
 // Silent background refresh (when serving from cache)
 async function silentAlbiRefresh(){
-  // Snapshot current manual assignments — these must never be touched
+  // Snapshot current manual assignments only if viewing today.
+  // For other dates, in-memory state came from _v2 — don't preserve it,
+  // we'll reload from the database after Albi refresh.
+  const wasViewingToday = _isViewingToday();
   const snapshot = {};
-  for(const l of ['appleton','stevens']){
-    snapshot[l] = {};
-    for(const [nm,tech] of Object.entries(techQ[l]||{})){
-      if(tech.jobs.length) snapshot[l][nm] = [...tech.jobs];
+  if (wasViewingToday) {
+    for(const l of ['appleton','stevens']){
+      snapshot[l] = {};
+      for(const [nm,tech] of Object.entries(techQ[l]||{})){
+        if(tech.jobs.length) snapshot[l][nm] = [...tech.jobs];
+      }
     }
   }
   // Reload Albi job data (updates job info, statuses, new jobs)
   await loadAlbiViaClaudeZapier();
   saveCache();
-  // Re-apply manual assignments on top of fresh Albi data
+  // If date changed during the Albi refresh, abort the stale write-back
+  if (_isViewingToday() !== wasViewingToday || !_isViewingToday()) {
+    // We're either now on a different date OR we were already off-today.
+    // Reload from _v2 for the current date instead of replaying snapshot.
+    // Clear techQ first so loadFromV2 builds clean state.
+    for (const l of ['appleton','stevens']) {
+      for (const nm in (techQ[l]||{})) {
+        if (techQ[l][nm]) techQ[l][nm].jobs = [];
+      }
+      unassigned[l] = [];
+    }
+    await loadFromV2();
+    render();
+    hideCacheBanner();
+    showToast('✓ Jobs updated from Albi');
+    return;
+  }
+  // Re-apply manual assignments on top of fresh Albi data (today only)
   // Only keep assigned jobs that still exist in Albi
   for(const l of ['appleton','stevens']){
     for(const [nm,jids] of Object.entries(snapshot[l]||{})){
@@ -1803,24 +1825,39 @@ async function refreshAll(){
   stepDone('techs','✓ Technicians reloaded');
   stepActive('albi');
   showToast('Fetching fresh Albi data...');
-  // Save current board assignments
+  // Save current board assignments only if viewing today.
+  // For other dates, in-memory came from _v2 — reload from there after refresh.
+  const wasViewingToday = _isViewingToday();
   const prevA = {};
-  for(const l of ['appleton','stevens']){
-    prevA[l]={};
-    for(const [nm,tech] of Object.entries(techQ[l]||{})){
-      if(tech.jobs.length) prevA[l][nm]=[...tech.jobs];
+  if (wasViewingToday) {
+    for(const l of ['appleton','stevens']){
+      prevA[l]={};
+      for(const [nm,tech] of Object.entries(techQ[l]||{})){
+        if(tech.jobs.length) prevA[l][nm]=[...tech.jobs];
+      }
     }
   }
   await loadAlbiViaClaudeZapier();
   stepDone('albi','✓ Live data loaded');
   saveCache();
-  // Restore assignments
-  for(const l of ['appleton','stevens']){
-    for(const [nm,jids] of Object.entries(prevA[l]||{})){
-      if(techQ[l]?.[nm]){
-        const vj = jids.filter(jid=>jobs[jid]);
-        techQ[l][nm].jobs = vj;
-        unassigned[l] = (unassigned[l]||[]).filter(jid=>!vj.includes(jid));
+  if (!_isViewingToday() || !wasViewingToday) {
+    // Reload from _v2 for whatever date we're now on
+    for (const l of ['appleton','stevens']) {
+      for (const nm in (techQ[l]||{})) {
+        if (techQ[l][nm]) techQ[l][nm].jobs = [];
+      }
+      unassigned[l] = [];
+    }
+    await loadFromV2();
+  } else {
+    // Restore today's assignments from snapshot
+    for(const l of ['appleton','stevens']){
+      for(const [nm,jids] of Object.entries(prevA[l]||{})){
+        if(techQ[l]?.[nm]){
+          const vj = jids.filter(jid=>jobs[jid]);
+          techQ[l][nm].jobs = vj;
+          unassigned[l] = (unassigned[l]||[]).filter(jid=>!vj.includes(jid));
+        }
       }
     }
   }
