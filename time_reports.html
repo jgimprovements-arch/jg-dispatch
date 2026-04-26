@@ -4,6 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>JG Time Reports</title>
+<link rel="icon" type="image/png" href="https://jgimprovements-arch.github.io/jg-dispatch/logo.png">
+<link rel="apple-touch-icon" href="https://jgimprovements-arch.github.io/jg-dispatch/logo.png">
 <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=DM+Mono:wght@500;600&display=swap" rel="stylesheet">
 <style>
 :root {
@@ -59,12 +61,13 @@ body {
   letter-spacing: .02em;
 }
 .hdr-logo {
-  height: 38px;
+  height: 44px;
   width: auto;
   border-radius: 6px;
   background: #fff;
-  padding: 3px;
+  padding: 4px 8px;
   object-fit: contain;
+  display: block;
 }
 .hdr-title { font-size: 17px; font-weight: 700; letter-spacing: .01em; }
 .hdr-right { display: flex; align-items: center; gap: 14px; font-size: 12px; color: rgba(255,255,255,.85); }
@@ -436,6 +439,30 @@ const STATE = {
 };
 
 // ── HELPERS ────────────────────────────────────────────────────────────────
+const LOGO_URL = 'https://jgimprovements-arch.github.io/jg-dispatch/logo.png';
+let LOGO_DATA_URL = null; // populated on first PDF export, cached after
+
+// Fetch logo and convert to base64 data URL — used by jsPDF.addImage()
+async function loadLogoDataUrl() {
+  if (LOGO_DATA_URL) return LOGO_DATA_URL;
+  try {
+    const r = await fetch(LOGO_URL);
+    if (!r.ok) return null;
+    const blob = await r.blob();
+    const dataUrl = await new Promise((resolve, reject) => {
+      const fr = new FileReader();
+      fr.onload = () => resolve(fr.result);
+      fr.onerror = reject;
+      fr.readAsDataURL(blob);
+    });
+    LOGO_DATA_URL = dataUrl;
+    return dataUrl;
+  } catch(e) {
+    console.warn('Logo load failed:', e);
+    return null;
+  }
+}
+
 function goHome() {
   // Use relative path; falls back to absolute GitHub Pages URL if context is wrong
   try {
@@ -555,6 +582,8 @@ async function initApp() {
   document.getElementById('app-header').style.display = 'flex';
   document.getElementById('app-main').style.display = 'block';
   document.getElementById('user-label').textContent = STATE.user.name;
+  // Kick off logo preload in the background — PDF export will use the cached version
+  loadLogoDataUrl();
   await loadJobsList();
 }
 
@@ -907,26 +936,62 @@ async function exportPDF() {
     const orange = [232, 93, 4];
     const muted = [107, 130, 160];
 
+    // Pre-load logo for PDF embedding
+    const logoData = await loadLogoDataUrl();
+
     // ── HEADER ──
     doc.setFillColor(...navy);
-    doc.rect(0, 0, pageW, 26, 'F');
-    doc.setTextColor(255, 255, 255);
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(18);
-    doc.text('JG RESTORATION', 14, 12);
-    doc.setFontSize(10);
-    doc.setFont('helvetica', 'normal');
-    doc.text('Time on Job Report', 14, 19);
+    doc.rect(0, 0, pageW, 30, 'F');
 
-    // Right side of header
+    // Embed logo on left side of header
+    if (logoData) {
+      try {
+        // Logo is ~1500x1093 — preserve aspect ratio at 22mm tall
+        const logoH = 22;
+        const logoW = logoH * (1500 / 1093);
+        // White background pill so the JPG's black areas don't clash with navy
+        doc.setFillColor(255, 255, 255);
+        doc.roundedRect(10, 4, logoW + 6, logoH + 4, 2, 2, 'F');
+        doc.addImage(logoData, 'JPEG', 13, 6, logoW, logoH);
+        // Title to right of logo
+        doc.setTextColor(255, 255, 255);
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(15);
+        doc.text('Time on Job Report', logoW + 22, 14);
+        doc.setFontSize(9);
+        doc.setFont('helvetica', 'normal');
+        doc.text('JG Restoration  ·  Fire · Water · Mold', logoW + 22, 21);
+      } catch(e) {
+        // Fallback if image embedding fails
+        console.warn('Logo embed failed, using text fallback', e);
+        doc.setTextColor(255, 255, 255);
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(18);
+        doc.text('JG RESTORATION', 14, 14);
+        doc.setFontSize(10);
+        doc.setFont('helvetica', 'normal');
+        doc.text('Time on Job Report', 14, 21);
+      }
+    } else {
+      // No logo loaded — text-only header
+      doc.setTextColor(255, 255, 255);
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(18);
+      doc.text('JG RESTORATION', 14, 14);
+      doc.setFontSize(10);
+      doc.setFont('helvetica', 'normal');
+      doc.text('Time on Job Report', 14, 21);
+    }
+
+    // Right side of header — generation metadata
     doc.setFontSize(8);
-    doc.setTextColor(255, 255, 255, 0.8);
+    doc.setTextColor(255, 255, 255);
     doc.text('Generated ' + new Date().toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' }) +
-             ' by ' + STATE.user.name, pageW - 14, 12, { align: 'right' });
-    doc.text('(920) 428-4200  ·  jg-restoration.com', pageW - 14, 18, { align: 'right' });
+             ' by ' + STATE.user.name, pageW - 14, 14, { align: 'right' });
+    doc.text('(920) 428-4200  ·  jg-restoration.com', pageW - 14, 20, { align: 'right' });
 
     // ── JOB INFO ──
-    let y = 36;
+    let y = 40;
     doc.setTextColor(...navy);
     doc.setFontSize(14);
     doc.setFont('helvetica', 'bold');
