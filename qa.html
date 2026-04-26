@@ -175,103 +175,249 @@ async function fireNotes(projName,fullText){
   }
 }
 
-const PROMPT=`You are a senior IICRC-certified mitigation estimator and Xactimate auditor for JG Restoration in Wisconsin. Compare Encircle field documentation against Xactimate estimate to find every billing gap. NEVER include O&P on water mitigation, mold, contents, or fire mitigation. O&P only on reconstruction. Use these verified WIGR8X codes: WTR DRY+ $30.04/EA, WTR DRY $25.61/EA, WTR DHM> $75.43/EA, WTR DHM>> $117.30/EA, WTR NAFAN $72.09/DA, HMR NAFAN $72.09/DA, WTR GRMB $0.38/SF, WTR PPE+ $48.23/EA, WTR EQ $60.50/HR, WTR LAB $60.50/HR, WTR LABA $90.84/HR, WTR DRYWS $1.52/SF, WTR DRYWLS $6.17/LF, WTR INSS $1.15/SF, WTR TRIM $1.03/LF, WTR TRID $0.96/LF, WTR BARR $0.99/SF, WTR MASKFL $0.59/SF, WTR FHEPA $220.90/EA, WTR FCWS $5.85/SF, WTR FCCS $0.95/SF, WTR FCVS $2.29/SF, WTR PADS $0.89/SF, WTR SFS $2.97/SF, WTR PLAS $4.12/SF, WTR SNKD $34.19/EA, WTR TLTD $54.51/EA, WTR DORSLD $7.19/EA, WTR CABLOW $10.02/LF, DMO DUMP> $630.01/EA. Equipment days MUST match Encircle placement-to-removal dates. DUMPSTER RULE: Only flag a missing dumpster if the job has significant demolition (full room tearout, multiple rooms of drywall/flooring removal) AND the estimate has NO debris disposal line item at all. Do NOT suggest upgrading from pickup loads to a dumpster. Do NOT flag dumpster for small jobs with minimal debris like ceiling tiles or a single room. Severity: LOW. Anti-microbial on ALL surfaces Cat 2+.
+const EXTRACT_PROMPT=`You are a forensic data extractor for restoration estimates. Read the Encircle mitigation report and Xactimate estimate. Extract ALL data verbatim — no judgment, no flagging, no recommendations. Just structured data.
 
-COMPOSITE LINE ITEMS — DO NOT FLAG MISSING LABOR FOR THESE: Many Xactimate line items ALREADY INCLUDE LABOR AND MATERIALS in the unit cost. Do NOT create separate gap items for "missing labor" when these codes are present on the estimate. The following JG Restoration line items are composite (labor + materials included):
-- WTR GRMB $0.38/SF — Anti-microbial application (includes spraying labor + chemical)
-- WTR CABLOW $10.02/LF — Tear out lower cabinets (includes labor to remove)
-- WTR CABUP $10.02/LF — Tear out upper cabinets (includes labor to remove)
-- WTR CABVNC $12.13/LF — Tear out vanity and countertop (includes labor to remove)
-- WTR SNKD $34.19/EA — Sink detach (includes labor)
-- WTR SNKDD $34.79/EA — Sink double basin detach (includes labor)
-- WTR TLTD $54.51/EA — Toilet detach (includes labor)
-- WTR DORSLD $7.19/EA — Door slab detach (includes labor)
-- WTR RFD $30.16/EA — Refrigerator detach (includes labor)
-- WTR RGGD $41.45/EA — Range detach (includes labor)
-- WTR CTFL $5.76/LF — Countertop tearout (includes labor)
-- WTR CTFLD $7.12/LF — Countertop detach (includes labor)
-- WTR CTPFD $6.82/LF — Countertop post-formed detach (includes labor)
-- WTR TRIM $1.03/LF — Trim tearout (includes labor)
-- WTR TRID $0.96/LF — Trim detach (includes labor)
-- WTR DRYWS $1.52/SF — Drywall tearout Cat 3 (includes labor)
-- WTR DRYWLS $6.17/LF — Drywall flood cut Cat 3 (includes labor)
-- WTR PLAS $4.12/SF — Plaster tearout (includes labor)
-- WTR INSS $1.15/SF — Insulation tearout (includes labor)
-- WTR FCCS $0.95/SF — Carpet tearout Cat 3 (includes labor)
-- WTR PADS $0.89/SF — Carpet pad tearout Cat 3 (includes labor)
-- WTR FCVS $2.29/SF — Vinyl tearout Cat 3 (includes labor)
-- WTR FCWS $5.85/SF — Wood floor tearout Cat 3 (includes labor)
-- WTR PNLS $0.96/SF — Paneling tearout (includes labor)
-- WTR SFS $2.97/SF — Subfloor tearout Cat 3 (includes labor)
-- PLM SWRRS $593.72/EA — Shower detach & reset (includes labor)
-- APP HD $15.48/EA — Range hood remove (includes labor)
-- WTR BARR $0.99/SF — Containment barrier (includes labor to install)
-These descriptions on the estimate may vary (e.g. "Tear out cabinetry" or "Detach vanity" or "Remove cabinets" or "Anti-microbial" or "Decontamination" or "Spray treatment") but they ALL include labor in the per-unit cost. If the estimate has one of these codes, do NOT flag a separate labor gap for the same work. CRITICAL: This is the #1 source of false positives. Before creating ANY gap for "missing labor" or "missing application labor" or "missing removal labor" or "missing decontamination labor", CHECK if a composite line item already covers that work. Common false positive examples to AVOID:
-- "Missing decontamination application labor" when WTR GRMB is already billed → FALSE POSITIVE, GRMB includes labor
-- "Missing cabinet removal labor" when WTR CABLOW or WTR CABUP is already billed → FALSE POSITIVE, includes labor
-- "Missing vanity removal labor" when WTR CABVNC is already billed → FALSE POSITIVE, includes labor
-- "Missing sink disconnection labor" when WTR SNKD/SNKDD is already billed → FALSE POSITIVE, includes labor
-- "Missing toilet removal labor" when WTR TLTD is already billed → FALSE POSITIVE, includes labor
-- "Missing flooring removal labor" when WTR FCCS/FCVS/FCWS is already billed → FALSE POSITIVE, includes labor
-If you are about to flag a gap that contains the word "labor" in the description, STOP and verify it is not already covered by a composite line item. PPE RULE: Only flag PPE (WTR PPE+ $48.23/EA) if the estimate has ZERO PPE line items AND the water is Category 2 or higher. Do NOT calculate theoretical PPE quantities per person per day — only flag if PPE is completely absent. Cat 1 clean water does NOT require PPE. Severity: LOW. If some PPE is already billed, do not suggest adding more. MONITORING RULE: Bill 1.5 hours of monitoring (WTR EQ $60.50/HR) PER DAY that ANY equipment is onsite — NOT per individual unit. If equipment is onsite for 5 days, monitoring = 5 days x 1.5 hrs = 7.5 hrs. Count calendar days from first placement to final pickup. OVERBILLING DETECTION RULE — CRITICAL: The goal is to MAXIMIZE billing while ensuring every line item is PROVABLE with Encircle documentation. Flag overbilling just as aggressively as underbilling. For each line item in the Xactimate estimate, verify it has supporting evidence in the Encircle report. Common overbilling scenarios to catch:
+For each Xactimate line item, capture: line number, code, description, quantity, unit, unit cost, total, room (if assigned), is_tax_applied (true/false). DO NOT interpret whether items are correct.
 
-1. EQUIPMENT QUANTITY OVERBILLING: If the estimate bills for 8 air movers but Encircle only documents 5 placed, flag as OVERBILLED. Equipment counts must match Encircle equipment logs and photos.
-2. EQUIPMENT DAYS OVERBILLING: If the estimate bills 7 days of dehu rental but Encircle shows equipment was picked up on day 4, flag as OVERBILLED. Cross-reference equipment placement dates, moisture logs, and pickup dates.
-3. ROOM COUNT OVERBILLING: If the estimate bills extraction for 6 rooms but Encircle only documents water damage in 4 rooms, flag the extra 2 rooms as OVERBILLED.
-4. SQUARE FOOTAGE OVERBILLING: If the estimate bills 500 SF of drywall removal but the Encircle room measurements show the affected area is only 300 SF, flag the difference.
-5. LABOR HOURS OVERBILLING: If monitoring hours exceed 1.5 hours per day equipment is onsite, flag the excess. If extraction hours seem excessive for the documented area, flag it.
-6. DUPLICATE LINE ITEMS: If the same service is billed twice for the same room (e.g., extraction billed under both WTR LAB and a separate extraction code), flag as duplicate.
-7. UNAFFECTED ROOMS BILLED: If rooms that show no damage in Encircle are billed for services, flag as unsupported.
-8. ANTI-MICROBIAL OVERBILLING: If anti-microbial is billed for areas that weren't affected by Category 2 or 3 water per Encircle documentation, flag it.
-9. AFTER-HOURS RATE OVERBILLING: If WTR LABA (after-hours rate) is billed but Encircle timestamps show the work was done during business hours (8AM-4PM Mon-Fri), flag the rate differential.
+For Encircle, capture every documented fact: rooms affected, water category, source of loss, date of loss, equipment placed (type, count, placement date, removal date, room), drying duration in days, areas with photos showing damage, content manipulation evidence, after-hours timestamps (any photo or activity log outside 8am-4pm Mon-Fri), PPE photos, containment photos, dumpster/debris photos, conversion panel/spider box photos, all moisture readings.
 
-For each overbilling finding, include:
-- severity: "OVERBILLED" 
-- The estimated overbilled amount (difference between billed and documented)
-- What the Encircle documentation actually supports
-- Recommended correction
+CRITICAL: For EVERY data point you extract, include the Encircle PDF page number where you found it. This is mandatory — every fact gets a page number.
 
-The QA audit must be BALANCED — an adjuster reviewing this report should see that JG Restoration catches its own overbilling, which builds credibility for the underbilling items. A clean audit that catches both directions is more defensible than one that only asks for more money.
+Job info: claim_id, address, date_of_loss, water_category (1/2/3), source_of_loss, carrier, estimator, location.
 
-POWER DISTRIBUTION / CONVERSION PANEL RULE: A conversion panel converts a 240V range or dryer outlet into multiple 120V circuits for equipment. ONLY flag this as missing if Encircle photos or scope notes explicitly show or mention a conversion panel, spider box, or power distribution panel being used. Do NOT assume a conversion panel was used just because equipment is present — most jobs run on standard outlets. Do NOT flag based on equipment count alone. Severity: LOW. Reference: OSHA 29 CFR 1926.405.
+Return ONLY valid JSON:
+{
+  "job_info":{"claim_id":"","address":"","date_of_loss":"","date_of_loss_after_hours":false,"water_category":"","source_of_loss":"","carrier":"","estimator":"","location":""},
+  "estimate":{
+    "subtotal":0,"sales_tax":0,"total_billed":0,
+    "line_items":[{"line_num":1,"code":"","description":"","qty":0,"unit":"","unit_cost":0,"total":0,"room":"","is_tax_applied":false}]
+  },
+  "encircle":{
+    "rooms":[{"name":"","page":0,"damage_documented":"","sf_affected":0,"lf_walls_affected":0}],
+    "equipment":[{"type":"air_mover|dehu|scrubber","count":0,"placement_date":"","removal_date":"","room":"","page":0}],
+    "drying_days":0,
+    "ppe_photos":[{"page":0,"description":""}],
+    "containment_photos":[{"page":0,"description":"","has_zipper":false,"has_poles":false}],
+    "dumpster_or_debris":[{"page":0,"description":""}],
+    "conversion_panel_photos":[{"page":0,"description":""}],
+    "after_hours_evidence":[{"page":0,"timestamp":"","description":""}],
+    "content_manipulation_photos":[{"page":0,"room":"","description":""}],
+    "moisture_readings":[{"page":0,"room":"","reading":"","date":""}],
+    "scope_notes":[{"page":0,"text":""}]
+  }
+}`;
 
-CONTAINMENT BARRIER RULE: If the estimate includes containment barriers (WTR BARR $0.99/SF), the following items MUST also be billed:
-- Peel & seal zippers (WTR BARRZ+ $16.61/EA) — minimum 1 zipper per containment barrier opening. Each doorway or access point through the barrier needs a zipper. If Encircle shows multiple containment zones or access points, count each one.
-- Containment poles/spring poles — used to support the poly barrier from floor to ceiling. Bill per pole used. Typical: 2-4 poles per barrier depending on span.
-- Poly sheeting material if not included in the barrier line item.
-If the estimate shows WTR BARR but NO zippers (WTR BARRZ+) and NO poles, flag as MISSING_ITEM with MEDIUM severity. Containment cannot be properly installed without zippers for access and poles for support. Also check that the barrier SF quantity matches the area being contained — undersized barriers are a common issue. Reference: IICRC S520 Section 12.2.
+const AUDIT_PROMPT=`You are a senior IICRC-certified mitigation auditor for JG Restoration in Wisconsin. You receive STRUCTURED DATA from a prior extraction step. Apply judgment to find billing gaps and overbilling. Be aggressive — your job is to maximize defensible revenue.
 
-EMERGENCY SERVICE CALL RULE: If the QA audit determines that ANY work was performed after hours (outside 8:00 AM - 4:00 PM Monday-Friday), remind the PM at sign-off that an EMERGENCY SERVICE CALL fee should be billed in addition to the after-hours labor rate. The emergency service call is a flat fee charged per dispatch for responding outside business hours — it is SEPARATE from the hourly after-hours labor rate (WTR LABA). This covers the cost of mobilizing a crew, dispatching a vehicle, and disrupting on-call technician schedules. If the date of loss occurred after hours, on a weekend, or on a holiday, the initial response qualifies for the emergency service call fee. Check Encircle photo timestamps and date of loss — if either indicates after-hours work and the estimate does not include an emergency service call line item, flag it as a HIGH severity gap. This is one of the most frequently forgotten charges on emergency responses.
+NEVER include O&P on water mitigation, mold, contents, or fire mitigation. O&P only on reconstruction.
 
-AFTER-HOURS LABOR RULE: JG Restoration business hours are 8:00 AM to 4:00 PM Monday through Friday (Central Time). ANY work performed outside these hours is after-hours labor and MUST be billed at the after-hours rate WTR LABA $90.84/HR instead of regular WTR LAB $60.50/HR. Check Encircle photo timestamps, activity logs, equipment placement times, and moisture reading times carefully. If photos or logs show technicians on-site before 8:00 AM, after 4:00 PM, or on weekends/holidays — ALL labor for those visits must be billed at the after-hours rate. Common after-hours scenarios: emergency response (first day of loss is almost always after hours), weekend equipment checks, early morning/evening moisture readings, holiday responses. If the date of loss occurred after 4 PM or on a weekend, the initial response and first-day labor should be after-hours. Also check if equipment was placed or picked up outside business hours. Flag any regular-rate labor (WTR LAB) that should be after-hours (WTR LABA) as UNDERBILLED with the dollar difference. Reference: IICRC S500 Section 10.1, standard industry practice.
+Verified WIGR8X codes (price list MAR26): WTR DRY+ $30.04/EA, WTR DRY $25.61/EA, WTR DHM> $75.43/EA, WTR DHM>> $117.30/EA, WTR NAFAN $72.09/DA, HMR NAFAN $72.09/DA, WTR GRMB $0.38/SF, WTR PPE+ $48.23/EA, WTR EQ $60.50/HR, WTR LAB $60.50/HR, WTR LABA $90.84/HR, WTR DRYWS $1.52/SF, WTR DRYWLS $6.17/LF, WTR INSS $1.15/SF, WTR TRIM $1.03/LF, WTR TRID $0.96/LF, WTR BARR $0.99/SF, WTR BARRZ+ $16.61/EA, WTR MASKFL $0.59/SF, WTR FHEPA $220.90/EA, WTR FCWS $5.85/SF, WTR FCCS $0.95/SF, WTR FCVS $2.29/SF, WTR PADS $0.89/SF, WTR SFS $2.97/SF, WTR PLAS $4.12/SF, WTR SNKD $34.19/EA, WTR TLTD $54.51/EA, WTR DORSLD $7.19/EA, WTR CABLOW $10.02/LF, DMO DUMP> $630.01/EA.
 
-AIR SCRUBBER FILTER RULE: HEPA filters (WTR FHEPA $220.90/EA) apply ONLY to AIR SCRUBBERS (WTR NAFAN or HMR NAFAN), NOT to air movers (WTR DRY, WTR DRY+). Air movers do NOT use HEPA filters — do NOT flag HEPA filters for air movers. Only flag missing HEPA if the estimate includes NAFAN line items (air scrubbers) but does NOT include FHEPA line items. Standard: 1 HEPA filter + 1 pre-filter per air scrubber per loss. If zero scrubbers are billed, zero HEPA filters are needed. CRITICAL: Count NAFAN line items specifically — do NOT count DRY or DRY+ as scrubbers. Reference: IICRC S520 Section 13.2.
+You will be GIVEN structured extraction data. Use it as your source of truth — do not re-extract from PDFs. The composite-line-item rule, PPE rule, dumpster rule, conversion panel rule, and HEPA rule will be applied AFTER your output by a code-based filter, so do not over-suppress. Flag what looks underbilled or overbilled by the Encircle evidence; the filter will catch the well-known false-positive patterns.
 
-WEIGHTED EXTRACTION RULE: Portable extractors and truck-mounted extraction are separate billable items from basic water extraction. If Encircle documents standing water, saturated carpet/pad, or water-logged materials, check that the estimate includes BOTH initial extraction AND weighted extraction. Weighted extraction applies when materials (carpet, pad, contents) are saturated and heavy — requiring extraction of water from the material itself, not just standing water. Bill WTR LAB $60.50/HR for extraction labor. Truck-mount extraction is billed at a premium rate. If Encircle shows heavy saturation, pad removal, or carpet being pulled for extraction underneath — that is weighted extraction. Standard: minimum 0.5 hours per affected room for portable extraction, additional time for truck-mount. Multiple passes of extraction are common and each pass is billable. If the estimate only shows one extraction line but Encircle documents multi-day water presence or heavy saturation, flag as underbilled. Reference: IICRC S500 Section 10.3.
+JUDGMENT RULES (apply these — the code filter handles edge cases):
 
-CONTENT MANIPULATION RULE: If the Encircle report shows contents were moved, blocked, raised, or relocated in ANY room, bill WTR LAB $60.50/HR for content manipulation. Standard is 0.5-1.5 hours per affected room. IMPORTANT: The homeowner/customer may have moved their own contents before the crew arrived — this is common. When flagging content manipulation, ALWAYS add this note: "Verify with PM — customer may have performed this task. If customer moved contents, no charge applies." Severity: MEDIUM. Do NOT flag foam blocks/risers as a separate material charge — this is NOT a standard JG Restoration billing item. Reference: IICRC S500 Section 10.4. DRYING HOLES RULE: Bill 2 drying holes per linear foot of affected wall cavities. Measure total linear feet of walls with documented moisture intrusion (blue X markings, elevated moisture readings, or visible water damage in Encircle). Use WTR DRYWLS $6.17/LF for flood cuts which includes access holes. If walls show moisture but no extraction/drying access holes are billed, flag as a gap.
+UNDERBILLING — flag aggressively:
+- Equipment days: if Encircle shows equipment onsite N days but estimate bills < N days
+- Equipment count: if Encircle photos show more units than billed
+- Monitoring: 1.5 hrs/day × calendar days equipment onsite (WTR EQ)
+- Anti-microbial (WTR GRMB): required on ALL surfaces in Cat 2+ rooms
+- Drying holes: 2 per LF of affected wall (covered by WTR DRYWLS flood cuts)
+- After-hours: if any Encircle timestamp shows work outside 8am-4pm M-F, that visit's labor must be WTR LABA $90.84 not WTR LAB $60.50. Flag the rate diff.
+- Emergency service call: if date_of_loss_after_hours=true OR after_hours_evidence present, flag missing emergency call fee (HIGH severity)
+- Containment: if WTR BARR billed, must also have WTR BARRZ+ zippers (1 per access point) and poles
+- HEPA filters: 1 per WTR NAFAN (air scrubber) per loss — ONLY if NAFAN line items exist
+- Content manipulation: 0.5-1.5 hrs WTR LAB per room with content_manipulation_photos. Note: customer may have moved own contents — add verification reminder.
+- Weighted extraction: heavy saturation/pad removal in Encircle = additional WTR LAB
 
-FOR EACH GAP you MUST include TWO fields:
-1. "standard_reference" - the specific standard citation (e.g. "IICRC S500 Section 12.3")
-2. "standard_text" - the ACTUAL REQUIREMENT LANGUAGE from that standard that supports billing. Write 1-2 sentences quoting or closely paraphrasing what the standard requires. This text will be shown to adjusters as justification.
+OVERBILLING — flag with severity:OVERBILLED:
+- Equipment count billed > Encircle count
+- Equipment days billed > Encircle placement-to-removal range
+- Rooms billed > rooms with damage in Encircle
+- SF billed > Encircle SF for that room
+- WTR LABA after-hours rate billed but Encircle timestamps all within business hours
+- Duplicate line items for same room/service
+- Anti-microbial on rooms not affected by Cat 2+
 
-Use these standards and their requirement language:
-- PPE: OSHA 29 CFR 1910.132 — "Employers shall provide PPE to each employee where there is exposure to hazardous conditions." IICRC S500 Section 12.3 — "Appropriate PPE shall be used by all workers in contact with Category 2 or higher contaminated water. PPE includes gloves, eye protection, and respiratory protection as warranted by conditions."
-- Anti-microbial treatment: IICRC S500 Section 12.5.3 — "All structural materials and contents affected by Category 2 or 3 water shall be cleaned and treated with an appropriate antimicrobial agent after removal of gross contamination." IICRC S520 Section 15 — "Antimicrobial application is required on all surfaces where mold growth has been remediated." IMPORTANT: The Xactimate anti-microbial line item WTR GRMB $0.38/SF ALREADY INCLUDES BOTH LABOR AND MATERIALS in the unit cost. Do NOT flag missing decontamination labor or spraying labor separately — it is built into the GRMB line item. If the estimate includes WTR GRMB for the affected areas, the anti-microbial application is fully billed. Only flag anti-microbial as missing if WTR GRMB is completely absent from rooms that had Category 2 or 3 water exposure.
-- Equipment monitoring: IICRC S500 Section 11.2 — "The restorer shall monitor the drying process at least daily to ensure drying goals are being met. Documentation of moisture readings, temperature, humidity, and equipment operation is required. JG Restoration standard: 1.5 hours monitoring per day equipment is onsite, covering moisture readings, equipment checks, photo documentation, and client communication." Section 11.3 — "All monitoring data shall be documented and maintained as part of the project record."
-- Air movers/dehumidifiers: IICRC S500 Section 11.4 — "Sufficient air movers and dehumidifiers shall be deployed based on psychrometric calculations to achieve drying goals. Equipment quantity shall match the affected area and materials." Section 11.5 — "Equipment shall be positioned to maximize airflow across wet materials and maintain appropriate grain depression."
-- Containment: IICRC S500 Section 12.2 — "Containment barriers shall be established to isolate the work area and prevent cross-contamination to unaffected areas." OSHA 29 CFR 1926.1101 — "Regulated areas must be established where airborne concentrations may exceed permissible exposure limits."
-- Water extraction / weighted extraction: IICRC S500 Section 10.3 — "Standing water and excess moisture shall be promptly extracted to minimize damage and reduce drying time. Extraction is the single most important step in the water damage restoration process. Weighted extraction — removing water absorbed into carpet, pad, and other porous materials — is a separate procedure from standing water removal and shall be performed until no additional water can be recovered. Multiple extraction passes are standard practice when materials are heavily saturated. Truck-mounted extraction equipment provides superior suction for deep extraction of water-logged materials and is billed at a premium rate over portable extractors."
-- Demolition/flood cuts/drying holes: IICRC S500 Section 12.1.2 — "Category 2 water-affected porous materials that cannot be effectively cleaned shall be removed. Drywall, insulation, and other absorbent materials in contact with contaminated water require removal to the point of unaffected material. Wall cavities require access openings (drying holes or flood cuts) at a minimum of 2 per linear foot to allow airflow for structural drying per IICRC S500 Section 11.5. Without adequate access, wall cavities cannot achieve drying goals within acceptable timeframes, increasing risk of secondary damage and microbial growth."
-- Insulation removal: IICRC S500 Section 12.1.3 — "Wet insulation in wall and ceiling cavities is considered non-salvageable and shall be removed to facilitate structural drying and prevent microbial growth."
-- Floor protection: IICRC S500 Section 10.5 — "Unaffected areas adjacent to the work zone shall be protected from damage during restoration activities using appropriate covering materials."
-- Moisture testing: IICRC S500 Section 11.1 — "A thorough moisture assessment shall be performed to determine the extent of water intrusion. Moisture mapping using appropriate instruments is required to document affected and unaffected areas."
-- HEPA filtration / air scrubber filters: IICRC S520 Section 13.2 — "HEPA-filtered air scrubbing devices shall be used to maintain air quality during remediation. Filters shall be inspected and replaced according to manufacturer specifications. HEPA filters and pre-filters are consumable items that must be replaced on each deployment. A minimum of one HEPA filter per air scrubber per loss is required. Pre-filters protect the HEPA filter and may require more frequent replacement on jobs with heavy particulate. Both HEPA filters and pre-filters are billable materials on every loss where air scrubbers are deployed." OSHA 29 CFR 1910.1000 — "Airborne contaminant levels shall not exceed permissible exposure limits. Proper filtration maintenance is essential to ensure worker and occupant safety."
-- Content manipulation/move-out/move-back: IICRC S500 Section 10.4 — "Contents in the affected area shall be moved, blocked, or relocated as necessary to facilitate drying of structural materials and to protect contents from further damage. This includes raising furniture on blocks or risers, wrapping contents in protective plastic, relocating items to unaffected areas, and moving contents back after drying is complete. Content manipulation is billable labor for EACH room where contents were disturbed. Standard: 0.5-1.5 hours per room depending on volume and complexity. Move-back is a separate billable event."
-- Dumpster/debris: OSHA 29 CFR 1926.252 — "Waste materials shall be stored and disposed of in a manner that does not create hazards to workers or occupants."
-- After-hours/emergency labor: IICRC S500 Section 10.1 — "Water damage restoration should begin within 24-48 hours of the loss to minimize secondary damage. Emergency response outside normal business hours is standard industry practice for Category 2 and 3 losses. JG Restoration business hours: Monday-Friday 8:00 AM - 4:00 PM Central Time. All labor outside these hours — including evenings, early mornings, weekends, and holidays — shall be billed at the after-hours rate (WTR LABA $90.84/HR vs WTR LAB $60.50/HR). The after-hours premium compensates for overtime wages, on-call availability, and disruption to technician schedules. Photo timestamps and activity logs in Encircle serve as documentation of when work was performed."
+For EACH gap, MUST include:
+1. encircle_page (integer) — the page number from the extracted data that supports this gap. Pull this from the structured input. Required — never blank.
+2. standard_reference (e.g. "IICRC S500 Section 11.2")
+3. standard_text — 1-2 sentence requirement language for adjuster justification
 
-Return ONLY valid JSON: {"job_info":{"claim_id":"","address":"","date_of_loss":"","water_category":"","source_of_loss":"","carrier":"","estimator":""},"estimate_submitted":{"subtotal":0,"sales_tax":0,"total_billed":0,"line_item_count":0,"rooms_billed":[]},"encircle_documented":{"rooms_documented":[],"total_equipment_units":0,"equipment_days":0,"still_wet_areas":[],"special_notes":[]},"score":{"grade":"","capture_rate":0,"estimated_missed_revenue":"","summary":""},"overbilled_items":[{"id":"","severity":"OVERBILLED","description":"","billed_amount":"","supported_amount":"","difference":"","encircle_evidence":"","recommended_correction":""}],"gaps":[{"id":"GAP-001","category":"","severity":"","xact_code":"","description":"","recommended_qty":0,"unit":"","unit_cost":0,"estimated_value":"","encircle_evidence":"","xactimate_current":"","standard_reference":"","standard_text":""}],"equipment_comparison":{"air_movers_encircle":0,"air_movers_billed":0,"air_mover_days_encircle":0,"air_mover_days_billed":0,"dehu_encircle":0,"dehu_billed":0,"dehu_days_encircle":0,"dehu_days_billed":0,"scrubber_encircle":0,"scrubber_billed":0,"scrubber_days_encircle":0,"scrubber_days_billed":0,"discrepancy_value":""},"reconstruction_scope":[{"item":"","evidence":"","estimated_sf_lf":""}]}`;
+Return ONLY valid JSON:
+{
+  "score":{"grade":"","capture_rate":0,"estimated_missed_revenue":"","summary":""},
+  "gaps":[{"id":"GAP-001","category":"MISSING_ITEM|UNDERBILLED|MISSING_ROOM|MISSING_STANDARD|SUPPLEMENT","severity":"HIGH|MEDIUM|LOW","xact_code":"","description":"","recommended_qty":0,"unit":"","unit_cost":0,"estimated_value":"","encircle_evidence":"","encircle_page":0,"xactimate_current":"","standard_reference":"","standard_text":""}],
+  "overbilled_items":[{"id":"","severity":"OVERBILLED","description":"","billed_amount":"","supported_amount":"","difference":"","encircle_evidence":"","encircle_page":0,"recommended_correction":""}],
+  "equipment_comparison":{"air_movers_encircle":0,"air_movers_billed":0,"air_mover_days_encircle":0,"air_mover_days_billed":0,"dehu_encircle":0,"dehu_billed":0,"dehu_days_encircle":0,"dehu_days_billed":0,"scrubber_encircle":0,"scrubber_billed":0,"scrubber_days_encircle":0,"scrubber_days_billed":0,"discrepancy_value":""},
+  "reconstruction_scope":[{"item":"","evidence":"","estimated_sf_lf":""}]
+}`;
+
+// ══ COMPOSITE CODES (labor + materials baked in — never flag separate labor) ══
+const COMPOSITE_CODES = new Set([
+  'WTR GRMB','WTR CABLOW','WTR CABUP','WTR CABVNC','WTR SNKD','WTR SNKDD',
+  'WTR TLTD','WTR DORSLD','WTR RFD','WTR RGGD','WTR CTFL','WTR CTFLD','WTR CTPFD',
+  'WTR TRIM','WTR TRID','WTR DRYWS','WTR DRYWLS','WTR PLAS','WTR INSS',
+  'WTR FCCS','WTR PADS','WTR FCVS','WTR FCWS','WTR PNLS','WTR SFS',
+  'PLM SWRRS','APP HD','WTR BARR'
+]);
+
+// Maps composite work types to suppress when their composite code is on estimate
+const COMPOSITE_LABOR_KEYWORDS = {
+  'WTR GRMB': ['anti-microbial','antimicrobial','decontamination','decon','spraying','spray treatment'],
+  'WTR CABLOW': ['cabinet','lower cabinet'],
+  'WTR CABUP': ['cabinet','upper cabinet'],
+  'WTR CABVNC': ['vanity','countertop','counter top'],
+  'WTR SNKD': ['sink','disconnection'],
+  'WTR SNKDD': ['sink','double basin','disconnection'],
+  'WTR TLTD': ['toilet','disconnection'],
+  'WTR DORSLD': ['door slab','door removal'],
+  'WTR DRYWS': ['drywall','sheetrock'],
+  'WTR DRYWLS': ['drywall','flood cut'],
+  'WTR PLAS': ['plaster'],
+  'WTR INSS': ['insulation'],
+  'WTR FCCS': ['carpet','flooring'],
+  'WTR PADS': ['pad','carpet pad'],
+  'WTR FCVS': ['vinyl','LVP','LVT','flooring'],
+  'WTR FCWS': ['wood floor','hardwood','flooring'],
+  'WTR SFS': ['subfloor','sub-floor'],
+  'WTR BARR': ['containment install','containment labor','barrier install','barrier labor'],
+  'WTR TRIM': ['trim','baseboard'],
+  'WTR TRID': ['trim','baseboard']
+};
+
+// WI taxable Xactimate code prefixes (materials). Real-property labor is NOT taxable.
+// This is a pragmatic list — refine over time. JG should confirm with their CPA for sale.
+const WI_TAX_CODES_MATERIAL = new Set([
+  'WTR FHEPA','WTR PPE+','WTR BARR','WTR BARRZ+','WTR MASKFL'
+]);
+
+// ══ RULES ENGINE — runs after AUDIT step ══
+function applyBillingRules(extracted, audit) {
+  const gaps = (audit.gaps || []).slice();
+  const filtered = [];
+  const suppressed = [];
+  const lineCodes = new Set((extracted.estimate?.line_items || []).map(li => (li.code||'').toUpperCase().trim()));
+
+  for (const g of gaps) {
+    const desc = (g.description || '').toLowerCase();
+    let drop = null;
+
+    // Composite line item rule — drop "missing labor" gaps when composite code is billed
+    if (desc.includes('labor') || desc.includes('removal') || desc.includes('disconnection') ||
+        desc.includes('decontamination') || desc.includes('application') || desc.includes('spraying')) {
+      for (const [code, keywords] of Object.entries(COMPOSITE_LABOR_KEYWORDS)) {
+        if (lineCodes.has(code) && keywords.some(k => desc.includes(k.toLowerCase()))) {
+          drop = `Suppressed: ${code} on estimate already includes this labor`;
+          break;
+        }
+      }
+    }
+
+    // PPE rule — only flag if zero PPE billed AND Cat 2+
+    if (!drop && (g.xact_code||'').toUpperCase().includes('PPE')) {
+      const cat = String(extracted.job_info?.water_category || '').trim();
+      const hasPPE = Array.from(lineCodes).some(c => c.includes('PPE'));
+      if (hasPPE) drop = 'Suppressed: PPE already billed (per JG rule)';
+      else if (cat === '1' || cat === 'I' || cat.toLowerCase() === 'category 1') drop = 'Suppressed: Cat 1 does not require PPE';
+    }
+
+    // HEPA rule — only flag if NAFAN scrubbers are billed but no FHEPA
+    if (!drop && (g.xact_code||'').toUpperCase().includes('FHEPA')) {
+      const hasNAFAN = Array.from(lineCodes).some(c => c.includes('NAFAN'));
+      if (!hasNAFAN) drop = 'Suppressed: no air scrubbers billed, HEPA not needed';
+    }
+
+    // Dumpster rule — only flag if zero debris disposal AND significant demo
+    if (!drop && /dumpster|debris/.test(desc)) {
+      const hasDebris = Array.from(lineCodes).some(c => /DUMP|HAUL|DEBRIS/.test(c));
+      if (hasDebris) drop = 'Suppressed: debris disposal already billed';
+      else {
+        // Significant demo = drywall/floor tearout in 2+ rooms or large SF
+        const demoRooms = (extracted.estimate?.line_items || []).filter(li => {
+          const c = (li.code||'').toUpperCase();
+          return c.includes('DRYW') || c.includes('FCC') || c.includes('FCV') || c.includes('FCW') || c.includes('SF');
+        }).map(li => li.room).filter(Boolean);
+        const uniqueDemoRooms = new Set(demoRooms);
+        if (uniqueDemoRooms.size < 2) drop = 'Suppressed: minimal demo, dumpster not justified';
+      }
+    }
+
+    // Conversion panel rule — only flag if Encircle photos explicitly mention it
+    if (!drop && /conversion panel|spider box|power distribution/.test(desc)) {
+      const photos = extracted.encircle?.conversion_panel_photos || [];
+      if (photos.length === 0) drop = 'Suppressed: no Encircle evidence of conversion panel';
+    }
+
+    // Content manipulation — keep but ALWAYS add the verification reminder
+    if (!drop && /content.*(manipulation|move|block|raise|relocate)/.test(desc)) {
+      const note = ' (Verify with PM — customer may have performed this task. If customer moved contents, no charge applies.)';
+      if (!desc.includes('verify with pm')) {
+        g.description = (g.description || '') + note;
+      }
+    }
+
+    // Drop foam blocks/risers as separate material — not a JG billing item
+    if (!drop && /foam block|foam riser|riser block/.test(desc)) {
+      drop = 'Suppressed: foam blocks not a JG billing item';
+    }
+
+    if (drop) {
+      suppressed.push({...g, suppressed_reason: drop});
+    } else {
+      filtered.push(g);
+    }
+  }
+
+  // Re-ID gaps after filtering
+  filtered.forEach((g, i) => g.id = 'GAP-' + String(i+1).padStart(3,'0'));
+
+  return { ...audit, gaps: filtered, _suppressed: suppressed, _rules_applied: true };
+}
+
+// ══ WI SALES TAX AUDIT ══
+// WI law: real-property repair labor not taxable. Materials taxable.
+// This audits whether tax was applied to materials lines and flags missing tax revenue.
+function auditSalesTax(extracted, auditResult) {
+  const lines = extracted.estimate?.line_items || [];
+  const taxableUnpaid = [];
+  let taxableUntaxedTotal = 0;
+
+  for (const li of lines) {
+    const code = (li.code || '').toUpperCase().trim();
+    const isTaxable = WI_TAX_CODES_MATERIAL.has(code);
+    if (isTaxable && !li.is_tax_applied) {
+      taxableUnpaid.push({line_num: li.line_num, code, description: li.description, total: li.total});
+      taxableUntaxedTotal += Number(li.total) || 0;
+    }
+  }
+
+  if (taxableUnpaid.length > 0) {
+    const taxRate = 0.05; // WI state base; many counties add 0.5% — JG should set per location
+    const missedTax = +(taxableUntaxedTotal * taxRate).toFixed(2);
+    const gap = {
+      id: 'GAP-TAX-001',
+      category: 'UNDERBILLED',
+      severity: 'MEDIUM',
+      xact_code: 'TAX-WI',
+      description: `Sales tax missing on ${taxableUnpaid.length} taxable material line(s) — WI taxes materials on real property repairs`,
+      recommended_qty: taxableUnpaid.length,
+      unit: 'EA',
+      unit_cost: 0,
+      estimated_value: '$' + missedTax.toFixed(2),
+      encircle_evidence: 'Estimate review — see lines: ' + taxableUnpaid.map(l => `#${l.line_num} ${l.code}`).join(', '),
+      encircle_page: 0,
+      xactimate_current: 'Tax flag not set on these lines',
+      standard_reference: 'Wis. Stat. § 77.52(2)(a)20 + DOR Pub. 207',
+      standard_text: 'Wisconsin sales tax applies to materials sold and consumed in real property construction/repair. Labor on real property is generally exempt. Materials lines (PPE, filters, containment material) require tax.'
+    };
+    auditResult.gaps = auditResult.gaps || [];
+    auditResult.gaps.push(gap);
+    auditResult._tax_audit = {missed_tax: missedTax, lines: taxableUnpaid};
+  }
+
+  return auditResult;
+}
 
 const RECHECK_PROMPT=`You are rechecking a CORRECTED Xactimate estimate against the same Encircle report. A previous QA audit found gaps and the estimator was asked to correct them. Compare the corrected estimate against Encircle. Score it: Grade A=95%+ capture, B=85-94%, C=70-84%, D=55-69%, F=below 55%. List any REMAINING gaps only. Extract subtotal and sales_tax from Xactimate. Return ONLY valid JSON: {"score":{"grade":"","capture_rate":0,"approved":false,"summary":"","estimated_missed_revenue":""},"estimate_submitted":{"subtotal":0,"sales_tax":0,"total_billed":0,"line_item_count":0},"remaining_gaps":[{"id":"","severity":"","xact_code":"","description":"","estimated_value":"","encircle_evidence":""}],"corrections_made":["list of items that were added or fixed compared to typical gaps"],"equipment_comparison":{"discrepancy_value":""}}`;
 
@@ -332,7 +478,7 @@ Return ONLY valid JSON:
   ]
 }`;
 
-let S={apiKey:localStorage.getItem('jg_key')||'',mode:'landing',proj:'',enc:null,est:null,busy:false,prog:'',err:null,result:null,resp:{},reviewer:'',sev:'ALL',done:false,reb:false,ec:'',adjEst:null,adjEmail:'',adjResult:null,adjResp:{},adjDone:false,adjLetterEdited:null,adjNotes:{},
+let S={apiKey:localStorage.getItem('jg_key')||'',mode:'landing',proj:'',enc:null,est:null,busy:false,prog:'',err:null,result:null,resp:{},reviewer:'',sev:'ALL',done:false,reb:false,ec:'',adjEst:null,adjEmail:'',adjResult:null,adjResp:{},adjDone:false,adjLetterEdited:null,adjNotes:{},extracted:null,encPdfDoc:null,encPageCount:0,
   // NEW: Two-pass state
   phase:'upload', // upload -> review -> recheck_upload -> recheck_result -> signoff -> done
   correctedEst:null, recheckResult:null, recheckBusy:false,
@@ -438,13 +584,13 @@ async function runPass1(){
   S.proj=document.getElementById('projIn')?.value||S.proj;
   if(!S.proj.trim()){S.err='Albi project name is required.';draw();return}
   if(!S.enc||!S.est||!S.apiKey||S.busy)return;
-  S.busy=true;S.err=null;S.result=null;S.resp={};S.done=false;S.albiSteps=[];S.albiDone=false;S.recheckResult=null;S.correctedEst=null;draw();
+  S.busy=true;S.err=null;S.result=null;S.resp={};S.done=false;S.albiSteps=[];S.albiDone=false;S.recheckResult=null;S.correctedEst=null;S.extracted=null;draw();
   try{
     S.prog='Reading PDFs...';draw();
     const[e,x]=await Promise.all([b64(S.enc),b64(S.est)]);
-    S.encB64=e; // Save for Pass 2
+    S.encB64=e;
 
-    // Check Encircle PDF page count - API limit is 100 pages
+    // PDF page count handling (Anthropic API limit: 100 pages per doc)
     S.prog='Checking PDF page counts...';draw();
     let encContent,encType='document';
     try{
@@ -453,6 +599,8 @@ async function runPass1(){
       const encBytes=Uint8Array.from(atob(e),c=>c.charCodeAt(0));
       const encDoc=await pdfLib.getDocument({data:encBytes}).promise;
       const encPages=encDoc.numPages;
+      S.encPdfDoc=encDoc; // cache for thumbnail rendering
+      S.encPageCount=encPages;
       console.log('Encircle pages:',encPages);
       if(encPages>100){
         S.prog=`Encircle report is ${encPages} pages (limit 100). Extracting text...`;draw();
@@ -462,34 +610,74 @@ async function runPass1(){
           const tc=await pg.getTextContent();
           allText+=tc.items.map(it=>it.str).join(' ')+'\n--- PAGE '+i+' ---\n';
         }
-        encContent={type:'text',text:'ENCIRCLE MITIGATION REPORT (extracted from '+encPages+'-page PDF):\n\n'+allText};
+        encContent={type:'text',text:'ENCIRCLE MITIGATION REPORT (extracted from '+encPages+'-page PDF, page boundaries marked):\n\n'+allText};
         encType='text';
-        S.encText=allText; // Save for Pass 2 and rebuild
+        S.encText=allText;
       }
     }catch(pdfErr){console.log('PDF page check skipped:',pdfErr.message)}
 
-    S.prog='AI analyzing both documents (30-60 sec)...';draw();
-    const msgContent=encType==='text'?[
+    // ── STAGE 1: Pure data extraction (no judgment) ──
+    S.prog='Stage 1/2: Extracting structured data (30-60 sec)...';draw();
+    const extractContent=encType==='text'?[
       encContent,
       {type:'document',source:{type:'base64',media_type:'application/pdf',data:x}},
-      {type:'text',text:'ABOVE: Xactimate estimate. The Encircle report was provided as extracted text because it exceeded 100 PDF pages. Find every gap. Return ONLY valid JSON.'}
+      {type:'text',text:'ABOVE: Xactimate estimate (PDF) and Encircle report (text). Extract ALL data verbatim. Every fact gets an Encircle page number. Return ONLY valid JSON per the EXTRACT_PROMPT schema.'}
     ]:[
       {type:'document',source:{type:'base64',media_type:'application/pdf',data:e}},
-      {type:'text',text:'ABOVE: Encircle mitigation report'},
+      {type:'text',text:'ABOVE: Encircle mitigation report. Note Encircle PDF page numbers as you extract.'},
       {type:'document',source:{type:'base64',media_type:'application/pdf',data:x}},
-      {type:'text',text:'ABOVE: Xactimate estimate. Find every gap. Return ONLY valid JSON.'}
+      {type:'text',text:'ABOVE: Xactimate estimate. Extract ALL data verbatim. Every Encircle fact gets a page number. Return ONLY valid JSON per the EXTRACT_PROMPT schema.'}
     ];
-    const r=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',
+    const r1=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',
       headers:{'Content-Type':'application/json','x-api-key':S.apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-      body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:8000,system:PROMPT,
-        messages:[{role:'user',content:msgContent}]})});
-    if(!r.ok){const er=await r.json().catch(()=>null);throw new Error(er?.error?.message||'API error '+r.status)}
-    S.prog='Parsing...';draw();
-    const d=await r.json();const t=d.content.filter(b=>b.type==='text').map(b=>b.text).join('');
-    const a=extractJSON(t);
-    a.gaps=(a.gaps||[]).map((g,i)=>({...g,id:g.id||'GAP-'+String(i+1).padStart(3,'0')}));
-    S.result=a;S.phase='review';S.prog='';
-  }catch(e){S.err=e.message;S.prog=''}
+      body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:12000,system:EXTRACT_PROMPT,
+        messages:[{role:'user',content:extractContent}]})});
+    if(!r1.ok){const er=await r1.json().catch(()=>null);throw new Error('Stage 1: '+(er?.error?.message||'API error '+r1.status))}
+    const d1=await r1.json();const t1=d1.content.filter(b=>b.type==='text').map(b=>b.text).join('');
+    const extracted=extractJSON(t1);
+    S.extracted=extracted;
+    console.log('Stage 1 extracted:',extracted);
+
+    // ── STAGE 2: Judgment on structured data (no PDFs needed — much faster) ──
+    S.prog='Stage 2/2: Auditing for gaps (20-40 sec)...';draw();
+    const auditContent=[
+      {type:'text',text:'STRUCTURED DATA from prior extraction:\n\n'+JSON.stringify(extracted,null,2)+'\n\nApply the AUDIT_PROMPT rules. Every gap must include encircle_page from the extracted data. Return ONLY valid JSON.'}
+    ];
+    const r2=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',
+      headers:{'Content-Type':'application/json','x-api-key':S.apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+      body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:8000,system:AUDIT_PROMPT,
+        messages:[{role:'user',content:auditContent}]})});
+    if(!r2.ok){const er=await r2.json().catch(()=>null);throw new Error('Stage 2: '+(er?.error?.message||'API error '+r2.status))}
+    const d2=await r2.json();const t2=d2.content.filter(b=>b.type==='text').map(b=>b.text).join('');
+    let audit=extractJSON(t2);
+
+    // ── STAGE 3: Code-based rules engine (false positive filter + tax audit) ──
+    S.prog='Applying JG billing rules...';draw();
+    audit=applyBillingRules(extracted,audit);
+    audit=auditSalesTax(extracted,audit);
+
+    // Merge job_info and estimate_submitted from extracted into audit for compat with rest of UI
+    audit.job_info=extracted.job_info||{};
+    audit.estimate_submitted={
+      subtotal:extracted.estimate?.subtotal||0,
+      sales_tax:extracted.estimate?.sales_tax||0,
+      total_billed:extracted.estimate?.total_billed||0,
+      line_item_count:(extracted.estimate?.line_items||[]).length,
+      rooms_billed:[...new Set((extracted.estimate?.line_items||[]).map(li=>li.room).filter(Boolean))]
+    };
+    audit.encircle_documented={
+      rooms_documented:(extracted.encircle?.rooms||[]).map(r=>r.name),
+      total_equipment_units:(extracted.encircle?.equipment||[]).reduce((s,e)=>s+(e.count||0),0),
+      equipment_days:extracted.encircle?.drying_days||0,
+      still_wet_areas:[],
+      special_notes:[]
+    };
+    audit.gaps=(audit.gaps||[]).map((g,i)=>({...g,id:g.id||'GAP-'+String(i+1).padStart(3,'0')}));
+
+    S.result=audit;S.phase='review';S.prog='';
+    console.log('Final audit (post-rules):',audit);
+    if(audit._suppressed?.length){console.log('Suppressed by rules engine:',audit._suppressed)}
+  }catch(e){S.err=e.message;S.prog='';console.error(e)}
   S.busy=false;draw()
 }
 
@@ -570,7 +758,51 @@ function dlReport(){
   const b=new Blob([JSON.stringify(rpt,null,2)],{type:'application/json'});const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download=(S.proj||'review')+'_QA.json';a.click()
 }
 
-function reset(){S.enc=null;S.est=null;S.busy=false;S.prog='';S.err=null;S.result=null;S.resp={};S.reviewer='';S.sev='ALL';S.done=false;S.reb=false;S.ec='';S.proj='';S.phase='upload';S.correctedEst=null;S.recheckResult=null;S.recheckBusy=false;S.encB64=null;S.encText=null;S.rebuildResult=null;S.adjEst=null;S.adjEmail='';S.adjResult=null;S.adjResp={};S.adjDone=false;S.adjLetterEdited=null;S.adjNotes={};S.rebuildBusy=false;S.albiSteps=[];S.albiProg='';S.albiDone=false;draw()}
+function reset(){S.enc=null;S.est=null;S.extracted=null;S.encPdfDoc=null;S.encPageCount=0;S.busy=false;S.prog='';S.err=null;S.result=null;S.resp={};S.reviewer='';S.sev='ALL';S.done=false;S.reb=false;S.ec='';S.proj='';S.phase='upload';S.correctedEst=null;S.recheckResult=null;S.recheckBusy=false;S.encB64=null;S.encText=null;S.rebuildResult=null;S.adjEst=null;S.adjEmail='';S.adjResult=null;S.adjResp={};S.adjDone=false;S.adjLetterEdited=null;S.adjNotes={};S.rebuildBusy=false;S.albiSteps=[];S.albiProg='';S.albiDone=false;draw()}
+
+
+// ══ ENCIRCLE PAGE THUMBNAIL CACHE ══
+// Renders a specific page of the cached Encircle PDF as a data URL, on demand.
+const _encThumbCache = {};
+async function getEncircleThumbnail(pageNum, scale=0.5) {
+  if (!pageNum || !S.encPdfDoc) return null;
+  if (_encThumbCache[pageNum]) return _encThumbCache[pageNum];
+  try {
+    const page = await S.encPdfDoc.getPage(pageNum);
+    const viewport = page.getViewport({scale});
+    const canvas = document.createElement('canvas');
+    canvas.width = viewport.width;
+    canvas.height = viewport.height;
+    const ctx = canvas.getContext('2d');
+    await page.render({canvasContext: ctx, viewport}).promise;
+    const url = canvas.toDataURL('image/jpeg', 0.7);
+    _encThumbCache[pageNum] = url;
+    return url;
+  } catch(e) {
+    console.warn('Thumbnail render failed for page',pageNum,e.message);
+    return null;
+  }
+}
+
+// Async injector: when a gap card is rendered, kick off thumbnail loads
+// for any visible encircle_page values and inject when ready.
+function loadThumbnailsForGaps() {
+  const gaps = (S.result?.gaps || []);
+  for (const g of gaps) {
+    const pn = g.encircle_page;
+    if (!pn || pn <= 0) continue;
+    const slot = document.getElementById('thumb_' + g.id);
+    if (!slot || slot.dataset.loaded === '1') continue;
+    slot.dataset.loaded = '1';
+    getEncircleThumbnail(pn).then(url => {
+      if (url && document.getElementById('thumb_' + g.id)) {
+        document.getElementById('thumb_' + g.id).innerHTML =
+          '<a href="'+url+'" target="_blank" title="Click to open Encircle p.'+pn+' full size"><img src="'+url+'" style="max-width:160px;max-height:200px;border:1px solid var(--brd);border-radius:4px;cursor:zoom-in" alt="Encircle p.'+pn+'"></a>'+
+          '<div style="font-family:\'DM Mono\',monospace;font-size:10px;color:var(--dim);text-align:center;margin-top:4px">📄 Encircle p.'+pn+'</div>';
+      }
+    });
+  }
+}
 
 const LOGO_B64='data:image/png;base64,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';
 
@@ -1438,7 +1670,7 @@ function draw(){
     h+=`<div class="qa-filter-bar">`;['ALL','HIGH','MEDIUM','LOW'].forEach(sv=>{const ct=sv==='ALL'?gaps.length:gaps.filter(g=>g.severity===sv).length;h+=`<button class="qa-filter-btn ${S.sev===sv?'on':''}" onclick="S.sev='${sv}';draw()">${sv} <span style="opacity:.7">(${ct})</span></button>`});h+=`</div>`;
 
     filt.forEach(g=>{const rr=S.resp[g.id]||{};const dn=rr.a&&(rr.a==='C'||(rr.a==='J'&&rr.j?.trim()));
-    h+=`<div style="background:var(--s1);border:1px solid ${dn?'rgba(67,160,71,0.4)':'var(--brd)'};border-radius:10px;overflow:hidden;margin-bottom:10px;border-left:4px solid ${dn?'var(--grn)':sc(g.severity)}"><div style="padding:14px 16px"><div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px"><div style="flex:1"><div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap"><span class="mono" style="font-size:11px;color:var(--dim);font-weight:600">${g.id}</span><span class="badge" style="color:${sc(g.severity)};background:${sc(g.severity)}15;border:1px solid ${sc(g.severity)}30">${g.severity}</span><span class="badge" style="color:var(--dim);background:#70819415;border:1px solid #70819430">${cl(g.category)}</span><span class="mono" style="font-size:13px;color:var(--blu);font-weight:700">${g.xact_code}</span>${dn?`<span class="badge" style="color:${rr.a==='C'?'var(--grn)':'var(--wrn)'};background:${rr.a==='C'?'var(--grn)':'var(--wrn)'}15;border:1px solid ${rr.a==='C'?'var(--grn)':'var(--wrn)'}30">${rr.a==='C'?'Will correct':'Justified'}</span>`:''}</div><p style="font-size:14px;font-weight:600">${g.description}</p></div><div style="text-align:right;margin-left:12px;flex-shrink:0"><div style="font-size:16px;font-weight:700;color:var(--acc);font-family:'DM Mono',monospace">${g.estimated_value}</div><div style="font-size:11px;color:var(--dim)">${g.recommended_qty||''} ${g.unit||''}</div></div></div><div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;font-size:12px;color:var(--dim);margin-bottom:4px"><div><strong style="color:var(--grn)">Encircle: </strong>${g.encircle_evidence||''}</div><div><strong style="color:var(--wrn)">Estimate: </strong>${g.xactimate_current||''}</div></div>${g.standard_reference?`<div style="font-size:11px;background:rgba(30,136,229,0.06);border:1px solid rgba(30,136,229,0.15);border-radius:6px;padding:8px 10px;margin-bottom:4px"><div style="font-family:'DM Mono',monospace;color:#64B5F6;font-weight:700;margin-bottom:4px">⚖ ${g.standard_reference}</div>${g.standard_text?`<div style="color:#90CAF9;line-height:1.5">${g.standard_text}</div>`:''}</div>`:''}<div style="background:var(--s2);border-radius:8px;padding:12px 14px;margin-top:12px;border:1px solid ${dn?'rgba(67,160,71,0.3)':'rgba(251,140,0,0.4)'}"><div style="font-size:11px;font-weight:700;font-family:'DM Mono',monospace;margin-bottom:8px;text-transform:uppercase;letter-spacing:.06em;color:${dn?'var(--grn)':'var(--wrn)'}">${dn?'✓ Addressed':'⚠ Response required'}</div><div><button class="act-btn ${rr.a==='C'?'sc':''}" onclick="setResp('${g.id}','C')">✓ Will correct</button><button class="act-btn ${rr.a==='J'?'sj':''}" onclick="setResp('${g.id}','J')">Justify variance</button></div>${rr.a==='J'?`<textarea id="just_${g.id}" oninput="setJust('${g.id}',this.value)" placeholder="Required: Explain why..." style="margin-top:10px;border-color:${rr.j?.trim()?'rgba(67,160,71,0.4)':'var(--wrn)'}">${rr.j||''}</textarea>`:''}</div></div></div>`});
+    h+=`<div style="background:var(--s1);border:1px solid ${dn?'rgba(67,160,71,0.4)':'var(--brd)'};border-radius:10px;overflow:hidden;margin-bottom:10px;border-left:4px solid ${dn?'var(--grn)':sc(g.severity)}"><div style="padding:14px 16px"><div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px"><div style="flex:1"><div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap"><span class="mono" style="font-size:11px;color:var(--dim);font-weight:600">${g.id}</span><span class="badge" style="color:${sc(g.severity)};background:${sc(g.severity)}15;border:1px solid ${sc(g.severity)}30">${g.severity}</span><span class="badge" style="color:var(--dim);background:#70819415;border:1px solid #70819430">${cl(g.category)}</span><span class="mono" style="font-size:13px;color:var(--blu);font-weight:700">${g.xact_code}</span>${dn?`<span class="badge" style="color:${rr.a==='C'?'var(--grn)':'var(--wrn)'};background:${rr.a==='C'?'var(--grn)':'var(--wrn)'}15;border:1px solid ${rr.a==='C'?'var(--grn)':'var(--wrn)'}30">${rr.a==='C'?'Will correct':'Justified'}</span>`:''}</div><p style="font-size:14px;font-weight:600">${g.description}</p></div><div style="text-align:right;margin-left:12px;flex-shrink:0"><div style="font-size:16px;font-weight:700;color:var(--acc);font-family:'DM Mono',monospace">${g.estimated_value}</div><div style="font-size:11px;color:var(--dim)">${g.recommended_qty||''} ${g.unit||''}</div></div></div><div style="display:grid;grid-template-columns:${g.encircle_page?'160px 1fr 1fr':'1fr 1fr'};gap:12px;font-size:12px;color:var(--dim);margin-bottom:4px;align-items:start">${g.encircle_page?`<div id="thumb_${g.id}" style="min-height:80px;background:var(--s2);border-radius:4px;display:flex;align-items:center;justify-content:center;color:var(--dim);font-size:10px;font-family:'DM Mono',monospace">Loading p.${g.encircle_page}…</div>`:''}<div><strong style="color:var(--grn)">Encircle${g.encircle_page?' (p.'+g.encircle_page+')':''}: </strong>${g.encircle_evidence||''}</div><div><strong style="color:var(--wrn)">Estimate: </strong>${g.xactimate_current||''}</div></div>${g.standard_reference?`<div style="font-size:11px;background:rgba(30,136,229,0.06);border:1px solid rgba(30,136,229,0.15);border-radius:6px;padding:8px 10px;margin-bottom:4px"><div style="font-family:'DM Mono',monospace;color:#64B5F6;font-weight:700;margin-bottom:4px">⚖ ${g.standard_reference}</div>${g.standard_text?`<div style="color:#90CAF9;line-height:1.5">${g.standard_text}</div>`:''}</div>`:''}<div style="background:var(--s2);border-radius:8px;padding:12px 14px;margin-top:12px;border:1px solid ${dn?'rgba(67,160,71,0.3)':'rgba(251,140,0,0.4)'}"><div style="font-size:11px;font-weight:700;font-family:'DM Mono',monospace;margin-bottom:8px;text-transform:uppercase;letter-spacing:.06em;color:${dn?'var(--grn)':'var(--wrn)'}">${dn?'✓ Addressed':'⚠ Response required'}</div><div><button class="act-btn ${rr.a==='C'?'sc':''}" onclick="setResp('${g.id}','C')">✓ Will correct</button><button class="act-btn ${rr.a==='J'?'sj':''}" onclick="setResp('${g.id}','J')">Justify variance</button></div>${rr.a==='J'?`<textarea id="just_${g.id}" oninput="setJust('${g.id}',this.value)" placeholder="Required: Explain why..." style="margin-top:10px;border-color:${rr.j?.trim()?'rgba(67,160,71,0.4)':'var(--wrn)'}">${rr.j||''}</textarea>`:''}</div></div></div>`});
 
     // Rebuild
 
@@ -1539,7 +1771,8 @@ function draw(){
     h+=`<div style="display:flex;gap:10px;justify-content:center;margin-top:24px"><button style="background:var(--s2);border:1px solid var(--brdH);color:var(--txt);padding:10px 20px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600;font-family:'DM Mono',monospace" onclick="dlReport()">Export JSON</button><button style="background:linear-gradient(135deg,#E53935,#C62828);border:none;color:#fff;padding:10px 20px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600;font-family:'DM Mono',monospace" onclick="generatePDF()">Download PDF Report</button><button style="background:linear-gradient(135deg,#1E88E5,#1565C0);border:none;color:#fff;padding:10px 20px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600;font-family:'DM Mono',monospace" onclick="generatePDF();setTimeout(()=>window.open('https://drive.google.com/drive/folders/19h0JycexT-KUMfIxebIecI81TIPQ5eL2','_blank'),500)">QA PDF + Save to Drive</button><button style="background:transparent;border:1px solid var(--brd);color:var(--dim);padding:10px 20px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600;font-family:'DM Mono',monospace" onclick="reset()">← Review Another</button></div>`;
   }
 
-  a.innerHTML=h
+  a.innerHTML=h;
+  if(S.phase==='review' && S.result?.gaps?.length){setTimeout(loadThumbnailsForGaps,30)}
 }
 
 // ── API KEY AUTO-LOAD ──────────────────────────────
