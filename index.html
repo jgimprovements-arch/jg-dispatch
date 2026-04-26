@@ -1100,8 +1100,9 @@ async function loadJobAuditMaps(){
     }
     _jobLastDispatch = dispatchMap;
 
-    // Tech history per job — every tech who has ever clocked time on the job.
-    // Most recent first, deduped by name.
+    // Tech history per job — only the LAST tech who clocked in (with their clock-in time).
+    // Used for scheduling: "Mike was on this Wed, keep him on it Thursday."
+    // Sorted desc by clock_in, so the first entry per job_id wins.
     const teRes = await sbFetch('/rest/v1/time_entries?job_id=not.is.null&clock_in=gte.' + cutoff + '&select=job_id,employee_name,clock_in&order=clock_in.desc&limit=5000');
     const techMap = {};
     if (teRes && teRes.ok) {
@@ -1109,11 +1110,9 @@ async function loadJobAuditMaps(){
       rows.forEach(r => {
         if (!r.job_id || !r.employee_name) return;
         const jid = String(r.job_id);
-        if (!techMap[jid]) techMap[jid] = [];
-        // Dedupe by name (first occurrence = most recent due to desc order)
-        if (!techMap[jid].includes(r.employee_name)) {
-          techMap[jid].push(r.employee_name);
-        }
+        // First occurrence = most recent due to desc order; skip subsequent
+        if (techMap[jid]) return;
+        techMap[jid] = { name: r.employee_name, clockIn: r.clock_in };
       });
     }
     _jobTechHistory = techMap;
@@ -1129,7 +1128,7 @@ async function loadJobAuditMaps(){
 function _jobAuditFooter(jid){
   const d = _jobLastDispatch[jid];
   const techs = _jobTechHistory[jid];
-  if (!d && (!techs || !techs.length)) return '';
+  if (!d && !techs) return '';
 
   let lines = '';
 
@@ -1151,19 +1150,42 @@ function _jobAuditFooter(jid){
     lines += '<div class="c-audit-line">' + actorFirst + ' ' + verb + toTech + ' · ' + ago + '</div>';
   }
 
-  if (techs && techs.length) {
-    // First names only, comma-joined, max 4 then "+N more"
-    const firstNames = techs.map(n => n.split(' ')[0]);
-    let display;
-    if (firstNames.length <= 4) {
-      display = firstNames.join(', ');
-    } else {
-      display = firstNames.slice(0, 4).join(', ') + ' +' + (firstNames.length - 4);
-    }
-    lines += '<div class="c-audit-line c-audit-techs">🔧 ' + display + '</div>';
+  if (techs && techs.name) {
+    // Last tech on-site, with relative time. "Yesterday" if 1 calendar day ago.
+    const firstName = techs.name.split(' ')[0];
+    const ago = _fmtLastOnSite(techs.clockIn);
+    lines += '<div class="c-audit-line c-audit-techs">🔧 Last on-site: ' + firstName + ' · ' + ago + '</div>';
   }
 
   return '<div class="c-audit-footer">' + lines + '</div>';
+}
+
+// Format a clock-in timestamp for the "last on-site" line.
+// Uses calendar-day awareness so a clock-in last night still says "yesterday"
+// instead of "10h ago" — what scheduling actually cares about.
+function _fmtLastOnSite(iso){
+  if (!iso) return '';
+  const then = new Date(iso);
+  const now = new Date();
+  // Calendar-day diff in Central time (matches dispatch day rollover)
+  const tz = { timeZone: 'America/Chicago' };
+  const todayStr = now.toLocaleDateString('en-CA', tz);
+  const thenStr = then.toLocaleDateString('en-CA', tz);
+  if (todayStr === thenStr) {
+    // Today — show hours
+    const h = Math.floor((now - then) / 3600000);
+    if (h < 1) return 'today';
+    return h + 'h ago';
+  }
+  const dayMs = 86400000;
+  const todayDate = new Date(todayStr + 'T12:00:00');
+  const thenDate = new Date(thenStr + 'T12:00:00');
+  const days = Math.round((todayDate - thenDate) / dayMs);
+  if (days === 1) return 'yesterday';
+  if (days < 7) return days + 'd ago';
+  if (days < 14) return '1w ago';
+  if (days < 30) return Math.floor(days/7) + 'w ago';
+  return Math.floor(days/30) + 'mo ago';
 }
 
 // Format a timestamp as "2h ago", "3d ago", etc.
