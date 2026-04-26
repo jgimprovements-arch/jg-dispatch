@@ -950,23 +950,36 @@ function _formatDateForDisplay(yyyymmdd){
   return date.toLocaleDateString('en-US', { weekday:'short', month:'short', day:'numeric' });
 }
 
+let _dateSwitchInProgress = false;
+let _lastDateSwitchAt = 0;
+
 async function setBoardDate(newDate){
   if (!newDate || newDate === currentBoardDate) return;
-  currentBoardDate = newDate;
-  // Update the picker UI
-  const input = document.getElementById('board-date-input');
-  if (input) input.value = newDate;
-  _updateDateContextBanner();
-  // Clear all in-memory state before reloading — loadFromV2 will repopulate
-  for (const l of ['appleton','stevens']) {
-    for (const nm in (techQ[l]||{})) {
-      if (techQ[l][nm]) techQ[l][nm].jobs = [];
-    }
-    unassigned[l] = []; // loadFromV2 will rebuild based on date
+  if (_dateSwitchInProgress) {
+    console.log('[date-switch] already in progress, ignoring switch to', newDate);
+    return;
   }
-  await loadFromV2();
-  await loadClockedInJobs(); // refresh active-clock indicators (only meaningful for today)
-  render();
+  _dateSwitchInProgress = true;
+  _lastDateSwitchAt = Date.now();
+  try {
+    currentBoardDate = newDate;
+    // Update the picker UI
+    const input = document.getElementById('board-date-input');
+    if (input) input.value = newDate;
+    _updateDateContextBanner();
+    // Clear all in-memory state before reloading — loadFromV2 will repopulate
+    for (const l of ['appleton','stevens']) {
+      for (const nm in (techQ[l]||{})) {
+        if (techQ[l][nm]) techQ[l][nm].jobs = [];
+      }
+      unassigned[l] = []; // loadFromV2 will rebuild based on date
+    }
+    await loadFromV2();
+    await loadClockedInJobs(); // refresh active-clock indicators (only meaningful for today)
+    render();
+  } finally {
+    _dateSwitchInProgress = false;
+  }
 }
 
 async function shiftBoardDate(deltaDays){
@@ -1377,6 +1390,11 @@ function saveBoardState(){
   // modified the board locally. Otherwise the boot-time render() calls will
   // save empty tech assignments to Supabase, wiping other clients' state.
   if (lastLocalChange === 0) return;
+  // Don't sync during/right after a date switch — loadFromV2 just rebuilt
+  // techQ from the database, syncing now would treat that load as "user changes"
+  // and write duplicate rows.
+  if (_dateSwitchInProgress) return;
+  if (_lastDateSwitchAt && (Date.now() - _lastDateSwitchAt) < 1500) return;
   clearTimeout(saveTimer);
   saveTimer = setTimeout(async ()=>{
     const payload = getBoardStatePayload();
@@ -3595,6 +3613,9 @@ function initRealtime() {
         try {
           // Don't clobber local state if user just made a change (within 2s)
           if (lastLocalChange > 0 && (Date.now() - lastLocalChange) < 2000) return;
+          // Don't run during a date switch
+          if (_dateSwitchInProgress) return;
+          if (_lastDateSwitchAt && (Date.now() - _lastDateSwitchAt) < 1500) return;
           // Snapshot existing assignments before reload
           const before = JSON.stringify(getBoardStatePayload().assignments);
           // Clear and reload from _v2
