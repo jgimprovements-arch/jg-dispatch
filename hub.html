@@ -122,33 +122,44 @@ function fmtMoney(n){return'$'+Math.round(n).toLocaleString()}
 
 async function loadDashboard(){
   const today=new Date().toISOString().split('T')[0],monthStart=new Date(new Date().getFullYear(),new Date().getMonth(),1).toISOString(),weekAgo=new Date(Date.now()-7*86400000).toISOString();
-  const[employees,clockedIn,reviews,pushes,rebuttals,recentTouches,boardState]=await Promise.all([
+  // Activity feed pulls from dispatch_assignments_history_v2 (audit log of all dispatcher actions).
+  // Active jobs/unassigned counts come from dispatch_assignments_v2 + dispatch_unassigned_v2.
+  const[employees,clockedIn,reviews,dispatchHistory,rebuttals,recentTouches,activeAssignments,unassignedJobs]=await Promise.all([
     sb('/rest/v1/employees?active=eq.true&select=id,name,role,market'),
     sb('/rest/v1/time_entries?clock_out=is.null&clock_in=gte.'+today+'T00:00:00&select=*'),
     sb('/rest/v1/qa_reviews?reviewed_at=gte.'+monthStart+'&select=grade,missed_revenue,job_name,reviewed_at'),
-    sb('/rest/v1/dispatch_history?pushed_at=gte.'+monthStart+'&select=id,tech_name,job_name,pushed_at'),
+    sb('/rest/v1/dispatch_assignments_history_v2?changed_at=gte.'+monthStart+'&action=eq.INSERT&order=changed_at.desc&limit=20&select=actor,new_data,changed_at'),
     sb('/rest/v1/adjuster_rebuttals?created_at=gte.'+monthStart+'&select=total_disputed,items_defended,items_conceded,adjuster_name,created_at'),
     sb('/rest/v1/sales_touches?touched_at=gte.'+weekAgo+'&order=touched_at.desc&limit=10&select=partner_name,rep_name,touched_at'),
-    sb('/rest/v1/board_state?select=job_name,tech_name,status,updated_at&order=updated_at.desc&limit=20')
+    sb('/rest/v1/dispatch_assignments_v2?or=(scheduled_date.is.null,scheduled_date.eq.'+today+')&select=id,job_id,tech_id'),
+    sb('/rest/v1/dispatch_unassigned_v2?select=job_id,market')
   ]);
   _data.employees=employees;_data.clockedIn=clockedIn;
   const clockedIds=new Set(clockedIn.map(e=>e.employee_id));
-  const activeJobs=boardState.filter(j=>j.status==='active'||j.status==='en_route'||j.status==='on_site');
-  _data.kpis.clockedCount=clockedIn.length;_data.kpis.activeJobs=activeJobs.length;_data.kpis.reviews=reviews.length;
+  _data.kpis.clockedCount=clockedIn.length;
+  _data.kpis.activeJobs=(activeAssignments||[]).length;
+  _data.kpis.reviews=reviews.length;
   const totMissed=reviews.reduce((s,r)=>s+(r.missed_revenue||0),0);
   _data.kpis.missed=fmtMoney(totMissed);_data.kpis.caught=fmtMoney(totMissed);
   const gm={A:4,B:3,C:2,D:1,F:0},gr={4:'A',3:'B',2:'C',1:'D',0:'F'};
   const gs=reviews.filter(r=>r.grade&&gm[r.grade]!==undefined);
   if(gs.length){_data.kpis.grade=gr[Math.round(gs.reduce((s,r)=>s+gm[r.grade],0)/gs.length)]||'—';}
   const totDef=rebuttals.reduce((s,r)=>{const v=parseFloat((r.total_disputed||'$0').replace(/[$,]/g,''))||0;return s+(r.items_conceded===0?v:v*(r.items_defended||0)/Math.max((r.items_defended||0)+(r.items_conceded||0),1));},0);
-  _data.kpis.defended=fmtMoney(totDef);_data.kpis.pushes=pushes.length;
+  _data.kpis.defended=fmtMoney(totDef);
+  _data.kpis.pushes=(dispatchHistory||[]).length;
   _data.alerts=[];
   const hour=new Date().getHours();
   if(hour>=8&&hour<16){employees.filter(e=>['Office','Project Manager','Admin'].includes(e.role)&&!clockedIds.has(e.id)).forEach(e=>{_data.alerts.push({icon:'⏰',text:'<strong>'+e.name.split(' ')[0]+'</strong> not clocked in',urgent:hour>=9})});}
-  boardState.filter(j=>!j.tech_name&&j.status!=='completed').forEach(j=>{_data.alerts.push({icon:'📋',text:'<strong>'+j.job_name+'</strong> unassigned',urgent:true});});
+  // Unassigned jobs alert — pulled from dispatch_unassigned_v2
+  (unassignedJobs||[]).slice(0,5).forEach(j=>{_data.alerts.push({icon:'📋',text:'<strong>'+j.job_id+'</strong> unassigned ('+(j.market==='stevens_point'?'Stevens Point':'Appleton')+')',urgent:true});});
   _data.feed=[];
   reviews.slice(0,5).forEach(r=>_data.feed.push({type:'qa',text:r.job_name+' — Grade '+(r.grade||'?')+', '+fmtMoney(r.missed_revenue||0)+' missed',time:r.reviewed_at}));
-  pushes.slice(0,5).forEach(p=>_data.feed.push({type:'dispatch',text:(p.tech_name?p.tech_name.split(' ')[0]:'Tech')+' → '+p.job_name,time:p.pushed_at}));
+  // Dispatch activity from v2 history (INSERT events = new assignments)
+  (dispatchHistory||[]).slice(0,5).forEach(h=>{
+    const nd=h.new_data||{};
+    const actor=h.actor?h.actor.split(' ')[0]:'Dispatcher';
+    _data.feed.push({type:'dispatch',text:actor+' assigned '+(nd.job_id||'job'),time:h.changed_at});
+  });
   recentTouches.slice(0,5).forEach(t=>_data.feed.push({type:'sales',text:(t.rep_name?t.rep_name.split(' ')[0]:'Rep')+' touched '+t.partner_name,time:t.touched_at}));
   rebuttals.slice(0,3).forEach(r=>_data.feed.push({type:'rebuttal',text:'Rebuttal — '+(r.adjuster_name||'adjuster')+' '+fmtMoney(parseFloat((r.total_disputed||'0').replace(/[$,]/g,''))||0),time:r.created_at}));
   _data.feed.sort((a,b)=>new Date(b.time)-new Date(a.time));
