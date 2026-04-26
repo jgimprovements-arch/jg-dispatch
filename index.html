@@ -211,6 +211,9 @@ body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);min
 .c-time-in{font-size:12px;font-weight:600;font-family:'DM Mono',monospace;background:#fff;border:1px solid var(--border-mid);border-radius:4px;color:var(--text);padding:3px 4px;width:108px;}
 .c-time-in:focus{border-color:var(--orange);outline:none;}
 .c-time-in.override{border-color:var(--gold);background:rgba(245,166,35,.08);}
+.c-audit-footer{margin-top:6px;padding:5px 4px 0;border-top:1px dashed var(--border);font-size:10px;color:var(--muted);line-height:1.4;}
+.c-audit-line{font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.c-audit-techs{color:#5a6e87;font-weight:500;}
 .trip-row{display:flex;align-items:center;gap:4px;margin:2px 0 2px 8px;}
 .trip-line{width:1px;height:11px;background:var(--border-mid);margin-left:4px;}
 .tb{font-size:8px;font-weight:500;padding:1px 5px;border-radius:8px;font-family:'DM Mono',monospace;}
@@ -783,6 +786,7 @@ async function boot(){
     }
     _initBoardDatePicker();
     await loadClockedInJobs();
+    await loadJobAuditMaps();
     render();
     hideLoader();
     // Wait for board state to fully restore before refreshing Albi
@@ -807,6 +811,7 @@ async function boot(){
   await loadBoardState();
   _initBoardDatePicker();
   await loadClockedInJobs();
+  await loadJobAuditMaps();
   render();
   hideLoader();
 }
@@ -996,6 +1001,7 @@ async function setBoardDate(newDate){
     await loadFromV2();
     await loadAbsencesForDate(); // re-load OUT/sick markers for the new date
     await loadClockedInJobs(); // refresh active-clock indicators (only meaningful for today)
+    await loadJobAuditMaps();
     render();
   } finally {
     _dateSwitchInProgress = false;
@@ -1058,6 +1064,124 @@ function _v2Actor(){
 
 let _clockedInJobs = {}; // { '1864213': 2, '1890382': 1, ... }
 let _clockedInChannel = null;
+
+// ── JOB AUDIT MAPS ─────────────────────────────────────────────────────────
+// Two lookups built once per board load (re-run on realtime), used by every
+// rendered job card to show "last dispatcher action" and "techs who've worked it".
+// Avoids per-card queries during render.
+let _jobLastDispatch = {}; // { jobId: { actor, action, ts } }
+let _jobTechHistory = {};  // { jobId: [techName, techName, ...] (most recent first, deduped) }
+
+async function loadJobAuditMaps(){
+  // Pull last 60 days of dispatcher actions and time entries.
+  // 60 days is enough for almost any active job; older history isn't useful glance-info.
+  const cutoff = new Date(Date.now() - 60*86400000).toISOString();
+  try {
+    // Last dispatcher action per job — INSERT/UPDATE actions only (DELETE removes the assignment row, less interesting on a still-existing card).
+    const histRes = await sbFetch('/rest/v1/dispatch_assignments_history_v2?changed_at=gte.' + cutoff + '&action=in.(INSERT,UPDATE,DELETE)&order=changed_at.desc&select=actor,action,new_data,old_data,changed_at&limit=2000');
+    const dispatchMap = {};
+    if (histRes && histRes.ok) {
+      const rows = await histRes.json();
+      rows.forEach(r => {
+        const data = r.new_data || r.old_data || {};
+        const jid = data.job_id;
+        if (!jid) return;
+        // First entry per job_id wins (already sorted desc by changed_at)
+        if (dispatchMap[jid]) return;
+        dispatchMap[jid] = {
+          actor: r.actor || 'Unknown',
+          action: r.action,
+          ts: r.changed_at,
+          // Snapshot of where it went: tech_id from new_data, market
+          tech_id: data.tech_id || null,
+          market: data.market || null
+        };
+      });
+    }
+    _jobLastDispatch = dispatchMap;
+
+    // Tech history per job — every tech who has ever clocked time on the job.
+    // Most recent first, deduped by name.
+    const teRes = await sbFetch('/rest/v1/time_entries?job_id=not.is.null&clock_in=gte.' + cutoff + '&select=job_id,employee_name,clock_in&order=clock_in.desc&limit=5000');
+    const techMap = {};
+    if (teRes && teRes.ok) {
+      const rows = await teRes.json();
+      rows.forEach(r => {
+        if (!r.job_id || !r.employee_name) return;
+        const jid = String(r.job_id);
+        if (!techMap[jid]) techMap[jid] = [];
+        // Dedupe by name (first occurrence = most recent due to desc order)
+        if (!techMap[jid].includes(r.employee_name)) {
+          techMap[jid].push(r.employee_name);
+        }
+      });
+    }
+    _jobTechHistory = techMap;
+
+    console.log('[job-audit] loaded ' + Object.keys(dispatchMap).length + ' dispatch records, ' + Object.keys(techMap).length + ' jobs with tech history');
+  } catch(e) {
+    console.warn('[job-audit] load error:', e);
+  }
+}
+
+// Build the footer HTML for a job card showing last dispatch + tech history.
+// Returns empty string if neither piece of info is available (clean card).
+function _jobAuditFooter(jid){
+  const d = _jobLastDispatch[jid];
+  const techs = _jobTechHistory[jid];
+  if (!d && (!techs || !techs.length)) return '';
+
+  let lines = '';
+
+  if (d) {
+    const verb = d.action === 'INSERT' ? 'assigned' : (d.action === 'UPDATE' ? 'moved' : 'removed');
+    // Resolve tech_id to name if we have it in the techQ map
+    let toTech = '';
+    if (d.tech_id && d.action !== 'DELETE') {
+      // Look across both markets to find the tech name
+      for (const l of ['appleton','stevens']) {
+        for (const [nm, t] of Object.entries(techQ[l] || {})) {
+          if (t.id === d.tech_id) { toTech = ' to ' + nm.split(' ')[0]; break; }
+        }
+        if (toTech) break;
+      }
+    }
+    const actorFirst = (d.actor || 'Someone').split(' ')[0];
+    const ago = _fmtAgo(d.ts);
+    lines += '<div class="c-audit-line">' + actorFirst + ' ' + verb + toTech + ' · ' + ago + '</div>';
+  }
+
+  if (techs && techs.length) {
+    // First names only, comma-joined, max 4 then "+N more"
+    const firstNames = techs.map(n => n.split(' ')[0]);
+    let display;
+    if (firstNames.length <= 4) {
+      display = firstNames.join(', ');
+    } else {
+      display = firstNames.slice(0, 4).join(', ') + ' +' + (firstNames.length - 4);
+    }
+    lines += '<div class="c-audit-line c-audit-techs">🔧 ' + display + '</div>';
+  }
+
+  return '<div class="c-audit-footer">' + lines + '</div>';
+}
+
+// Format a timestamp as "2h ago", "3d ago", etc.
+function _fmtAgo(iso){
+  if (!iso) return '';
+  const ms = Date.now() - new Date(iso).getTime();
+  if (ms < 0) return 'just now';
+  const s = Math.floor(ms/1000);
+  if (s < 60) return 'just now';
+  const m = Math.floor(s/60);
+  if (m < 60) return m + 'm ago';
+  const h = Math.floor(m/60);
+  if (h < 24) return h + 'h ago';
+  const days = Math.floor(h/24);
+  if (days < 30) return days + 'd ago';
+  const months = Math.floor(days/30);
+  return months + 'mo ago';
+}
 
 async function loadClockedInJobs(){
   // Only meaningful when viewing today
@@ -2063,7 +2187,8 @@ function renderBoard(){
             onclick="event.stopPropagation()"
             onchange="event.stopPropagation();setJobTime('${nm}','${jid}',null,this.value)">
         </div>
-      </div>`}`;
+      </div>
+      ${_jobAuditFooter(jid)}`}`;
       card.addEventListener('dragstart',onDS);card.addEventListener('dragend',onDE);
       body.appendChild(card);pLat=j.lat;pLng=j.lng;
     });
@@ -2144,7 +2269,8 @@ function renderBoard(){
               onclick="event.stopPropagation()"
               onchange="event.stopPropagation();setJobTime('${nm}','${jid}',null,this.value)">
           </div>
-        </div>`}`;
+        </div>
+        ${_jobAuditFooter(jid)}`}`;
         card.addEventListener('dragstart',(e)=>{
           card.dataset.wasDragged='1';
           onCardDragStart(e,nm,jid);
@@ -3497,6 +3623,8 @@ function initRealtime() {
             unassigned[l] = [];
           }
           await loadFromV2();
+          // Refresh audit maps too — dispatchers in other sessions may have moved jobs
+          await loadJobAuditMaps();
           const after = JSON.stringify(getBoardStatePayload().assignments);
           if (before !== after) {
             render();
