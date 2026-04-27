@@ -645,6 +645,28 @@
   .msg-status-bad { color: var(--red); font-weight: 700; }
   .msg-status-rx { color: var(--green); font-weight: 700; }
 
+  .msg-att-list { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+  .msg-att-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 8px;
+    background: #eef0f7;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    font-size: 11px;
+    color: var(--navy);
+  }
+  .msg-att-chip a { color: var(--navy); text-decoration: none; font-weight: 600; }
+  .msg-att-chip a:hover { color: var(--orange); }
+  .msg-att-chip .remove {
+    cursor: pointer;
+    color: var(--red);
+    font-weight: 700;
+    margin-left: 2px;
+  }
+  .msg-row .msg-att-list { margin-top: 8px; margin-bottom: 0; }
+
   /* ──── Modal ──── */
   .modal-back {
     position: fixed; inset: 0;
@@ -1270,7 +1292,7 @@ async function loadSelections() {
 async function loadMessages() {
   if (!sb) { state.messages = []; return; }
   const { data } = await sb.from('rebuild_messages')
-    .select('*, recipient_sub:rebuild_subs(id, company_name, primary_contact)')
+    .select('*, recipient_sub:rebuild_subs(id, company_name, primary_contact), attachments:rebuild_message_attachments(id, file_name, file_size, mime_type, public_url)')
     .eq('project_id', state.activeProjectId)
     .order('created_at', { ascending: false }).limit(200);
   state.messages = data || [];
@@ -1496,14 +1518,45 @@ function renderTabContent() {
     const toEl = $('#msg_to');
     const subWrap = $('#msg_subject_wrap');
     const info = $('#msg_send_info');
+    const attachBtn = $('#msg_attach_btn');
+    const attachWrap = $('#msg_attachments_wrap');
+    const attachList = $('#msg_attachments_list');
+    const fileInput = $('#msg_file_input');
+
+    // Reset staged files when re-entering tab
+    state.stagedAttachments = [];
+
+    const renderStaged = () => {
+      if (!attachList) return;
+      if (!state.stagedAttachments.length) {
+        attachList.innerHTML = '';
+        return;
+      }
+      attachList.innerHTML = state.stagedAttachments.map((f, i) => `
+        <span class="msg-att-chip">
+          📄 ${f.name} <span style="color:var(--muted);">(${(f.size/1024).toFixed(0)} KB)</span>
+          <span class="remove" data-i="${i}" title="Remove">✕</span>
+        </span>
+      `).join('');
+      attachList.querySelectorAll('.remove').forEach(el => {
+        el.addEventListener('click', () => {
+          state.stagedAttachments.splice(parseInt(el.dataset.i), 1);
+          renderStaged();
+        });
+      });
+    };
 
     const updateUi = () => {
       const isEmail = channelEl.value === 'email';
       const isInternal = toEl.value === 'internal';
       if (subWrap) subWrap.style.display = (isEmail && !isInternal) ? 'block' : 'none';
+      // Attachments only available for email (per spec — email-only)
+      const showAttach = isEmail && !isInternal;
+      if (attachBtn) attachBtn.style.display = showAttach ? 'inline-block' : 'none';
+      if (attachWrap) attachWrap.style.display = (showAttach && state.stagedAttachments.length) ? 'block' : 'none';
       if (isInternal) channelEl.disabled = true;
       else channelEl.disabled = false;
-      // Helper text below send button
+
       const p = state.activeProject;
       let hint = '';
       if (isInternal) hint = 'Internal note — not sent, never visible to customer/sub';
@@ -1519,6 +1572,16 @@ function renderTabContent() {
       }
       if (info) info.textContent = hint;
     };
+
+    if (attachBtn && fileInput) {
+      attachBtn.addEventListener('click', () => fileInput.click());
+      fileInput.addEventListener('change', () => {
+        for (const f of fileInput.files) state.stagedAttachments.push(f);
+        fileInput.value = '';
+        if (attachWrap) attachWrap.style.display = state.stagedAttachments.length ? 'block' : 'none';
+        renderStaged();
+      });
+    }
     if (channelEl) channelEl.addEventListener('change', updateUi);
     if (toEl) toEl.addEventListener('change', updateUi);
     if (sendBtn) sendBtn.addEventListener('click', () => sendMessage());
@@ -1769,8 +1832,15 @@ function renderMessagesTab() {
           </div>
         </div>
         <textarea id="msg_body" placeholder="Type your message…" rows="4"></textarea>
+        <div id="msg_attachments_wrap" style="display:none;margin-top:8px;">
+          <div id="msg_attachments_list" class="msg-att-list"></div>
+          <input type="file" id="msg_file_input" multiple style="display:none;">
+        </div>
         <div class="msg-composer-foot">
-          <span id="msg_send_info" style="font-size:11px;color:var(--muted);"></span>
+          <div style="display:flex;align-items:center;gap:10px;">
+            <button class="btn" id="msg_attach_btn" type="button" style="display:none;">📎 Attach files</button>
+            <span id="msg_send_info" style="font-size:11px;color:var(--muted);"></span>
+          </div>
           <button class="btn primary" id="msg_send_btn">Send</button>
         </div>
       </div>
@@ -1796,6 +1866,16 @@ function renderMessageRow(m) {
     : m.status === 'received'
       ? `<span class="msg-status-rx">Received</span>`
       : '';
+  const attachments = m.attachments || [];
+  const attachHtml = attachments.length ? `
+    <div class="msg-att-list">
+      ${attachments.map(a => `
+        <span class="msg-att-chip">
+          📎 <a href="${a.public_url}" target="_blank" rel="noopener">${a.file_name}</a>
+          ${a.file_size ? `<span style="color:var(--muted);">(${(a.file_size/1024).toFixed(0)} KB)</span>` : ''}
+        </span>
+      `).join('')}
+    </div>` : '';
   return `
     <div class="msg-row msg-${m.recipient_type} msg-dir-${m.direction}">
       <div class="msg-row-head">
@@ -1806,6 +1886,7 @@ function renderMessageRow(m) {
       </div>
       ${m.subject ? `<div class="msg-subject"><b>${m.subject}</b></div>` : ''}
       <div class="msg-body">${m.body.replace(/</g,'&lt;').replace(/\n/g,'<br>')}</div>
+      ${attachHtml}
       <div class="msg-row-foot">
         <span>by ${sender}</span>
         ${m.recipient_phone ? `<span> · ${fmtPhone(m.recipient_phone)}</span>` : ''}
@@ -1880,6 +1961,37 @@ async function sendMessage() {
   if (error) { toast('Save failed: ' + error.message); return; }
   const inserted = insertedArr?.[0];
 
+  // Upload staged attachments (email only)
+  const uploadedAttachments = [];
+  const stagedFiles = (channel === 'email' && !isInternal) ? (state.stagedAttachments || []) : [];
+  if (stagedFiles.length && inserted) {
+    for (const file of stagedFiles) {
+      const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+      const path = `${inserted.id}/${Date.now()}-${safeName}`;
+      const { error: upErr } = await sb.storage
+        .from('rebuild-message-attachments')
+        .upload(path, file, { contentType: file.type, upsert: false });
+      if (upErr) {
+        console.error('Upload failed:', upErr);
+        toast('Attachment upload failed: ' + file.name);
+        continue;
+      }
+      const { data: urlData } = sb.storage
+        .from('rebuild-message-attachments')
+        .getPublicUrl(path);
+      const publicUrl = urlData.publicUrl;
+      await sb.from('rebuild_message_attachments').insert({
+        message_id: inserted.id,
+        file_name: file.name,
+        file_size: file.size,
+        mime_type: file.type,
+        storage_path: path,
+        public_url: publicUrl,
+      });
+      uploadedAttachments.push({ name: file.name, url: publicUrl, size: file.size, type: file.type });
+    }
+  }
+
   // Fire-and-forget to Zapier (skip for internal notes)
   if (!isInternal) {
     const payload = {
@@ -1896,6 +2008,15 @@ async function sendMessage() {
       recipient_type: recipient.type,
       subject: subject || `Re: ${p.albi_job_number || 'project'}`,
       body: body,
+      // Attachments — Zapier Gmail action takes a comma-separated list of URLs
+      attachment_count: uploadedAttachments.length,
+      attachment_urls: uploadedAttachments.map(a => a.url).join(','),
+      attachment_url_1: uploadedAttachments[0]?.url || '',
+      attachment_url_2: uploadedAttachments[1]?.url || '',
+      attachment_url_3: uploadedAttachments[2]?.url || '',
+      attachment_url_4: uploadedAttachments[3]?.url || '',
+      attachment_url_5: uploadedAttachments[4]?.url || '',
+      attachment_names: uploadedAttachments.map(a => a.name).join(', '),
     };
     try {
       await fetch(MESSAGE_HOOK, {
@@ -1904,7 +2025,6 @@ async function sendMessage() {
         body: JSON.stringify(payload),
         mode: 'no-cors',
       });
-      // Mark sent
       if (inserted) await sb.from('rebuild_messages').update({ status: 'sent' }).eq('id', inserted.id);
     } catch (e) {
       console.warn('Zapier send failed:', e);
@@ -1912,19 +2032,21 @@ async function sendMessage() {
     }
   }
 
-  // Log to Albi timeline (excluding internal notes — those stay private)
+  // Log to Albi timeline
   if (!isInternal) {
     const channelLabel = channel === 'sms' ? 'SMS' : 'Email';
     const recipLabel = recipient.type === 'customer'
       ? `customer (${recipient.name})`
       : `sub (${state.subs.find(s => s.id === recipient.sub_id)?.company_name || recipient.name})`;
     const preview = body.length > 200 ? body.substring(0, 200) + '…' : body;
-    logToAlbi(`message_${recipient.type}_out`, `${channelLabel} sent to ${recipLabel}: ${preview}`);
+    const attachNote = uploadedAttachments.length ? ` [+${uploadedAttachments.length} attachment${uploadedAttachments.length>1?'s':''}]` : '';
+    logToAlbi(`message_${recipient.type}_out`, `${channelLabel} sent to ${recipLabel}${attachNote}: ${preview}`);
   }
 
   toast(isInternal ? 'Note saved' : 'Message sent');
   $('#msg_body').value = '';
   if ($('#msg_subject')) $('#msg_subject').value = '';
+  state.stagedAttachments = [];
   await loadMessages();
   renderDetail();
 }
