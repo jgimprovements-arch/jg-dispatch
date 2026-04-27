@@ -1079,9 +1079,10 @@ function _v2Actor(){
 // ─────────────────────────────────────────────────────────────────────────────
 // Polls time_entries every 30s for clock_out IS NULL entries (active sessions).
 // Realtime channel also subscribes for instant updates on clock_in/clock_out.
-// _clockedInJobs maps job_id -> count of techs currently clocked in.
-
-let _clockedInJobs = {}; // { '1864213': 2, '1890382': 1, ... }
+// _clockedInJobs maps job_id -> array of tech names currently clocked in.
+// Keyed by job_id with a set of employee_names so we can match against the
+// specific tech lane each card belongs to (not pulse cards on non-active techs).
+let _clockedInJobs = {}; // { '1864213': ['Christina Corral','Mike Smith'], ... }
 let _clockedInChannel = null;
 
 // ── JOB AUDIT MAPS ─────────────────────────────────────────────────────────
@@ -1240,15 +1241,18 @@ async function loadClockedInJobs(){
       return;
     }
     const entries = await r.json();
-    const counts = {};
+    const byJob = {};
     entries.forEach(e => {
-      if (e.job_id) {
+      if (e.job_id && e.employee_name) {
         const key = String(e.job_id);
-        counts[key] = (counts[key] || 0) + 1;
+        if (!byJob[key]) byJob[key] = [];
+        if (byJob[key].indexOf(e.employee_name) === -1) {
+          byJob[key].push(e.employee_name);
+        }
       }
     });
-    _clockedInJobs = counts;
-    console.log('[clocked-in] ' + entries.length + ' active sessions, ' + Object.keys(counts).length + ' jobs');
+    _clockedInJobs = byJob;
+    console.log('[clocked-in] ' + entries.length + ' active sessions, ' + Object.keys(byJob).length + ' jobs');
     _applyClockedInToCards();
   } catch(e) {
     console.warn('[clocked-in] error:', e);
@@ -1258,21 +1262,30 @@ async function loadClockedInJobs(){
 function _applyClockedInToCards(){
   // Remove all existing pulse indicators
   document.querySelectorAll('.clocked-in-pulse, .clocked-in-count').forEach(el => el.remove());
-  // Add to current cards
+  // Add to cards ONLY where the lane's tech is actually the one clocked in.
+  // Same job assigned to multiple techs (team work) only pulses on the lane
+  // of the tech actually clocked in — not on every card carrying that job.
   document.querySelectorAll('.job-card[data-job-id]').forEach(card => {
     const jid = card.dataset.jobId;
-    const count = _clockedInJobs[jid];
-    if (count) {
-      const pulse = document.createElement('div');
-      pulse.className = 'clocked-in-pulse';
-      pulse.title = count > 1 ? count + ' techs clocked in' : 'Tech clocked in';
-      card.appendChild(pulse);
-      if (count > 1) {
-        const badge = document.createElement('div');
-        badge.className = 'clocked-in-count';
-        badge.textContent = count;
-        card.appendChild(badge);
-      }
+    const laneTech = card.dataset.tech; // set in card render: card.dataset.tech = nm
+    const techsOnJob = _clockedInJobs[jid];
+    if (!techsOnJob || !techsOnJob.length || !laneTech) return;
+    if (techsOnJob.indexOf(laneTech) === -1) return; // this lane's tech isn't clocked in
+    const pulse = document.createElement('div');
+    pulse.className = 'clocked-in-pulse';
+    pulse.title = laneTech + ' clocked in';
+    card.appendChild(pulse);
+    // Multi-tech badge: only show if MULTIPLE techs assigned to this card
+    // are simultaneously clocked in (rare but possible for true team work)
+    if (techsOnJob.length > 1) {
+      // Count how many of this card's lane-relevant tech sessions are active.
+      // Since the card belongs to one tech lane, we just show total active for
+      // context — informative without being misleading.
+      const badge = document.createElement('div');
+      badge.className = 'clocked-in-count';
+      badge.textContent = techsOnJob.length;
+      badge.title = techsOnJob.join(', ') + ' clocked in';
+      card.appendChild(badge);
     }
   });
 }
