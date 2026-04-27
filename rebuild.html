@@ -290,7 +290,7 @@
     border-radius: 6px;
     padding: 11px 14px;
     display: grid;
-    grid-template-columns: 30px minmax(140px, 1.5fr) minmax(110px, 1fr) minmax(120px, 1fr) 100px 80px;
+    grid-template-columns: 60px minmax(140px, 1.5fr) minmax(110px, 1fr) minmax(120px, 1fr) 100px 80px;
     align-items: center;
     gap: 10px;
     font-size: 13px;
@@ -305,7 +305,15 @@
     font-size: 11px;
     color: var(--muted);
     font-weight: 700;
+    cursor: grab;
+    user-select: none;
+    white-space: nowrap;
   }
+  .phase .seq:active { cursor: grabbing; }
+  .phase[draggable="true"] { transition: opacity .15s; }
+  .phase.dragging { opacity: 0.4; }
+  .phase.drag-over-top { border-top: 2px solid var(--orange); }
+  .phase.drag-over-bottom { border-bottom: 2px solid var(--orange); }
   .phase .name { font-weight: 600; color: var(--navy); }
   .phase .name .trade {
     display: block;
@@ -1222,6 +1230,7 @@ function renderTabContent() {
   if (state.tab === 'phases') {
     const addBtn = $('#btnAddPhase');
     if (addBtn) addBtn.addEventListener('click', () => addNewPhase());
+    let _draggedId = null;
     $$('.phase').forEach(row => {
       const id = row.dataset.id;
       row.style.cursor = 'pointer';
@@ -1232,6 +1241,35 @@ function renderTabContent() {
       if (advBtn) advBtn.addEventListener('click', e => { e.stopPropagation(); advancePhaseStatus(id); });
       const delayBtn = row.querySelector('[data-act="delay"]');
       if (delayBtn) delayBtn.addEventListener('click', e => { e.stopPropagation(); openDelayModal(id); });
+
+      // Drag handlers
+      row.addEventListener('dragstart', e => {
+        _draggedId = id;
+        row.classList.add('dragging');
+        e.dataTransfer.effectAllowed = 'move';
+      });
+      row.addEventListener('dragend', () => {
+        row.classList.remove('dragging');
+        $$('.phase').forEach(r => r.classList.remove('drag-over-top','drag-over-bottom'));
+      });
+      row.addEventListener('dragover', e => {
+        e.preventDefault();
+        if (id === _draggedId) return;
+        const rect = row.getBoundingClientRect();
+        const above = e.clientY < rect.top + rect.height / 2;
+        $$('.phase').forEach(r => r.classList.remove('drag-over-top','drag-over-bottom'));
+        row.classList.add(above ? 'drag-over-top' : 'drag-over-bottom');
+      });
+      row.addEventListener('dragleave', () => {
+        row.classList.remove('drag-over-top','drag-over-bottom');
+      });
+      row.addEventListener('drop', e => {
+        e.preventDefault();
+        if (!_draggedId || _draggedId === id) return;
+        const rect = row.getBoundingClientRect();
+        const above = e.clientY < rect.top + rect.height / 2;
+        reorderPhase(_draggedId, id, above);
+      });
     });
     // Calendar bar clicks open phase editor
     $$('.cal-row').forEach(row => {
@@ -1390,8 +1428,8 @@ function phaseRowHtml(ph) {
   const isLate = ph.status === 'in_progress' && ph.scheduled_end && new Date() > new Date(ph.scheduled_end);
   const showDelayBtn = isLate && !ph.delay_attribution;
   return `
-    <div class="phase ${ph.status}" data-id="${ph.id}">
-      <div class="seq">${String(ph.sequence).padStart(2,'0')}</div>
+    <div class="phase ${ph.status}" data-id="${ph.id}" draggable="true">
+      <div class="seq" title="Drag to reorder">⋮⋮ ${String(ph.sequence).padStart(2,'0')}</div>
       <div class="name">
         ${ph.phase_name}
         ${ph.delay_attribution && ph.delay_attribution !== 'none'
@@ -1480,6 +1518,53 @@ function renderAuditTab() {
 }
 
 // ──── Phase editor ────
+async function reorderPhase(draggedId, targetId, above) {
+  // Build new ordered list
+  const ordered = [...state.phases].sort((a,b) => a.sequence - b.sequence);
+  const dragged = ordered.find(p => p.id === draggedId);
+  const target = ordered.find(p => p.id === targetId);
+  if (!dragged || !target) return;
+
+  // Remove dragged, insert at target position
+  const without = ordered.filter(p => p.id !== draggedId);
+  const targetIdx = without.findIndex(p => p.id === targetId);
+  const insertAt = above ? targetIdx : targetIdx + 1;
+  without.splice(insertAt, 0, dragged);
+
+  // Renumber sequences in increments of 10
+  const updates = without.map((p, i) => ({ id: p.id, sequence: (i + 1) * 10 }));
+
+  // Apply optimistically to local state
+  for (const u of updates) {
+    const ph = state.phases.find(p => p.id === u.id);
+    if (ph) ph.sequence = u.sequence;
+  }
+  renderDetail();
+
+  // Persist — sequence column has UNIQUE (project_id, sequence) so we need to bump
+  // through a temp range to avoid collisions. Easiest: shift all to negative first, then to final.
+  if (sb) {
+    try {
+      // Step 1: shift everyone to negative space (avoids unique-constraint collision)
+      for (let i = 0; i < updates.length; i++) {
+        const u = updates[i];
+        await sb.from('rebuild_phases').update({ sequence: -(i + 1) }).eq('id', u.id);
+      }
+      // Step 2: settle to final sequences
+      for (const u of updates) {
+        await sb.from('rebuild_phases').update({ sequence: u.sequence }).eq('id', u.id);
+      }
+      toast('Reordered');
+      await loadPhases(); await loadHistory();
+      renderDetail();
+    } catch (e) {
+      toast('Reorder failed: ' + e.message);
+      console.error(e);
+      await loadPhases(); renderDetail();
+    }
+  }
+}
+
 async function addNewPhase() {
   const name = prompt('Phase name?');
   if (!name) return;
