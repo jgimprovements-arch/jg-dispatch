@@ -3077,6 +3077,62 @@ async function saveOCData(){
   }
 }
 
+// Auto-save: debounced silent save triggered after any on-call change.
+// Fires 800ms after the user's last action — avoids spamming Supabase
+// on bulk edits (e.g., Fill Week applies 6+ changes in rapid succession).
+let _ocAutoSaveTimer = null;
+function scheduleOCAutoSave(){
+  // Always update localStorage immediately so the data is safe even if
+  // the page closes before the Supabase write fires.
+  try { localStorage.setItem('jg_oncall_v2', JSON.stringify(ocData)); } catch(e){}
+  // Visual feedback: show "Saving..." status near the Save button
+  _setOCSaveStatus('saving');
+  clearTimeout(_ocAutoSaveTimer);
+  _ocAutoSaveTimer = setTimeout(async function(){
+    try {
+      const r = await sbFetch('/rest/v1/oncall_schedule', {
+        method: 'POST',
+        prefer: 'resolution=merge-duplicates',
+        body: JSON.stringify({ id: 'current', data: ocData, updated_at: new Date().toISOString() })
+      });
+      if (r && r.ok) {
+        _setOCSaveStatus('saved');
+      } else {
+        _setOCSaveStatus('error');
+      }
+    } catch(e) {
+      _setOCSaveStatus('error');
+    }
+  }, 800);
+}
+
+function _setOCSaveStatus(state){
+  // Find or create a small status indicator next to the Save button
+  let el = document.getElementById('oc-save-status');
+  if (!el) {
+    const saveBtn = document.querySelector('#oncall-panel button[onclick="saveOCData()"]');
+    if (!saveBtn) return;
+    el = document.createElement('span');
+    el.id = 'oc-save-status';
+    el.style.cssText = 'margin-left:10px;font-size:11px;font-weight:600;';
+    saveBtn.parentNode.insertBefore(el, saveBtn.nextSibling);
+  }
+  if (state === 'saving') {
+    el.textContent = '⏳ Saving...';
+    el.style.color = 'var(--muted)';
+  } else if (state === 'saved') {
+    el.textContent = '✓ Saved';
+    el.style.color = 'var(--green, #2e7d32)';
+    // Fade after 2 seconds
+    setTimeout(function(){ if (el.textContent === '✓ Saved') el.textContent = ''; }, 2000);
+  } else if (state === 'error') {
+    el.textContent = '⚠ Save failed — local only';
+    el.style.color = 'var(--danger, #c62828)';
+  } else {
+    el.textContent = '';
+  }
+}
+
 async function loadOCData(){
   // Try Supabase first, fallback to localStorage
   try {
@@ -3133,6 +3189,7 @@ function applyWeekTemplate(locKey, mKey, mondayDate){
     }
   });
   renderOCMonth();
+  scheduleOCAutoSave();
 }
 
 function renderOCLocation(locKey, monthDate, mKey){
@@ -3255,6 +3312,7 @@ function renderOCLocation(locKey, monthDate, mKey){
         } else {
           sel.style.outline='none';
         }
+        scheduleOCAutoSave();
       });
 
       slotWrap.appendChild(sel);
