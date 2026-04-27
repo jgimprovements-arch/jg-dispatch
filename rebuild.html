@@ -589,6 +589,62 @@
     letter-spacing: .5px;
   }
 
+  /* ──── Messages tab ──── */
+  .msg-wrap { display: flex; flex-direction: column; gap: 16px; }
+  .msg-composer {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 14px;
+  }
+  .msg-composer .msg-composer-head { margin-bottom: 8px; }
+  .msg-composer .row { display: grid; grid-template-columns: 2fr 1fr; gap: 10px; margin-bottom: 8px; }
+  .msg-composer label { display: block; font-size: 11px; font-weight: 700; color: var(--muted); margin-bottom: 4px; text-transform: uppercase; letter-spacing: .3px; }
+  .msg-composer select, .msg-composer input, .msg-composer textarea {
+    width: 100%;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 8px 10px;
+    font-size: 13px;
+    font-family: inherit;
+  }
+  .msg-composer textarea { resize: vertical; min-height: 80px; }
+  .msg-composer-foot {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 8px;
+  }
+  .msg-list { display: flex; flex-direction: column; gap: 8px; }
+  .msg-row {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--line);
+    border-radius: 6px;
+    padding: 10px 12px;
+  }
+  .msg-row.msg-customer { border-left-color: var(--orange); }
+  .msg-row.msg-sub { border-left-color: var(--navy); }
+  .msg-row.msg-internal { border-left-color: var(--gold); background: #fffbf0; }
+  .msg-row.msg-dir-inbound { background: #f4f8fe; }
+  .msg-row-head {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    font-size: 11px;
+    color: var(--muted);
+    margin-bottom: 4px;
+    flex-wrap: wrap;
+  }
+  .msg-row .msg-who { font-weight: 700; color: var(--navy); font-size: 12px; }
+  .msg-row .msg-channel { font-weight: 600; }
+  .msg-row .msg-time { margin-left: auto; }
+  .msg-row .msg-subject { font-size: 12px; margin-bottom: 4px; color: var(--text); }
+  .msg-row .msg-body { font-size: 13px; color: var(--text); white-space: pre-wrap; line-height: 1.45; }
+  .msg-row .msg-row-foot { font-size: 10px; color: var(--muted); margin-top: 6px; }
+  .msg-status-bad { color: var(--red); font-weight: 700; }
+  .msg-status-rx { color: var(--green); font-weight: 700; }
+
   /* ──── Modal ──── */
   .modal-back {
     position: fixed; inset: 0;
@@ -815,6 +871,7 @@ const state = {
   activeProject: null,
   phases: [],
   selections: [],
+  messages: [],
   history: [],
   filterStatus: 'all',
   filterPm: 'all',
@@ -985,6 +1042,7 @@ $('#searchInput').addEventListener('input', e => {
 // Vercel proxy URL — same pattern as dispatch (jg-proxy-v2)
 const ALBI_PROXY_URL = 'https://jg-proxy-v2.vercel.app/api/albi';
 const ALBI_NOTE_HOOK = 'https://hooks.zapier.com/hooks/catch/12653197/uvugxag/';
+const MESSAGE_HOOK = 'https://hooks.zapier.com/hooks/catch/12653197/uvule41/';
 const VALID_SUFFIXES = new Set(['BRD','REB','REM','RZE']);
 
 // Fire-and-forget post to Albi timeline note via Zapier.
@@ -1181,7 +1239,7 @@ async function selectProject(id) {
   state.activeProject = state.projects.find(p => p.id === id);
   renderProjects();
   if (!state.activeProject) return;
-  await Promise.all([loadPhases(), loadSelections(), loadHistory()]);
+  await Promise.all([loadPhases(), loadSelections(), loadMessages(), loadHistory()]);
   renderDetail();
 }
 
@@ -1199,6 +1257,15 @@ async function loadSelections() {
   const { data } = await sb.from('rebuild_customer_selections')
     .select('*').eq('project_id', state.activeProjectId).order('due_date', { nullsFirst: false });
   state.selections = data || [];
+}
+
+async function loadMessages() {
+  if (!sb) { state.messages = []; return; }
+  const { data } = await sb.from('rebuild_messages')
+    .select('*, recipient_sub:rebuild_subs(id, company_name, primary_contact)')
+    .eq('project_id', state.activeProjectId)
+    .order('created_at', { ascending: false }).limit(200);
+  state.messages = data || [];
 }
 
 async function loadHistory() {
@@ -1345,10 +1412,11 @@ function renderTabContent() {
   const c = $('#tabContent');
   if (state.tab === 'phases')      c.innerHTML = renderPhasesTab();
   else if (state.tab === 'selections') c.innerHTML = renderSelectionsTab();
+  else if (state.tab === 'messages') c.innerHTML = renderMessagesTab();
   else if (state.tab === 'audit')   c.innerHTML = renderAuditTab();
   else c.innerHTML = `<div class="empty" style="padding:40px 20px;">
     <h2 style="font-size:15px;">Coming next session</h2>
-    <p>${state.tab.charAt(0).toUpperCase()+state.tab.slice(1)} module ships in session 2 (sub portal + customer portal + messaging) or session 3 (documents).</p>
+    <p>${state.tab.charAt(0).toUpperCase()+state.tab.slice(1)} module ships in session 2 (sub portal + customer portal) or session 3 (documents).</p>
   </div>`;
 
   // Wire phase actions if we just rendered phases
@@ -1411,6 +1479,42 @@ function renderTabContent() {
     const pdfBtn = $('#btnAuditPdf');
     if (csvBtn) csvBtn.addEventListener('click', () => exportAuditCsv());
     if (pdfBtn) pdfBtn.addEventListener('click', () => exportAuditPdf());
+  }
+
+  // Wire messages tab
+  if (state.tab === 'messages') {
+    const sendBtn = $('#msg_send_btn');
+    const channelEl = $('#msg_channel');
+    const toEl = $('#msg_to');
+    const subWrap = $('#msg_subject_wrap');
+    const info = $('#msg_send_info');
+
+    const updateUi = () => {
+      const isEmail = channelEl.value === 'email';
+      const isInternal = toEl.value === 'internal';
+      if (subWrap) subWrap.style.display = (isEmail && !isInternal) ? 'block' : 'none';
+      if (isInternal) channelEl.disabled = true;
+      else channelEl.disabled = false;
+      // Helper text below send button
+      const p = state.activeProject;
+      let hint = '';
+      if (isInternal) hint = 'Internal note — not sent, never visible to customer/sub';
+      else if (toEl.value === 'customer') {
+        if (channelEl.value === 'sms') hint = p.customer_phone ? 'Send SMS to ' + fmtPhone(p.customer_phone) : 'No customer phone on file';
+        else hint = p.customer_email ? 'Send email to ' + p.customer_email : 'No customer email on file';
+      } else if (toEl.value.startsWith('sub:')) {
+        const sub = state.subs.find(s => s.id === toEl.value.substring(4));
+        if (sub) {
+          if (channelEl.value === 'sms') hint = sub.phone ? 'Send SMS to ' + fmtPhone(sub.phone) : 'No phone on file for ' + sub.company_name;
+          else hint = sub.email ? 'Send email to ' + sub.email : 'No email on file for ' + sub.company_name;
+        }
+      }
+      if (info) info.textContent = hint;
+    };
+    if (channelEl) channelEl.addEventListener('change', updateUi);
+    if (toEl) toEl.addEventListener('change', updateUi);
+    if (sendBtn) sendBtn.addEventListener('click', () => sendMessage());
+    updateUi();
   }
 }
 
@@ -1610,6 +1714,211 @@ function renderSelectionsTab() {
         </div>`;
     }).join('')}
   `;
+}
+
+function renderMessagesTab() {
+  const p = state.activeProject;
+  const msgs = state.messages;
+
+  // Build sub options for the To dropdown — pull from assigned-on-this-project first, then full roster
+  const assignedSubIds = new Set(state.phases.map(ph => ph.assigned_sub_id).filter(Boolean));
+  const assignedSubs = state.subs.filter(s => assignedSubIds.has(s.id));
+  const otherSubs = state.subs.filter(s => !assignedSubIds.has(s.id));
+
+  const subOptions = [
+    ...(assignedSubs.length ? [`<optgroup label="On this project">`,
+      ...assignedSubs.map(s => `<option value="sub:${s.id}">${s.company_name}${s.primary_contact ? ' · ' + s.primary_contact : ''}</option>`),
+      `</optgroup>`] : []),
+    `<optgroup label="All subs">`,
+    ...otherSubs.map(s => `<option value="sub:${s.id}">${s.company_name}${s.primary_contact ? ' · ' + s.primary_contact : ''}</option>`),
+    `</optgroup>`,
+  ].join('');
+
+  return `
+    <div class="msg-wrap">
+      <div class="msg-composer">
+        <div class="msg-composer-head">
+          <div class="row">
+            <div>
+              <label>To</label>
+              <select id="msg_to">
+                ${p.customer_name ? `<option value="customer">👤 Customer · ${p.customer_name}</option>` : ''}
+                ${subOptions}
+                <option value="internal">📝 Internal note (no send)</option>
+              </select>
+            </div>
+            <div>
+              <label>Channel</label>
+              <select id="msg_channel">
+                <option value="sms">📱 SMS</option>
+                <option value="email">✉ Email</option>
+              </select>
+            </div>
+          </div>
+          <div id="msg_subject_wrap" style="display:none;">
+            <label>Subject</label>
+            <input id="msg_subject" placeholder="Re: ${p.albi_job_number || 'project'}">
+          </div>
+        </div>
+        <textarea id="msg_body" placeholder="Type your message…" rows="4"></textarea>
+        <div class="msg-composer-foot">
+          <span id="msg_send_info" style="font-size:11px;color:var(--muted);"></span>
+          <button class="btn primary" id="msg_send_btn">Send</button>
+        </div>
+      </div>
+
+      <div class="msg-list">
+        ${msgs.length === 0 ? `<div class="empty" style="padding:20px;color:var(--muted);font-size:12px;">No messages yet on this project.</div>` : msgs.map(m => renderMessageRow(m)).join('')}
+      </div>
+    </div>
+  `;
+}
+
+function renderMessageRow(m) {
+  const who = m.recipient_type === 'customer'
+    ? `👤 ${m.recipient_name || 'Customer'}`
+    : m.recipient_type === 'sub'
+      ? `🛠 ${m.recipient_sub?.company_name || m.recipient_name || 'Sub'}`
+      : `📝 Internal Note`;
+  const channelIcon = m.channel === 'sms' ? '📱' : (m.channel === 'email' ? '✉' : '📝');
+  const dirIcon = m.direction === 'inbound' ? '⇠' : '⇢';
+  const sender = m.sent_by_name || m.sent_by_email || 'platform';
+  const statusBadge = m.status === 'failed'
+    ? `<span class="msg-status-bad">Failed</span>`
+    : m.status === 'received'
+      ? `<span class="msg-status-rx">Received</span>`
+      : '';
+  return `
+    <div class="msg-row msg-${m.recipient_type} msg-dir-${m.direction}">
+      <div class="msg-row-head">
+        <span class="msg-who">${dirIcon} ${who}</span>
+        <span class="msg-channel">${channelIcon} ${titleCase(m.channel === 'internal_note' ? 'note' : m.channel)}</span>
+        <span class="msg-time">${fmtDateTime(m.created_at)}</span>
+        ${statusBadge}
+      </div>
+      ${m.subject ? `<div class="msg-subject"><b>${m.subject}</b></div>` : ''}
+      <div class="msg-body">${m.body.replace(/</g,'&lt;').replace(/\n/g,'<br>')}</div>
+      <div class="msg-row-foot">
+        <span>by ${sender}</span>
+        ${m.recipient_phone ? `<span> · ${fmtPhone(m.recipient_phone)}</span>` : ''}
+        ${m.recipient_email ? `<span> · ${m.recipient_email}</span>` : ''}
+      </div>
+    </div>`;
+}
+
+async function sendMessage() {
+  const p = state.activeProject;
+  if (!p) return;
+  const toVal = $('#msg_to').value;
+  const channel = $('#msg_channel').value;
+  const body = $('#msg_body').value.trim();
+  const subject = $('#msg_subject') ? $('#msg_subject').value.trim() : '';
+  if (!body) { toast('Message body required'); return; }
+
+  // Resolve recipient
+  let recipient = { type: null, sub_id: null, name: null, phone: null, email: null };
+  if (toVal === 'customer') {
+    if (!p.customer_name) { toast('No customer on this project'); return; }
+    recipient = {
+      type: 'customer',
+      sub_id: null,
+      name: p.customer_name,
+      phone: p.customer_phone,
+      email: p.customer_email,
+    };
+  } else if (toVal === 'internal') {
+    recipient = { type: 'internal', sub_id: null, name: null, phone: null, email: null };
+  } else if (toVal.startsWith('sub:')) {
+    const subId = toVal.substring(4);
+    const sub = state.subs.find(s => s.id === subId);
+    if (!sub) { toast('Sub not found'); return; }
+    recipient = {
+      type: 'sub',
+      sub_id: sub.id,
+      name: sub.primary_contact || sub.company_name,
+      phone: sub.phone,
+      email: sub.email,
+    };
+  }
+
+  // Validate channel + recipient combo
+  const isInternal = recipient.type === 'internal';
+  const effectiveChannel = isInternal ? 'internal_note' : channel;
+  if (!isInternal) {
+    if (channel === 'sms' && !recipient.phone) { toast('No phone on file for that recipient'); return; }
+    if (channel === 'email' && !recipient.email) { toast('No email on file for that recipient'); return; }
+  }
+
+  const fromEmail = p.albi_pm_email || state.pmEmail || 'office@jg-restoration.com';
+  const fromName = p.albi_pm_name || 'JG Restoration';
+
+  // Insert into Supabase first (source of truth)
+  const insertRow = {
+    project_id: p.id,
+    recipient_type: recipient.type,
+    recipient_sub_id: recipient.sub_id,
+    recipient_name: recipient.name,
+    recipient_phone: recipient.phone,
+    recipient_email: recipient.email,
+    channel: effectiveChannel,
+    direction: 'outbound',
+    subject: subject || null,
+    body: body,
+    sent_by_email: fromEmail,
+    sent_by_name: fromName,
+    status: isInternal ? 'sent' : 'queued',
+  };
+  const { data: insertedArr, error } = await sb.from('rebuild_messages').insert(insertRow).select();
+  if (error) { toast('Save failed: ' + error.message); return; }
+  const inserted = insertedArr?.[0];
+
+  // Fire-and-forget to Zapier (skip for internal notes)
+  if (!isInternal) {
+    const payload = {
+      message_id: inserted?.id,
+      project_id: p.id,
+      albi_project_id: p.albi_project_id,
+      job_number: p.albi_job_number,
+      channel: channel,
+      to_phone: recipient.phone || '',
+      to_email: recipient.email || '',
+      from_email: fromEmail,
+      from_name: fromName,
+      recipient_name: recipient.name || '',
+      recipient_type: recipient.type,
+      subject: subject || `Re: ${p.albi_job_number || 'project'}`,
+      body: body,
+    };
+    try {
+      await fetch(MESSAGE_HOOK, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        mode: 'no-cors',
+      });
+      // Mark sent
+      if (inserted) await sb.from('rebuild_messages').update({ status: 'sent' }).eq('id', inserted.id);
+    } catch (e) {
+      console.warn('Zapier send failed:', e);
+      if (inserted) await sb.from('rebuild_messages').update({ status: 'failed', error_message: String(e) }).eq('id', inserted.id);
+    }
+  }
+
+  // Log to Albi timeline (excluding internal notes — those stay private)
+  if (!isInternal) {
+    const channelLabel = channel === 'sms' ? 'SMS' : 'Email';
+    const recipLabel = recipient.type === 'customer'
+      ? `customer (${recipient.name})`
+      : `sub (${state.subs.find(s => s.id === recipient.sub_id)?.company_name || recipient.name})`;
+    const preview = body.length > 200 ? body.substring(0, 200) + '…' : body;
+    logToAlbi(`message_${recipient.type}_out`, `${channelLabel} sent to ${recipLabel}: ${preview}`);
+  }
+
+  toast(isInternal ? 'Note saved' : 'Message sent');
+  $('#msg_body').value = '';
+  if ($('#msg_subject')) $('#msg_subject').value = '';
+  await loadMessages();
+  renderDetail();
 }
 
 function renderAuditTab() {
