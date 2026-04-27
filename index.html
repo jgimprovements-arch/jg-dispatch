@@ -1544,26 +1544,28 @@ async function loadFromV2(){
         if (unGrouped[loc].length) unassigned[loc] = unGrouped[loc];
       }
     } else {
-      // Non-today view: pool = today's unassigned (NULL-dated rows) minus
-      // anything already assigned on this specific date.
-      // Fetch the today-unassigned pool to use as the source list.
+      // Non-today view: pool = ALL schedulable jobs (in-memory `jobs` map is
+      // already filtered to active statuses at Albi ingest) MINUS anything
+      // already assigned on this specific date. This includes jobs currently
+      // on today's tech lanes — multi-day work needs to be schedulable forward
+      // even if a tech is on it today.
       try {
-        const todayUnRes = await sbFetch('/rest/v1/dispatch_unassigned_v2?select=job_id,market');
-        const todayUn = todayUnRes.ok ? await todayUnRes.json() : [];
         const assignedOnDate = new Set(dbAssigns.map(r => r.job_id));
         const grouped = { appleton: [], stevens: [] };
-        todayUn.forEach(r => {
-          if (assignedOnDate.has(r.job_id)) return; // already scheduled this date
-          const loc = _fromV2Market(r.market);
-          // Only include if the job actually exists in the in-memory map
-          if (!jobs[r.job_id]) return;
-          grouped[loc].push(r.job_id);
+        Object.keys(jobs).forEach(jid => {
+          if (assignedOnDate.has(jid)) return; // already scheduled this date
+          const j = jobs[jid];
+          if (!j || !j.loc) return;
+          const lane = j.loc; // 'appleton' or 'stevens'
+          if (lane === 'appleton' || lane === 'stevens') {
+            grouped[lane].push(jid);
+          }
         });
         for (const loc of ['appleton','stevens']) {
           unassigned[loc] = grouped[loc];
         }
       } catch(e) {
-        console.warn('[v2-read] non-today unassigned fetch failed:', e);
+        console.warn('[v2-read] non-today unassigned build failed:', e);
         for (const loc of ['appleton','stevens']) unassigned[loc] = [];
       }
     }
