@@ -782,7 +782,7 @@ function renderLive() {
     h += '<div class="stat-card" style="border:2px solid #c62828;background:rgba(198,40,40,.04);">';
     h += '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;"><div>';
     h += '<div class="stat-val" style="color:#c62828;">'+missedCO.length+'</div><div class="stat-lbl" style="color:#c62828;font-weight:700;">&#9888; Missed Clock-Outs</div>';
-    h += '</div><button class="btn btn-sm" onclick="nudgeAllMissedCO()" style="background:#c62828;color:#fff;border-color:#c62828;white-space:nowrap;">📱 Text All</button></div></div>';
+    h += '</div><button class="btn btn-sm" onclick="notifyAllMissedCO()" style="background:#6a1b9a;color:#fff;border-color:#6a1b9a;white-space:nowrap;">🔔 Notify All</button></div></div>';
   }
   h += '</div>';
 
@@ -1292,6 +1292,114 @@ function _calcOT(entries) {
 
 // ── SMS FLOW HELPERS ─────────────────────────────────────────────────────
 // Flow 1: Nudge a single missed clock-out (manual button on row)
+// In-app bell notification for missed clock-out — uses the notifications table
+// (replaced the SMS Text button on 2026-04-27 because Zapier hook wasn't firing)
+async function notifyMissedCO(entryId) {
+  var e = ST.entries.find(function(x){ return x.id === entryId; });
+  if (!e) { toast('Entry not found'); return; }
+  var emp = ST.employees.find(function(x){ return x.name === e.employee_name; });
+  if (!emp) { toast('Employee not found: ' + e.employee_name); return; }
+
+  var hoursOpen = Math.round((Date.now() - new Date(e.clock_in).getTime()) / 3600000);
+  var entryDate = new Date(e.clock_in).toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
+  var clockInTime = new Date(e.clock_in).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+
+  var payload = {
+    recipient_employee_id: emp.id,
+    recipient_email: emp.email || null,
+    recipient_name: emp.name,
+    category: 'timeclock',
+    severity: 'urgent',
+    title: 'Missed clock-out',
+    body: 'You have an open time entry from ' + entryDate + ' at ' + clockInTime +
+          ' on ' + (e.job_name || 'no job') + ' — ' + hoursOpen + ' hours open. ' +
+          'Please open the app and request a time correction to fix it.',
+    action_url: 'https://jgimprovements-arch.github.io/jg-dispatch/timeclock.html',
+    action_label: 'Open Time Clock',
+    metadata: { rule: 'missed_clockout_manual', entry_id: entryId, hours_open: hoursOpen },
+    expires_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString()
+  };
+
+  try {
+    var r = await fetch(SB_URL + '/rest/v1/notifications', {
+      method: 'POST',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
+      body: JSON.stringify(payload)
+    });
+    if (!r.ok) { toast('⚠ Notify failed (' + r.status + ')'); return; }
+    toast('🔔 Notified ' + e.employee_name.split(' ')[0]);
+    if (typeof logActivity === 'function') {
+      logActivity('Missed Clock-Out Notify', e.employee_name + ' notified about ' + hoursOpen + 'h open entry', 'time_clock', e.employee_name);
+    }
+  } catch(err) {
+    console.error('notifyMissedCO error:', err);
+    toast('⚠ Notify failed');
+  }
+}
+
+// Bulk: notify ALL employees with missed clock-outs
+async function notifyAllMissedCO() {
+  var missed = ST.entries.filter(function(e) {
+    return !e.clock_out && ((Date.now() - new Date(e.clock_in).getTime()) > 12*60*60*1000);
+  });
+  if (!missed.length) { toast('No missed clock-outs'); return; }
+  if (!confirm('Send in-app notification to ' + missed.length + ' employee(s) about missed clock-outs?')) return;
+
+  // Group by employee — one notification per employee, not one per entry
+  var byEmp = {};
+  missed.forEach(function(e) {
+    var emp = ST.employees.find(function(x){ return x.name === e.employee_name; });
+    if (!emp) return;
+    if (!byEmp[emp.id]) byEmp[emp.id] = { emp: emp, entries: [] };
+    byEmp[emp.id].entries.push(e);
+  });
+
+  var sent = 0, skipped = 0;
+  var empKeys = Object.keys(byEmp);
+  for (var i = 0; i < empKeys.length; i++) {
+    var bucket = byEmp[empKeys[i]];
+    var emp = bucket.emp;
+    var entries = bucket.entries;
+    var oldest = entries.reduce(function(a,b){ return new Date(a.clock_in) < new Date(b.clock_in) ? a : b; });
+    var hoursOpen = Math.round((Date.now() - new Date(oldest.clock_in).getTime()) / 3600000);
+    var bodyText;
+    if (entries.length === 1) {
+      var entryDate = new Date(oldest.clock_in).toLocaleDateString('en-US', { weekday:'long', month:'short', day:'numeric' });
+      var clockInTime = new Date(oldest.clock_in).toLocaleTimeString('en-US', { hour:'numeric', minute:'2-digit' });
+      bodyText = 'You have an open time entry from ' + entryDate + ' at ' + clockInTime +
+                 ' on ' + (oldest.job_name || 'no job') + ' — ' + hoursOpen + ' hours open. Please request a time correction.';
+    } else {
+      bodyText = 'You have ' + entries.length + ' open time entries — oldest is ' + hoursOpen +
+                 ' hours old. Please review and close any you forgot.';
+    }
+    var payload = {
+      recipient_employee_id: emp.id,
+      recipient_email: emp.email || null,
+      recipient_name: emp.name,
+      category: 'timeclock',
+      severity: 'urgent',
+      title: 'Missed clock-out',
+      body: bodyText,
+      action_url: 'https://jgimprovements-arch.github.io/jg-dispatch/timeclock.html',
+      action_label: 'Open Time Clock',
+      metadata: { rule: 'missed_clockout_manual', entry_count: entries.length, hours_open: hoursOpen },
+      expires_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString()
+    };
+    try {
+      var r = await fetch(SB_URL + '/rest/v1/notifications', {
+        method: 'POST',
+        headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
+        body: JSON.stringify(payload)
+      });
+      if (r.ok) sent++; else skipped++;
+    } catch(err) { skipped++; }
+  }
+  toast('🔔 Sent ' + sent + ' notification(s)' + (skipped ? ', skipped ' + skipped : ''));
+  if (typeof logActivity === 'function') {
+    logActivity('Bulk Missed Clock-Out Notify', sent + ' employees notified', 'time_clock');
+  }
+}
+
 async function nudgeMissedCO(entryId) {
   var e = ST.entries.find(function(x){ return x.id === entryId; });
   if (!e) { toast('Entry not found'); return; }
@@ -2868,7 +2976,7 @@ function renderTimesheets() {
       var missedCO = active && ((Date.now() - new Date(e.clock_in).getTime()) > 12*60*60*1000);
       var flagCell='';
       if(missedCO) {
-        flagCell='<span style="color:#c62828;font-size:11px;font-weight:700;">&#9888; Missed clock-out<br><button class="btn btn-sm" onclick="editEntry(\''+e.id+'\')">Fix</button> <button class="btn btn-sm" onclick="nudgeMissedCO(\''+e.id+'\')" style="background:#0d2d5e;color:#fff;border-color:#0d2d5e;">📱 Text</button></span>';
+        flagCell='<span style="color:#c62828;font-size:11px;font-weight:700;">&#9888; Missed clock-out<br><button class="btn btn-sm" onclick="editEntry(\''+e.id+'\')">Fix</button> <button class="btn btn-sm" onclick="notifyMissedCO(\''+e.id+'\')" style="background:#6a1b9a;color:#fff;border-color:#6a1b9a;">🔔 Notify</button></span>';
       }
       else if(early&&!e.approved_early) flagCell='<span style="color:#c62828;font-size:11px;font-weight:700;">Early<br><button class="btn btn-sm" onclick="approveEarly(\''+e.id+'\')">Approve</button></span>';
       else if(early&&e.approved_early) flagCell='<span style="color:#2e7d32;font-size:11px;">Early OK</span>';
