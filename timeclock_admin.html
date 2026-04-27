@@ -10191,6 +10191,31 @@ function closeModal() { var m=document.getElementById('tc-modal'); if(m)m.remove
 // header summary, all time entries, edit/fix actions, approval state, and
 // a prominent Approve button at top.
 function openTimecardDetail(empName) {
+  // Local copies of helpers that are scoped inside renderTimesheets
+  // (fmt, fmtDur, durMins, calcOT, fmtHM are NOT global)
+  var fmt = function(iso){ if(!iso)return ''; var d=new Date(iso),h=d.getHours()%12||12,m=d.getMinutes(),ap=d.getHours()>=12?'PM':'AM'; return h+':'+(m<10?'0':'')+m+' '+ap; };
+  var fmtDur = function(mins){ if(!mins&&mins!==0)return '-'; return Math.floor(mins/60)+'h '+(mins%60)+'m'; };
+  var durMins = function(e){ var out=e.clock_out?new Date(e.clock_out):new Date(); return Math.floor((out-new Date(e.clock_in))/60000); };
+  var fmtHM = function(mins){ var h=Math.floor(mins/60),m=Math.round(mins%60); return h+'h '+(m<10?'0':'')+m+'m'; };
+  var calcOT = function(entries){
+    // OT calculation: weekly threshold 40h, anything beyond is OT
+    var weeklyMins = {};
+    entries.forEach(function(e){
+      if (!e.clock_out) return;
+      var d = new Date(e.clock_in);
+      var wkStart = new Date(d); wkStart.setDate(d.getDate() - d.getDay()); wkStart.setHours(0,0,0,0);
+      var wkKey = wkStart.toISOString().split('T')[0];
+      var brks = (ST.breaks||[]).filter(function(b){return b.entry_id===e.id;});
+      weeklyMins[wkKey] = (weeklyMins[wkKey]||0) + billableMins(e, brks);
+    });
+    var regMins=0, otMins=0;
+    Object.values(weeklyMins).forEach(function(mins){
+      if (mins <= 2400) { regMins += mins; }
+      else { regMins += 2400; otMins += (mins - 2400); }
+    });
+    return { regMins: regMins, otMins: otMins };
+  };
+
   // selPeriod is local to renderTimesheets; the canonical store is ST.selPeriod
   var periods = getPayPeriods(ST.payPeriod.type, ST.payPeriod.start, 6);
   var periodLabel = ST.selPeriod || (periods[0] ? periods[0].label : null);
