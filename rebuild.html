@@ -947,7 +947,34 @@ $('#searchInput').addEventListener('input', e => {
 // ──── Sync from Albi (full backfill of all matching active jobs) ────
 // Vercel proxy URL — same pattern as dispatch (jg-proxy-v2)
 const ALBI_PROXY_URL = 'https://jg-proxy-v2.vercel.app/api/albi';
+const ALBI_NOTE_HOOK = 'https://hooks.zapier.com/hooks/catch/12653197/uvugxag/';
 const VALID_SUFFIXES = new Set(['BRD','REB','REM','RZE']);
+
+// Fire-and-forget post to Albi timeline note via Zapier.
+// Doesn't block the UI — failures only log to console.
+async function logToAlbi(eventType, noteText, opts) {
+  opts = opts || {};
+  const proj = opts.project || state.activeProject;
+  if (!proj || !proj.albi_project_id) return;
+  const payload = {
+    albi_project_id: proj.albi_project_id,
+    albi_job_number: proj.albi_job_number || '',
+    event_type: eventType,
+    note_text: noteText,
+    actor: state.pmEmail || 'platform',
+    timestamp: new Date().toISOString(),
+  };
+  try {
+    await fetch(ALBI_NOTE_HOOK, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      mode: 'no-cors',  // Zapier hooks don't return CORS headers
+    });
+  } catch (e) {
+    console.warn('logToAlbi failed:', e);
+  }
+}
 const ACTIVE_STATUSES = new Set([
   'new','waiting for mit','estimate shipped','down payment received',
   'material hold','wo scheduling','active construction','final construction'
@@ -1231,13 +1258,18 @@ function renderDetail() {
     toast('Re-syncing from Albi…');
     $('#syncAlbiAllBtn').click();
   });
-  $('#btnPushNote').addEventListener('click', () => toast('Push timeline note — wires up next session'));
+  $('#btnPushNote').addEventListener('click', async () => {
+    const text = prompt('Timeline note to push to Albi:');
+    if (!text || !text.trim()) return;
+    await logToAlbi('manual_note', text.trim());
+    toast('Note pushed to Albi');
+  });
   $('#btnExportPdf').addEventListener('click', () => exportProjectPdf());
   $('#btnOpenInAlbi').addEventListener('click', () => {
     const albiId = state.activeProject?.albi_project_id;
     if (!albiId) { toast('No Albi ID'); return; }
     // Albi project URL pattern (adjust if your tenant uses a different host)
-    window.open(`https://app.albiware.com/projects/${albiId}`, '_blank');
+    window.open(`https://app.albiware.com/Project/${albiId}?tab=BasicInfo`, '_blank');
   });
 
   renderTabContent();
@@ -1581,6 +1613,7 @@ async function reorderPhase(draggedId, targetId, above) {
       for (const u of updates) {
         await sb.from('rebuild_phases').update({ sequence: u.sequence }).eq('id', u.id);
       }
+      logToAlbi('phase_reordered', `Phase "${dragged.phase_name}" reordered`);
       toast('Reordered');
       await loadPhases(); await loadHistory();
       renderDetail();
@@ -1604,6 +1637,7 @@ async function addNewPhase() {
     status: 'pending',
   });
   if (error) { toast('Add failed: ' + error.message); return; }
+  logToAlbi('phase_added', `Phase "${name.trim()}" added to schedule`);
   toast('Phase added');
   await loadPhases(); await loadHistory();
   renderDetail();
@@ -1673,6 +1707,7 @@ function openPhaseEditor(phaseId) {
   });
 
   $('#eph_save').onclick = async () => {
+    const before = ph; // closure: ph is the original phase row
     const assignType = $('#eph_assigntype').value;
     const updates = {
       phase_name: $('#eph_name').value,
@@ -1700,6 +1735,35 @@ function openPhaseEditor(phaseId) {
       const { error } = await sb.from('rebuild_phases').update(updates).eq('id', phaseId);
       if (error) { toast('Save failed: ' + error.message); return; }
     }
+
+    // ── Log meaningful changes to Albi timeline ──
+    const phaseName = updates.phase_name || before.phase_name;
+    if (before.status !== updates.status) {
+      logToAlbi('phase_status', `Phase "${phaseName}": ${titleCase(before.status)} → ${titleCase(updates.status)}`);
+    }
+    const beforeAssignee = before.assigned_sub_id
+      ? (state.subs.find(s => s.id === before.assigned_sub_id)?.company_name || 'Sub')
+      : (before.trade && before.trade.startsWith('inhouse:')
+          ? (state.employees.find(e => e.id === before.trade.substring(8))?.name || 'In-house')
+          : null);
+    const afterAssignee = updates.assigned_sub_id
+      ? (state.subs.find(s => s.id === updates.assigned_sub_id)?.company_name || 'Sub')
+      : (updates.trade && updates.trade.startsWith('inhouse:')
+          ? (state.employees.find(e => e.id === updates.trade.substring(8))?.name || 'In-house')
+          : null);
+    if (beforeAssignee !== afterAssignee) {
+      if (afterAssignee) logToAlbi('phase_assigned', `Phase "${phaseName}" assigned to ${afterAssignee}${beforeAssignee ? ' (was ' + beforeAssignee + ')' : ''}`);
+      else if (beforeAssignee) logToAlbi('phase_unassigned', `Phase "${phaseName}" unassigned (was ${beforeAssignee})`);
+    }
+    const oldStart = before.scheduled_start || '';
+    const newStart = updates.scheduled_start || '';
+    const oldEnd = before.scheduled_end || '';
+    const newEnd = updates.scheduled_end || '';
+    if (oldStart !== newStart || oldEnd !== newEnd) {
+      const range = newStart ? (fmtDate(newStart) + (newEnd ? ' → ' + fmtDate(newEnd) : '')) : 'unscheduled';
+      logToAlbi('phase_scheduled', `Phase "${phaseName}" scheduled: ${range}`);
+    }
+
     toast('Phase saved');
     closeModal('modalEditPhase');
     await loadPhases(); await loadHistory();
@@ -1707,7 +1771,9 @@ function openPhaseEditor(phaseId) {
   };
   $('#eph_delete').onclick = async () => {
     if (!confirm('Delete this phase? This is logged in the audit trail.')) return;
+    const phaseName = ph.phase_name;
     if (sb) await sb.from('rebuild_phases').delete().eq('id', phaseId);
+    logToAlbi('phase_deleted', `Phase "${phaseName}" removed from schedule`);
     closeModal('modalEditPhase');
     await loadPhases(); await loadHistory();
     renderDetail();
@@ -1722,21 +1788,23 @@ async function advancePhaseStatus(phaseId) {
   const order = ['pending','scheduled','in_progress','complete'];
   const idx = order.indexOf(ph.status);
   const next = order[Math.min(idx + 1, order.length - 1)];
+  if (next === ph.status) return;
   const updates = { status: next };
   if (next === 'in_progress' && !ph.actual_start) updates.actual_start = new Date().toISOString();
   if (next === 'complete' && !ph.actual_end) updates.actual_end = new Date().toISOString();
   if (sb) await sb.from('rebuild_phases').update(updates).eq('id', phaseId);
+  logToAlbi('phase_status', `Phase "${ph.phase_name}": ${titleCase(ph.status)} → ${titleCase(next)}`);
   toast(`→ ${titleCase(next)}`);
   await loadPhases(); await loadHistory();
   renderDetail();
 
-  // Per Q3 design — if phase moves into in_progress past its window, prompt for delay attribution
   const isLate = next === 'in_progress' && ph.scheduled_start && new Date() > new Date(ph.scheduled_start);
   if (isLate) openDelayModal(phaseId);
 }
 
 function openDelayModal(phaseId) {
   $('#dl_save').onclick = async () => {
+    const ph = state.phases.find(p => p.id === phaseId);
     const updates = {
       delay_attribution: $('#dl_cause').value,
       delay_notes: $('#dl_notes').value || null,
@@ -1744,6 +1812,8 @@ function openDelayModal(phaseId) {
       delay_logged_by: state.pmEmail,
     };
     if (sb) await sb.from('rebuild_phases').update(updates).eq('id', phaseId);
+    const noteText = `Delay logged on "${ph?.phase_name || 'phase'}": ${titleCase(updates.delay_attribution)}${updates.delay_notes ? ' — ' + updates.delay_notes : ''}`;
+    logToAlbi('delay_logged', noteText);
     toast('Delay logged');
     closeModal('modalDelay');
     await loadPhases(); await loadHistory();
