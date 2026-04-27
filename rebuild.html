@@ -2385,6 +2385,41 @@ async function openSelectionEditor(selectionId) {
     renderDetail();
   };
   $('#modalEditPhase h3').firstChild.textContent = isNew ? 'New Material Selection ' : 'Edit Material Selection ';
+
+  // Inject "Save & Send to Customer" button into modal footer (only for selection editor)
+  const foot = $('#modalEditPhase .modal-foot');
+  let sendBtn = foot.querySelector('#eph_save_send');
+  if (!sendBtn) {
+    sendBtn = document.createElement('button');
+    sendBtn.id = 'eph_save_send';
+    sendBtn.className = 'btn primary';
+    sendBtn.style.background = 'var(--green)';
+    sendBtn.style.borderColor = 'var(--green)';
+    sendBtn.textContent = '✉ Save & Send to Customer';
+    foot.appendChild(sendBtn);
+  }
+  sendBtn.onclick = async () => {
+    // Trigger save first
+    await new Promise(resolve => {
+      const origSave = $('#eph_save').onclick;
+      $('#eph_save').onclick = async () => {
+        await origSave();
+        resolve();
+      };
+      $('#eph_save').click();
+    });
+    // After save, refresh and find the just-saved selection by category
+    await loadSelections();
+    const cat = $('#sel_category')?.value?.trim();
+    const fresh = state.selections.find(x => x.category === cat);
+    if (!fresh) { toast('Saved but could not locate to send'); return; }
+    if (!fresh.total_cost) { toast('Set Total Cost before sending to customer'); return; }
+    if (!state.activeProject?.customer_email) { toast('No customer email on file'); return; }
+    sendSelectionToCustomer(fresh.id);
+  };
+  // Hide the send button when editing (avoids confusion — they can use the row button)
+  if (!isNew) sendBtn.style.display = 'none'; else sendBtn.style.display = '';
+
   openModal('modalEditPhase');
 }
 
@@ -2423,16 +2458,16 @@ JG Restoration`;
 
   openSendPreviewModal({
     title: 'Send Selection Request to Vendor',
-    to: `${vendor.company_name} <${vendor.email}>`,
+    to: vendor.email,
     subject: defaultSubject,
     body: defaultBody,
-    onSend: async (subject, body) => {
+    onSend: async (subject, body, toEmail) => {
       const { data: msgData } = await sb.from('rebuild_messages').insert({
         project_id: p.id,
         recipient_type: 'sub',
         recipient_sub_id: vendor.id,
         recipient_name: vendor.primary_contact || vendor.company_name,
-        recipient_email: vendor.email,
+        recipient_email: toEmail,
         channel: 'email',
         direction: 'outbound',
         subject, body,
@@ -2448,7 +2483,7 @@ JG Restoration`;
           body: JSON.stringify({
             message_id: msgData?.[0]?.id,
             project_id: p.id, albi_project_id: p.albi_project_id, job_number: p.albi_job_number,
-            channel: 'email', to_email: vendor.email,
+            channel: 'email', to_email: toEmail,
             from_email: p.albi_pm_email || state.pmEmail,
             from_name: p.albi_pm_name || 'JG Restoration',
             recipient_name: vendor.primary_contact || vendor.company_name,
@@ -2463,7 +2498,7 @@ JG Restoration`;
       await sb.from('rebuild_selections').update({ status: 'awaiting_vendor' }).eq('id', selectionId);
       await sb.from('rebuild_selections_history').insert({
         selection_id: selectionId, action: 'sent_to_vendor', actor: state.pmEmail,
-        details: `Sent to ${vendor.company_name} (${vendor.email})`,
+        details: `Sent to ${vendor.company_name} (${toEmail})`,
       });
       logToAlbi('selection_to_vendor', `Selection "${s.category}" sent to vendor ${vendor.company_name} for estimate`);
       toast('Sent to vendor');
@@ -2506,15 +2541,15 @@ JG Restoration`;
 
   openSendPreviewModal({
     title: 'Send to Customer for Approval',
-    to: `${p.customer_name} <${p.customer_email}>`,
+    to: p.customer_email,
     subject: defaultSubject,
     body: defaultBody,
-    onSend: async (subject, body) => {
+    onSend: async (subject, body, toEmail) => {
       const { data: msgData } = await sb.from('rebuild_messages').insert({
         project_id: p.id,
         recipient_type: 'customer',
         recipient_name: p.customer_name,
-        recipient_email: p.customer_email,
+        recipient_email: toEmail,
         channel: 'email',
         direction: 'outbound',
         subject, body,
@@ -2530,7 +2565,7 @@ JG Restoration`;
           body: JSON.stringify({
             message_id: msgData?.[0]?.id,
             project_id: p.id, albi_project_id: p.albi_project_id, job_number: p.albi_job_number,
-            channel: 'email', to_email: p.customer_email,
+            channel: 'email', to_email: toEmail,
             from_email: p.albi_pm_email || state.pmEmail,
             from_name: p.albi_pm_name || 'JG Restoration',
             recipient_name: p.customer_name, recipient_type: 'customer',
@@ -2544,7 +2579,7 @@ JG Restoration`;
       await sb.from('rebuild_selections').update({ status: 'awaiting_customer' }).eq('id', selectionId);
       await sb.from('rebuild_selections_history').insert({
         selection_id: selectionId, action: 'sent_to_customer', actor: state.pmEmail,
-        details: `Sent to ${p.customer_name} (${p.customer_email}) for approval — $${Number(s.total_cost).toLocaleString()}`,
+        details: `Sent to ${p.customer_name} (${toEmail}) for approval — $${Number(s.total_cost).toLocaleString()}`,
       });
       logToAlbi('selection_to_customer', `Selection "${s.category}" sent to customer for approval — $${Number(s.total_cost).toLocaleString()}`);
       toast('Sent to customer');
@@ -2566,7 +2601,8 @@ function openSendPreviewModal({ title, to, subject, body, onSend }) {
         <h3 id="spv_title">Review Email <button class="close" data-close>×</button></h3>
         <div class="modal-body">
           <label>To</label>
-          <input id="spv_to" readonly style="background:var(--bg);">
+          <input id="spv_to" placeholder="email@example.com">
+          <div style="font-size:11px;color:var(--muted);margin-top:3px;">Comma-separate multiple recipients</div>
           <label style="margin-top:10px;">Subject</label>
           <input id="spv_subject">
           <label style="margin-top:10px;">Message</label>
@@ -2596,10 +2632,12 @@ function openSendPreviewModal({ title, to, subject, body, onSend }) {
   newBtn.addEventListener('click', async () => {
     newBtn.disabled = true;
     newBtn.textContent = 'Sending…';
+    const finalTo = modal.querySelector('#spv_to').value.trim();
     const finalSubject = modal.querySelector('#spv_subject').value;
     const finalBody = modal.querySelector('#spv_body').value;
+    if (!finalTo) { toast('Recipient email required'); newBtn.disabled = false; newBtn.textContent = '✉ Send'; return; }
     modal.classList.remove('on');
-    await onSend(finalSubject, finalBody);
+    await onSend(finalSubject, finalBody, finalTo);
   });
 }
 
@@ -3141,6 +3179,10 @@ function openPhaseEditor(phaseId) {
     renderDetail();
     toast('Phase deleted');
   };
+  // Hide the selection-only "Save & Send to Customer" button when editing a phase
+  const sendBtn = $('#modalEditPhase #eph_save_send');
+  if (sendBtn) sendBtn.style.display = 'none';
+  $('#modalEditPhase h3').firstChild.textContent = 'Edit Phase ';
   openModal('modalEditPhase');
 }
 
