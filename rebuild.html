@@ -841,34 +841,73 @@ async function syncOneProject(p) {
   return data || { skipped: false };
 }
 
+// Track last sync time so we can skip redundant calls
+let _lastSyncAt = 0;
+const SYNC_COOLDOWN_MS = 60 * 1000; // skip sync if last one was <60s ago
+
+async function pullAllAlbiPages() {
+  // Probe first page to know if there's data; then fan out parallel fetches.
+  const first = await pullAlbiPage(1);
+  if (!first.length) return [];
+
+  // Fetch pages 2..15 in parallel (15 pages * 50 = up to 750 jobs).
+  // Stop accumulating once we hit an empty page.
+  const parallelPages = await Promise.all(
+    [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15].map(p =>
+      pullAlbiPage(p).catch(() => [])
+    )
+  );
+  const all = [first];
+  for (const items of parallelPages) {
+    if (!items || !items.length) break;
+    all.push(items);
+  }
+  return all.flat();
+}
+
 async function runAlbiSync(opts) {
   opts = opts || {};
   const silent = !!opts.silent;
+  const force = !!opts.force;
+
+  // Cooldown: skip if last sync <60s ago and not forced
+  if (!force && (Date.now() - _lastSyncAt) < SYNC_COOLDOWN_MS) {
+    return { skipped: true, reason: 'cooldown' };
+  }
+
   const btn = $('#syncAlbiAllBtn');
   if (btn) { btn.disabled = true; btn.textContent = '⟳ Syncing…'; }
   const summary = { scanned: 0, inserted: 0, updated: 0, skipped: 0, errors: 0 };
   try {
-    let page = 1;
-    while (page <= 50) {
-      const items = await pullAlbiPage(page);
-      if (!items.length) break;
-      for (const p of items) {
-        summary.scanned++;
-        try {
-          const r = await syncOneProject(p);
-          if (r?.skipped) summary.skipped++;
-          else if (r?.inserted) summary.inserted++;
-          else if (r?.error) summary.errors++;
-          else summary.updated++;
-        } catch (e) {
-          summary.errors++;
-          console.error('Sync error:', e, p);
-        }
+    const items = await pullAllAlbiPages();
+
+    // Pre-filter client-side before hitting Supabase — cheap suffix + status check
+    const candidates = items.filter(p => {
+      const sfx = suffixOf(p.name || p.projectName || '');
+      const st = (p.status || '').toLowerCase();
+      return sfx && ACTIVE_STATUSES.has(st);
+    });
+    summary.scanned = items.length;
+    summary.skipped = items.length - candidates.length;
+
+    // Run upserts in parallel chunks of 8 — much faster than serial
+    const CHUNK = 8;
+    for (let i = 0; i < candidates.length; i += CHUNK) {
+      const slice = candidates.slice(i, i + CHUNK);
+      const results = await Promise.all(slice.map(p =>
+        syncOneProject(p).catch(e => { console.error(e); return { error: true }; })
+      ));
+      for (const r of results) {
+        if (r?.skipped) summary.skipped++;
+        else if (r?.inserted) summary.inserted++;
+        else if (r?.error) summary.errors++;
+        else summary.updated++;
       }
-      page++;
     }
-    if (!silent || summary.inserted || summary.updated) {
-      toast(`Synced: +${summary.inserted} new, ${summary.updated} updated, ${summary.skipped} skipped`);
+
+    _lastSyncAt = Date.now();
+    if (!silent || summary.inserted || (summary.updated > 0 && !silent)) {
+      toast(`Synced: +${summary.inserted} new, ${summary.updated} updated`);
     }
     await loadProjects();
   } catch (e) {
@@ -882,7 +921,7 @@ async function runAlbiSync(opts) {
 
 $('#syncAlbiAllBtn').addEventListener('click', async () => {
   if (!confirm('Pull all active Albi jobs (BRD/REB/REM/RZE) into the rebuild scheduler?\n\nNew matches will be inserted; existing projects will have their Albi-sourced fields refreshed (customer info, scope $, status). PM-edited fields like phase schedule and template are preserved.')) return;
-  await runAlbiSync({ silent: false });
+  await runAlbiSync({ silent: false, force: true });
 });
 
 // ──── Select / load a project ────
@@ -1396,13 +1435,14 @@ function setupRealtime() {
 
 // ──── Boot ────
 (async function init() {
+  // Load cached projects from Supabase first — renders board instantly
   await loadProjects();
   setupRealtime();
 
-  // Auto-sync on page load (silent — only toasts if changes found)
+  // Auto-sync from Albi in background (doesn't block the UI)
   runAlbiSync({ silent: true });
 
-  // Auto-sync every 5 minutes thereafter (silent — same rule)
+  // Re-sync every 5 minutes thereafter
   setInterval(() => runAlbiSync({ silent: true }), 5 * 60 * 1000);
 })();
 
