@@ -387,7 +387,12 @@
     border-radius: 4px;
     cursor: pointer;
     font-size: 13px;
+    text-transform: none;
+    color: var(--text);
+    font-weight: 400;
+    letter-spacing: 0;
   }
+  .assignee-check span { text-transform: none; font-weight: 400; }
   .assignee-check:hover { background: #fff; }
   .assignee-check input { margin: 0; cursor: pointer; }
   .phase .dates {
@@ -1013,10 +1018,9 @@ async function loadSubs() {
 // ──── Load in-house employees (from existing dispatch employees table) ────
 async function loadEmployees() {
   if (!sb) return;
-  // In-house pickers on rebuild only show carpenters — techs/PMs/office aren't options for rebuild phase work
+  // Carpenters work rebuilds, not dispatch — don't filter on show_on_dispatch
   const { data } = await sb.from('employees')
     .select('id, name, role')
-    .eq('show_on_dispatch', true)
     .eq('role', 'Carpenter')
     .order('name');
   state.employees = data || [];
@@ -2488,18 +2492,20 @@ function openPhaseEditor(phaseId) {
     </div>
 
     <label style="margin-top:14px;">Assigned Subs <span style="color:var(--muted);font-weight:400;">(multi-select)</span></label>
+    <input type="text" id="eph_subs_search" placeholder="🔍 Filter subs by name…" style="margin-bottom:6px;">
     <div class="assignee-checklist" id="eph_subs_list">
       ${state.subs.map(s => `
-        <label class="assignee-check">
+        <label class="assignee-check" data-sub-name="${(s.company_name + ' ' + (s.primary_contact||'')).toLowerCase()}">
           <input type="checkbox" value="${s.id}" ${currentSubIds.has(s.id) ? 'checked' : ''}>
           <span>${s.company_name}${s.primary_contact ? ' · ' + s.primary_contact : ''}</span>
         </label>`).join('')}
     </div>
 
     <label style="margin-top:14px;">Assigned Carpenters <span style="color:var(--muted);font-weight:400;">(multi-select — pairs OK)</span></label>
+    <input type="text" id="eph_emps_search" placeholder="🔍 Filter carpenters by name…" style="margin-bottom:6px;${state.employees.length ? '' : 'display:none;'}">
     <div class="assignee-checklist" id="eph_emps_list">
       ${state.employees.length ? state.employees.map(e => `
-        <label class="assignee-check">
+        <label class="assignee-check" data-emp-name="${e.name.toLowerCase()}">
           <input type="checkbox" value="${e.id}" ${currentEmpIds.has(e.id) ? 'checked' : ''}>
           <span>🏠 ${e.name}</span>
         </label>`).join('') : '<div style="color:var(--muted);font-size:12px;padding:8px;">No carpenters in roster (set role=Carpenter on employees).</div>'}
@@ -2508,6 +2514,21 @@ function openPhaseEditor(phaseId) {
     <label style="margin-top:14px;">Notes</label>
     <textarea id="eph_notes">${ph.notes || ''}</textarea>
   `;
+
+  // Wire search filters
+  const wireSearch = (inputId, listId, attr) => {
+    const inp = $('#' + inputId);
+    if (!inp) return;
+    inp.addEventListener('input', () => {
+      const q = inp.value.toLowerCase().trim();
+      $('#' + listId).querySelectorAll('label.assignee-check').forEach(row => {
+        const name = row.dataset[attr] || '';
+        row.style.display = (!q || name.includes(q)) ? 'flex' : 'none';
+      });
+    });
+  };
+  wireSearch('eph_subs_search', 'eph_subs_list', 'subName');
+  wireSearch('eph_emps_search', 'eph_emps_list', 'empName');
 
   $('#eph_save').onclick = async () => {
     const before = ph;
