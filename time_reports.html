@@ -588,17 +588,56 @@ async function initApp() {
 }
 
 // ── LOAD JOBS LIST ─────────────────────────────────────────────────────────
-// Pull every distinct job_id from time_entries that has any logged time.
-// Aggregate total minutes and unique tech count per job.
+// Pull every job from the Albi proxy (same source as dispatch board + timeclock).
+// Includes ALL project types — mitigation (WTR/FRE/MLD/CT3/BRD/CNT) AND
+// reconstruction (REB/RZE/REM). Then merge logged-hours data from time_entries
+// so each job shows "X hrs · Y techs" or "No hours yet".
 async function loadJobsList() {
   const target = document.getElementById('job-list-wrap');
-  target.innerHTML = '<div id="loading-jobs" style="padding:24px;text-align:center;color:var(--muted);font-size:13px;">Loading jobs with logged hours...</div>';
+  target.innerHTML = '<div id="loading-jobs" style="padding:24px;text-align:center;color:var(--muted);font-size:13px;">Loading jobs...</div>';
   try {
-    // Pull all entries with non-null job_id. Paginated to handle large datasets.
+    // 1) Pull every Albi project (paginated)
+    const PROXY = 'https://jg-proxy-v2.vercel.app/api/albi';
+    const albiJobs = {};
+    let page = 1;
+    let hasMore = true;
+    while (hasMore && page <= 30) { // 30 pages × 50 = 1500 jobs cap
+      try {
+        const r = await fetch(PROXY + '?pageSize=50&page=' + page);
+        if (!r.ok) { hasMore = false; break; }
+        const data = await r.json();
+        const items = Array.isArray(data) ? data : (data.data || data.results || data.projects || data.items || []);
+        if (!items.length) { hasMore = false; break; }
+        items.forEach(p => {
+          const jid = String(p.uniqueNumber || p.id || '');
+          if (!jid || albiJobs[jid]) return;
+          const name = p.name || p.projectName || jid;
+          const loc = (p.location || p.locationId || '').toString().toLowerCase();
+          const market = (loc.includes('stevens') || loc.includes('point')) ? 'Stevens Point' : 'Appleton';
+          const status = p.status || '';
+          const projectType = p.projectType || p.project_type || p.type || '';
+          albiJobs[jid] = {
+            job_id: jid,
+            job_name: name,
+            market: market,
+            status: status,
+            project_type: projectType,
+            createdAt: p.createdAt || p.createdDate || p.created_at || ''
+          };
+        });
+        hasMore = items.length === 50;
+        page++;
+      } catch(e) {
+        console.warn('Albi page ' + page + ' failed:', e.message);
+        hasMore = false;
+      }
+    }
+
+    // 2) Pull time_entries to get hours/tech-count per job
     const all = [];
     let from = 0;
     const PAGE = 1000;
-    for (let i = 0; i < 50; i++) { // safety cap: 50,000 rows
+    for (let i = 0; i < 50; i++) {
       const rows = await sb('/rest/v1/time_entries?job_id=not.is.null&select=job_id,job_name,employee_id,duration_minutes,clock_in,clock_out&order=clock_in.desc&limit=' + PAGE + '&offset=' + from);
       if (!rows || !rows.length) break;
       all.push(...rows);
@@ -606,19 +645,19 @@ async function loadJobsList() {
       from += PAGE;
     }
 
-    // Aggregate by job_id
-    const byJob = {};
+    // 3) Aggregate hours by job_id
+    const hoursByJob = {};
     all.forEach(r => {
-      const jid = r.job_id;
+      const jid = String(r.job_id);
       if (!jid) return;
-      if (!byJob[jid]) byJob[jid] = {
-        job_id: jid,
-        job_name: r.job_name || jid,
-        total_minutes: 0,
-        techs: new Set(),
-        last_activity: r.clock_in
-      };
-      // Use stored duration if we have it; otherwise compute from in/out
+      if (!hoursByJob[jid]) {
+        hoursByJob[jid] = {
+          total_minutes: 0,
+          techs: new Set(),
+          last_activity: r.clock_in,
+          job_name_from_entries: r.job_name || ''
+        };
+      }
       let mins = parseFloat(r.duration_minutes);
       if (isNaN(mins) || mins <= 0) {
         if (r.clock_in && r.clock_out) {
@@ -627,23 +666,56 @@ async function loadJobsList() {
           mins = 0;
         }
       }
-      byJob[jid].total_minutes += mins;
-      if (r.employee_id) byJob[jid].techs.add(r.employee_id);
-      // Most recent name wins (in case names changed)
-      if (r.job_name && (!byJob[jid].job_name || byJob[jid].job_name === jid)) {
-        byJob[jid].job_name = r.job_name;
-      }
+      hoursByJob[jid].total_minutes += mins;
+      if (r.employee_id) hoursByJob[jid].techs.add(r.employee_id);
     });
 
-    STATE.jobs = Object.values(byJob).map(j => ({
-      job_id: j.job_id,
-      job_name: j.job_name,
-      total_minutes: j.total_minutes,
-      tech_count: j.techs.size,
-      last_activity: j.last_activity
-    })).sort((a, b) => {
-      // Sort by most recent activity desc
-      return new Date(b.last_activity || 0) - new Date(a.last_activity || 0);
+    // 4) Build the unified job list — Albi as source of truth, hours merged in.
+    //    Also include any time_entries jobs that DON'T appear in Albi
+    //    (e.g., shop time, internal codes, jobs that fell out of the proxy window).
+    const merged = {};
+    Object.keys(albiJobs).forEach(jid => {
+      const a = albiJobs[jid];
+      const h = hoursByJob[jid] || { total_minutes: 0, techs: new Set(), last_activity: null };
+      merged[jid] = {
+        job_id: jid,
+        job_name: a.job_name,
+        market: a.market,
+        status: a.status,
+        project_type: a.project_type,
+        total_minutes: h.total_minutes,
+        tech_count: h.techs.size,
+        last_activity: h.last_activity || a.createdAt,
+        from_albi: true
+      };
+    });
+    Object.keys(hoursByJob).forEach(jid => {
+      if (merged[jid]) return; // already covered by Albi
+      const h = hoursByJob[jid];
+      merged[jid] = {
+        job_id: jid,
+        job_name: h.job_name_from_entries || jid,
+        market: '',
+        status: '',
+        project_type: '',
+        total_minutes: h.total_minutes,
+        tech_count: h.techs.size,
+        last_activity: h.last_activity,
+        from_albi: false
+      };
+    });
+
+    // 5) Sort: jobs WITH hours first (most recent activity), then jobs WITHOUT
+    //    hours (alphabetical by name). PMs typically want active jobs first.
+    STATE.jobs = Object.values(merged).sort((a, b) => {
+      const aHas = a.total_minutes > 0;
+      const bHas = b.total_minutes > 0;
+      if (aHas && !bHas) return -1;
+      if (!aHas && bHas) return 1;
+      if (aHas && bHas) {
+        return new Date(b.last_activity || 0) - new Date(a.last_activity || 0);
+      }
+      return (a.job_name || '').localeCompare(b.job_name || '');
     });
 
     STATE.filteredJobs = STATE.jobs;
@@ -663,14 +735,22 @@ function renderJobsList() {
   const html = '<div class="job-list">' +
     STATE.filteredJobs.slice(0, 200).map(j => {
       const sel = STATE.selectedJob && STATE.selectedJob.job_id === j.job_id ? ' selected' : '';
+      const hasHours = j.total_minutes > 0;
+      const stats = hasHours
+        ? fmtDecimalHours(j.total_minutes) + ' hrs · ' + j.tech_count + ' tech' + (j.tech_count !== 1 ? 's' : '')
+        : '<span style="color:var(--muted);font-weight:500;">No hours yet</span>';
+      // Build a meta line: market · status · type (if known)
+      const metaParts = [];
+      if (j.market) metaParts.push(escapeHtml(j.market));
+      if (j.status) metaParts.push(escapeHtml(j.status));
+      if (j.project_type) metaParts.push(escapeHtml(j.project_type));
+      const meta = metaParts.length ? metaParts.join(' · ') : 'ID: ' + escapeHtml(j.job_id);
       return '<div class="job-row' + sel + '" onclick="selectJob(\'' + j.job_id.replace(/'/g, "\\'") + '\')">' +
-        '<div>' +
+        '<div style="flex:1;min-width:0;">' +
           '<div class="job-row-name">' + escapeHtml(j.job_name) + '</div>' +
-          '<div class="job-row-meta">ID: ' + escapeHtml(j.job_id) + '</div>' +
+          '<div class="job-row-meta">' + meta + '</div>' +
         '</div>' +
-        '<div class="job-row-stats">' +
-          fmtDecimalHours(j.total_minutes) + ' hrs · ' + j.tech_count + ' tech' + (j.tech_count !== 1 ? 's' : '') +
-        '</div>' +
+        '<div class="job-row-stats" style="flex-shrink:0;text-align:right;">' + stats + '</div>' +
       '</div>';
     }).join('') +
     (STATE.filteredJobs.length > 200 ? '<div style="padding:10px;text-align:center;color:var(--muted);font-size:11px;">Showing 200 of ' + STATE.filteredJobs.length + ' — narrow your search to see more</div>' : '') +
@@ -689,7 +769,10 @@ function filterJobs() {
   } else {
     STATE.filteredJobs = STATE.jobs.filter(j =>
       (j.job_name || '').toLowerCase().includes(q) ||
-      (j.job_id || '').toLowerCase().includes(q)
+      (j.job_id || '').toLowerCase().includes(q) ||
+      (j.project_type || '').toLowerCase().includes(q) ||
+      (j.market || '').toLowerCase().includes(q) ||
+      (j.status || '').toLowerCase().includes(q)
     );
   }
   renderJobsList();
