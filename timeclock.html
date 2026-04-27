@@ -1418,11 +1418,15 @@ function renderEntries() {
     var active = !e.clock_out;
     var mins = e.duration_minutes || Math.floor(((e.clock_out ? new Date(e.clock_out) : new Date()) - new Date(e.clock_in)) / 60000);
     var isSalary = e.status === 'salary_auto';
+    var isNonJob = e.entry_type && e.entry_type !== 'job';
+    var typeBadge = isNonJob
+      ? '<span style="display:inline-block;font-size:9px;background:rgba(13,45,94,.08);color:var(--navy);padding:1px 6px;border-radius:8px;font-weight:700;margin-left:6px;letter-spacing:.04em;text-transform:uppercase;">' + (e.entry_type || '') + '</span>'
+      : '';
     return '<div class="entry-row">' +
       '<div class="entry-dot' + (active ? '' : ' done') + '"' + (isSalary ? ' style="background:#1565c0;"' : '') + '></div>' +
       '<div class="entry-info">' +
         '<div class="entry-times">' + (isSalary ? 'Salary — 8h' : fmtTime(e.clock_in) + (e.clock_out ? ' - ' + fmtTime(e.clock_out) : ' Active')) + '</div>' +
-        '<div class="entry-job">' + (e.job_name || 'No job') + '</div>' +
+        '<div class="entry-job">' + (e.job_name || 'No job') + typeBadge + '</div>' +
       '</div>' +
       '<div class="entry-dur" style="color:' + (active ? 'var(--green)' : isSalary ? '#1565c0' : 'var(--green)') + ';">' + fmtDur(mins) + '</div>' +
     '</div>';
@@ -1541,12 +1545,17 @@ async function loadSchedule() {
     var hasClockedInToday = Array.isArray(clockChecks) && clockChecks.length > 0;
 
     if (!hasClockedInToday) {
-      // GATE: schedule locked until first clock-in
+      // GATE: schedule locked until first clock-in.
+      // Locked screen only offers Morning Meeting (the typical start-of-day path).
+      // Shop Time and other categories become available after schedule unlocks.
       el.innerHTML =
-        '<div style="padding:24px 16px;text-align:center;border:1.5px dashed var(--border);border-radius:10px;background:rgba(13,45,94,.02);">' +
+        '<div style="padding:20px 16px;text-align:center;border:1.5px dashed var(--border);border-radius:10px;background:rgba(13,45,94,.02);">' +
         '<div style="font-size:30px;margin-bottom:8px;">🔒</div>' +
         '<div style="font-size:13px;font-weight:600;color:var(--navy);margin-bottom:4px;">Schedule unlocks at clock-in</div>' +
-        '<div style="font-size:11px;color:var(--muted);line-height:1.5;">Punch in below to see your jobs for today.</div>' +
+        '<div style="font-size:11px;color:var(--muted);line-height:1.5;margin-bottom:14px;">Start your day with a morning meeting, or punch into a job below.</div>' +
+        '<button onclick="startNonJobEntry(\'meeting\',\'Morning Meeting\')" ' +
+          'style="padding:10px 22px;border-radius:8px;border:1.5px solid var(--navy);background:#fff;color:var(--navy);font-size:13px;font-weight:700;cursor:pointer;font-family:\'DM Sans\',sans-serif;">' +
+          '☕ Start Morning Meeting</button>' +
         '</div>';
       if (marketEl) marketEl.textContent = '';
       return;
@@ -1561,7 +1570,18 @@ async function loadSchedule() {
     );
 
     if (!assigns || !assigns.length) {
-      el.innerHTML = '<div class="empty" style="padding:16px 0;">No jobs assigned today</div>';
+      el.innerHTML = '<div class="empty" style="padding:16px 0 12px;">No jobs assigned today</div>' +
+        '<div style="margin-top:10px;padding-top:12px;border-top:1px dashed var(--border);">' +
+          '<div style="font-size:10px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-bottom:8px;">Non-Job Time</div>' +
+          '<div style="display:flex;gap:8px;flex-wrap:wrap;">' +
+            '<button onclick="startNonJobEntry(\'meeting\',\'Morning Meeting\')" ' +
+              'style="padding:8px 14px;border-radius:7px;border:1.5px solid var(--border);background:#fff;color:var(--navy);font-size:12px;font-weight:600;cursor:pointer;font-family:\'DM Sans\',sans-serif;">' +
+              '☕ Meeting</button>' +
+            '<button onclick="startNonJobEntry(\'shop\',\'Shop Time\')" ' +
+              'style="padding:8px 14px;border-radius:7px;border:1.5px solid var(--border);background:#fff;color:var(--navy);font-size:12px;font-weight:600;cursor:pointer;font-family:\'DM Sans\',sans-serif;">' +
+              '🔧 Shop Time</button>' +
+          '</div>' +
+        '</div>';
       if (marketEl) marketEl.textContent = '';
       return;
     }
@@ -1606,7 +1626,19 @@ async function loadSchedule() {
         '</div>' +
         '<div class="schedule-job-action">' + action + '</div>' +
       '</div>';
-    }).join('');
+    }).join('') +
+    // Non-job category buttons — shown after the schedule list once unlocked
+    '<div style="margin-top:14px;padding-top:12px;border-top:1px dashed var(--border);">' +
+      '<div style="font-size:10px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-bottom:8px;">Non-Job Time</div>' +
+      '<div style="display:flex;gap:8px;flex-wrap:wrap;">' +
+        '<button onclick="startNonJobEntry(\'meeting\',\'Morning Meeting\')" ' +
+          'style="padding:8px 14px;border-radius:7px;border:1.5px solid var(--border);background:#fff;color:var(--navy);font-size:12px;font-weight:600;cursor:pointer;font-family:\'DM Sans\',sans-serif;">' +
+          '☕ Meeting</button>' +
+        '<button onclick="startNonJobEntry(\'shop\',\'Shop Time\')" ' +
+          'style="padding:8px 14px;border-radius:7px;border:1.5px solid var(--border);background:#fff;color:var(--navy);font-size:12px;font-weight:600;cursor:pointer;font-family:\'DM Sans\',sans-serif;">' +
+          '🔧 Shop Time</button>' +
+      '</div>' +
+    '</div>';
 
   } catch(e) {
     console.warn('Schedule load failed:', e);
@@ -2028,6 +2060,78 @@ async function checkClockInCelebration(u) {
       }
     }
   } catch(e) {}
+}
+
+// Start a non-job time entry (meeting, shop time, etc).
+// If tech is already clocked in to a job or other non-job entry, this will
+// clock them OUT of the current entry and into the new non-job category —
+// same flow as switching jobs, just with no job_id set.
+async function startNonJobEntry(category, label) {
+  if (!TC.employee || !TC.employee.id) { toast('Employee record not found'); return; }
+
+  var validCategories = ['meeting','shop','travel','admin'];
+  if (validCategories.indexOf(category) === -1) {
+    toast('Invalid category'); return;
+  }
+
+  // If already clocked in, clock out current entry first (same as job switch flow)
+  if (TC.clockedIn && TC.activeEntry) {
+    var ok = confirm('You are currently clocked in. Clock out and start ' + label + '?');
+    if (!ok) return;
+    try { await clockOut(); } catch(e) { console.warn('Clock out failed', e); }
+  }
+
+  toast('Starting ' + label + '...');
+  try {
+    var loc = await getLocation();
+    var now = new Date().toISOString();
+
+    var payload = {
+      employee_id: TC.employee.id,
+      employee_name: TC.employee.name,
+      employee_email: TC.user.email,
+      job_id: null,                       // non-job entry — no Albi job
+      job_name: label,                    // human label for history view
+      market: TC.employee.market || 'Appleton',
+      clock_in: now,
+      clock_in_lat: loc ? loc.lat : null,
+      clock_in_lng: loc ? loc.lng : null,
+      notes: null,
+      status: 'active',
+      entry_type: category                // 'meeting' or 'shop'
+    };
+
+    var result = await sb('/rest/v1/time_entries', {
+      method: 'POST',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=representation' },
+      body: JSON.stringify(payload)
+    });
+
+    if (result && result[0]) {
+      TC.activeEntry = result[0];
+      TC.clockedIn = true;
+      TC.clockInTime = Date.now();
+      TC.selectedJobId = '';
+      TC.selectedJobName = label;
+      TC.entries.push(result[0]);
+      startPinging();
+      if (typeof logActivity === 'function') {
+        logActivity('Clock In', 'Clocked in to ' + label + ' (' + category + ')', 'time_clock');
+      }
+      toast('Clocked in to ' + label);
+      // Refresh schedule so the locked screen unlocks (if first clock-in of day)
+      // and the active entry indicator updates
+      if (typeof loadSchedule === 'function') loadSchedule();
+      if (typeof renderStatus === 'function') renderStatus();
+      if (typeof renderEntries === 'function') renderEntries();
+      if (typeof updateStats === 'function') updateStats();
+    } else {
+      toast('Could not start ' + label);
+    }
+  } catch(e) {
+    console.error('startNonJobEntry error', e);
+    toast('Error starting ' + label);
+  }
 }
 
 async function clockIn() {
