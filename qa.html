@@ -185,6 +185,10 @@ For Encircle, capture every documented fact: rooms affected, water category, sou
 
 CRITICAL: For EVERY data point you extract, include the Encircle PDF page number where you found it. This is mandatory — every fact gets a page number.
 
+EQUIPMENT BY ROOM: For each room with equipment, count air movers, dehus, scrubbers separately. A piece of equipment is "in" a room if its photo is geo-tagged to that room OR a caption explicitly assigns it. Build equipment_by_room as a roll-up — one entry per room that contains any equipment.
+
+PHOTO NOTES & CAPTIONS: Encircle photos can have captions, technician notes, or text annotations. Capture EVERY caption you see, even brief ones — they are critical evidence. Especially capture phrases that indicate equipment status: "not in system", "extra", "added", "borrowed", "replaced", "swapped", "additional", "new unit", "from another job", or anything suggesting equipment exists outside the formal register. Also capture damage descriptions, room conditions, and any technician observations. Include the page number for every caption.
+
 Job info: claim_id, address, date_of_loss, water_category (1/2/3), source_of_loss, carrier, estimator, location.
 
 Return ONLY valid JSON:
@@ -196,7 +200,9 @@ Return ONLY valid JSON:
   },
   "encircle":{
     "rooms":[{"name":"","page":0,"damage_documented":"","sf_affected":0,"lf_walls_affected":0}],
-    "equipment":[{"type":"air_mover|dehu|scrubber","count":0,"placement_date":"","removal_date":"","room":"","page":0}],
+    "equipment":[{"type":"air_mover|dehu|scrubber","count":0,"placement_date":"","removal_date":"","room":"","page":0,"photo_caption":""}],
+    "equipment_by_room":[{"room":"","air_movers":0,"dehus":0,"scrubbers":0,"days_onsite":0,"page_evidence":[0]}],
+    "photo_notes":[{"page":0,"room":"","caption_text":"","photo_description":""}],
     "drying_days":0,
     "ppe_photos":[{"page":0,"description":""}],
     "containment_photos":[{"page":0,"description":"","has_zipper":false,"has_poles":false}],
@@ -233,6 +239,12 @@ UNDERBILLING — flag aggressively:
 - HEPA filters: 1 per WTR NAFAN (air scrubber) per loss — ONLY if NAFAN line items exist
 - Content manipulation: 0.5-1.5 hrs WTR LAB per room with content_manipulation_photos. Note: customer may have moved own contents — add verification reminder.
 - Weighted extraction: heavy saturation/pad removal in Encircle = additional WTR LAB
+
+EQUIPMENT-ROOM ALIGNMENT — only flag when it causes revenue loss:
+For each room in equipment_by_room, check if the estimate has line items billed to that room. If a room has documented equipment but no line items at all in that room, that's a HIGH severity gap — likely missing monitoring labor (1.5 hrs/day × days_onsite for that room with WTR EQ), antimicrobial (WTR GRMB on affected SF), and any drying-related work. Calculate the missed revenue. If a room has equipment but only partial room-level work (e.g., has antimicrobial but no monitoring labor), flag MEDIUM with the specific missing item. DO NOT flag pure billing-room mismatches where the count and days match overall and all room-level work is present somewhere — those are sloppy but not revenue-losing.
+
+ORPHAN EQUIPMENT SCANNER — scan photo_notes for unlogged equipment:
+Watch for these trigger phrases in caption_text or photo_description: "not in system", "extra", "added", "borrowed", "replaced", "swapped", "additional unit", "new unit", "from another job", "third [air mover/dehu]", "swapped out", "second [unit]", "brought in". When you find these, check if the corresponding equipment is in the estimate's line items. If not, flag as HIGH severity UNDERBILLED with the photo page number, the caption text quoted, and a PM verification note. Use category "MISSING_ITEM". Always include the verification reminder: "Verify with PM — confirm equipment was actually onsite per field tech notes before billing."
 
 OVERBILLING — flag with severity:OVERBILLED:
 - Equipment count billed > Encircle count
@@ -429,6 +441,170 @@ function auditSalesTax(extracted, auditResult) {
     auditResult.gaps = auditResult.gaps || [];
     auditResult.gaps.push(gap);
     auditResult._tax_audit = {missed_tax: missedTax, lines: taxableUnpaid};
+  }
+
+  return auditResult;
+}
+
+// ══ EQUIPMENT-ROOM ALIGNMENT AUDIT ══
+// For each room in equipment_by_room, check if it has the room-level work
+// that equipment placement implies (monitoring, antimicrobial, drying).
+// Only emits gaps when there's actual revenue loss — skips pure mismatches.
+function auditEquipmentAlignment(extracted, auditResult) {
+  const eqByRoom = extracted.encircle?.equipment_by_room || [];
+  const lineItems = extracted.estimate?.line_items || [];
+  const cat = String(extracted.job_info?.water_category || '').trim();
+  const isCat2Plus = cat === '2' || cat === '3' || cat === 'II' || cat === 'III' ||
+                     cat.toLowerCase().includes('2') || cat.toLowerCase().includes('3');
+
+  // Build a map: room name (lowercased, trimmed) → set of code categories billed to that room
+  const roomBilling = {};
+  for (const li of lineItems) {
+    const room = (li.room || '').toLowerCase().trim();
+    if (!room) continue;
+    if (!roomBilling[room]) roomBilling[room] = { codes: new Set(), totalSF: 0, lines: [] };
+    roomBilling[room].codes.add((li.code || '').toUpperCase().trim());
+    roomBilling[room].lines.push(li);
+  }
+
+  const newGaps = [];
+  const RATE_EQ = 60.50; // WTR EQ monitoring rate per hour
+  const RATE_GRMB = 0.38; // WTR GRMB anti-microbial per SF (used as fallback)
+
+  for (const eq of eqByRoom) {
+    const roomName = (eq.room || '').trim();
+    if (!roomName) continue;
+    const roomKey = roomName.toLowerCase();
+    const billed = roomBilling[roomKey];
+    const totalUnits = (eq.air_movers || 0) + (eq.dehus || 0) + (eq.scrubbers || 0);
+    const days = eq.days_onsite || extracted.encircle?.drying_days || 3;
+    const evidencePage = (eq.page_evidence && eq.page_evidence[0]) || 0;
+
+    if (totalUnits === 0) continue;
+
+    // CASE 1: Room has documented equipment but ZERO line items billed there → HIGH
+    if (!billed || billed.codes.size === 0) {
+      // Estimate missed revenue: monitoring (1.5 hr/day × WTR EQ) + likely antimicrobial
+      const monitoringHours = 1.5 * days;
+      const monitoringValue = +(monitoringHours * RATE_EQ).toFixed(2);
+      newGaps.push({
+        id: 'GAP-ALIGN-' + (newGaps.length + 1),
+        category: 'MISSING_ROOM',
+        severity: 'HIGH',
+        xact_code: 'WTR EQ',
+        description: `Room "${roomName}" has ${totalUnits} piece(s) of equipment documented in Encircle but ZERO line items billed to it. Missing monitoring labor at minimum, likely also missing antimicrobial${isCat2Plus ? ' (Cat 2+)' : ''} and drying-related work for this room.`,
+        recommended_qty: monitoringHours,
+        unit: 'HR',
+        unit_cost: RATE_EQ,
+        estimated_value: '$' + monitoringValue.toFixed(2) + '+',
+        encircle_evidence: `${eq.air_movers || 0} air mover(s), ${eq.dehus || 0} dehu(s), ${eq.scrubbers || 0} scrubber(s) documented in ${roomName} for ~${days} days`,
+        encircle_page: evidencePage,
+        xactimate_current: `No line items billed to "${roomName}"`,
+        standard_reference: 'IICRC S500 Section 12.2.4',
+        standard_text: 'Daily monitoring of all affected areas with active drying equipment is required. Each room with equipment placement requires monitoring labor (typically 1.5 hrs/day per area).'
+      });
+      continue;
+    }
+
+    // CASE 2: Room has equipment AND line items, but missing key room-level work → MEDIUM
+    const codes = billed.codes;
+    const codesArr = Array.from(codes);
+    const hasMonitoring = codesArr.some(c => c.includes('WTR EQ') || c === 'WTR EQ');
+    const hasAntimicrobial = codesArr.some(c => c.includes('GRMB') || c.includes('ANTI'));
+    const hasAnyDryingWork = codesArr.some(c => /WTR (DRY|FCC|FCV|FCW|PAD|SF|DRYW|TRIM|INSS)/.test(c));
+
+    const missing = [];
+    if (!hasMonitoring) missing.push('monitoring labor (WTR EQ — 1.5 hrs/day × ' + days + ' days = $' + (1.5 * days * RATE_EQ).toFixed(2) + ')');
+    if (isCat2Plus && !hasAntimicrobial) missing.push('antimicrobial (WTR GRMB — required for Cat 2+ in affected rooms)');
+    if (!hasAnyDryingWork) missing.push('drying-related work (no drying, demo, or floor coverage line items)');
+
+    if (missing.length > 0) {
+      const monitoringValue = !hasMonitoring ? +(1.5 * days * RATE_EQ).toFixed(2) : 0;
+      newGaps.push({
+        id: 'GAP-ALIGN-' + (newGaps.length + 1),
+        category: 'UNDERBILLED',
+        severity: 'MEDIUM',
+        xact_code: !hasMonitoring ? 'WTR EQ' : (isCat2Plus && !hasAntimicrobial ? 'WTR GRMB' : 'MULTIPLE'),
+        description: `Room "${roomName}" has equipment documented (${totalUnits} unit(s) for ~${days} days) but is missing: ` + missing.join('; ') + '.',
+        recommended_qty: !hasMonitoring ? +(1.5 * days).toFixed(2) : 0,
+        unit: !hasMonitoring ? 'HR' : 'EA',
+        unit_cost: !hasMonitoring ? RATE_EQ : 0,
+        estimated_value: monitoringValue ? '$' + monitoringValue.toFixed(2) + '+' : 'TBD',
+        encircle_evidence: `Equipment documented in ${roomName}: ${eq.air_movers || 0} AM, ${eq.dehus || 0} dehu, ${eq.scrubbers || 0} scrubber over ${days} days`,
+        encircle_page: evidencePage,
+        xactimate_current: 'Room billed but missing: ' + missing.join('; '),
+        standard_reference: 'IICRC S500 Section 12.2.4',
+        standard_text: 'Each room with active drying equipment requires daily monitoring and (in Cat 2+) antimicrobial application. Equipment placement without associated room-level work indicates incomplete billing.'
+      });
+    }
+  }
+
+  if (newGaps.length > 0) {
+    auditResult.gaps = (auditResult.gaps || []).concat(newGaps);
+    auditResult._alignment_audit = { gaps_added: newGaps.length, rooms_checked: eqByRoom.length };
+  }
+
+  return auditResult;
+}
+
+// ══ ORPHAN EQUIPMENT SCANNER ══
+// Scan photo_notes for trigger phrases that indicate equipment exists in
+// the field but isn't in the formal Encircle equipment register.
+const ORPHAN_TRIGGERS = [
+  /not in (the )?system/i,
+  /\bextra (air mover|dehu|scrubber|fan|unit)\b/i,
+  /\badded (an? )?(air mover|dehu|scrubber|fan|unit)/i,
+  /\bborrowed (from|an?)\b/i,
+  /\breplaced (the |an? )?(air mover|dehu|scrubber|fan|unit)/i,
+  /\bswapped (out)?\b/i,
+  /\badditional (air mover|dehu|scrubber|fan|unit)\b/i,
+  /\bnew unit\b/i,
+  /\bfrom another job\b/i,
+  /\bthird (air mover|dehu|scrubber|fan)\b/i,
+  /\bsecond (air mover|dehu|scrubber|fan)\b/i,
+  /\bbrought in (an? )?(air mover|dehu|scrubber|fan|unit)/i
+];
+
+function auditOrphanEquipment(extracted, auditResult) {
+  const photoNotes = extracted.encircle?.photo_notes || [];
+  const newGaps = [];
+  const matched = [];
+
+  for (const note of photoNotes) {
+    const text = ((note.caption_text || '') + ' ' + (note.photo_description || '')).trim();
+    if (!text) continue;
+    for (const pattern of ORPHAN_TRIGGERS) {
+      if (pattern.test(text)) {
+        matched.push({ note, pattern: pattern.toString() });
+        break; // one match per note is enough
+      }
+    }
+  }
+
+  for (let i = 0; i < matched.length; i++) {
+    const m = matched[i];
+    const room = m.note.room || '(unspecified room)';
+    newGaps.push({
+      id: 'GAP-ORPHAN-' + (i + 1),
+      category: 'MISSING_ITEM',
+      severity: 'HIGH',
+      xact_code: 'WTR NAFAN',
+      description: `Possible unlogged equipment in ${room} — Encircle photo caption suggests equipment exists outside the formal register. Verify with PM — confirm equipment was actually onsite per field tech notes before billing.`,
+      recommended_qty: 1,
+      unit: 'EA',
+      unit_cost: 72.09,
+      estimated_value: '$72.09+ per unit per day',
+      encircle_evidence: `Photo caption (p.${m.note.page || '?'}): "${(m.note.caption_text || m.note.photo_description || '').slice(0, 200)}"`,
+      encircle_page: m.note.page || 0,
+      xactimate_current: 'Equipment may not be in line items — verify count vs photos',
+      standard_reference: 'JG QA — Field Documentation Cross-Check',
+      standard_text: 'Field technician notes referencing extra, replaced, swapped, or unlogged equipment require PM verification. If verified onsite, billing must reflect actual equipment days.'
+    });
+  }
+
+  if (newGaps.length > 0) {
+    auditResult.gaps = (auditResult.gaps || []).concat(newGaps);
+    auditResult._orphan_audit = { matches: matched.length };
   }
 
   return auditResult;
@@ -670,6 +846,8 @@ async function runPass1(){
     S.prog='Applying JG billing rules...';draw();
     audit=applyBillingRules(extracted,audit);
     audit=auditSalesTax(extracted,audit);
+    audit=auditEquipmentAlignment(extracted,audit);
+    audit=auditOrphanEquipment(extracted,audit);
 
     // Merge job_info and estimate_submitted from extracted into audit for compat with rest of UI
     audit.job_info=extracted.job_info||{};
