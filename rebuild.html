@@ -666,6 +666,7 @@ const $ = sel => document.querySelector(sel);
 const $$ = sel => document.querySelectorAll(sel);
 const fmtDate = d => d ? new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '—';
 const fmtDateTime = d => d ? new Date(d).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—';
+const titleCase = s => String(s||'').replace(/_/g,' ').replace(/\b\w/g, c => c.toUpperCase());
 const fmtRelative = d => {
   if (!d) return '';
   const ms = Date.now() - new Date(d).getTime();
@@ -752,7 +753,7 @@ function renderProjects() {
       <div class="project-card ${p.id === state.activeProjectId ? 'active' : ''}" data-id="${p.id}">
         <div class="pc-top">
           <div class="pc-job">${p.albi_job_number || ('Albi #' + p.albi_project_id)}</div>
-          <div class="pc-status ${p.status}">${(p.status||'').replace('_',' ')}</div>
+          <div class="pc-status ${p.status}">${titleCase(p.status)}</div>
         </div>
         <div class="pc-customer">${p.customer_name || '—'}</div>
         <div class="pc-meta">
@@ -1037,7 +1038,7 @@ function renderDetail() {
       </div>
       <div class="kpi">
         <div class="label">Status</div>
-        <div class="value" style="font-size:14px;text-transform:uppercase;">${p.status.replace('_',' ')}</div>
+        <div class="value" style="font-size:14px;text-transform:uppercase;">${titleCase(p.status)}</div>
         <div class="sub">updated ${fmtRelative(p.updated_at)}</div>
       </div>
     </div>
@@ -1086,9 +1087,10 @@ function renderTabContent() {
 
   // Wire phase actions if we just rendered phases
   if (state.tab === 'phases') {
+    const addBtn = $('#btnAddPhase');
+    if (addBtn) addBtn.addEventListener('click', () => addNewPhase());
     $$('.phase').forEach(row => {
       const id = row.dataset.id;
-      // Click anywhere on the row (except action buttons) opens the editor
       row.style.cursor = 'pointer';
       row.addEventListener('click', () => openPhaseEditor(id));
       const editBtn = row.querySelector('[data-act="edit"]');
@@ -1116,10 +1118,7 @@ function renderPhasesTab() {
   return `
     <div class="section-head">
       <h3>Phase Schedule</h3>
-      <div style="display:flex;gap:6px;">
-        <button class="btn">+ Add Phase</button>
-        <button class="btn">⊟ Reorder</button>
-      </div>
+      <button class="btn" id="btnAddPhase">+ Add Phase</button>
     </div>
     <div class="phase-list">
       ${state.phases.map(ph => phaseRowHtml(ph)).join('')}
@@ -1142,7 +1141,7 @@ function phaseRowHtml(ph) {
       <div class="name">
         ${ph.phase_name}
         ${ph.delay_attribution && ph.delay_attribution !== 'none'
-          ? `<div class="delay-flag">⚠ ${ph.delay_attribution.replace(/_/g,' ')}</div>` : ''}
+          ? `<div class="delay-flag">⚠ ${titleCase(ph.delay_attribution)}</div>` : ''}
       </div>
       <div class="sub-name ${(sub || inhouseEmp) ? '' : 'unassigned'}">
         ${assigneeLabel}
@@ -1152,7 +1151,7 @@ function phaseRowHtml(ph) {
           ? `<b>${fmtDate(ph.scheduled_start)}</b> → ${fmtDate(ph.scheduled_end)}`
           : '<span style="color:var(--muted);">no schedule</span>'}
       </div>
-      <div class="status-pill ${ph.status}">${ph.status.replace('_',' ')}</div>
+      <div class="status-pill ${ph.status}">${titleCase(ph.status)}</div>
       <div class="row-actions">
         ${showDelayBtn ? `<button data-act="delay" title="Log delay">⚑</button>` : ''}
         <button data-act="advance" title="Advance status">▶</button>
@@ -1227,6 +1226,23 @@ function renderAuditTab() {
 }
 
 // ──── Phase editor ────
+async function addNewPhase() {
+  const name = prompt('Phase name?');
+  if (!name) return;
+  const lastSeq = state.phases.length ? Math.max(...state.phases.map(p => p.sequence)) : 0;
+  const newSeq = lastSeq + 10;
+  const { error } = await sb.from('rebuild_phases').insert({
+    project_id: state.activeProjectId,
+    sequence: newSeq,
+    phase_name: name.trim(),
+    status: 'pending',
+  });
+  if (error) { toast('Add failed: ' + error.message); return; }
+  toast('Phase added');
+  await loadPhases(); await loadHistory();
+  renderDetail();
+}
+
 function openPhaseEditor(phaseId) {
   const ph = state.phases.find(p => p.id === phaseId);
   if (!ph) return;
@@ -1243,7 +1259,7 @@ function openPhaseEditor(phaseId) {
         <label>Status</label>
         <select id="eph_status">
           ${['pending','scheduled','in_progress','complete','skipped','blocked']
-            .map(s => `<option value="${s}" ${s===ph.status?'selected':''}>${s.replace('_',' ')}</option>`).join('')}
+            .map(s => `<option value="${s}" ${s===ph.status?'selected':''}>${titleCase(s)}</option>`).join('')}
         </select>
       </div>
       <div>
@@ -1344,7 +1360,7 @@ async function advancePhaseStatus(phaseId) {
   if (next === 'in_progress' && !ph.actual_start) updates.actual_start = new Date().toISOString();
   if (next === 'complete' && !ph.actual_end) updates.actual_end = new Date().toISOString();
   if (sb) await sb.from('rebuild_phases').update(updates).eq('id', phaseId);
-  toast(`→ ${next.replace('_',' ')}`);
+  toast(`→ ${titleCase(next)}`);
   await loadPhases(); await loadHistory();
   renderDetail();
 
@@ -1385,10 +1401,10 @@ function exportProjectPdf() {
       ph.phase_name || '',
       ph.trade || '',
       ph.assigned_sub?.company_name || '—',
-      (ph.status || '').replace('_',' '),
+      titleCase(ph.status),
       ph.scheduled_start ? `${fmtDate(ph.scheduled_start)} → ${fmtDate(ph.scheduled_end)}` : (ph.window_earliest ? `Window ${fmtDate(ph.window_earliest)}–${fmtDate(ph.window_latest)}` : '—'),
       ph.actual_start ? `${fmtDate(ph.actual_start)}${ph.actual_end ? ' → ' + fmtDate(ph.actual_end) : ''}` : '—',
-      (ph.delay_attribution && ph.delay_attribution !== 'none') ? ph.delay_attribution.replace(/_/g,' ') : '',
+      (ph.delay_attribution && ph.delay_attribution !== 'none') ? titleCase(ph.delay_attribution) : '',
     ])
   };
 
@@ -1419,7 +1435,7 @@ function exportProjectPdf() {
           ['Albi Job Number', p.albi_job_number || '—'],
           ['Type', p.albi_suffix ? `${p.albi_suffix} (${p.loss_type || 'unspecified'})` : (p.loss_type || '—')],
           ['Albi Status', p.albi_status || '—'],
-          ['Platform Status', (p.status || '').replace('_',' ')],
+          ['Platform Status', titleCase(p.status)],
           ['Scope', p.scope_amount ? '$' + Number(p.scope_amount).toLocaleString() : '—'],
           ['Estimated Start', fmtDate(p.estimated_start)],
           ['Estimated Completion', fmtDate(p.estimated_completion)],
