@@ -163,6 +163,49 @@ async function render() {
       <label>Notes for JG</label>
       <textarea id="v_notes" placeholder="Lead time, alternate options, anything else…"></textarea>
 
+      <div style="margin-top:18px;padding-top:18px;border-top:1px solid var(--line);">
+        <h3 style="color:var(--navy);margin:0 0 4px;font-size:16px;">Proposed Install Dates</h3>
+        <div class="sub" style="margin-bottom:10px;">Provide up to 3 date options. JG will pick one and confirm with the customer.</div>
+        <div class="row">
+          <div>
+            <label>Option 1 *</label>
+            <input id="v_date1" type="date" required>
+          </div>
+          <div>
+            <label>Option 1 Notes</label>
+            <input id="v_date1_notes" placeholder="e.g., 2-day install, AM start">
+          </div>
+        </div>
+        <div class="row">
+          <div>
+            <label>Option 2</label>
+            <input id="v_date2" type="date">
+          </div>
+          <div>
+            <label>Option 2 Notes</label>
+            <input id="v_date2_notes">
+          </div>
+        </div>
+        <div class="row">
+          <div>
+            <label>Option 3</label>
+            <input id="v_date3" type="date">
+          </div>
+          <div>
+            <label>Option 3 Notes</label>
+            <input id="v_date3_notes">
+          </div>
+        </div>
+      </div>
+
+      <div style="margin-top:18px;padding-top:18px;border-top:1px solid var(--line);">
+        <h3 style="color:var(--navy);margin:0 0 4px;font-size:16px;">Attachments</h3>
+        <div class="sub" style="margin-bottom:10px;">Upload your estimate PDF, product spec sheets, photos, or anything else relevant.</div>
+        <div id="v_staged" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;"></div>
+        <button type="button" class="btn" id="v_attach_btn">📎 Attach files</button>
+        <input type="file" id="v_file_input" multiple style="display:none;" accept="image/*,application/pdf,.doc,.docx,.xls,.xlsx">
+      </div>
+
       <div class="submit-bar">
         <button class="btn primary" id="v_submit">Submit Estimate</button>
       </div>
@@ -178,9 +221,58 @@ async function render() {
   document.getElementById('v_qty').addEventListener('input', recalc);
   document.getElementById('v_unit_cost').addEventListener('input', recalc);
 
+  // File staging
+  let stagedFiles = [];
+  const renderStaged = () => {
+    const wrap = document.getElementById('v_staged');
+    wrap.innerHTML = stagedFiles.map((f, i) => `
+      <span style="display:inline-flex;align-items:center;gap:6px;padding:6px 10px;background:#eef0f7;border-radius:6px;font-size:12px;color:var(--navy);">
+        📄 ${f.name} <span style="color:var(--muted);">(${(f.size/1024).toFixed(0)} KB)</span>
+        <span style="cursor:pointer;color:var(--red);font-weight:700;" data-i="${i}">✕</span>
+      </span>
+    `).join('');
+    wrap.querySelectorAll('[data-i]').forEach(el => el.addEventListener('click', () => {
+      stagedFiles.splice(parseInt(el.dataset.i), 1);
+      renderStaged();
+    }));
+  };
+  document.getElementById('v_attach_btn').addEventListener('click', () => document.getElementById('v_file_input').click());
+  document.getElementById('v_file_input').addEventListener('change', e => {
+    for (const f of e.target.files) stagedFiles.push(f);
+    e.target.value = '';
+    renderStaged();
+  });
+
   document.getElementById('v_submit').onclick = async () => {
     const total = parseFloat(document.getElementById('v_total').value);
     if (!total) { alert('Total cost is required.'); return; }
+    const date1 = document.getElementById('v_date1').value;
+    if (!date1) { alert('At least one install date option is required.'); return; }
+
+    // Build proposed dates array
+    const proposedDates = [{ date: date1, notes: document.getElementById('v_date1_notes').value.trim() || null }];
+    const date2 = document.getElementById('v_date2').value;
+    if (date2) proposedDates.push({ date: date2, notes: document.getElementById('v_date2_notes').value.trim() || null });
+    const date3 = document.getElementById('v_date3').value;
+    if (date3) proposedDates.push({ date: date3, notes: document.getElementById('v_date3_notes').value.trim() || null });
+
+    // Upload files
+    const newUrls = [];
+    document.getElementById('v_submit').disabled = true;
+    document.getElementById('v_submit').textContent = 'Uploading…';
+    for (const file of stagedFiles) {
+      const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+      const path = `selections/${sel.id}/vendor-${Date.now()}-${safeName}`;
+      const { error: upErr } = await sb.storage
+        .from('rebuild-message-attachments')
+        .upload(path, file, { contentType: file.type, upsert: false });
+      if (upErr) { console.error('Upload failed:', upErr); continue; }
+      const { data: urlData } = sb.storage.from('rebuild-message-attachments').getPublicUrl(path);
+      newUrls.push(urlData.publicUrl);
+    }
+    const existingUrls = Array.isArray(sel.attachment_urls) ? sel.attachment_urls : [];
+    const allUrls = [...existingUrls, ...newUrls];
+
     const updates = {
       description: document.getElementById('v_desc').value.trim() || null,
       sku: document.getElementById('v_sku').value.trim() || null,
@@ -189,6 +281,9 @@ async function render() {
       unit_cost: parseFloat(document.getElementById('v_unit_cost').value) || null,
       total_cost: total,
       vendor_submitted_at: new Date().toISOString(),
+      proposed_install_dates: proposedDates,
+      attachment_urls: allUrls.length ? allUrls : null,
+      status: 'awaiting_pm_review',
     };
     const notes = document.getElementById('v_notes').value.trim();
     if (notes) updates.pm_notes = (sel.pm_notes ? sel.pm_notes + '\n\n' : '') + 'Vendor: ' + notes;
@@ -198,13 +293,13 @@ async function render() {
     await sb.from('rebuild_selections_history').insert({
       selection_id: sel.id, action: 'vendor_submitted',
       actor: document.getElementById('v_contact').value || (sel.vendor_sub?.company_name || 'vendor'),
-      details: `Vendor submitted estimate: $${total.toLocaleString()}`,
+      details: `Vendor submitted estimate: $${total.toLocaleString()} · ${proposedDates.length} install date option${proposedDates.length>1?'s':''}${newUrls.length ? ' · ' + newUrls.length + ' attachment' + (newUrls.length>1?'s':'') : ''}`,
     });
 
     main.innerHTML = `<div class="card success-state">
       <div class="check">✓</div>
       <h2>Estimate Submitted</h2>
-      <p>Thank you. JG Restoration will review and follow up with the customer.</p>
+      <p>Thank you. JG Restoration will review your estimate and proposed install dates, then follow up with the customer.</p>
     </div>`;
   };
 }

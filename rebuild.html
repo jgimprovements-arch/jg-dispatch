@@ -1800,6 +1800,8 @@ function renderTabContent() {
         if (act === 'edit') return openSelectionEditor(id);
         if (act === 'send-vendor') return sendSelectionToVendor(id);
         if (act === 'send-customer') return sendSelectionToCustomer(id);
+        if (act === 'review-vendor') return openVendorReviewModal(id);
+        if (act === 'notify-sub') return notifySubInstallScheduled(id);
         if (act === 'copy-vendor') {
           const link = `${CUSTOMER_PORTAL_BASE.replace('customer.html','vendor.html')}?t=${sel.vendor_token}`;
           try { await navigator.clipboard.writeText(link); toast('Vendor link copied'); } catch { toast('Copy failed — link: ' + link); }
@@ -1808,6 +1810,10 @@ function renderTabContent() {
         if (act === 'copy-customer') {
           const link = `${CUSTOMER_PORTAL_BASE.replace('customer.html','approval.html')}?t=${sel.customer_token}`;
           try { await navigator.clipboard.writeText(link); toast('Customer approval link copied'); } catch { toast('Copy failed — link: ' + link); }
+        }
+        if (act === 'copy-install') {
+          const link = `${CUSTOMER_PORTAL_BASE.replace('customer.html','install_approval.html')}?t=${sel.customer_token}`;
+          try { await navigator.clipboard.writeText(link); toast('Install approval link copied'); } catch { toast('Copy failed — link: ' + link); }
         }
         if (act === 'delete') {
           if (!confirm('Delete this selection?')) return;
@@ -2137,14 +2143,34 @@ function renderSelectionRow(s) {
   const statusLabels = {
     draft: { lbl: 'Draft', color: 'var(--muted)' },
     awaiting_vendor: { lbl: 'Awaiting Vendor', color: 'var(--gold)' },
+    awaiting_pm_review: { lbl: 'Vendor Submitted — Review', color: 'var(--orange)' },
     awaiting_customer: { lbl: 'Awaiting Customer', color: 'var(--orange)' },
+    awaiting_customer_install: { lbl: 'Awaiting Install Approval', color: 'var(--orange)' },
     approved: { lbl: 'Approved', color: 'var(--green)' },
+    install_scheduled: { lbl: 'Install Scheduled', color: 'var(--green)' },
     rejected: { lbl: 'Rejected', color: 'var(--red)' },
     changes_requested: { lbl: 'Changes Requested', color: 'var(--red)' },
   };
   const sl = statusLabels[s.status] || statusLabels.draft;
   const vendor = s.vendor_sub?.company_name || s.vendor_name || '—';
   const cost = s.total_cost ? '$' + Number(s.total_cost).toLocaleString(undefined,{minimumFractionDigits:2}) : '—';
+
+  // Proposed install dates from vendor (if present)
+  const proposedDates = Array.isArray(s.proposed_install_dates) ? s.proposed_install_dates : [];
+  const proposedHtml = (proposedDates.length && s.status === 'awaiting_pm_review') ? `
+    <div style="background:#fff8ed;border:1px solid var(--gold);border-radius:6px;padding:10px 12px;margin:8px 0;font-size:12px;">
+      <b>Vendor proposed install dates:</b>
+      <ul style="margin:6px 0 0;padding-left:20px;">
+        ${proposedDates.map(d => `<li>${fmtDate(d.date)}${d.notes ? ' — ' + d.notes : ''}</li>`).join('')}
+      </ul>
+    </div>` : '';
+
+  // Approved install date display
+  const installInfo = s.approved_install_date ? `
+    <div style="background:#eaf5ee;border:1px solid var(--green);border-radius:6px;padding:8px 12px;margin:8px 0;font-size:12px;">
+      📅 <b>Install scheduled:</b> ${fmtDate(s.approved_install_date)}
+    </div>` : '';
+
   return `
     <div class="selection-card" data-id="${s.id}">
       <div class="sel-head">
@@ -2160,14 +2186,19 @@ function renderSelectionRow(s) {
         ${s.quantity ? `<span><b>Qty:</b> ${s.quantity}${s.unit ? ' ' + s.unit : ''}</span>` : ''}
         <span><b>Total:</b> ${cost}</span>
       </div>
+      ${proposedHtml}
+      ${installInfo}
       ${s.customer_notes ? `<div class="sel-customer-note">💬 Customer: ${s.customer_notes}</div>` : ''}
       <div class="sel-actions">
         <button class="btn" data-act="edit" data-id="${s.id}">✎ Edit</button>
+        ${s.status === 'awaiting_pm_review' ? `<button class="btn primary" data-act="review-vendor" data-id="${s.id}" style="background:var(--orange);border-color:var(--orange);">⚡ Review &amp; Pick Install Date</button>` : ''}
         ${s.status === 'awaiting_vendor' ? `<button class="btn" data-act="copy-vendor" data-id="${s.id}">🔗 Copy Vendor Link</button>` : ''}
         ${s.status === 'awaiting_vendor' ? `<button class="btn" data-act="email-vendor" data-id="${s.id}">✉ Email Vendor</button>` : ''}
         ${(s.status === 'draft' || s.status === 'changes_requested') ? `<button class="btn" data-act="send-vendor" data-id="${s.id}">→ Send to Vendor</button>` : ''}
         ${(s.status === 'draft' || s.status === 'changes_requested' || s.status === 'awaiting_vendor') && s.total_cost ? `<button class="btn primary" data-act="send-customer" data-id="${s.id}">→ Send to Customer for Approval</button>` : ''}
         ${s.status === 'awaiting_customer' ? `<button class="btn" data-act="copy-customer" data-id="${s.id}">🔗 Copy Customer Link</button>` : ''}
+        ${s.status === 'awaiting_customer_install' ? `<button class="btn" data-act="copy-install" data-id="${s.id}">🔗 Copy Install Approval Link</button>` : ''}
+        ${s.status === 'install_scheduled' && !s.sub_notified_at ? `<button class="btn primary" data-act="notify-sub" data-id="${s.id}">→ Notify Sub</button>` : ''}
         <button class="btn ghost-red" data-act="delete" data-id="${s.id}">Delete</button>
       </div>
     </div>`;
@@ -2421,6 +2452,315 @@ async function openSelectionEditor(selectionId) {
   if (!isNew) sendBtn.style.display = 'none'; else sendBtn.style.display = '';
 
   openModal('modalEditPhase');
+}
+
+// ────────── Vendor Review (PM picks install date + phase, sends to customer) ──────────
+async function openVendorReviewModal(selectionId) {
+  const s = state.selections.find(x => x.id === selectionId);
+  if (!s) return;
+
+  const proposed = Array.isArray(s.proposed_install_dates) ? s.proposed_install_dates : [];
+  const phases = state.phases;
+  const attachments = Array.isArray(s.attachment_urls) ? s.attachment_urls : [];
+
+  $('#ephBody').innerHTML = `
+    <h3 style="color:var(--navy);margin:0 0 12px;font-size:18px;">${s.category}</h3>
+    <div style="background:var(--bg);border-radius:6px;padding:12px;font-size:13px;margin-bottom:14px;">
+      <div><b>Vendor:</b> ${s.vendor_sub?.company_name || s.vendor_name || '—'}</div>
+      ${s.sku ? `<div><b>SKU:</b> ${s.sku}</div>` : ''}
+      ${s.quantity ? `<div><b>Quantity:</b> ${s.quantity}${s.unit ? ' ' + s.unit : ''}</div>` : ''}
+      ${s.total_cost ? `<div><b>Total:</b> $${Number(s.total_cost).toLocaleString(undefined,{minimumFractionDigits:2})}</div>` : ''}
+      ${s.description ? `<div style="margin-top:6px;"><b>Description:</b> ${s.description}</div>` : ''}
+    </div>
+
+    ${attachments.length ? `
+      <label>Vendor Attachments</label>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px;">
+        ${attachments.map(url => {
+          const name = url.split('/').pop().split('?')[0];
+          const isImage = /\.(jpg|jpeg|png|gif|webp)$/i.test(name);
+          return isImage
+            ? `<a href="${url}" target="_blank"><img src="${url}" style="max-width:120px;max-height:120px;border:1px solid var(--line);border-radius:4px;"></a>`
+            : `<a href="${url}" target="_blank" style="display:inline-flex;align-items:center;gap:6px;padding:6px 10px;background:#eef0f7;border-radius:6px;text-decoration:none;color:var(--navy);font-weight:600;font-size:12px;">📎 ${name}</a>`;
+        }).join('')}
+      </div>
+    ` : ''}
+
+    <label>Pick Install Date *</label>
+    <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:14px;">
+      ${proposed.map((d, i) => `
+        <label style="display:flex;align-items:center;gap:10px;padding:8px 12px;background:var(--bg);border:1px solid var(--line);border-radius:6px;cursor:pointer;font-size:13px;">
+          <input type="radio" name="vr_date" value="${d.date}" ${i===0?'checked':''} style="width:auto;margin:0;">
+          <div>
+            <div style="font-weight:600;">${fmtDate(d.date)}</div>
+            ${d.notes ? `<div style="font-size:11px;color:var(--muted);">${d.notes}</div>` : ''}
+          </div>
+        </label>
+      `).join('')}
+      <label style="display:flex;align-items:center;gap:10px;padding:8px 12px;background:var(--bg);border:1px solid var(--line);border-radius:6px;font-size:13px;">
+        <input type="radio" name="vr_date" value="custom" style="width:auto;margin:0;">
+        <span style="font-weight:600;">Other date:</span>
+        <input id="vr_custom_date" type="date" style="flex:1;">
+      </label>
+    </div>
+
+    <label>Attach to Phase</label>
+    <select id="vr_phase">
+      <option value="">— Create new phase named "${s.category} install" —</option>
+      ${phases.map(p => `<option value="${p.id}">${String(p.sequence).padStart(2,'0')} · ${p.phase_name}</option>`).join('')}
+    </select>
+
+    <label style="margin-top:14px;">Notes (optional, for audit log)</label>
+    <textarea id="vr_notes" rows="2" placeholder="Why this date, special instructions..."></textarea>
+  `;
+
+  $('#modalEditPhase h3').firstChild.textContent = 'Review Vendor Submission ';
+
+  // Hide Save & Send to Customer button
+  const sendBtnExisting = $('#modalEditPhase #eph_save_send');
+  if (sendBtnExisting) sendBtnExisting.style.display = 'none';
+
+  $('#eph_save').onclick = async () => {
+    let chosenDate = null;
+    document.querySelectorAll('input[name="vr_date"]').forEach(r => {
+      if (r.checked) {
+        if (r.value === 'custom') chosenDate = $('#vr_custom_date').value || null;
+        else chosenDate = r.value;
+      }
+    });
+    if (!chosenDate) { toast('Pick an install date'); return; }
+
+    let phaseId = $('#vr_phase').value || null;
+
+    // Create phase if not picking existing
+    if (!phaseId) {
+      const maxSeq = phases.length ? Math.max(...phases.map(p => p.sequence)) : 0;
+      const { data: newPhase, error: phErr } = await sb.from('rebuild_phases').insert({
+        project_id: state.activeProjectId,
+        phase_name: `${s.category} install`,
+        sequence: maxSeq + 10,
+        status: 'scheduled',
+        scheduled_start: chosenDate,
+        scheduled_end: chosenDate,
+        notes: 'Auto-created from material selection',
+      }).select();
+      if (phErr) { toast('Phase create failed: ' + phErr.message); return; }
+      phaseId = newPhase[0].id;
+
+      // Auto-assign sub to new phase
+      if (s.vendor_sub_id) {
+        await sb.from('rebuild_phase_assignees').insert({
+          phase_id: phaseId, assignee_type: 'sub', sub_id: s.vendor_sub_id,
+          assigned_by_email: state.pmEmail,
+        });
+      }
+    } else {
+      // Update existing phase with this date
+      await sb.from('rebuild_phases').update({
+        scheduled_start: chosenDate,
+        scheduled_end: chosenDate,
+        status: 'scheduled',
+      }).eq('id', phaseId);
+      // Add sub as assignee if not already
+      if (s.vendor_sub_id) {
+        const { data: existing } = await sb.from('rebuild_phase_assignees')
+          .select('id').eq('phase_id', phaseId).eq('sub_id', s.vendor_sub_id).maybeSingle();
+        if (!existing) {
+          await sb.from('rebuild_phase_assignees').insert({
+            phase_id: phaseId, assignee_type: 'sub', sub_id: s.vendor_sub_id,
+            assigned_by_email: state.pmEmail,
+          });
+        }
+      }
+    }
+
+    // Update selection
+    await sb.from('rebuild_selections').update({
+      approved_install_date: chosenDate,
+      install_phase_id: phaseId,
+      status: 'awaiting_customer_install',
+    }).eq('id', selectionId);
+
+    const notes = $('#vr_notes').value.trim();
+    await sb.from('rebuild_selections_history').insert({
+      selection_id: selectionId, action: 'pm_picked_install_date', actor: state.pmEmail,
+      details: `Picked ${fmtDate(chosenDate)}${notes ? ' · ' + notes : ''}`,
+    });
+    logToAlbi('selection_install_picked', `Selection "${s.category}" — install date set: ${fmtDate(chosenDate)}, sent to customer for approval`);
+
+    closeModal('modalEditPhase');
+    await loadSelections(); await loadPhases();
+    renderDetail();
+
+    // Now open the customer install approval send preview
+    sendInstallApprovalToCustomer(selectionId);
+  };
+
+  $('#eph_delete').style.display = 'none';
+  openModal('modalEditPhase');
+}
+
+// Send install date approval request to customer (uses existing message hook)
+async function sendInstallApprovalToCustomer(selectionId) {
+  const s = state.selections.find(x => x.id === selectionId) || (await sb.from('rebuild_selections').select('*, vendor_sub:rebuild_subs(company_name)').eq('id', selectionId).single()).data;
+  const p = state.activeProject;
+  if (!s || !p) return;
+  if (!p.customer_email) { toast('No customer email'); return; }
+
+  const link = `${CUSTOMER_PORTAL_BASE.replace('customer.html','install_approval.html')}?t=${s.customer_token}`;
+  const pmFirst = (p.albi_pm_name || 'JG Restoration').split(' ')[0];
+  const pmPhone = p.albi_pm_phone ? fmtPhone(p.albi_pm_phone) : '(920) 428-4200';
+  const vendor = s.vendor_sub?.company_name || s.vendor_name || 'our vendor';
+
+  const defaultBody = `Hi ${(p.customer_name || '').split(' ')[0] || 'there'},
+
+Good news — ${vendor} has confirmed your ${s.category} and is ready to schedule installation.
+
+Proposed install date: ${fmtDate(s.approved_install_date)}
+
+Please confirm this date works for you:
+${link}
+
+If this date doesn't work, you can request a different date on that page or call me at ${pmPhone}.
+
+Thanks,
+${pmFirst}
+JG Restoration`;
+
+  const defaultSubject = `Install date approval — ${s.category}`;
+
+  openSendPreviewModal({
+    title: 'Send Install Date to Customer',
+    to: p.customer_email,
+    subject: defaultSubject,
+    body: defaultBody,
+    onSend: async (subject, body, toEmail) => {
+      const { data: msgData } = await sb.from('rebuild_messages').insert({
+        project_id: p.id, recipient_type: 'customer',
+        recipient_name: p.customer_name, recipient_email: toEmail,
+        channel: 'email', direction: 'outbound', subject, body,
+        sent_by_email: p.albi_pm_email || state.pmEmail,
+        sent_by_name: p.albi_pm_name || 'JG Restoration', status: 'queued',
+      }).select();
+
+      try {
+        await fetch(MESSAGE_HOOK, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            message_id: msgData?.[0]?.id, project_id: p.id, albi_project_id: p.albi_project_id,
+            job_number: p.albi_job_number, channel: 'email', to_email: toEmail,
+            from_email: p.albi_pm_email || state.pmEmail,
+            from_name: p.albi_pm_name || 'JG Restoration',
+            recipient_name: p.customer_name, recipient_type: 'customer',
+            subject, body, attachment_count: 0, attachment_urls: '',
+          }), mode: 'no-cors',
+        });
+        if (msgData?.[0]) await sb.from('rebuild_messages').update({ status: 'sent' }).eq('id', msgData[0].id);
+      } catch (e) { console.error(e); }
+
+      await sb.from('rebuild_selections_history').insert({
+        selection_id: selectionId, action: 'install_sent_to_customer', actor: state.pmEmail,
+        details: `Install date sent to customer: ${fmtDate(s.approved_install_date)}`,
+      });
+      toast('Sent to customer for install approval');
+    }
+  });
+}
+
+// PM-triggered "Notify Sub" (after customer approves install date) — picks email vs SMS
+async function notifySubInstallScheduled(selectionId) {
+  const s = state.selections.find(x => x.id === selectionId);
+  const p = state.activeProject;
+  if (!s || !p) return;
+  if (!s.vendor_sub) { toast('No sub on file for this selection'); return; }
+  const sub = s.vendor_sub;
+
+  // Pick channel
+  const pickChannel = await new Promise(resolve => {
+    const choice = prompt('Notify sub via Email or SMS? Type "email" or "sms"', sub.email ? 'email' : 'sms');
+    resolve((choice || '').toLowerCase().trim());
+  });
+  if (!['email','sms'].includes(pickChannel)) { toast('Cancelled'); return; }
+
+  if (pickChannel === 'email' && !sub.email) { toast('Sub has no email on file'); return; }
+  if (pickChannel === 'sms' && !sub.phone) { toast('Sub has no phone on file'); return; }
+
+  const pmFirst = (p.albi_pm_name || 'JG Restoration').split(' ')[0];
+  const pmPhone = p.albi_pm_phone ? fmtPhone(p.albi_pm_phone) : '(920) 428-4200';
+  const subFirst = (sub.primary_contact || sub.company_name).split(' ')[0];
+
+  const body = pickChannel === 'sms'
+    ? `Hi ${subFirst}, this is ${pmFirst} from JG Restoration. Customer ${p.customer_name} approved the install for ${s.category} on ${fmtDate(s.approved_install_date)} at ${p.property_address || p.address || ''}. You're booked. Call ${pmPhone} with questions.`
+    : `Hi ${subFirst},
+
+The customer has approved the install date. You're confirmed:
+
+Project: ${p.albi_job_number}
+Customer: ${p.customer_name}
+Address: ${p.property_address || p.address || ''}
+${p.customer_phone ? 'Customer phone: ' + fmtPhone(p.customer_phone) : ''}
+
+Selection: ${s.category}
+${s.sku ? 'SKU: ' + s.sku + '\n' : ''}${s.quantity ? 'Quantity: ' + s.quantity + (s.unit ? ' ' + s.unit : '') + '\n' : ''}
+Install date: ${fmtDate(s.approved_install_date)}
+
+Please confirm receipt and let me know if anything changes.
+
+Thanks,
+${pmFirst}
+JG Restoration · ${pmPhone}`;
+
+  const subject = pickChannel === 'email' ? `Install confirmed — ${s.category} · ${fmtDate(s.approved_install_date)}` : null;
+
+  openSendPreviewModal({
+    title: `Notify ${sub.company_name} — Install Scheduled`,
+    to: pickChannel === 'email' ? sub.email : sub.phone,
+    subject: subject || '(SMS — no subject)',
+    body,
+    onSend: async (finalSubject, finalBody, toAddr) => {
+      const { data: msgData } = await sb.from('rebuild_messages').insert({
+        project_id: p.id, recipient_type: 'sub', recipient_sub_id: sub.id,
+        recipient_name: sub.primary_contact || sub.company_name,
+        recipient_email: pickChannel === 'email' ? toAddr : null,
+        recipient_phone: pickChannel === 'sms' ? toAddr : null,
+        channel: pickChannel, direction: 'outbound',
+        subject: pickChannel === 'email' ? finalSubject : null, body: finalBody,
+        sent_by_email: p.albi_pm_email || state.pmEmail,
+        sent_by_name: p.albi_pm_name || 'JG Restoration', status: 'queued',
+      }).select();
+
+      try {
+        await fetch(MESSAGE_HOOK, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            message_id: msgData?.[0]?.id, project_id: p.id, albi_project_id: p.albi_project_id,
+            job_number: p.albi_job_number, channel: pickChannel,
+            to_email: pickChannel === 'email' ? toAddr : null,
+            to_phone: pickChannel === 'sms' ? toE164(toAddr) : null,
+            from_email: p.albi_pm_email || state.pmEmail,
+            from_name: p.albi_pm_name || 'JG Restoration',
+            recipient_name: sub.primary_contact || sub.company_name,
+            recipient_type: 'sub',
+            subject: finalSubject, body: finalBody,
+            attachment_count: 0, attachment_urls: '',
+          }), mode: 'no-cors',
+        });
+        if (msgData?.[0]) await sb.from('rebuild_messages').update({ status: 'sent' }).eq('id', msgData[0].id);
+      } catch (e) { console.error(e); }
+
+      await sb.from('rebuild_selections').update({
+        sub_notified_at: new Date().toISOString(),
+      }).eq('id', selectionId);
+      await sb.from('rebuild_selections_history').insert({
+        selection_id: selectionId, action: 'sub_notified', actor: state.pmEmail,
+        details: `Sub notified via ${pickChannel}: ${sub.company_name}`,
+      });
+      logToAlbi('selection_sub_notified', `Sub ${sub.company_name} notified of install date ${fmtDate(s.approved_install_date)} for ${s.category}`);
+      toast('Sub notified');
+      await loadSelections();
+      renderDetail();
+    }
+  });
 }
 
 async function sendSelectionToVendor(selectionId) {
