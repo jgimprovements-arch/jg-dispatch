@@ -2074,15 +2074,18 @@ async function startNonJobEntry(category, label) {
     toast('Invalid category'); return;
   }
 
-  // If already clocked in, clock out current entry first (same as job switch flow)
+  // If already clocked in, confirm before switching
   if (TC.clockedIn && TC.activeEntry) {
     var ok = confirm('You are currently clocked in. Clock out and start ' + label + '?');
     if (!ok) return;
-    try { await clockOut(); } catch(e) { console.warn('Clock out failed', e); }
   }
 
   toast('Starting ' + label + '...');
   try {
+    // Defensive: close any orphan open sessions (also handles the just-confirmed
+    // current session). One source of truth for closing — no double-PATCH paths.
+    await _closeAnyOpenSessions('switching to ' + label);
+
     var loc = await getLocation();
     var now = new Date().toISOString();
 
@@ -2134,6 +2137,43 @@ async function startNonJobEntry(category, label) {
   }
 }
 
+// Defensively close any open time_entries rows for this tech.
+// Run before clocking into anything new — guards against bugs where a previous
+// switch failed silently, leaving an orphan session open. Idempotent.
+async function _closeAnyOpenSessions(reason) {
+  if (!TC.employee || !TC.employee.id) return false;
+  try {
+    var openRes = await fetch(SB_URL + '/rest/v1/time_entries?employee_id=eq.' + TC.employee.id + '&clock_out=is.null&select=id,clock_in', {
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+    });
+    if (!openRes.ok) return false;
+    var openRows = await openRes.json();
+    if (!openRows.length) return true; // nothing to do
+    // Close each — set clock_out = now, compute duration from its clock_in
+    var now = new Date();
+    var nowIso = now.toISOString();
+    for (var i = 0; i < openRows.length; i++) {
+      var row = openRows[i];
+      var dur = Math.max(0, Math.floor((now - new Date(row.clock_in)) / 60000));
+      await fetch(SB_URL + '/rest/v1/time_entries?id=eq.' + row.id, {
+        method: 'PATCH',
+        headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          clock_out: nowIso,
+          duration_minutes: dur,
+          status: 'auto_closed',
+          notes: 'Auto-closed by ' + (reason || 'new clock-in')
+        })
+      });
+    }
+    console.log('[orphan-cleanup] closed ' + openRows.length + ' open session(s)');
+    return true;
+  } catch(e) {
+    console.warn('Orphan cleanup failed:', e);
+    return false;
+  }
+}
+
 async function clockIn() {
   if (!TC.employee || !TC.employee.id) { toast('Employee record not found'); return; }
   var role = TC.employee.role || 'Technician';
@@ -2145,6 +2185,10 @@ async function clockIn() {
   if (btn) { btn.style.opacity = '.6'; btn.style.pointerEvents = 'none'; }
   toast('Getting location...');
   try {
+
+  // Belt-and-suspenders: close any orphaned open sessions for this tech first.
+  // Prevents bugs where a previous switch failed silently and left a session open.
+  await _closeAnyOpenSessions('new clock-in');
 
   var loc = await getLocation();
   var now = new Date().toISOString();
@@ -2958,20 +3002,38 @@ async function submitSwitchJob() {
   var btn = document.querySelector('#switch-job-sheet button');
   if (btn) { btn.textContent = 'Switching...'; btn.disabled = true; }
 
-  // 1. Clock out current job
+  // 1. Clock out current job — VERIFY success before proceeding
   var loc = await getLocation();
   var now = new Date().toISOString();
   var duration = Math.floor((Date.now() - TC.clockInTime) / 60000);
+  var oldEntryId = TC.activeEntry.id;
 
-  await fetch(SB_URL + '/rest/v1/time_entries?id=eq.' + TC.activeEntry.id, {
-    method: 'PATCH',
-    headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ clock_out: now, duration_minutes: duration, clock_out_lat: loc ? loc.lat : null, clock_out_lng: loc ? loc.lng : null, status: 'complete', notes: 'Job switch → ' + _switchJobName })
-  });
+  var closeRes;
+  try {
+    closeRes = await fetch(SB_URL + '/rest/v1/time_entries?id=eq.' + oldEntryId, {
+      method: 'PATCH',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clock_out: now, duration_minutes: duration, clock_out_lat: loc ? loc.lat : null, clock_out_lng: loc ? loc.lng : null, status: 'complete', notes: 'Job switch → ' + _switchJobName })
+    });
+  } catch(e) {
+    console.error('Clock-out network error:', e);
+    toast('Network error closing current job — check connection and retry');
+    if (btn) { btn.textContent = 'Switch Job'; btn.disabled = false; }
+    return;
+  }
 
-  logActivity('Job Switch', 'Switched from ' + (TC.selectedJobName||TC.selectedJobId) + ' to ' + _switchJobName, 'time_clock');
+  if (!closeRes || !closeRes.ok) {
+    console.error('Clock-out PATCH failed:', closeRes && closeRes.status);
+    toast('Could not close current job — try again');
+    if (btn) { btn.textContent = 'Switch Job'; btn.disabled = false; }
+    return; // ABORT — never create the new entry while old is still open
+  }
 
-  // 2. Clock into new job — keep same day link
+  if (typeof logActivity === 'function') {
+    logActivity('Job Switch', 'Switched from ' + (TC.selectedJobName||TC.selectedJobId) + ' to ' + _switchJobName, 'time_clock');
+  }
+
+  // 2. Clock into new job
   var newEntry = {
     employee_id:   TC.employee ? TC.employee.id : null,
     employee_name: TC.employee ? TC.employee.name : '',
@@ -2985,25 +3047,51 @@ async function submitSwitchJob() {
     notes:         'Switched from ' + (TC.selectedJobName || TC.selectedJobId)
   };
 
-  var cr = await fetch(SB_URL + '/rest/v1/time_entries', {
-    method: 'POST',
-    headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=representation' },
-    body: JSON.stringify(newEntry)
-  });
+  var cr;
+  try {
+    cr = await fetch(SB_URL + '/rest/v1/time_entries', {
+      method: 'POST',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=representation' },
+      body: JSON.stringify(newEntry)
+    });
+  } catch(e) {
+    console.error('Clock-in network error:', e);
+    cr = null;
+  }
 
-  if (cr.ok) {
+  if (cr && cr.ok) {
     var newRows = await cr.json();
     TC.activeEntry   = newRows[0];
     TC.clockInTime   = Date.now();
     TC.selectedJobId = _switchJobId;
     TC.selectedJobName = _switchJobName;
+    // Update entries list — close the old, push the new
+    var oldIdx = TC.entries.findIndex(function(e) { return e.id === oldEntryId; });
+    if (oldIdx !== -1) {
+      TC.entries[oldIdx].clock_out = now;
+      TC.entries[oldIdx].duration_minutes = duration;
+      TC.entries[oldIdx].status = 'complete';
+    }
+    TC.entries.push(newRows[0]);
     startPinging();
     closeSwitchJob();
     toast('✓ Switched to ' + _switchJobName);
     renderStatus();
     renderEntries();
   } else {
-    toast('Error switching job — try again');
+    // ROLLBACK — re-open the closed entry so tech isn't left in limbo
+    console.error('Clock-in failed, attempting rollback of close', cr && cr.status);
+    try {
+      await fetch(SB_URL + '/rest/v1/time_entries?id=eq.' + oldEntryId, {
+        method: 'PATCH',
+        headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ clock_out: null, duration_minutes: null, clock_out_lat: null, clock_out_lng: null, status: 'active', notes: null })
+      });
+      toast('Switch failed — original job restored, try again');
+    } catch(e) {
+      console.error('Rollback also failed:', e);
+      toast('Switch failed — contact office, your time may need a manual fix');
+    }
     if (btn) { btn.textContent = 'Switch Job'; btn.disabled = false; }
   }
 }
