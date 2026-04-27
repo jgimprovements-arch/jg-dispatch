@@ -151,6 +151,12 @@
   .pc-status.cancelled { background: #fbe5e5; color: var(--red); }
   .project-card .pc-customer { font-size: 12px; color: var(--text); margin-bottom: 2px; }
   .project-card .pc-meta { font-size: 11px; color: var(--muted); display: flex; gap: 8px; }
+  .project-card .pc-scope {
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--green);
+    margin-top: 4px;
+  }
   .project-card .pc-progress {
     margin-top: 6px;
     height: 4px;
@@ -890,6 +896,7 @@ function renderProjects() {
   }
   list.innerHTML = items.map(p => {
     const pct = projectProgress(p.id);
+    const scopeStr = p.scope_amount ? '$' + Number(p.scope_amount).toLocaleString() : null;
     return `
       <div class="project-card ${p.id === state.activeProjectId ? 'active' : ''}" data-id="${p.id}">
         <div class="pc-top">
@@ -902,6 +909,7 @@ function renderProjects() {
           ${p.albi_suffix ? `<span>·</span><span style="font-weight:700;color:var(--orange);">${p.albi_suffix}</span>` : ''}
           ${p.albi_status ? `<span>·</span><span title="Albi status">${p.albi_status}</span>` : `<span>·</span><span>${p.loss_type||'unspecified'}</span>`}
         </div>
+        ${scopeStr ? `<div class="pc-scope">${scopeStr}</div>` : ''}
         <div class="pc-progress"><div style="width:${pct}%"></div></div>
       </div>`;
   }).join('');
@@ -978,6 +986,18 @@ async function syncOneProject(p) {
   const albiId = String(p.id || p.projectId || '');
   if (!albiId) return { skipped: true, reason: 'no_id' };
 
+  // Albi returns scope amount under various field names depending on tenant config.
+  // Try the most common candidates in priority order. First non-null wins.
+  const scopeAmount = parseFloat(
+    p.totalApproved || p.total_approved ||
+    p.estimateTotal || p.estimate_total ||
+    p.totalEstimate || p.total_estimate ||
+    p.scopeAmount || p.scope_amount ||
+    p.contractTotal || p.contract_total ||
+    p.totalAmount || p.total_amount ||
+    p.amount || 0
+  ) || null;
+
   const params = {
     p_albi_project_id: albiId,
     p_albi_job_number: jobNumber,
@@ -988,7 +1008,7 @@ async function syncOneProject(p) {
     p_customer_phone: p.customerPhone || p.customer_phone || null,
     p_customer_email: p.customerEmail || p.customer_email || null,
     p_property_address: p.address1 || p.address || null,
-    p_scope_amount: p.scopeAmount || p.scope_amount || null,
+    p_scope_amount: scopeAmount,
     p_estimated_start: p.estimatedStart || p.estimated_start || null,
     p_estimated_completion: p.estimatedCompletion || p.estimated_completion || null,
     p_pm_email: state.pmEmail,
@@ -1011,8 +1031,15 @@ async function pullAllAlbiPages() {
   const first = await pullAlbiPage(1);
   if (!first.length) return [];
 
+  // One-time debug: log field names + sample values from the first project so
+  // we can see what Albi actually returns (esp. scope/estimate amount field name)
+  if (!window._albiKeysLogged && first[0]) {
+    console.log('[Albi Sync] First project keys:', Object.keys(first[0]));
+    console.log('[Albi Sync] First project sample:', first[0]);
+    window._albiKeysLogged = true;
+  }
+
   // Fetch pages 2..15 in parallel (15 pages * 50 = up to 750 jobs).
-  // Stop accumulating once we hit an empty page.
   const parallelPages = await Promise.all(
     [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15].map(p =>
       pullAlbiPage(p).catch(() => [])
