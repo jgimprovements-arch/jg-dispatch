@@ -2255,7 +2255,50 @@ async function openSelectionEditor(selectionId) {
 
     <label>PM Notes (internal — not shown to customer)</label>
     <textarea id="sel_pm_notes" rows="2">${s.pm_notes || ''}</textarea>
+
+    <label style="margin-top:14px;">Sketches / Reference Files (visible to vendor and customer)</label>
+    <div id="sel_existing_atts" class="msg-att-list">
+      ${(s.attachment_urls || []).map((url, i) => {
+        const name = url.split('/').pop().split('?')[0];
+        return `<span class="msg-att-chip">📎 <a href="${url}" target="_blank">${name}</a> <span class="remove" data-url="${url}" title="Remove">✕</span></span>`;
+      }).join('')}
+    </div>
+    <div id="sel_new_atts" class="msg-att-list" style="margin-top:6px;"></div>
+    <button type="button" class="btn" id="sel_attach_btn" style="margin-top:6px;">📎 Attach sketch / photo / PDF</button>
+    <input type="file" id="sel_file_input" multiple style="display:none;" accept="image/*,application/pdf">
   `;
+
+  // Track staged + existing attachments
+  let stagedFiles = [];
+  let existingUrls = Array.isArray(s.attachment_urls) ? [...s.attachment_urls] : [];
+
+  const renderStaged = () => {
+    const wrap = $('#sel_new_atts');
+    if (!wrap) return;
+    wrap.innerHTML = stagedFiles.map((f, i) => `
+      <span class="msg-att-chip">
+        📄 ${f.name} <span style="color:var(--muted);">(${(f.size/1024).toFixed(0)} KB · pending upload)</span>
+        <span class="remove" data-i="${i}" title="Remove">✕</span>
+      </span>
+    `).join('');
+    wrap.querySelectorAll('.remove').forEach(el => {
+      el.addEventListener('click', () => { stagedFiles.splice(parseInt(el.dataset.i), 1); renderStaged(); });
+    });
+  };
+
+  $('#sel_attach_btn').addEventListener('click', () => $('#sel_file_input').click());
+  $('#sel_file_input').addEventListener('change', e => {
+    for (const f of e.target.files) stagedFiles.push(f);
+    e.target.value = '';
+    renderStaged();
+  });
+  // Wire remove on existing attachments
+  $('#sel_existing_atts').querySelectorAll('.remove').forEach(el => {
+    el.addEventListener('click', () => {
+      existingUrls = existingUrls.filter(u => u !== el.dataset.url);
+      el.parentElement.remove();
+    });
+  });
 
   // Auto-calc total when qty * unit_cost are filled
   const recalc = () => {
@@ -2284,18 +2327,22 @@ async function openSelectionEditor(selectionId) {
     };
     if (!updates.category) { toast('Category is required'); return; }
 
+    let savedId = selectionId;
     if (isNew) {
       updates.project_id = state.activeProjectId;
       updates.status = 'draft';
       updates.created_by_email = state.pmEmail;
+      updates.attachment_urls = existingUrls.length ? existingUrls : null;
       const { data, error } = await sb.from('rebuild_selections').insert(updates).select();
       if (error) { toast('Save failed: ' + error.message); return; }
+      savedId = data[0].id;
       await sb.from('rebuild_selections_history').insert({
-        selection_id: data[0].id, action: 'created', actor: state.pmEmail,
+        selection_id: savedId, action: 'created', actor: state.pmEmail,
         details: `Created: ${updates.category}`,
       });
       logToAlbi('selection_created', `Material selection added: ${updates.category}${updates.total_cost ? ' · $' + Number(updates.total_cost).toLocaleString() : ''}`);
     } else {
+      updates.attachment_urls = existingUrls;
       const { error } = await sb.from('rebuild_selections').update(updates).eq('id', selectionId);
       if (error) { toast('Save failed: ' + error.message); return; }
       await sb.from('rebuild_selections_history').insert({
@@ -2303,6 +2350,26 @@ async function openSelectionEditor(selectionId) {
         details: `Edited: ${updates.category}`,
       });
     }
+
+    // Upload any staged sketches/photos
+    if (stagedFiles.length) {
+      const newUrls = [];
+      for (const file of stagedFiles) {
+        const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+        const path = `selections/${savedId}/${Date.now()}-${safeName}`;
+        const { error: upErr } = await sb.storage
+          .from('rebuild-message-attachments')
+          .upload(path, file, { contentType: file.type, upsert: false });
+        if (upErr) { console.error('Upload failed:', upErr); continue; }
+        const { data: urlData } = sb.storage.from('rebuild-message-attachments').getPublicUrl(path);
+        newUrls.push(urlData.publicUrl);
+      }
+      if (newUrls.length) {
+        const merged = [...existingUrls, ...newUrls];
+        await sb.from('rebuild_selections').update({ attachment_urls: merged }).eq('id', savedId);
+      }
+    }
+
     toast('Saved');
     closeModal('modalEditPhase');
     await loadSelections();
