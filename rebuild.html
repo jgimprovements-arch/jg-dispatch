@@ -352,8 +352,44 @@
   .phase .sub-name {
     font-size: 12px;
     color: var(--text);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    align-items: center;
   }
   .phase .sub-name.unassigned { color: var(--muted); font-style: italic; }
+  .phase .assignee-chip {
+    background: #eef0f7;
+    color: var(--navy);
+    padding: 2px 7px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .phase .unassigned-label { font-style: italic; color: var(--muted); }
+  .assignee-checklist {
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 6px;
+    max-height: 180px;
+    overflow-y: auto;
+    background: #fafbfd;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .assignee-check {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 13px;
+  }
+  .assignee-check:hover { background: #fff; }
+  .assignee-check input { margin: 0; cursor: pointer; }
   .phase .dates {
     font-size: 11px;
     color: var(--muted);
@@ -1481,7 +1517,14 @@ async function selectProject(id) {
 async function loadPhases() {
   if (!sb) { state.phases = []; return; }
   const { data } = await sb.from('rebuild_phases')
-    .select('*, assigned_sub:rebuild_subs(id, company_name, primary_contact, phone)')
+    .select(`
+      *,
+      assignees:rebuild_phase_assignees(
+        id, assignee_type, sub_id, employee_id, assigned_at,
+        sub:rebuild_subs(id, company_name, primary_contact, phone, email),
+        employee:employees(id, name, role)
+      )
+    `)
     .eq('project_id', state.activeProjectId)
     .order('sequence');
   state.phases = data || [];
@@ -1915,16 +1958,20 @@ function renderCalendarView() {
     const end = p.scheduled_end ? new Date(p.scheduled_end) : new Date(start.getTime() + 86400000);
     const left = ((start - minDate) / totalMs) * 100;
     const width = Math.max(((end - start) / totalMs) * 100, 1);
-    const sub = p.assigned_sub;
-    const isInhouse = !sub && p.trade && p.trade.startsWith('inhouse:');
-    const inhouseEmp = isInhouse ? state.employees.find(e => e.id === p.trade.substring(8)) : null;
-    const assignee = sub ? sub.company_name : (inhouseEmp ? inhouseEmp.name : 'Unassigned');
+    const assignees = p.assignees || [];
+    const assigneeNames = assignees.map(a => a.assignee_type === 'sub'
+      ? (a.sub?.company_name || 'Sub')
+      : (a.employee?.name || 'Carpenter'));
+    const barLabel = assigneeNames.length === 0 ? 'Unassigned'
+      : assigneeNames.length === 1 ? assigneeNames[0]
+      : `${assigneeNames[0]} +${assigneeNames.length - 1}`;
+    const titleAssignees = assigneeNames.length ? assigneeNames.join(', ') : 'Unassigned';
     return `
       <div class="cal-row" data-phase="${p.id}">
         <div class="cal-label">${String(p.sequence).padStart(2,'0')} · ${p.phase_name}</div>
         <div class="cal-track">
-          <div class="cal-bar cal-bar-${p.status}" style="left:${left}%;width:${width}%;" title="${p.phase_name} · ${assignee} · ${fmtDate(start)} → ${fmtDate(end)}">
-            <span class="cal-bar-text">${assignee}</span>
+          <div class="cal-bar cal-bar-${p.status}" style="left:${left}%;width:${width}%;" title="${p.phase_name} · ${titleAssignees} · ${fmtDate(start)} → ${fmtDate(end)}">
+            <span class="cal-bar-text">${barLabel}</span>
           </div>
         </div>
       </div>`;
@@ -1973,13 +2020,14 @@ function renderCalendarView() {
 }
 
 function phaseRowHtml(ph) {
-  const sub = ph.assigned_sub;
-  const isInhouse = !sub && ph.trade && ph.trade.startsWith('inhouse:');
-  const inhouseId = isInhouse ? ph.trade.substring(8) : null;
-  const inhouseEmp = inhouseId ? state.employees.find(e => e.id === inhouseId) : null;
-  const assigneeLabel = sub
-    ? sub.company_name
-    : (inhouseEmp ? `🏠 ${inhouseEmp.name}` : 'Unassigned');
+  const assignees = ph.assignees || [];
+  const labels = assignees.map(a => a.assignee_type === 'sub'
+    ? (a.sub?.company_name || 'Sub')
+    : `🏠 ${a.employee?.name || 'Carpenter'}`);
+  const assigneeHtml = labels.length
+    ? labels.map(l => `<span class="assignee-chip">${l}</span>`).join('')
+    : '<span class="unassigned-label">Unassigned</span>';
+
   const isLate = ph.status === 'in_progress' && ph.scheduled_end && new Date() > new Date(ph.scheduled_end);
   const showDelayBtn = isLate && !ph.delay_attribution;
   return `
@@ -1990,8 +2038,8 @@ function phaseRowHtml(ph) {
         ${ph.delay_attribution && ph.delay_attribution !== 'none'
           ? `<div class="delay-flag">⚠ ${titleCase(ph.delay_attribution)}</div>` : ''}
       </div>
-      <div class="sub-name ${(sub || inhouseEmp) ? '' : 'unassigned'}">
-        ${assigneeLabel}
+      <div class="sub-name ${labels.length ? '' : 'unassigned'}">
+        ${assigneeHtml}
       </div>
       <div class="dates">
         ${ph.scheduled_start
@@ -2047,7 +2095,10 @@ function renderMessagesTab() {
   const msgs = state.messages;
 
   // Build sub options for the To dropdown — pull from assigned-on-this-project first, then full roster
-  const assignedSubIds = new Set(state.phases.map(ph => ph.assigned_sub_id).filter(Boolean));
+  const assignedSubIds = new Set();
+  state.phases.forEach(ph => (ph.assignees || []).forEach(a => {
+    if (a.assignee_type === 'sub' && a.sub_id) assignedSubIds.add(a.sub_id);
+  }));
   const assignedSubs = state.subs.filter(s => assignedSubIds.has(s.id));
   const otherSubs = state.subs.filter(s => !assignedSubIds.has(s.id));
 
@@ -2408,9 +2459,9 @@ function openPhaseEditor(phaseId) {
   const ph = state.phases.find(p => p.id === phaseId);
   if (!ph) return;
 
-  // Determine current assignment mode
-  const currentAssignType = ph.assigned_sub_id ? 'sub' : (ph.trade && ph.trade.startsWith('inhouse:') ? 'inhouse' : 'unassigned');
-  const currentInhouseId = ph.trade && ph.trade.startsWith('inhouse:') ? ph.trade.substring(8) : '';
+  const currentAssignees = ph.assignees || [];
+  const currentSubIds = new Set(currentAssignees.filter(a => a.assignee_type === 'sub').map(a => a.sub_id));
+  const currentEmpIds = new Set(currentAssignees.filter(a => a.assignee_type === 'carpenter').map(a => a.employee_id));
 
   $('#ephBody').innerHTML = `
     <label>Phase Name</label>
@@ -2424,114 +2475,123 @@ function openPhaseEditor(phaseId) {
         </select>
       </div>
       <div>
-        <label>Assign Type</label>
-        <select id="eph_assigntype">
-          <option value="unassigned" ${currentAssignType==='unassigned'?'selected':''}>Unassigned</option>
-          <option value="sub" ${currentAssignType==='sub'?'selected':''}>Subcontractor</option>
-          <option value="inhouse" ${currentAssignType==='inhouse'?'selected':''}>In-House Team</option>
-        </select>
-      </div>
-    </div>
-    <div id="eph_sub_picker" style="display:${currentAssignType==='sub'?'block':'none'};">
-      <label>Subcontractor</label>
-      <select id="eph_sub_id">
-        <option value="">— Select sub —</option>
-        ${state.subs.map(s => `<option value="${s.id}" ${s.id===ph.assigned_sub_id?'selected':''}>${s.company_name}${s.primary_contact ? ' · ' + s.primary_contact : ''}</option>`).join('')}
-      </select>
-    </div>
-    <div id="eph_inhouse_picker" style="display:${currentAssignType==='inhouse'?'block':'none'};">
-      <label>In-House Tech / Team</label>
-      <select id="eph_inhouse_id">
-        <option value="">— Select tech —</option>
-        ${state.employees.map(e => `<option value="${e.id}" ${e.id===currentInhouseId?'selected':''}>${e.name}${e.role ? ' · ' + e.role : ''}</option>`).join('')}
-      </select>
-    </div>
-    <div class="row">
-      <div>
         <label>Scheduled Start</label>
         <input id="eph_ss" type="date" value="${ph.scheduled_start || ''}">
       </div>
+    </div>
+    <div class="row">
       <div>
         <label>Scheduled End</label>
         <input id="eph_se" type="date" value="${ph.scheduled_end || ''}">
       </div>
+      <div></div>
     </div>
-    <label>Notes</label>
+
+    <label style="margin-top:14px;">Assigned Subs <span style="color:var(--muted);font-weight:400;">(multi-select)</span></label>
+    <div class="assignee-checklist" id="eph_subs_list">
+      ${state.subs.map(s => `
+        <label class="assignee-check">
+          <input type="checkbox" value="${s.id}" ${currentSubIds.has(s.id) ? 'checked' : ''}>
+          <span>${s.company_name}${s.primary_contact ? ' · ' + s.primary_contact : ''}</span>
+        </label>`).join('')}
+    </div>
+
+    <label style="margin-top:14px;">Assigned Carpenters <span style="color:var(--muted);font-weight:400;">(multi-select — pairs OK)</span></label>
+    <div class="assignee-checklist" id="eph_emps_list">
+      ${state.employees.length ? state.employees.map(e => `
+        <label class="assignee-check">
+          <input type="checkbox" value="${e.id}" ${currentEmpIds.has(e.id) ? 'checked' : ''}>
+          <span>🏠 ${e.name}</span>
+        </label>`).join('') : '<div style="color:var(--muted);font-size:12px;padding:8px;">No carpenters in roster (set role=Carpenter on employees).</div>'}
+    </div>
+
+    <label style="margin-top:14px;">Notes</label>
     <textarea id="eph_notes">${ph.notes || ''}</textarea>
   `;
 
-  // Toggle pickers based on assign type
-  $('#eph_assigntype').addEventListener('change', e => {
-    const t = e.target.value;
-    $('#eph_sub_picker').style.display = t === 'sub' ? 'block' : 'none';
-    $('#eph_inhouse_picker').style.display = t === 'inhouse' ? 'block' : 'none';
-  });
-
   $('#eph_save').onclick = async () => {
-    const before = ph; // closure: ph is the original phase row
-    const assignType = $('#eph_assigntype').value;
+    const before = ph;
     const updates = {
       phase_name: $('#eph_name').value,
       status: $('#eph_status').value,
       scheduled_start: $('#eph_ss').value || null,
       scheduled_end: $('#eph_se').value || null,
       notes: $('#eph_notes').value || null,
-      assigned_sub_id: null,
-      trade: null,
     };
-    if (assignType === 'sub') {
-      const subId = $('#eph_sub_id').value;
-      if (subId) {
-        updates.assigned_sub_id = subId;
-        updates.assigned_at = new Date().toISOString();
-      }
-    } else if (assignType === 'inhouse') {
-      const empId = $('#eph_inhouse_id').value;
-      if (empId) {
-        updates.trade = 'inhouse:' + empId;
-        updates.assigned_at = new Date().toISOString();
-      }
-    }
+
+    // Read selected subs + carpenters
+    const selectedSubIds = Array.from($('#eph_subs_list').querySelectorAll('input:checked')).map(i => i.value);
+    const selectedEmpIds = Array.from($('#eph_emps_list').querySelectorAll('input:checked')).map(i => i.value);
+
     if (sb) {
-      const { error } = await sb.from('rebuild_phases').update(updates).eq('id', phaseId);
-      if (error) { toast('Save failed: ' + error.message); return; }
-    }
+      // 1. Update the phase row itself
+      const { error: phErr } = await sb.from('rebuild_phases').update(updates).eq('id', phaseId);
+      if (phErr) { toast('Save failed: ' + phErr.message); return; }
 
-    // ── Log meaningful changes to Albi timeline ──
-    const phaseName = updates.phase_name || before.phase_name;
-    const customerNotices = [];
-    if (before.status !== updates.status) {
-      logToAlbi('phase_status', `Phase "${phaseName}": ${titleCase(before.status)} → ${titleCase(updates.status)}`);
-      customerNotices.push(`"${phaseName}" is now ${titleCase(updates.status)}.`);
-    }
-    const beforeAssignee = before.assigned_sub_id
-      ? (state.subs.find(s => s.id === before.assigned_sub_id)?.company_name || 'Sub')
-      : (before.trade && before.trade.startsWith('inhouse:')
-          ? (state.employees.find(e => e.id === before.trade.substring(8))?.name || 'In-house')
-          : null);
-    const afterAssignee = updates.assigned_sub_id
-      ? (state.subs.find(s => s.id === updates.assigned_sub_id)?.company_name || 'Sub')
-      : (updates.trade && updates.trade.startsWith('inhouse:')
-          ? (state.employees.find(e => e.id === updates.trade.substring(8))?.name || 'In-house')
-          : null);
-    if (beforeAssignee !== afterAssignee) {
-      if (afterAssignee) logToAlbi('phase_assigned', `Phase "${phaseName}" assigned to ${afterAssignee}${beforeAssignee ? ' (was ' + beforeAssignee + ')' : ''}`);
-      else if (beforeAssignee) logToAlbi('phase_unassigned', `Phase "${phaseName}" unassigned (was ${beforeAssignee})`);
-    }
-    const oldStart = before.scheduled_start || '';
-    const newStart = updates.scheduled_start || '';
-    const oldEnd = before.scheduled_end || '';
-    const newEnd = updates.scheduled_end || '';
-    if (oldStart !== newStart || oldEnd !== newEnd) {
-      const range = newStart ? (fmtDate(newStart) + (newEnd ? ' → ' + fmtDate(newEnd) : '')) : 'unscheduled';
-      logToAlbi('phase_scheduled', `Phase "${phaseName}" scheduled: ${range}`);
-      if (newStart) customerNotices.push(`"${phaseName}" is scheduled for ${range}.`);
-      else customerNotices.push(`"${phaseName}" has been unscheduled and we'll update you once a new date is set.`);
-    }
+      // 2. Diff assignees — calculate adds/removes so audit trigger fires accurately
+      const beforeSubIds = new Set(currentAssignees.filter(a => a.assignee_type === 'sub').map(a => a.sub_id));
+      const beforeEmpIds = new Set(currentAssignees.filter(a => a.assignee_type === 'carpenter').map(a => a.employee_id));
+      const afterSubIds = new Set(selectedSubIds);
+      const afterEmpIds = new Set(selectedEmpIds);
 
-    // Send change alert to customer if anything customer-facing changed
-    if (customerNotices.length) {
-      notifyCustomerOfChange(customerNotices.join('\n\n'));
+      // Removes
+      const subsToRemove = currentAssignees.filter(a => a.assignee_type === 'sub' && !afterSubIds.has(a.sub_id));
+      const empsToRemove = currentAssignees.filter(a => a.assignee_type === 'carpenter' && !afterEmpIds.has(a.employee_id));
+      for (const a of [...subsToRemove, ...empsToRemove]) {
+        await sb.from('rebuild_phase_assignees').delete().eq('id', a.id);
+      }
+
+      // Adds
+      const subsToAdd = selectedSubIds.filter(id => !beforeSubIds.has(id));
+      const empsToAdd = selectedEmpIds.filter(id => !beforeEmpIds.has(id));
+      const newRows = [
+        ...subsToAdd.map(id => ({ phase_id: phaseId, assignee_type: 'sub', sub_id: id, assigned_by_email: state.pmEmail })),
+        ...empsToAdd.map(id => ({ phase_id: phaseId, assignee_type: 'carpenter', employee_id: id, assigned_by_email: state.pmEmail })),
+      ];
+      if (newRows.length) {
+        const { error: addErr } = await sb.from('rebuild_phase_assignees').insert(newRows);
+        if (addErr) console.error('Assignee insert error:', addErr);
+      }
+
+      // ── Log to Albi timeline ──
+      const phaseName = updates.phase_name || before.phase_name;
+      const customerNotices = [];
+
+      if (before.status !== updates.status) {
+        logToAlbi('phase_status', `Phase "${phaseName}": ${titleCase(before.status)} → ${titleCase(updates.status)}`);
+        customerNotices.push(`"${phaseName}" is now ${titleCase(updates.status)}.`);
+      }
+
+      // Assignee change summary
+      const addedNames = [];
+      const removedNames = [];
+      for (const id of subsToAdd) {
+        const s = state.subs.find(x => x.id === id);
+        if (s) addedNames.push(s.company_name);
+      }
+      for (const id of empsToAdd) {
+        const e = state.employees.find(x => x.id === id);
+        if (e) addedNames.push(e.name);
+      }
+      for (const a of subsToRemove) removedNames.push(a.sub?.company_name || 'a sub');
+      for (const a of empsToRemove) removedNames.push(a.employee?.name || 'a carpenter');
+
+      if (addedNames.length) logToAlbi('phase_assigned', `Phase "${phaseName}" assigned to: ${addedNames.join(', ')}`);
+      if (removedNames.length) logToAlbi('phase_unassigned', `Phase "${phaseName}" removed from: ${removedNames.join(', ')}`);
+
+      // Schedule change notice to customer
+      const oldStart = before.scheduled_start || '';
+      const newStart = updates.scheduled_start || '';
+      const oldEnd = before.scheduled_end || '';
+      const newEnd = updates.scheduled_end || '';
+      if (oldStart !== newStart || oldEnd !== newEnd) {
+        const range = newStart ? (fmtDate(newStart) + (newEnd ? ' → ' + fmtDate(newEnd) : '')) : 'unscheduled';
+        logToAlbi('phase_scheduled', `Phase "${phaseName}" scheduled: ${range}`);
+        if (newStart) customerNotices.push(`"${phaseName}" is scheduled for ${range}.`);
+        else customerNotices.push(`"${phaseName}" has been unscheduled and we'll update you once a new date is set.`);
+      }
+
+      if (customerNotices.length) notifyCustomerOfChange(customerNotices.join('\n\n'));
     }
 
     toast('Phase saved');
@@ -2539,6 +2599,7 @@ function openPhaseEditor(phaseId) {
     await loadPhases(); await loadHistory();
     renderDetail();
   };
+
   $('#eph_delete').onclick = async () => {
     if (!confirm('Delete this phase? This is logged in the audit trail.')) return;
     const phaseName = ph.phase_name;
@@ -2603,17 +2664,21 @@ function exportProjectPdf() {
   if (!p || !window.JGExport) { toast('Nothing to export'); return; }
 
   const phasesTable = {
-    headers: ['#', 'Phase', 'Trade', 'Sub', 'Status', 'Scheduled', 'Actual', 'Delay'],
-    rows: state.phases.map(ph => [
-      String(ph.sequence).padStart(2,'0'),
-      ph.phase_name || '',
-      ph.trade || '',
-      ph.assigned_sub?.company_name || '—',
-      titleCase(ph.status),
-      ph.scheduled_start ? `${fmtDate(ph.scheduled_start)} → ${fmtDate(ph.scheduled_end)}` : (ph.window_earliest ? `Window ${fmtDate(ph.window_earliest)}–${fmtDate(ph.window_latest)}` : '—'),
-      ph.actual_start ? `${fmtDate(ph.actual_start)}${ph.actual_end ? ' → ' + fmtDate(ph.actual_end) : ''}` : '—',
-      (ph.delay_attribution && ph.delay_attribution !== 'none') ? titleCase(ph.delay_attribution) : '',
-    ])
+    headers: ['#', 'Phase', 'Assigned To', 'Status', 'Scheduled', 'Actual', 'Delay'],
+    rows: state.phases.map(ph => {
+      const labels = (ph.assignees || []).map(a => a.assignee_type === 'sub'
+        ? (a.sub?.company_name || 'Sub')
+        : (a.employee?.name || 'Carpenter'));
+      return [
+        String(ph.sequence).padStart(2,'0'),
+        ph.phase_name || '',
+        labels.length ? labels.join(', ') : '—',
+        titleCase(ph.status),
+        ph.scheduled_start ? `${fmtDate(ph.scheduled_start)} → ${fmtDate(ph.scheduled_end)}` : '—',
+        ph.actual_start ? `${fmtDate(ph.actual_start)}${ph.actual_end ? ' → ' + fmtDate(ph.actual_end) : ''}` : '—',
+        (ph.delay_attribution && ph.delay_attribution !== 'none') ? titleCase(ph.delay_attribution) : '',
+      ];
+    })
   };
 
   const selectionsTable = state.selections.length ? {
