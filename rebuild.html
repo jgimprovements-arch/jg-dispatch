@@ -2402,7 +2402,7 @@ async function sendSelectionToVendor(selectionId) {
   const customerLine = s.vendor_meeting_with_customer
     ? `\n\nThe customer (${p.customer_name}${p.customer_phone ? ' — ' + fmtPhone(p.customer_phone) : ''}) will meet you at the showroom to make selections together. Please coordinate a time directly with them.`
     : '';
-  const body = `Hi ${(vendor.primary_contact || '').split(' ')[0] || 'there'},
+  const defaultBody = `Hi ${(vendor.primary_contact || '').split(' ')[0] || 'there'},
 
 We have a customer who needs an estimate for: ${s.category}${s.description ? '\n\nDetails: ' + s.description : ''}
 
@@ -2419,53 +2419,58 @@ Thanks,
 ${pmFirst}
 JG Restoration`;
 
-  const subject = `Selection request — ${s.category} for ${p.albi_job_number}`;
+  const defaultSubject = `Selection request — ${s.category} for ${p.albi_job_number}`;
 
-  // Save message
-  const { data: msgData } = await sb.from('rebuild_messages').insert({
-    project_id: p.id,
-    recipient_type: 'sub',
-    recipient_sub_id: vendor.id,
-    recipient_name: vendor.primary_contact || vendor.company_name,
-    recipient_email: vendor.email,
-    channel: 'email',
-    direction: 'outbound',
-    subject, body,
-    sent_by_email: p.albi_pm_email || state.pmEmail,
-    sent_by_name: p.albi_pm_name || 'JG Restoration',
-    status: 'queued',
-  }).select();
-
-  // Fire to Zapier message hook
-  try {
-    await fetch(MESSAGE_HOOK, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        message_id: msgData?.[0]?.id,
-        project_id: p.id, albi_project_id: p.albi_project_id, job_number: p.albi_job_number,
-        channel: 'email', to_email: vendor.email,
-        from_email: p.albi_pm_email || state.pmEmail,
-        from_name: p.albi_pm_name || 'JG Restoration',
+  openSendPreviewModal({
+    title: 'Send Selection Request to Vendor',
+    to: `${vendor.company_name} <${vendor.email}>`,
+    subject: defaultSubject,
+    body: defaultBody,
+    onSend: async (subject, body) => {
+      const { data: msgData } = await sb.from('rebuild_messages').insert({
+        project_id: p.id,
+        recipient_type: 'sub',
+        recipient_sub_id: vendor.id,
         recipient_name: vendor.primary_contact || vendor.company_name,
-        recipient_type: 'sub', subject, body,
-        attachment_count: 0, attachment_urls: '',
-      }),
-      mode: 'no-cors',
-    });
-    if (msgData?.[0]) await sb.from('rebuild_messages').update({ status: 'sent' }).eq('id', msgData[0].id);
-  } catch (e) { console.error(e); }
+        recipient_email: vendor.email,
+        channel: 'email',
+        direction: 'outbound',
+        subject, body,
+        sent_by_email: p.albi_pm_email || state.pmEmail,
+        sent_by_name: p.albi_pm_name || 'JG Restoration',
+        status: 'queued',
+      }).select();
 
-  // Update selection status + history
-  await sb.from('rebuild_selections').update({ status: 'awaiting_vendor' }).eq('id', selectionId);
-  await sb.from('rebuild_selections_history').insert({
-    selection_id: selectionId, action: 'sent_to_vendor', actor: state.pmEmail,
-    details: `Sent to ${vendor.company_name} (${vendor.email})`,
+      try {
+        await fetch(MESSAGE_HOOK, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            message_id: msgData?.[0]?.id,
+            project_id: p.id, albi_project_id: p.albi_project_id, job_number: p.albi_job_number,
+            channel: 'email', to_email: vendor.email,
+            from_email: p.albi_pm_email || state.pmEmail,
+            from_name: p.albi_pm_name || 'JG Restoration',
+            recipient_name: vendor.primary_contact || vendor.company_name,
+            recipient_type: 'sub', subject, body,
+            attachment_count: 0, attachment_urls: '',
+          }),
+          mode: 'no-cors',
+        });
+        if (msgData?.[0]) await sb.from('rebuild_messages').update({ status: 'sent' }).eq('id', msgData[0].id);
+      } catch (e) { console.error(e); }
+
+      await sb.from('rebuild_selections').update({ status: 'awaiting_vendor' }).eq('id', selectionId);
+      await sb.from('rebuild_selections_history').insert({
+        selection_id: selectionId, action: 'sent_to_vendor', actor: state.pmEmail,
+        details: `Sent to ${vendor.company_name} (${vendor.email})`,
+      });
+      logToAlbi('selection_to_vendor', `Selection "${s.category}" sent to vendor ${vendor.company_name} for estimate`);
+      toast('Sent to vendor');
+      await loadSelections();
+      renderDetail();
+    }
   });
-  logToAlbi('selection_to_vendor', `Selection "${s.category}" sent to vendor ${vendor.company_name} for estimate`);
-  toast('Sent to vendor');
-  await loadSelections();
-  renderDetail();
 }
 
 async function sendSelectionToCustomer(selectionId) {
@@ -2480,7 +2485,7 @@ async function sendSelectionToCustomer(selectionId) {
   const pmPhone = p.albi_pm_phone ? fmtPhone(p.albi_pm_phone) : '(920) 428-4200';
   const vendor = s.vendor_sub?.company_name || s.vendor_name || 'our vendor';
 
-  const body = `Hi ${(p.customer_name || '').split(' ')[0] || 'there'},
+  const defaultBody = `Hi ${(p.customer_name || '').split(' ')[0] || 'there'},
 
 We have a material selection ready for your approval:
 
@@ -2497,48 +2502,105 @@ Thanks,
 ${pmFirst}
 JG Restoration`;
 
-  const subject = `Material selection approval needed — ${s.category}`;
+  const defaultSubject = `Material selection approval needed — ${s.category}`;
 
-  const { data: msgData } = await sb.from('rebuild_messages').insert({
-    project_id: p.id,
-    recipient_type: 'customer',
-    recipient_name: p.customer_name,
-    recipient_email: p.customer_email,
-    channel: 'email',
-    direction: 'outbound',
-    subject, body,
-    sent_by_email: p.albi_pm_email || state.pmEmail,
-    sent_by_name: p.albi_pm_name || 'JG Restoration',
-    status: 'queued',
-  }).select();
+  openSendPreviewModal({
+    title: 'Send to Customer for Approval',
+    to: `${p.customer_name} <${p.customer_email}>`,
+    subject: defaultSubject,
+    body: defaultBody,
+    onSend: async (subject, body) => {
+      const { data: msgData } = await sb.from('rebuild_messages').insert({
+        project_id: p.id,
+        recipient_type: 'customer',
+        recipient_name: p.customer_name,
+        recipient_email: p.customer_email,
+        channel: 'email',
+        direction: 'outbound',
+        subject, body,
+        sent_by_email: p.albi_pm_email || state.pmEmail,
+        sent_by_name: p.albi_pm_name || 'JG Restoration',
+        status: 'queued',
+      }).select();
 
-  try {
-    await fetch(MESSAGE_HOOK, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        message_id: msgData?.[0]?.id,
-        project_id: p.id, albi_project_id: p.albi_project_id, job_number: p.albi_job_number,
-        channel: 'email', to_email: p.customer_email,
-        from_email: p.albi_pm_email || state.pmEmail,
-        from_name: p.albi_pm_name || 'JG Restoration',
-        recipient_name: p.customer_name, recipient_type: 'customer',
-        subject, body, attachment_count: 0, attachment_urls: '',
-      }),
-      mode: 'no-cors',
-    });
-    if (msgData?.[0]) await sb.from('rebuild_messages').update({ status: 'sent' }).eq('id', msgData[0].id);
-  } catch (e) { console.error(e); }
+      try {
+        await fetch(MESSAGE_HOOK, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            message_id: msgData?.[0]?.id,
+            project_id: p.id, albi_project_id: p.albi_project_id, job_number: p.albi_job_number,
+            channel: 'email', to_email: p.customer_email,
+            from_email: p.albi_pm_email || state.pmEmail,
+            from_name: p.albi_pm_name || 'JG Restoration',
+            recipient_name: p.customer_name, recipient_type: 'customer',
+            subject, body, attachment_count: 0, attachment_urls: '',
+          }),
+          mode: 'no-cors',
+        });
+        if (msgData?.[0]) await sb.from('rebuild_messages').update({ status: 'sent' }).eq('id', msgData[0].id);
+      } catch (e) { console.error(e); }
 
-  await sb.from('rebuild_selections').update({ status: 'awaiting_customer' }).eq('id', selectionId);
-  await sb.from('rebuild_selections_history').insert({
-    selection_id: selectionId, action: 'sent_to_customer', actor: state.pmEmail,
-    details: `Sent to ${p.customer_name} (${p.customer_email}) for approval — $${Number(s.total_cost).toLocaleString()}`,
+      await sb.from('rebuild_selections').update({ status: 'awaiting_customer' }).eq('id', selectionId);
+      await sb.from('rebuild_selections_history').insert({
+        selection_id: selectionId, action: 'sent_to_customer', actor: state.pmEmail,
+        details: `Sent to ${p.customer_name} (${p.customer_email}) for approval — $${Number(s.total_cost).toLocaleString()}`,
+      });
+      logToAlbi('selection_to_customer', `Selection "${s.category}" sent to customer for approval — $${Number(s.total_cost).toLocaleString()}`);
+      toast('Sent to customer');
+      await loadSelections();
+      renderDetail();
+    }
   });
-  logToAlbi('selection_to_customer', `Selection "${s.category}" sent to customer for approval — $${Number(s.total_cost).toLocaleString()}`);
-  toast('Sent to customer');
-  await loadSelections();
-  renderDetail();
+}
+
+// Generic email preview modal — used by selection sends and any other "preview before send" flow
+function openSendPreviewModal({ title, to, subject, body, onSend }) {
+  let modal = document.getElementById('modalSendPreview');
+  if (!modal) {
+    modal = document.createElement('div');
+    modal.id = 'modalSendPreview';
+    modal.className = 'modal-back';
+    modal.innerHTML = `
+      <div class="modal" style="max-width:640px;">
+        <h3 id="spv_title">Review Email <button class="close" data-close>×</button></h3>
+        <div class="modal-body">
+          <label>To</label>
+          <input id="spv_to" readonly style="background:var(--bg);">
+          <label style="margin-top:10px;">Subject</label>
+          <input id="spv_subject">
+          <label style="margin-top:10px;">Message</label>
+          <textarea id="spv_body" rows="14" style="font-family:inherit;"></textarea>
+        </div>
+        <div class="modal-foot">
+          <div style="flex:1"></div>
+          <button class="btn" data-close>Cancel</button>
+          <button class="btn primary" id="spv_send">✉ Send</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(modal);
+    modal.querySelector('[data-close]').addEventListener('click', () => modal.classList.remove('on'));
+    modal.querySelectorAll('[data-close]').forEach(el => el.addEventListener('click', () => modal.classList.remove('on')));
+  }
+  modal.querySelector('#spv_title').firstChild.textContent = title + ' ';
+  modal.querySelector('#spv_to').value = to;
+  modal.querySelector('#spv_subject').value = subject;
+  modal.querySelector('#spv_body').value = body;
+  modal.classList.add('on');
+
+  const sendBtn = modal.querySelector('#spv_send');
+  // Replace listener (clone to clear previous handlers)
+  const newBtn = sendBtn.cloneNode(true);
+  sendBtn.parentNode.replaceChild(newBtn, sendBtn);
+  newBtn.addEventListener('click', async () => {
+    newBtn.disabled = true;
+    newBtn.textContent = 'Sending…';
+    const finalSubject = modal.querySelector('#spv_subject').value;
+    const finalBody = modal.querySelector('#spv_body').value;
+    modal.classList.remove('on');
+    await onSend(finalSubject, finalBody);
+  });
 }
 
 function renderMessagesTab() {
