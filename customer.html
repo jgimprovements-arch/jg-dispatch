@@ -127,9 +127,7 @@
     justify-content: center;
     font-size: 11px;
     font-weight: 700;
-    color: #fff;
-    text-shadow: 0 1px 2px rgba(0,0,0,.3);
-    mix-blend-mode: difference;
+    color: var(--navy);
   }
 
   .phases {
@@ -208,6 +206,15 @@
     text-transform: uppercase;
     letter-spacing: .4px;
   }
+  .cal-header {
+    display: flex;
+    border-bottom: 1px solid var(--line);
+    padding-bottom: 6px;
+    margin-bottom: 8px;
+    height: 22px;
+    position: relative;
+  }
+  .cal-body { position: relative; }
   .cal-row {
     display: flex;
     align-items: center;
@@ -215,7 +222,7 @@
     margin-bottom: 4px;
     position: relative;
   }
-  .cal-label {
+  .cal-label, .cal-label-spacer {
     width: 160px;
     flex-shrink: 0;
     font-size: 11px;
@@ -226,11 +233,29 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .cal-track {
+  .cal-track, .cal-track-header {
     flex: 1;
     position: relative;
     height: 100%;
     border-left: 1px solid var(--line);
+  }
+  .cal-track-header { border-left: 0; }
+  .cal-day-tick {
+    position: absolute;
+    top: 0;
+    height: 100%;
+    border-left: 1px dashed var(--line);
+  }
+  .cal-day-tick span {
+    position: absolute;
+    top: 0;
+    left: 3px;
+    font-size: 9px;
+    color: var(--muted);
+    white-space: nowrap;
+    text-transform: uppercase;
+    letter-spacing: .3px;
+    font-weight: 600;
   }
   .cal-bar {
     position: absolute;
@@ -244,6 +269,7 @@
     color: #fff;
     font-weight: 600;
     overflow: hidden;
+    box-shadow: 0 1px 2px rgba(13,45,94,.15);
   }
   .cal-bar-pending { background: #b6bccc; }
   .cal-bar-scheduled { background: var(--gold); }
@@ -251,6 +277,22 @@
   .cal-bar-complete { background: var(--green); }
   .cal-bar-blocked { background: var(--red); }
   .cal-bar-skipped { background: #c5cad6; opacity: .6; }
+  .cal-weekend-overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    pointer-events: none;
+    z-index: 0;
+  }
+  .cal-weekend-overlay .cal-track {
+    border-left: 0;
+  }
+  .cal-weekend {
+    position: absolute;
+    top: 0;
+    height: 100%;
+    background: rgba(245, 166, 35, 0.06);
+  }
   .cal-today-line {
     position: absolute;
     top: 0;
@@ -259,6 +301,15 @@
     background: var(--orange);
     z-index: 5;
     pointer-events: none;
+  }
+  .cal-today-line .cal-today-label {
+    position: absolute;
+    top: -16px;
+    left: -22px;
+    font-size: 9px;
+    font-weight: 700;
+    color: var(--orange);
+    letter-spacing: .5px;
   }
 
   .footer-note {
@@ -293,8 +344,9 @@
     <div class="brand-tag">Your Project Schedule</div>
   </div>
   <div class="contact">
-    <div><a href="tel:9204284200">(920) 428-4200</a></div>
-    <div style="font-size:11px;opacity:.75;">jg-restoration.com</div>
+    <div><b>Appleton:</b> <a href="tel:9204284200">(920) 428-4200</a></div>
+    <div><b>Stevens Point:</b> <a href="tel:7156003883">(715) 600-3883</a></div>
+    <div style="font-size:11px;opacity:.75;margin-top:2px;">jg-restoration.com</div>
   </div>
 </header>
 
@@ -304,7 +356,7 @@
 
 <div class="footer-note">
   Last updated: <span id="lastUpdated">—</span> · This page auto-refreshes when changes are made.
-  <br>Questions? Call <a href="tel:9204284200">(920) 428-4200</a>
+  <br>Questions? Call <a href="tel:9204284200">Appleton: (920) 428-4200</a> or <a href="tel:7156003883">Stevens Point: (715) 600-3883</a>
 </div>
 
 <script type="module">
@@ -384,11 +436,37 @@ async function render() {
     let maxDate = new Date(Math.max(...dates));
     minDate = new Date(minDate.getTime() - 2 * 86400000);
     maxDate = new Date(maxDate.getTime() + 2 * 86400000);
+    minDate.setHours(0,0,0,0);
+    maxDate.setHours(0,0,0,0);
     const totalMs = maxDate - minDate;
+    const totalDays = Math.ceil(totalMs / 86400000);
 
     const today = new Date(); today.setHours(0,0,0,0);
     const todayPct = ((today - minDate) / totalMs) * 100;
     const todayInRange = todayPct >= 0 && todayPct <= 100;
+
+    // Build day cells for header + body grid
+    const showEveryN = totalDays > 60 ? 7 : (totalDays > 30 ? 3 : 1);
+    const dayCells = [];
+    for (let i = 0; i <= totalDays; i++) {
+      const d = new Date(minDate.getTime() + i * 86400000);
+      const left = (i / totalDays) * 100;
+      const showLabel = (i % showEveryN === 0);
+      const isWeekend = d.getDay() === 0 || d.getDay() === 6;
+      dayCells.push({ date: d, left, showLabel, isWeekend });
+    }
+
+    // Date header strip
+    const headerTicks = dayCells.map(c => c.showLabel
+      ? `<div class="cal-day-tick" style="left:${c.left}%;"><span>${c.date.toLocaleDateString('en-US',{month:'short',day:'numeric'})}</span></div>`
+      : ''
+    ).join('');
+
+    // Weekend shading overlay
+    const weekendOverlay = dayCells.filter(c => c.isWeekend).map(c => {
+      const w = (1 / totalDays) * 100;
+      return `<div class="cal-weekend" style="left:${c.left}%;width:${w}%;"></div>`;
+    }).join('');
 
     const bars = phasesArr.map(p => {
       if (!p.scheduled_start) return '';
@@ -407,9 +485,19 @@ async function render() {
 
     calHtml = `
       <div class="timeline">
-        <h3>Timeline</h3>
-        ${todayInRange ? `<div style="position:relative;height:0;"><div class="cal-today-line" style="left:calc(160px + (100% - 160px) * ${todayPct/100});height:${(scheduled.length+1) * 28}px;"></div></div>` : ''}
-        ${bars}
+        <h3>Timeline · ${fmtShortDate(minDate)} → ${fmtShortDate(maxDate)}</h3>
+        <div class="cal-header">
+          <div class="cal-label-spacer"></div>
+          <div class="cal-track cal-track-header">${headerTicks}</div>
+        </div>
+        <div class="cal-body">
+          <div class="cal-weekend-overlay">
+            <div class="cal-label-spacer"></div>
+            <div class="cal-track">${weekendOverlay}</div>
+          </div>
+          ${todayInRange ? `<div class="cal-today-line" style="left:calc(160px + ((100% - 160px) * ${todayPct/100}));"><span class="cal-today-label">TODAY</span></div>` : ''}
+          ${bars}
+        </div>
       </div>
     `;
   }
