@@ -443,30 +443,50 @@
   }
 
   /* ──── Selections ──── */
-  .selection-row {
+  /* ──── Material selections ──── */
+  .selection-card {
     background: var(--card);
     border: 1px solid var(--line);
-    border-radius: 6px;
-    padding: 10px 14px;
-    display: grid;
-    grid-template-columns: 1fr 130px 100px 90px;
-    align-items: center;
+    border-radius: 8px;
+    padding: 14px 16px;
+    margin-bottom: 10px;
+  }
+  .selection-card .sel-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
     gap: 12px;
-    margin-bottom: 6px;
-    font-size: 13px;
+    margin-bottom: 8px;
   }
-  .selection-row.overdue { border-left: 3px solid var(--red); background: #fdf6f6; }
-  .selection-row.due-soon { border-left: 3px solid var(--amber); }
-  .selection-row .lbl { font-weight: 600; color: var(--navy); }
-  .selection-row .lbl .desc {
-    display: block;
-    font-size: 11px;
-    color: var(--muted);
-    font-weight: 400;
-    margin-top: 2px;
+  .selection-card .sel-cat { font-weight: 700; color: var(--navy); font-size: 14px; }
+  .selection-card .sel-desc { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .selection-card .sel-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 14px;
+    font-size: 12px;
+    color: var(--text);
+    padding: 8px 0;
+    border-top: 1px solid var(--line);
+    border-bottom: 1px solid var(--line);
+    margin-bottom: 8px;
   }
-  .selection-row .due { font-size: 11px; color: var(--muted); }
-  .selection-row .due b { color: var(--text); font-weight: 600; }
+  .selection-card .sel-meta b { color: var(--muted); font-weight: 600; }
+  .selection-card .sel-customer-note {
+    background: #fff8ed;
+    border: 1px solid var(--gold);
+    border-radius: 4px;
+    padding: 8px 10px;
+    font-size: 12px;
+    color: var(--text);
+    margin-bottom: 8px;
+  }
+  .selection-card .sel-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .selection-card .sel-actions .btn { font-size: 11px; padding: 5px 10px; }
 
   /* ──── Audit trail ──── */
   .audit-list { display: flex; flex-direction: column; gap: 4px; }
@@ -1536,8 +1556,10 @@ async function loadPhases() {
 
 async function loadSelections() {
   if (!sb) { state.selections = []; return; }
-  const { data } = await sb.from('rebuild_customer_selections')
-    .select('*').eq('project_id', state.activeProjectId).order('due_date', { nullsFirst: false });
+  const { data } = await sb.from('rebuild_selections')
+    .select('*, vendor_sub:rebuild_subs(id, company_name, primary_contact, phone, email)')
+    .eq('project_id', state.activeProjectId)
+    .order('created_at', { ascending: false });
   state.selections = data || [];
 }
 
@@ -1763,6 +1785,39 @@ function renderTabContent() {
     const pdfBtn = $('#btnAuditPdf');
     if (csvBtn) csvBtn.addEventListener('click', () => exportAuditCsv());
     if (pdfBtn) pdfBtn.addEventListener('click', () => exportAuditPdf());
+  }
+
+  // Wire selections tab
+  if (state.tab === 'selections') {
+    const addBtn = $('#btnAddSelection');
+    if (addBtn) addBtn.addEventListener('click', () => openSelectionEditor(null));
+    $$('.selection-card [data-act]').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const id = btn.dataset.id;
+        const act = btn.dataset.act;
+        const sel = state.selections.find(x => x.id === id);
+        if (act === 'edit') return openSelectionEditor(id);
+        if (act === 'send-vendor') return sendSelectionToVendor(id);
+        if (act === 'send-customer') return sendSelectionToCustomer(id);
+        if (act === 'copy-vendor') {
+          const link = `${CUSTOMER_PORTAL_BASE.replace('customer.html','vendor.html')}?t=${sel.vendor_token}`;
+          try { await navigator.clipboard.writeText(link); toast('Vendor link copied'); } catch { toast('Copy failed — link: ' + link); }
+        }
+        if (act === 'email-vendor') return sendSelectionToVendor(id);
+        if (act === 'copy-customer') {
+          const link = `${CUSTOMER_PORTAL_BASE.replace('customer.html','approval.html')}?t=${sel.customer_token}`;
+          try { await navigator.clipboard.writeText(link); toast('Customer approval link copied'); } catch { toast('Copy failed — link: ' + link); }
+        }
+        if (act === 'delete') {
+          if (!confirm('Delete this selection?')) return;
+          await sb.from('rebuild_selections').delete().eq('id', id);
+          toast('Deleted');
+          await loadSelections();
+          renderDetail();
+        }
+      });
+    });
   }
 
   // Wire messages tab
@@ -2060,38 +2115,363 @@ function phaseRowHtml(ph) {
 }
 
 function renderSelectionsTab() {
-  if (!state.selections.length) return `<div class="empty" style="padding:30px;">
-    <p>No customer selections yet. They auto-populate from the phase template when the project is created.</p>
-  </div>`;
-  const today = new Date(); today.setHours(0,0,0,0);
+  const sels = state.selections;
+  const totalApproved = sels.filter(s => s.status === 'approved').reduce((sum, s) => sum + (parseFloat(s.total_cost) || 0), 0);
+  const pendingCount = sels.filter(s => ['draft','awaiting_vendor','awaiting_customer','changes_requested'].includes(s.status)).length;
+
   return `
     <div class="section-head">
-      <h3>Customer Selections</h3>
-      <button class="btn">+ Add Selection Item</button>
+      <h3>Material Selections</h3>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <span style="font-size:11px;color:var(--muted);">${pendingCount} pending · $${Number(totalApproved).toLocaleString(undefined,{maximumFractionDigits:0})} approved</span>
+        <button class="btn primary" id="btnAddSelection">+ Add Selection</button>
+      </div>
     </div>
-    ${state.selections.map(s => {
-      const due = s.due_date ? new Date(s.due_date) : null;
-      const daysOut = due ? Math.round((due - today) / 86400000) : null;
-      const cls = (s.status === 'pending' && daysOut !== null && daysOut < 0) ? 'overdue'
-                : (s.status === 'pending' && daysOut !== null && daysOut <= 3) ? 'due-soon'
-                : '';
-      return `
-        <div class="selection-row ${cls}">
-          <div class="lbl">
-            ${s.label}
-            ${s.description ? `<span class="desc">${s.description}</span>` : ''}
-          </div>
-          <div class="due">
-            ${s.due_date ? `Due <b>${fmtDate(s.due_date)}</b>` : 'No deadline'}
-            ${daysOut !== null ? `<br><span style="color:${daysOut<0?'var(--red)':'var(--muted)'};">${daysOut<0?Math.abs(daysOut)+'d overdue':daysOut+'d out'}</span>` : ''}
-          </div>
-          <div class="status-pill ${s.status === 'pending' ? 'pending' : 'complete'}">${s.status}</div>
-          <div class="row-actions">
-            <button class="btn" style="padding:5px 9px;font-size:11px;">Nudge</button>
-          </div>
-        </div>`;
-    }).join('')}
+    ${sels.length === 0 ? `<div class="empty" style="padding:30px;">
+      <p>No material selections yet. Click <b>+ Add Selection</b> to log a material, request a vendor estimate, or send for customer approval.</p>
+    </div>` : sels.map(s => renderSelectionRow(s)).join('')}
   `;
+}
+
+function renderSelectionRow(s) {
+  const statusLabels = {
+    draft: { lbl: 'Draft', color: 'var(--muted)' },
+    awaiting_vendor: { lbl: 'Awaiting Vendor', color: 'var(--gold)' },
+    awaiting_customer: { lbl: 'Awaiting Customer', color: 'var(--orange)' },
+    approved: { lbl: 'Approved', color: 'var(--green)' },
+    rejected: { lbl: 'Rejected', color: 'var(--red)' },
+    changes_requested: { lbl: 'Changes Requested', color: 'var(--red)' },
+  };
+  const sl = statusLabels[s.status] || statusLabels.draft;
+  const vendor = s.vendor_sub?.company_name || s.vendor_name || '—';
+  const cost = s.total_cost ? '$' + Number(s.total_cost).toLocaleString(undefined,{minimumFractionDigits:2}) : '—';
+  return `
+    <div class="selection-card" data-id="${s.id}">
+      <div class="sel-head">
+        <div>
+          <div class="sel-cat">${s.category}</div>
+          ${s.description ? `<div class="sel-desc">${s.description}</div>` : ''}
+        </div>
+        <div class="status-pill" style="background:${sl.color}20;color:${sl.color};border:1px solid ${sl.color}40;">${sl.lbl}</div>
+      </div>
+      <div class="sel-meta">
+        <span><b>Vendor:</b> ${vendor}</span>
+        ${s.sku ? `<span><b>SKU:</b> ${s.sku}</span>` : ''}
+        ${s.quantity ? `<span><b>Qty:</b> ${s.quantity}${s.unit ? ' ' + s.unit : ''}</span>` : ''}
+        <span><b>Total:</b> ${cost}</span>
+      </div>
+      ${s.customer_notes ? `<div class="sel-customer-note">💬 Customer: ${s.customer_notes}</div>` : ''}
+      <div class="sel-actions">
+        <button class="btn" data-act="edit" data-id="${s.id}">✎ Edit</button>
+        ${s.status === 'awaiting_vendor' ? `<button class="btn" data-act="copy-vendor" data-id="${s.id}">🔗 Copy Vendor Link</button>` : ''}
+        ${s.status === 'awaiting_vendor' ? `<button class="btn" data-act="email-vendor" data-id="${s.id}">✉ Email Vendor</button>` : ''}
+        ${(s.status === 'draft' || s.status === 'changes_requested') ? `<button class="btn" data-act="send-vendor" data-id="${s.id}">→ Send to Vendor</button>` : ''}
+        ${(s.status === 'draft' || s.status === 'changes_requested' || s.status === 'awaiting_vendor') && s.total_cost ? `<button class="btn primary" data-act="send-customer" data-id="${s.id}">→ Send to Customer for Approval</button>` : ''}
+        ${s.status === 'awaiting_customer' ? `<button class="btn" data-act="copy-customer" data-id="${s.id}">🔗 Copy Customer Link</button>` : ''}
+        <button class="btn ghost-red" data-act="delete" data-id="${s.id}">Delete</button>
+      </div>
+    </div>`;
+}
+
+async function openSelectionEditor(selectionId) {
+  const isNew = !selectionId;
+  const s = isNew ? {
+    category: '',
+    description: '',
+    vendor_name: '',
+    vendor_sub_id: null,
+    sku: '',
+    quantity: '',
+    unit: '',
+    unit_cost: '',
+    total_cost: '',
+    pm_notes: '',
+    vendor_meeting_with_customer: false,
+    vendor_due_date: '',
+  } : state.selections.find(x => x.id === selectionId);
+  if (!s) return;
+
+  $('#ephBody').innerHTML = `
+    <label>Category *</label>
+    <input id="sel_category" placeholder="e.g., Master Bath Flooring, Kitchen Cabinets" value="${s.category || ''}">
+
+    <label>Description</label>
+    <textarea id="sel_description" rows="2" placeholder="Color, finish, brand preference, room dimensions, etc.">${s.description || ''}</textarea>
+
+    <div class="row">
+      <div>
+        <label>Vendor (from sub roster)</label>
+        <select id="sel_vendor_sub">
+          <option value="">— Select or type custom name —</option>
+          ${state.subs.map(x => `<option value="${x.id}" ${x.id===s.vendor_sub_id?'selected':''}>${x.company_name}</option>`).join('')}
+        </select>
+      </div>
+      <div>
+        <label>Or Custom Vendor Name</label>
+        <input id="sel_vendor_name" placeholder="Floor Source, Menards, etc" value="${s.vendor_name || ''}">
+      </div>
+    </div>
+
+    <label style="margin-top:10px;">
+      <input type="checkbox" id="sel_meeting" ${s.vendor_meeting_with_customer ? 'checked' : ''} style="vertical-align:middle;width:auto;margin-right:6px;">
+      Customer should meet vendor at showroom (vendor will fill selection + price)
+    </label>
+
+    <div class="row">
+      <div>
+        <label>SKU / Product #</label>
+        <input id="sel_sku" placeholder="ABC-123" value="${s.sku || ''}">
+      </div>
+      <div>
+        <label>Vendor Due Date</label>
+        <input id="sel_due_date" type="date" value="${s.vendor_due_date || ''}">
+      </div>
+    </div>
+
+    <div class="row">
+      <div>
+        <label>Quantity</label>
+        <input id="sel_qty" type="number" step="0.01" value="${s.quantity || ''}">
+      </div>
+      <div>
+        <label>Unit</label>
+        <select id="sel_unit">
+          <option value="">—</option>
+          ${['sqft','linear ft','each','yard','box','pallet','case','roll','sheet','set'].map(u => `<option value="${u}" ${u===s.unit?'selected':''}>${u}</option>`).join('')}
+        </select>
+      </div>
+    </div>
+
+    <div class="row">
+      <div>
+        <label>Unit Cost ($)</label>
+        <input id="sel_unit_cost" type="number" step="0.01" value="${s.unit_cost || ''}">
+      </div>
+      <div>
+        <label>Total Cost ($)</label>
+        <input id="sel_total_cost" type="number" step="0.01" value="${s.total_cost || ''}">
+      </div>
+    </div>
+
+    <label>PM Notes (internal — not shown to customer)</label>
+    <textarea id="sel_pm_notes" rows="2">${s.pm_notes || ''}</textarea>
+  `;
+
+  // Auto-calc total when qty * unit_cost are filled
+  const recalc = () => {
+    const q = parseFloat($('#sel_qty').value) || 0;
+    const uc = parseFloat($('#sel_unit_cost').value) || 0;
+    if (q && uc) $('#sel_total_cost').value = (q * uc).toFixed(2);
+  };
+  $('#sel_qty').addEventListener('input', recalc);
+  $('#sel_unit_cost').addEventListener('input', recalc);
+
+  // Set save handler
+  $('#eph_save').onclick = async () => {
+    const updates = {
+      category: $('#sel_category').value.trim(),
+      description: $('#sel_description').value.trim() || null,
+      vendor_sub_id: $('#sel_vendor_sub').value || null,
+      vendor_name: $('#sel_vendor_name').value.trim() || null,
+      vendor_meeting_with_customer: $('#sel_meeting').checked,
+      sku: $('#sel_sku').value.trim() || null,
+      quantity: parseFloat($('#sel_qty').value) || null,
+      unit: $('#sel_unit').value || null,
+      unit_cost: parseFloat($('#sel_unit_cost').value) || null,
+      total_cost: parseFloat($('#sel_total_cost').value) || null,
+      vendor_due_date: $('#sel_due_date').value || null,
+      pm_notes: $('#sel_pm_notes').value.trim() || null,
+    };
+    if (!updates.category) { toast('Category is required'); return; }
+
+    if (isNew) {
+      updates.project_id = state.activeProjectId;
+      updates.status = 'draft';
+      updates.created_by_email = state.pmEmail;
+      const { data, error } = await sb.from('rebuild_selections').insert(updates).select();
+      if (error) { toast('Save failed: ' + error.message); return; }
+      await sb.from('rebuild_selections_history').insert({
+        selection_id: data[0].id, action: 'created', actor: state.pmEmail,
+        details: `Created: ${updates.category}`,
+      });
+      logToAlbi('selection_created', `Material selection added: ${updates.category}${updates.total_cost ? ' · $' + Number(updates.total_cost).toLocaleString() : ''}`);
+    } else {
+      const { error } = await sb.from('rebuild_selections').update(updates).eq('id', selectionId);
+      if (error) { toast('Save failed: ' + error.message); return; }
+      await sb.from('rebuild_selections_history').insert({
+        selection_id: selectionId, action: 'edited', actor: state.pmEmail,
+        details: `Edited: ${updates.category}`,
+      });
+    }
+    toast('Saved');
+    closeModal('modalEditPhase');
+    await loadSelections();
+    renderDetail();
+  };
+  $('#eph_delete').onclick = async () => {
+    if (isNew) { closeModal('modalEditPhase'); return; }
+    if (!confirm('Delete this selection? Audit trail will retain a record.')) return;
+    await sb.from('rebuild_selections').delete().eq('id', selectionId);
+    closeModal('modalEditPhase');
+    toast('Deleted');
+    await loadSelections();
+    renderDetail();
+  };
+  $('#modalEditPhase h3').firstChild.textContent = isNew ? 'New Material Selection ' : 'Edit Material Selection ';
+  openModal('modalEditPhase');
+}
+
+async function sendSelectionToVendor(selectionId) {
+  const s = state.selections.find(x => x.id === selectionId);
+  if (!s) return;
+  const vendor = s.vendor_sub;
+  if (!vendor) { toast('No vendor with email on file. Edit and pick a vendor from the sub roster first.'); return; }
+  if (!vendor.email) { toast('Vendor has no email on file in subs roster.'); return; }
+
+  const link = `${CUSTOMER_PORTAL_BASE.replace('customer.html','vendor.html')}?t=${s.vendor_token}`;
+  const p = state.activeProject;
+  const pmFirst = (p.albi_pm_name || 'JG Restoration').split(' ')[0];
+  const pmPhone = p.albi_pm_phone ? fmtPhone(p.albi_pm_phone) : '(920) 428-4200';
+  const customerLine = s.vendor_meeting_with_customer
+    ? `\n\nThe customer (${p.customer_name}${p.customer_phone ? ' — ' + fmtPhone(p.customer_phone) : ''}) will meet you at the showroom to make selections together. Please coordinate a time directly with them.`
+    : '';
+  const body = `Hi ${(vendor.primary_contact || '').split(' ')[0] || 'there'},
+
+We have a customer who needs an estimate for: ${s.category}${s.description ? '\n\nDetails: ' + s.description : ''}
+
+Project: ${p.albi_job_number}
+Customer: ${p.customer_name}
+Address: ${p.property_address || ''}${customerLine}
+
+Please use this link to enter your selection details and estimate:
+${link}
+
+${s.vendor_due_date ? 'Please complete by ' + fmtDate(s.vendor_due_date) + '.\n\n' : ''}Call me at ${pmPhone} if you have questions.
+
+Thanks,
+${pmFirst}
+JG Restoration`;
+
+  const subject = `Selection request — ${s.category} for ${p.albi_job_number}`;
+
+  // Save message
+  const { data: msgData } = await sb.from('rebuild_messages').insert({
+    project_id: p.id,
+    recipient_type: 'sub',
+    recipient_sub_id: vendor.id,
+    recipient_name: vendor.primary_contact || vendor.company_name,
+    recipient_email: vendor.email,
+    channel: 'email',
+    direction: 'outbound',
+    subject, body,
+    sent_by_email: p.albi_pm_email || state.pmEmail,
+    sent_by_name: p.albi_pm_name || 'JG Restoration',
+    status: 'queued',
+  }).select();
+
+  // Fire to Zapier message hook
+  try {
+    await fetch(MESSAGE_HOOK, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        message_id: msgData?.[0]?.id,
+        project_id: p.id, albi_project_id: p.albi_project_id, job_number: p.albi_job_number,
+        channel: 'email', to_email: vendor.email,
+        from_email: p.albi_pm_email || state.pmEmail,
+        from_name: p.albi_pm_name || 'JG Restoration',
+        recipient_name: vendor.primary_contact || vendor.company_name,
+        recipient_type: 'sub', subject, body,
+        attachment_count: 0, attachment_urls: '',
+      }),
+      mode: 'no-cors',
+    });
+    if (msgData?.[0]) await sb.from('rebuild_messages').update({ status: 'sent' }).eq('id', msgData[0].id);
+  } catch (e) { console.error(e); }
+
+  // Update selection status + history
+  await sb.from('rebuild_selections').update({ status: 'awaiting_vendor' }).eq('id', selectionId);
+  await sb.from('rebuild_selections_history').insert({
+    selection_id: selectionId, action: 'sent_to_vendor', actor: state.pmEmail,
+    details: `Sent to ${vendor.company_name} (${vendor.email})`,
+  });
+  logToAlbi('selection_to_vendor', `Selection "${s.category}" sent to vendor ${vendor.company_name} for estimate`);
+  toast('Sent to vendor');
+  await loadSelections();
+  renderDetail();
+}
+
+async function sendSelectionToCustomer(selectionId) {
+  const s = state.selections.find(x => x.id === selectionId);
+  const p = state.activeProject;
+  if (!s || !p) return;
+  if (!p.customer_email) { toast('No customer email on file'); return; }
+  if (!s.total_cost) { toast('Total cost required before sending for approval'); return; }
+
+  const link = `${CUSTOMER_PORTAL_BASE.replace('customer.html','approval.html')}?t=${s.customer_token}`;
+  const pmFirst = (p.albi_pm_name || 'JG Restoration').split(' ')[0];
+  const pmPhone = p.albi_pm_phone ? fmtPhone(p.albi_pm_phone) : '(920) 428-4200';
+  const vendor = s.vendor_sub?.company_name || s.vendor_name || 'our vendor';
+
+  const body = `Hi ${(p.customer_name || '').split(' ')[0] || 'there'},
+
+We have a material selection ready for your approval:
+
+${s.category}
+${s.description ? s.description + '\n' : ''}Vendor: ${vendor}
+${s.sku ? 'SKU: ' + s.sku + '\n' : ''}${s.quantity ? 'Quantity: ' + s.quantity + (s.unit ? ' ' + s.unit : '') + '\n' : ''}Total: $${Number(s.total_cost).toLocaleString(undefined,{minimumFractionDigits:2})}
+
+Please review and approve here:
+${link}
+
+If you have questions or want changes, you can reply directly on that page or call me at ${pmPhone}.
+
+Thanks,
+${pmFirst}
+JG Restoration`;
+
+  const subject = `Material selection approval needed — ${s.category}`;
+
+  const { data: msgData } = await sb.from('rebuild_messages').insert({
+    project_id: p.id,
+    recipient_type: 'customer',
+    recipient_name: p.customer_name,
+    recipient_email: p.customer_email,
+    channel: 'email',
+    direction: 'outbound',
+    subject, body,
+    sent_by_email: p.albi_pm_email || state.pmEmail,
+    sent_by_name: p.albi_pm_name || 'JG Restoration',
+    status: 'queued',
+  }).select();
+
+  try {
+    await fetch(MESSAGE_HOOK, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        message_id: msgData?.[0]?.id,
+        project_id: p.id, albi_project_id: p.albi_project_id, job_number: p.albi_job_number,
+        channel: 'email', to_email: p.customer_email,
+        from_email: p.albi_pm_email || state.pmEmail,
+        from_name: p.albi_pm_name || 'JG Restoration',
+        recipient_name: p.customer_name, recipient_type: 'customer',
+        subject, body, attachment_count: 0, attachment_urls: '',
+      }),
+      mode: 'no-cors',
+    });
+    if (msgData?.[0]) await sb.from('rebuild_messages').update({ status: 'sent' }).eq('id', msgData[0].id);
+  } catch (e) { console.error(e); }
+
+  await sb.from('rebuild_selections').update({ status: 'awaiting_customer' }).eq('id', selectionId);
+  await sb.from('rebuild_selections_history').insert({
+    selection_id: selectionId, action: 'sent_to_customer', actor: state.pmEmail,
+    details: `Sent to ${p.customer_name} (${p.customer_email}) for approval — $${Number(s.total_cost).toLocaleString()}`,
+  });
+  logToAlbi('selection_to_customer', `Selection "${s.category}" sent to customer for approval — $${Number(s.total_cost).toLocaleString()}`);
+  toast('Sent to customer');
+  await loadSelections();
+  renderDetail();
 }
 
 function renderMessagesTab() {

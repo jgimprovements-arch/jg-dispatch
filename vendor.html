@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Material Selection · JG Restoration</title>
+<link rel="icon" href="https://jgimprovements-arch.github.io/jg-dispatch/logo.png">
+<style>
+  :root {
+    --navy: #0d2d5e; --orange: #e85d04; --gold: #f5a623; --green: #2d9c5f; --red: #d64545;
+    --bg: #f4f6fb; --card: #ffffff; --text: #1a2540; --muted: #7884a0; --line: #e3e7f0;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--text); }
+  header { background: var(--navy); color: #fff; padding: 18px 28px; display: flex; align-items: center; gap: 14px; }
+  header img { width: 44px; height: 44px; object-fit: contain; background: #fff; padding: 4px; border-radius: 6px; }
+  header .brand-name { font-weight: 800; font-size: 18px; }
+  header .brand-tag { font-size: 11px; opacity: .85; letter-spacing: .5px; text-transform: uppercase; }
+  main { max-width: 720px; margin: 0 auto; padding: 24px; }
+  .card { background: var(--card); border-radius: 10px; padding: 22px 26px; margin-bottom: 18px; border: 1px solid var(--line); }
+  .card h2 { color: var(--navy); margin: 0 0 12px; }
+  .card .sub { color: var(--muted); font-size: 13px; margin-bottom: 12px; }
+  .info-line { font-size: 13px; margin: 6px 0; }
+  .info-line b { color: var(--navy); }
+  .meeting-note { background: #fff4e3; border: 1px solid var(--gold); padding: 12px; border-radius: 6px; font-size: 13px; margin-bottom: 14px; }
+  label { display: block; font-size: 11px; font-weight: 700; color: var(--muted); margin: 14px 0 4px; text-transform: uppercase; letter-spacing: .3px; }
+  input, select, textarea { width: 100%; padding: 10px 12px; border: 1px solid var(--line); border-radius: 6px; font-size: 14px; font-family: inherit; }
+  textarea { resize: vertical; min-height: 80px; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .submit-bar { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
+  .btn { padding: 10px 20px; border: 1px solid var(--line); border-radius: 6px; background: #fff; color: var(--navy); font-weight: 600; cursor: pointer; font-size: 14px; }
+  .btn.primary { background: var(--orange); color: #fff; border-color: var(--orange); }
+  .btn:hover { filter: brightness(1.05); }
+  .empty-state, .error-state { text-align: center; padding: 60px 20px; color: var(--muted); }
+  .success-state { text-align: center; padding: 40px 20px; }
+  .success-state .check { font-size: 48px; color: var(--green); }
+  .footer-note { text-align: center; color: var(--muted); font-size: 11px; padding: 24px 0 40px; }
+  .footer-note a { color: var(--navy); text-decoration: none; font-weight: 600; }
+</style>
+</head>
+<body>
+
+<header>
+  <img src="https://jgimprovements-arch.github.io/jg-dispatch/logo.png" alt="JG Restoration">
+  <div>
+    <div class="brand-name">JG Restoration</div>
+    <div class="brand-tag">Material Selection Estimate</div>
+  </div>
+</header>
+
+<main id="main">
+  <div class="empty-state">Loading…</div>
+</main>
+
+<div class="footer-note">
+  Questions? Call <a href="tel:9204284200">Appleton: (920) 428-4200</a> or <a href="tel:7156003883">Stevens Point: (715) 600-3883</a>
+</div>
+
+<script type="module">
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+const SB_URL = 'https://nuykvchgecpiuikoerze.supabase.co';
+const SB_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im51eWt2Y2hnZWNwaXVpa29lcnplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYyNjM3ODYsImV4cCI6MjA5MTgzOTc4Nn0.39hZ8DdjT_0iFJXPeAL2FXUSLw8FZBirDVzxZTO1W9s';
+const sb = createClient(SB_URL, SB_ANON);
+const params = new URLSearchParams(window.location.search);
+const token = params.get('t');
+const main = document.getElementById('main');
+
+const fmtDate = d => d ? new Date(d).toLocaleDateString('en-US', {month:'short',day:'numeric',year:'numeric'}) : '—';
+const fmtPhone = v => { if (!v) return ''; const d = String(v).replace(/\D/g,''); if (d.length===10) return `(${d.slice(0,3)}) ${d.slice(3,6)}-${d.slice(6)}`; return v; };
+
+if (!token) main.innerHTML = `<div class="error-state"><h2>Invalid link</h2></div>`;
+else await render();
+
+async function render() {
+  const { data: sel, error } = await sb.from('rebuild_selections')
+    .select('*, project:rebuild_projects(*), vendor_sub:rebuild_subs(company_name, primary_contact)')
+    .eq('vendor_token', token).maybeSingle();
+  if (error || !sel) { main.innerHTML = `<div class="error-state"><h2>Selection not found</h2><p>This link may have expired.</p></div>`; return; }
+
+  if (sel.status === 'approved' || sel.status === 'rejected') {
+    main.innerHTML = `<div class="card"><h2>This selection is closed</h2><p>Status: <b>${sel.status}</b>. No further changes can be made through this link. Please contact JG Restoration.</p></div>`;
+    return;
+  }
+
+  const p = sel.project;
+  const meeting = sel.vendor_meeting_with_customer
+    ? `<div class="meeting-note">📅 <b>Customer meeting requested:</b> Please coordinate a time directly with <b>${p.customer_name}</b>${p.customer_phone ? ' at <a href="tel:' + p.customer_phone + '">' + fmtPhone(p.customer_phone) + '</a>' : ''} to make selections together at your showroom.</div>`
+    : '';
+
+  main.innerHTML = `
+    <div class="card">
+      <h2>${sel.category}</h2>
+      <div class="sub">JG Restoration is requesting your estimate.</div>
+      ${sel.description ? `<div class="info-line"><b>Description:</b> ${sel.description}</div>` : ''}
+      <div class="info-line"><b>Project:</b> ${p.albi_job_number}</div>
+      <div class="info-line"><b>Customer:</b> ${p.customer_name}</div>
+      ${p.property_address ? `<div class="info-line"><b>Address:</b> ${p.property_address}</div>` : ''}
+      ${sel.vendor_due_date ? `<div class="info-line"><b>Please complete by:</b> ${fmtDate(sel.vendor_due_date)}</div>` : ''}
+      ${meeting}
+    </div>
+
+    <div class="card">
+      <h2>Your Estimate</h2>
+      <div class="sub">Fill in the selection details and total cost. JG will review and send to the customer for approval.</div>
+
+      <label>Vendor Contact Name</label>
+      <input id="v_contact" placeholder="Your name" value="${sel.vendor_sub?.primary_contact || ''}">
+
+      <label>Selection Description (color, finish, brand, etc.)</label>
+      <textarea id="v_desc">${sel.description || ''}</textarea>
+
+      <div class="row">
+        <div>
+          <label>SKU / Product #</label>
+          <input id="v_sku" value="${sel.sku || ''}">
+        </div>
+        <div>
+          <label>Vendor Due Date (your delivery ETA)</label>
+          <input id="v_eta" type="date">
+        </div>
+      </div>
+
+      <div class="row">
+        <div>
+          <label>Quantity</label>
+          <input id="v_qty" type="number" step="0.01" value="${sel.quantity || ''}">
+        </div>
+        <div>
+          <label>Unit</label>
+          <select id="v_unit">
+            ${['','sqft','linear ft','each','yard','box','pallet','case','roll','sheet','set'].map(u => `<option value="${u}" ${u===(sel.unit||'')?'selected':''}>${u||'—'}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+
+      <div class="row">
+        <div>
+          <label>Unit Cost ($)</label>
+          <input id="v_unit_cost" type="number" step="0.01" value="${sel.unit_cost || ''}">
+        </div>
+        <div>
+          <label>Total Cost ($) *</label>
+          <input id="v_total" type="number" step="0.01" value="${sel.total_cost || ''}" required>
+        </div>
+      </div>
+
+      <label>Notes for JG</label>
+      <textarea id="v_notes" placeholder="Lead time, alternate options, anything else…"></textarea>
+
+      <div class="submit-bar">
+        <button class="btn primary" id="v_submit">Submit Estimate</button>
+      </div>
+    </div>
+  `;
+
+  // Auto-calc total
+  const recalc = () => {
+    const q = parseFloat(document.getElementById('v_qty').value) || 0;
+    const uc = parseFloat(document.getElementById('v_unit_cost').value) || 0;
+    if (q && uc) document.getElementById('v_total').value = (q * uc).toFixed(2);
+  };
+  document.getElementById('v_qty').addEventListener('input', recalc);
+  document.getElementById('v_unit_cost').addEventListener('input', recalc);
+
+  document.getElementById('v_submit').onclick = async () => {
+    const total = parseFloat(document.getElementById('v_total').value);
+    if (!total) { alert('Total cost is required.'); return; }
+    const updates = {
+      description: document.getElementById('v_desc').value.trim() || null,
+      sku: document.getElementById('v_sku').value.trim() || null,
+      quantity: parseFloat(document.getElementById('v_qty').value) || null,
+      unit: document.getElementById('v_unit').value || null,
+      unit_cost: parseFloat(document.getElementById('v_unit_cost').value) || null,
+      total_cost: total,
+      vendor_submitted_at: new Date().toISOString(),
+    };
+    const notes = document.getElementById('v_notes').value.trim();
+    if (notes) updates.pm_notes = (sel.pm_notes ? sel.pm_notes + '\n\n' : '') + 'Vendor: ' + notes;
+
+    const { error: updErr } = await sb.from('rebuild_selections').update(updates).eq('id', sel.id);
+    if (updErr) { alert('Submit failed: ' + updErr.message); return; }
+    await sb.from('rebuild_selections_history').insert({
+      selection_id: sel.id, action: 'vendor_submitted',
+      actor: document.getElementById('v_contact').value || (sel.vendor_sub?.company_name || 'vendor'),
+      details: `Vendor submitted estimate: $${total.toLocaleString()}`,
+    });
+
+    main.innerHTML = `<div class="card success-state">
+      <div class="check">✓</div>
+      <h2>Estimate Submitted</h2>
+      <p>Thank you. JG Restoration will review and follow up with the customer.</p>
+    </div>`;
+  };
+}
+</script>
+</body>
+</html>

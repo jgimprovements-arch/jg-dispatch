@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Material Selection Approval · JG Restoration</title>
+<link rel="icon" href="https://jgimprovements-arch.github.io/jg-dispatch/logo.png">
+<style>
+  :root {
+    --navy: #0d2d5e; --orange: #e85d04; --gold: #f5a623; --green: #2d9c5f; --red: #d64545;
+    --bg: #f4f6fb; --card: #ffffff; --text: #1a2540; --muted: #7884a0; --line: #e3e7f0;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--text); }
+  header { background: var(--navy); color: #fff; padding: 18px 28px; display: flex; align-items: center; gap: 14px; }
+  header img { width: 44px; height: 44px; object-fit: contain; background: #fff; padding: 4px; border-radius: 6px; }
+  header .brand-name { font-weight: 800; font-size: 18px; }
+  header .brand-tag { font-size: 11px; opacity: .85; letter-spacing: .5px; text-transform: uppercase; }
+  main { max-width: 640px; margin: 0 auto; padding: 24px; }
+  .card { background: var(--card); border-radius: 10px; padding: 22px 26px; margin-bottom: 18px; border: 1px solid var(--line); }
+  .card h2 { color: var(--navy); margin: 0 0 4px; }
+  .card .sub { color: var(--muted); font-size: 13px; margin-bottom: 14px; }
+  .info-table { width: 100%; border-collapse: collapse; margin: 12px 0; }
+  .info-table td { padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
+  .info-table td:first-child { color: var(--muted); width: 40%; }
+  .total-line { font-size: 22px; font-weight: 800; color: var(--navy); padding: 14px 0 6px; border-top: 2px solid var(--navy); margin-top: 8px; }
+  .approve-btn { display: block; width: 100%; padding: 14px; background: var(--green); color: #fff; border: 0; border-radius: 6px; font-size: 16px; font-weight: 700; cursor: pointer; margin-bottom: 8px; }
+  .changes-btn, .reject-btn { display: block; width: 100%; padding: 12px; background: #fff; border: 1px solid var(--line); border-radius: 6px; font-size: 14px; font-weight: 600; cursor: pointer; margin-bottom: 8px; color: var(--navy); }
+  .changes-btn:hover { background: var(--gold); color: #fff; border-color: var(--gold); }
+  .reject-btn { color: var(--red); }
+  .reject-btn:hover { background: var(--red); color: #fff; border-color: var(--red); }
+  textarea { width: 100%; padding: 10px 12px; border: 1px solid var(--line); border-radius: 6px; font-family: inherit; font-size: 14px; min-height: 100px; resize: vertical; }
+  .footer-note { text-align: center; color: var(--muted); font-size: 11px; padding: 24px 0 40px; }
+  .footer-note a { color: var(--navy); text-decoration: none; font-weight: 600; }
+  .success-state { text-align: center; padding: 40px 20px; }
+  .success-state .check { font-size: 56px; }
+  .reject-state .check { color: var(--red); }
+  .approve-state .check { color: var(--green); }
+  .changes-state .check { color: var(--gold); }
+  .error-state { text-align: center; padding: 60px 20px; color: var(--muted); }
+</style>
+</head>
+<body>
+
+<header>
+  <img src="https://jgimprovements-arch.github.io/jg-dispatch/logo.png" alt="JG Restoration">
+  <div>
+    <div class="brand-name">JG Restoration</div>
+    <div class="brand-tag">Material Selection Approval</div>
+  </div>
+</header>
+
+<main id="main">
+  <div class="error-state">Loading…</div>
+</main>
+
+<div class="footer-note">
+  Questions? Call <a href="tel:9204284200">Appleton: (920) 428-4200</a> or <a href="tel:7156003883">Stevens Point: (715) 600-3883</a>
+</div>
+
+<script type="module">
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+const SB_URL = 'https://nuykvchgecpiuikoerze.supabase.co';
+const SB_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im51eWt2Y2hnZWNwaXVpa29lcnplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYyNjM3ODYsImV4cCI6MjA5MTgzOTc4Nn0.39hZ8DdjT_0iFJXPeAL2FXUSLw8FZBirDVzxZTO1W9s';
+const sb = createClient(SB_URL, SB_ANON);
+const params = new URLSearchParams(window.location.search);
+const token = params.get('t');
+const main = document.getElementById('main');
+
+if (!token) main.innerHTML = `<div class="error-state"><h2>Invalid link</h2></div>`;
+else await render();
+
+async function render() {
+  const { data: sel, error } = await sb.from('rebuild_selections')
+    .select('*, project:rebuild_projects(albi_job_number, customer_name), vendor_sub:rebuild_subs(company_name)')
+    .eq('customer_token', token).maybeSingle();
+  if (error || !sel) { main.innerHTML = `<div class="error-state"><h2>Selection not found</h2></div>`; return; }
+
+  if (sel.status === 'approved') {
+    main.innerHTML = `<div class="card success-state approve-state"><div class="check">✓</div><h2>Already Approved</h2><p>Thank you — JG Restoration is moving forward with this selection.</p></div>`;
+    return;
+  }
+  if (sel.status === 'rejected') {
+    main.innerHTML = `<div class="card success-state reject-state"><div class="check">✗</div><h2>Selection Declined</h2><p>This selection has been declined. Your project manager will be in touch.</p></div>`;
+    return;
+  }
+
+  const vendor = sel.vendor_sub?.company_name || sel.vendor_name || '—';
+  const total = sel.total_cost ? '$' + Number(sel.total_cost).toLocaleString(undefined, {minimumFractionDigits: 2}) : '—';
+
+  main.innerHTML = `
+    <div class="card">
+      <h2>${sel.category}</h2>
+      <div class="sub">${sel.project?.customer_name || ''} · ${sel.project?.albi_job_number || ''}</div>
+      ${sel.description ? `<p style="font-size:14px;color:var(--text);margin:12px 0;">${sel.description}</p>` : ''}
+      <table class="info-table">
+        <tr><td>Vendor</td><td><b>${vendor}</b></td></tr>
+        ${sel.sku ? `<tr><td>SKU</td><td>${sel.sku}</td></tr>` : ''}
+        ${sel.quantity ? `<tr><td>Quantity</td><td>${sel.quantity}${sel.unit ? ' ' + sel.unit : ''}</td></tr>` : ''}
+        ${sel.unit_cost ? `<tr><td>Unit Cost</td><td>$${Number(sel.unit_cost).toLocaleString(undefined,{minimumFractionDigits:2})}</td></tr>` : ''}
+      </table>
+      <div class="total-line">Total: ${total}</div>
+    </div>
+
+    <div class="card">
+      <h2 style="font-size:16px;">Please Review and Decide</h2>
+      <button class="approve-btn" id="b_approve">✓ Approve This Selection</button>
+      <button class="changes-btn" id="b_changes">↻ Request Changes</button>
+      <button class="reject-btn" id="b_reject">✗ Decline</button>
+    </div>
+  `;
+
+  document.getElementById('b_approve').onclick = () => decide('approved');
+  document.getElementById('b_changes').onclick = () => decide('changes_requested');
+  document.getElementById('b_reject').onclick = () => decide('rejected');
+}
+
+async function decide(decision) {
+  const { data: sel } = await sb.from('rebuild_selections').select('id, category, total_cost').eq('customer_token', token).maybeSingle();
+  if (!sel) return;
+
+  let notes = null;
+  if (decision === 'changes_requested' || decision === 'rejected') {
+    notes = prompt(decision === 'changes_requested'
+      ? 'What changes would you like? (e.g., different color, lower cost option, etc.)'
+      : 'Why are you declining this selection? (optional)');
+    if (decision === 'changes_requested' && !notes) { alert('Please describe the changes you want.'); return; }
+  }
+
+  await sb.from('rebuild_selections').update({
+    status: decision,
+    customer_decided_at: new Date().toISOString(),
+    customer_notes: notes,
+  }).eq('customer_token', token);
+
+  await sb.from('rebuild_selections_history').insert({
+    selection_id: sel.id, action: decision, actor: 'customer',
+    details: decision === 'approved'
+      ? `Customer approved · $${Number(sel.total_cost).toLocaleString()}`
+      : `Customer ${decision === 'rejected' ? 'declined' : 'requested changes'}${notes ? ': ' + notes : ''}`,
+  });
+
+  // Show confirmation
+  if (decision === 'approved') {
+    main.innerHTML = `<div class="card success-state approve-state"><div class="check">✓</div><h2>Approved!</h2><p>Thanks — JG Restoration has been notified and will move forward with this selection.</p></div>`;
+  } else if (decision === 'changes_requested') {
+    main.innerHTML = `<div class="card success-state changes-state"><div class="check">↻</div><h2>Changes Requested</h2><p>Got it. Your project manager will review your feedback and follow up shortly.</p></div>`;
+  } else {
+    main.innerHTML = `<div class="card success-state reject-state"><div class="check">✗</div><h2>Declined</h2><p>Thanks for letting us know. Your project manager will reach out to discuss alternatives.</p></div>`;
+  }
+}
+</script>
+</body>
+</html>
