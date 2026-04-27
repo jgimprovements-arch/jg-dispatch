@@ -4173,23 +4173,53 @@ function renderNotifList() {
     el.addEventListener('click', async () => {
       const id = el.dataset.id;
       const projId = el.dataset.project;
-      // Mark read
       const n = state.notifications.find(x => x.id === id);
+
+      // Mark read
       if (n && !n.read_at) {
         n.read_at = new Date().toISOString();
         await sb.from('rebuild_notifications').update({ read_at: n.read_at }).eq('id', id);
         renderNotifBadge();
         renderNotifList();
       }
-      // Jump to project + selections tab
+
+      // Map event type → which tab to land on
+      const tabForEvent = {
+        vendor_submitted: 'selections',
+        customer_approved: 'selections',
+        customer_rejected: 'selections',
+        customer_changes_requested: 'selections',
+        install_approved: 'selections',
+        install_changes_requested: 'selections',
+      };
+      const targetTab = tabForEvent[n?.event_type] || 'selections';
+
+      // Switch project if needed
       if (projId && projId !== state.activeProjectId) {
-        state.activeProjectId = projId;
-        state.tab = 'selections';
-        await loadProjectDetail();
+        state.tab = targetTab;
+        await selectProject(projId);
       } else if (projId) {
-        state.tab = 'selections';
+        state.tab = targetTab;
         renderDetail();
       }
+
+      // Scroll to and flash-highlight the specific item
+      if (n?.selection_id) {
+        setTimeout(() => {
+          const card = document.querySelector(`.selection-card[data-id="${n.selection_id}"]`);
+          if (card) {
+            card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            card.style.transition = 'box-shadow .3s, outline .3s';
+            card.style.outline = '3px solid var(--orange)';
+            card.style.boxShadow = '0 0 0 6px rgba(232,93,4,.15)';
+            setTimeout(() => {
+              card.style.outline = '';
+              card.style.boxShadow = '';
+            }, 2400);
+          }
+        }, 200);
+      }
+
       // Close panel
       $('#notifPanel').classList.remove('on');
       state.notifPanelOpen = false;
