@@ -423,6 +423,139 @@
   .action-tag.UPDATE { background: #fdf3e0; color: var(--amber); }
   .action-tag.DELETE { background: #fbe5e5; color: var(--red); }
 
+  /* ──── Calendar / Gantt timeline ──── */
+  .cal-wrap {
+    margin-top: 8px;
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 14px 14px 10px;
+    overflow-x: auto;
+  }
+  .cal-header {
+    display: flex;
+    border-bottom: 1px solid var(--line);
+    padding-bottom: 6px;
+    margin-bottom: 8px;
+    height: 22px;
+    position: relative;
+  }
+  .cal-body { position: relative; }
+  .cal-row {
+    display: flex;
+    align-items: center;
+    height: 24px;
+    margin-bottom: 4px;
+    position: relative;
+  }
+  .cal-label, .cal-label-spacer {
+    width: 180px;
+    flex-shrink: 0;
+    font-size: 11px;
+    color: var(--text);
+    font-weight: 500;
+    padding-right: 10px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .cal-track, .cal-track-header {
+    flex: 1;
+    position: relative;
+    height: 100%;
+    background: linear-gradient(to right, var(--bg) 1px, transparent 1px);
+    background-size: calc(100% / 7) 100%;
+    border-left: 1px solid var(--line);
+  }
+  .cal-track-header { background: transparent; border-left: 0; }
+  .cal-day-tick {
+    position: absolute;
+    top: 0;
+    height: 100%;
+    border-left: 1px dashed var(--line);
+  }
+  .cal-day-tick span {
+    position: absolute;
+    top: 0;
+    left: 3px;
+    font-size: 9px;
+    color: var(--muted);
+    white-space: nowrap;
+    text-transform: uppercase;
+    letter-spacing: .3px;
+    font-weight: 600;
+  }
+  .cal-bar {
+    position: absolute;
+    top: 3px;
+    height: 18px;
+    border-radius: 3px;
+    display: flex;
+    align-items: center;
+    padding: 0 6px;
+    font-size: 10px;
+    color: #fff;
+    font-weight: 600;
+    cursor: pointer;
+    overflow: hidden;
+    box-shadow: 0 1px 2px rgba(13,45,94,.15);
+  }
+  .cal-bar-text {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .cal-bar:hover { filter: brightness(1.1); transform: translateY(-1px); }
+  .cal-bar-pending     { background: #b6bccc; }
+  .cal-bar-scheduled   { background: var(--gold); }
+  .cal-bar-in_progress { background: var(--orange); }
+  .cal-bar-complete    { background: var(--green); }
+  .cal-bar-blocked     { background: var(--red); }
+  .cal-bar-skipped     { background: #c5cad6; opacity: .6; }
+  .cal-no-schedule {
+    color: var(--muted);
+    font-size: 10px;
+    font-style: italic;
+    padding-left: 6px;
+    line-height: 24px;
+  }
+  .cal-weekend-overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    pointer-events: none;
+    z-index: 0;
+  }
+  .cal-weekend-overlay .cal-track {
+    border-left: 0;
+    background: transparent;
+  }
+  .cal-weekend {
+    position: absolute;
+    top: 0;
+    height: 100%;
+    background: rgba(245, 166, 35, 0.06);
+  }
+  .cal-today-line {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    background: var(--orange);
+    z-index: 5;
+    pointer-events: none;
+  }
+  .cal-today-line::before {
+    content: 'TODAY';
+    position: absolute;
+    top: -14px;
+    left: -22px;
+    font-size: 9px;
+    font-weight: 700;
+    color: var(--orange);
+    letter-spacing: .5px;
+  }
+
   /* ──── Modal ──── */
   .modal-back {
     position: fixed; inset: 0;
@@ -1100,6 +1233,13 @@ function renderTabContent() {
       const delayBtn = row.querySelector('[data-act="delay"]');
       if (delayBtn) delayBtn.addEventListener('click', e => { e.stopPropagation(); openDelayModal(id); });
     });
+    // Calendar bar clicks open phase editor
+    $$('.cal-row').forEach(row => {
+      const id = row.dataset.phase;
+      if (!id) return;
+      row.style.cursor = 'pointer';
+      row.addEventListener('click', () => openPhaseEditor(id));
+    });
   }
 
   // Wire audit export buttons
@@ -1122,7 +1262,121 @@ function renderPhasesTab() {
     </div>
     <div class="phase-list">
       ${state.phases.map(ph => phaseRowHtml(ph)).join('')}
-    </div>`;
+    </div>
+    ${renderCalendarView()}
+  `;
+}
+
+function renderCalendarView() {
+  // Find all phases with at least a start date
+  const scheduled = state.phases.filter(p => p.scheduled_start);
+  if (!scheduled.length) {
+    return `
+      <div class="section-head" style="margin-top:24px;">
+        <h3>Calendar / Timeline</h3>
+      </div>
+      <div class="empty" style="padding:24px;">
+        <p>No scheduled phases yet. Set dates on phases to see them on the timeline.</p>
+      </div>`;
+  }
+
+  // Determine timeline window — earliest start to latest end (or start+1d if no end)
+  const dates = scheduled.flatMap(p => {
+    const s = new Date(p.scheduled_start);
+    const e = p.scheduled_end ? new Date(p.scheduled_end) : new Date(s.getTime() + 86400000);
+    return [s, e];
+  });
+  let minDate = new Date(Math.min(...dates));
+  let maxDate = new Date(Math.max(...dates));
+  // Pad 2 days on each side so bars don't hug edges
+  minDate = new Date(minDate.getTime() - 2 * 86400000);
+  maxDate = new Date(maxDate.getTime() + 2 * 86400000);
+  const totalMs = maxDate - minDate;
+  const totalDays = Math.ceil(totalMs / 86400000);
+
+  // Generate column header days (one per day, but only show labels every Nth day if > 30 days)
+  const showEveryN = totalDays > 60 ? 7 : (totalDays > 30 ? 3 : 1);
+  const dayCols = [];
+  for (let i = 0; i <= totalDays; i++) {
+    const d = new Date(minDate.getTime() + i * 86400000);
+    const showLabel = (i % showEveryN === 0);
+    dayCols.push({ date: d, showLabel, isWeekend: d.getDay() === 0 || d.getDay() === 6 });
+  }
+
+  const today = new Date(); today.setHours(0,0,0,0);
+  const todayPct = ((today - minDate) / totalMs) * 100;
+  const todayInRange = todayPct >= 0 && todayPct <= 100;
+
+  // Build phase bars
+  const bars = state.phases.map(p => {
+    if (!p.scheduled_start) {
+      return `
+        <div class="cal-row" data-phase="${p.id}">
+          <div class="cal-label">${String(p.sequence).padStart(2,'0')} · ${p.phase_name}</div>
+          <div class="cal-track">
+            <div class="cal-no-schedule">no schedule</div>
+          </div>
+        </div>`;
+    }
+    const start = new Date(p.scheduled_start);
+    const end = p.scheduled_end ? new Date(p.scheduled_end) : new Date(start.getTime() + 86400000);
+    const left = ((start - minDate) / totalMs) * 100;
+    const width = Math.max(((end - start) / totalMs) * 100, 1);
+    const sub = p.assigned_sub;
+    const isInhouse = !sub && p.trade && p.trade.startsWith('inhouse:');
+    const inhouseEmp = isInhouse ? state.employees.find(e => e.id === p.trade.substring(8)) : null;
+    const assignee = sub ? sub.company_name : (inhouseEmp ? inhouseEmp.name : 'Unassigned');
+    return `
+      <div class="cal-row" data-phase="${p.id}">
+        <div class="cal-label">${String(p.sequence).padStart(2,'0')} · ${p.phase_name}</div>
+        <div class="cal-track">
+          <div class="cal-bar cal-bar-${p.status}" style="left:${left}%;width:${width}%;" title="${p.phase_name} · ${assignee} · ${fmtDate(start)} → ${fmtDate(end)}">
+            <span class="cal-bar-text">${assignee}</span>
+          </div>
+        </div>
+      </div>`;
+  }).join('');
+
+  // Day header strip — only show labels at intervals
+  const headerCells = dayCols.map(c => {
+    const left = ((c.date - minDate) / totalMs) * 100;
+    return c.showLabel
+      ? `<div class="cal-day-tick" style="left:${left}%;"><span>${c.date.toLocaleDateString('en-US',{month:'short',day:'numeric'})}</span></div>`
+      : '';
+  }).join('');
+
+  const weekendOverlay = dayCols
+    .filter(c => c.isWeekend)
+    .map(c => {
+      const left = ((c.date - minDate) / totalMs) * 100;
+      const width = (1 / totalDays) * 100;
+      return `<div class="cal-weekend" style="left:${left}%;width:${width}%;"></div>`;
+    }).join('');
+
+  return `
+    <div class="section-head" style="margin-top:24px;">
+      <h3>Calendar / Timeline</h3>
+      <div style="font-size:11px;color:var(--muted);">${fmtDate(minDate)} → ${fmtDate(maxDate)}</div>
+    </div>
+    <div class="cal-wrap">
+      <div class="cal-header">
+        <div class="cal-label-spacer"></div>
+        <div class="cal-track cal-track-header">
+          ${headerCells}
+        </div>
+      </div>
+      <div class="cal-body">
+        <div class="cal-weekend-overlay">
+          <div class="cal-label-spacer"></div>
+          <div class="cal-track">${weekendOverlay}</div>
+        </div>
+        ${todayInRange ? `
+          <div class="cal-today-line" style="left:calc(180px + ${todayPct}% * (100% - 180px) / 100);"></div>
+        ` : ''}
+        ${bars}
+      </div>
+    </div>
+  `;
 }
 
 function phaseRowHtml(ph) {
