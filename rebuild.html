@@ -648,6 +648,7 @@ const sb = window.supabase ? supabase.createClient(SUPABASE_URL, SUPABASE_ANON_K
 const state = {
   projects: [],
   subs: [],
+  employees: [],
   activeProjectId: null,
   activeProject: null,
   phases: [],
@@ -705,6 +706,24 @@ async function loadProjects() {
   if (error) { console.error(error); toast('Failed to load projects'); return; }
   state.projects = data || [];
   renderProjects();
+}
+
+// ──── Load subcontractor roster ────
+async function loadSubs() {
+  if (!sb) return;
+  const { data } = await sb.from('rebuild_subs')
+    .select('id, company_name, primary_contact, phone, email')
+    .eq('active', true).order('company_name');
+  state.subs = data || [];
+}
+
+// ──── Load in-house employees (from existing dispatch employees table) ────
+async function loadEmployees() {
+  if (!sb) return;
+  const { data } = await sb.from('employees')
+    .select('id, name, role')
+    .eq('show_on_dispatch', true).order('name');
+  state.employees = data || [];
 }
 
 function renderProjects() {
@@ -1109,6 +1128,12 @@ function renderPhasesTab() {
 
 function phaseRowHtml(ph) {
   const sub = ph.assigned_sub;
+  const isInhouse = !sub && ph.trade && ph.trade.startsWith('inhouse:');
+  const inhouseId = isInhouse ? ph.trade.substring(8) : null;
+  const inhouseEmp = inhouseId ? state.employees.find(e => e.id === inhouseId) : null;
+  const assigneeLabel = sub
+    ? sub.company_name
+    : (inhouseEmp ? `🏠 ${inhouseEmp.name}` : 'Unassigned');
   const isLate = ph.status === 'in_progress' && ph.scheduled_end && new Date() > new Date(ph.scheduled_end);
   const showDelayBtn = isLate && !ph.delay_attribution;
   return `
@@ -1116,19 +1141,16 @@ function phaseRowHtml(ph) {
       <div class="seq">${String(ph.sequence).padStart(2,'0')}</div>
       <div class="name">
         ${ph.phase_name}
-        ${ph.trade ? `<span class="trade">${ph.trade}</span>` : ''}
         ${ph.delay_attribution && ph.delay_attribution !== 'none'
           ? `<div class="delay-flag">⚠ ${ph.delay_attribution.replace(/_/g,' ')}</div>` : ''}
       </div>
-      <div class="sub-name ${sub ? '' : 'unassigned'}">
-        ${sub ? sub.company_name : 'Unassigned'}
+      <div class="sub-name ${(sub || inhouseEmp) ? '' : 'unassigned'}">
+        ${assigneeLabel}
       </div>
       <div class="dates">
         ${ph.scheduled_start
           ? `<b>${fmtDate(ph.scheduled_start)}</b> → ${fmtDate(ph.scheduled_end)}`
-          : (ph.window_earliest
-              ? `Window: ${fmtDate(ph.window_earliest)}–${fmtDate(ph.window_latest)}`
-              : '<span style="color:var(--muted);">no schedule</span>')}
+          : '<span style="color:var(--muted);">no schedule</span>'}
       </div>
       <div class="status-pill ${ph.status}">${ph.status.replace('_',' ')}</div>
       <div class="row-actions">
@@ -1208,14 +1230,15 @@ function renderAuditTab() {
 function openPhaseEditor(phaseId) {
   const ph = state.phases.find(p => p.id === phaseId);
   if (!ph) return;
+
+  // Determine current assignment mode
+  const currentAssignType = ph.assigned_sub_id ? 'sub' : (ph.trade && ph.trade.startsWith('inhouse:') ? 'inhouse' : 'unassigned');
+  const currentInhouseId = ph.trade && ph.trade.startsWith('inhouse:') ? ph.trade.substring(8) : '';
+
   $('#ephBody').innerHTML = `
     <label>Phase Name</label>
     <input id="eph_name" value="${ph.phase_name || ''}">
     <div class="row">
-      <div>
-        <label>Trade</label>
-        <input id="eph_trade" value="${ph.trade || ''}">
-      </div>
       <div>
         <label>Status</label>
         <select id="eph_status">
@@ -1223,16 +1246,28 @@ function openPhaseEditor(phaseId) {
             .map(s => `<option value="${s}" ${s===ph.status?'selected':''}>${s.replace('_',' ')}</option>`).join('')}
         </select>
       </div>
+      <div>
+        <label>Assign Type</label>
+        <select id="eph_assigntype">
+          <option value="unassigned" ${currentAssignType==='unassigned'?'selected':''}>Unassigned</option>
+          <option value="sub" ${currentAssignType==='sub'?'selected':''}>Subcontractor</option>
+          <option value="inhouse" ${currentAssignType==='inhouse'?'selected':''}>In-House Team</option>
+        </select>
+      </div>
     </div>
-    <div class="row">
-      <div>
-        <label>Window Earliest (sub may self-schedule from)</label>
-        <input id="eph_we" type="date" value="${ph.window_earliest || ''}">
-      </div>
-      <div>
-        <label>Window Latest</label>
-        <input id="eph_wl" type="date" value="${ph.window_latest || ''}">
-      </div>
+    <div id="eph_sub_picker" style="display:${currentAssignType==='sub'?'block':'none'};">
+      <label>Subcontractor</label>
+      <select id="eph_sub_id">
+        <option value="">— Select sub —</option>
+        ${state.subs.map(s => `<option value="${s.id}" ${s.id===ph.assigned_sub_id?'selected':''}>${s.company_name}${s.primary_contact ? ' · ' + s.primary_contact : ''}</option>`).join('')}
+      </select>
+    </div>
+    <div id="eph_inhouse_picker" style="display:${currentAssignType==='inhouse'?'block':'none'};">
+      <label>In-House Tech / Team</label>
+      <select id="eph_inhouse_id">
+        <option value="">— Select tech —</option>
+        ${state.employees.map(e => `<option value="${e.id}" ${e.id===currentInhouseId?'selected':''}>${e.name}${e.role ? ' · ' + e.role : ''}</option>`).join('')}
+      </select>
     </div>
     <div class="row">
       <div>
@@ -1247,21 +1282,41 @@ function openPhaseEditor(phaseId) {
     <label>Notes</label>
     <textarea id="eph_notes">${ph.notes || ''}</textarea>
   `;
+
+  // Toggle pickers based on assign type
+  $('#eph_assigntype').addEventListener('change', e => {
+    const t = e.target.value;
+    $('#eph_sub_picker').style.display = t === 'sub' ? 'block' : 'none';
+    $('#eph_inhouse_picker').style.display = t === 'inhouse' ? 'block' : 'none';
+  });
+
   $('#eph_save').onclick = async () => {
+    const assignType = $('#eph_assigntype').value;
     const updates = {
       phase_name: $('#eph_name').value,
-      trade: $('#eph_trade').value || null,
       status: $('#eph_status').value,
-      window_earliest: $('#eph_we').value || null,
-      window_latest: $('#eph_wl').value || null,
       scheduled_start: $('#eph_ss').value || null,
       scheduled_end: $('#eph_se').value || null,
       notes: $('#eph_notes').value || null,
+      assigned_sub_id: null,
+      trade: null,
     };
+    if (assignType === 'sub') {
+      const subId = $('#eph_sub_id').value;
+      if (subId) {
+        updates.assigned_sub_id = subId;
+        updates.assigned_at = new Date().toISOString();
+      }
+    } else if (assignType === 'inhouse') {
+      const empId = $('#eph_inhouse_id').value;
+      if (empId) {
+        updates.trade = 'inhouse:' + empId;
+        updates.assigned_at = new Date().toISOString();
+      }
+    }
     if (sb) {
-      await sb.rpc('set_jg_user', { user_email: state.pmEmail }).catch(()=>{}); // optional helper
       const { error } = await sb.from('rebuild_phases').update(updates).eq('id', phaseId);
-      if (error) { toast('Save failed'); return; }
+      if (error) { toast('Save failed: ' + error.message); return; }
     }
     toast('Phase saved');
     closeModal('modalEditPhase');
@@ -1435,8 +1490,8 @@ function setupRealtime() {
 
 // ──── Boot ────
 (async function init() {
-  // Load cached projects from Supabase first — renders board instantly
-  await loadProjects();
+  // Load cached projects + roster in parallel — renders board instantly
+  await Promise.all([loadProjects(), loadSubs(), loadEmployees()]);
   setupRealtime();
 
   // Auto-sync from Albi in background (doesn't block the UI)
