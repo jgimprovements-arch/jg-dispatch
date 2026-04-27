@@ -474,13 +474,25 @@ body {
   <img src="https://jgimprovements-arch.github.io/jg-dispatch/logo.png" alt="JG Restoration" style="width:200px;height:200px;object-fit:contain;border-radius:32px;margin-bottom:16px;filter:drop-shadow(0 4px 20px rgba(0,0,0,.3));">
   <div class="login-title">JG Time Clock</div>
 
-  <div id="login-email-form" style="width:100%;max-width:280px;display:flex;flex-direction:column;align-items:center;">
+  <!-- Email/password form (default) -->
+  <div id="login-email-form" style="width:100%;max-width:280px;">
+    <input id="login-email-input" type="email" placeholder="Your email address"
+      style="width:100%;padding:13px 16px;border-radius:12px;border:1.5px solid rgba(255,255,255,.2);background:rgba(255,255,255,.1);color:#fff;font-size:15px;font-family:'DM Sans',sans-serif;outline:none;margin-bottom:10px;box-sizing:border-box;"
+      oninput="document.getElementById('login-err').textContent=''">
+    <input id="login-pass-input" type="password" placeholder="Password"
+      style="width:100%;padding:13px 16px;border-radius:12px;border:1.5px solid rgba(255,255,255,.2);background:rgba(255,255,255,.1);color:#fff;font-size:15px;font-family:'DM Sans',sans-serif;outline:none;margin-bottom:14px;box-sizing:border-box;"
+      onkeydown="if(event.key==='Enter')emailSignIn()">
+    <button onclick="emailSignIn()"
+      style="width:100%;padding:14px;border-radius:12px;border:none;background:var(--orange);color:#fff;font-size:15px;font-weight:700;cursor:pointer;font-family:'DM Sans',sans-serif;margin-bottom:14px;">
+      Sign In
+    </button>
+    <div style="text-align:center;font-size:12px;color:rgba(255,255,255,.5);margin-bottom:12px;">— or —</div>
     <div id="g_id_onload" data-client_id="209231675110-6id8vr3ehcocg4df7tvpc89jsmrvhogk.apps.googleusercontent.com" data-ux_mode="popup" data-callback="tcGoogleCb" data-auto_prompt="false"></div>
     <div class="g_id_signin" data-type="standard" data-size="large" data-theme="outline" data-text="sign_in_with" data-shape="pill" data-logo_alignment="left" data-width="280"></div>
   </div>
 
   <div class="login-err" id="login-err"></div>
-  <div class="login-note">Sign in with the Google account on file with the office</div>
+  <div class="login-note">Sign in with your invite email or Google account</div>
 </div>
 
 <!-- APP -->
@@ -935,11 +947,53 @@ var TC = {
 };
 
 // AUTH -
-// Email/password sign-in DEPRECATED 2026-04-26. Google is the only path now.
-// Stub kept to avoid runtime errors if any handler still references it.
+// Email + password sign-in via Supabase Auth
 async function emailSignIn() {
+  var email = (document.getElementById('login-email-input') || {}).value || '';
+  var pass  = (document.getElementById('login-pass-input')  || {}).value || '';
   var errEl = document.getElementById('login-err');
-  if (errEl) errEl.textContent = 'Use the Google sign-in button.';
+  if (!email || !pass) { if(errEl) errEl.textContent = 'Enter your email and password.'; return; }
+
+  var btn = document.querySelector('#login-email-form button');
+  if (btn) { btn.textContent = 'Signing in...'; btn.disabled = true; }
+
+  try {
+    var r = await fetch('https://nuykvchgecpiuikoerze.supabase.co/auth/v1/token?grant_type=password', {
+      method: 'POST',
+      headers: { 'apikey': 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im51eWt2Y2hnZWNwaXVpa29lcnplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYyNjM3ODYsImV4cCI6MjA5MTgzOTc4Nn0.39hZ8DdjT_0iFJXPeAL2FXUSLw8FZBirDVzxZTO1W9s', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: email.trim().toLowerCase(), password: pass })
+    });
+    var data = await r.json();
+    if (!r.ok || !data.user) throw new Error(data.error_description || data.msg || 'Invalid email or password');
+
+    // Gate on employees table — Supabase Auth pass alone isn't enough
+    // Check either `email` or `personal_email` column
+    var emailLow = email.trim().toLowerCase();
+    var e = encodeURIComponent(emailLow);
+    var filter = 'or=(email.eq.' + e + ',personal_email.eq.' + e + ')';
+    var empR = await fetch(SB_URL + '/rest/v1/employees?' + filter + '&select=active,pending_approval,name,email,personal_email', {
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+    });
+    var empRows = await empR.json();
+    var emp = empRows && empRows[0] ? empRows[0] : null;
+    if (!emp) throw new Error('Your account is not in the employee roster. Contact the office.');
+    if (emp.active === false && !emp.pending_approval) throw new Error('Your account has been disabled. Contact the office.');
+
+    var u = {
+      name: data.user.user_metadata?.name || emp.name || email.split('@')[0],
+      email: emailLow,
+      picture: '',
+      access_token: data.access_token,
+      auth_method: 'email'
+    };
+    localStorage.setItem(TC_KEY, JSON.stringify(u));
+    localStorage.setItem(TC_EXP, String(Date.now() + 43200000));
+    initApp(u);
+  } catch(e) {
+    if (errEl) errEl.textContent = e.message;
+  }
+
+  if (btn) { btn.textContent = 'Sign In'; btn.disabled = false; }
 }
 
 window.tcGoogleCb = async function(r) {
@@ -1127,13 +1181,10 @@ async function initApp(u) {
     }
   } catch(e) {}
 
- // Lookup employee record — match on either email or personal_email column
- // (techs may sign in with their @jg-restoration.com OR their personal Gmail)
+ // Lookup employee record — direct fetch for reliability
   TC.employee = { name: u.name, email: u.email }; // bare fallback
   try {
-    var emailEnc = encodeURIComponent(u.email);
-    var lookupFilter = 'or=(email.eq.' + emailEnc + ',personal_email.eq.' + emailEnc + ')';
-    var empR = await fetch(SB_URL + '/rest/v1/employees?' + lookupFilter + '&select=*', {
+    var empR = await fetch(SB_URL + '/rest/v1/employees?email=eq.' + encodeURIComponent(u.email) + '&select=*', {
       headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
     });
     if (empR.ok) {
@@ -1147,15 +1198,16 @@ async function initApp(u) {
           return;
         }
       } else {
-        // Not found in roster — kick back to login with a clear error.
-        // (Auto-create disabled 2026-04-26 — it was creating duplicate rows
-        //  for techs signing in with personal Gmail when their work email was on file.)
-        localStorage.removeItem(TC_KEY);
-        localStorage.removeItem(TC_EXP);
-        document.getElementById('login-screen').style.display = 'flex';
-        document.getElementById('app').style.display = 'none';
-        document.getElementById('login-err').textContent = 'Your email is not in the employee roster. Contact the office at (920) 428-4200.';
-        return;
+        // Not found — auto-create
+        var createR = await fetch(SB_URL + '/rest/v1/employees', {
+          method: 'POST',
+          headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=representation' },
+          body: JSON.stringify({ name: u.name, email: u.email, role: 'Technician', market: 'Appleton', active: true })
+        });
+        if (createR.ok) {
+          var created = await createR.json();
+          if (created && created[0]) TC.employee = created[0];
+        }
       }
     }
   } catch(e) { console.warn('Employee fetch failed:', e.message); }
@@ -1418,15 +1470,11 @@ function renderEntries() {
     var active = !e.clock_out;
     var mins = e.duration_minutes || Math.floor(((e.clock_out ? new Date(e.clock_out) : new Date()) - new Date(e.clock_in)) / 60000);
     var isSalary = e.status === 'salary_auto';
-    var isNonJob = e.entry_type && e.entry_type !== 'job';
-    var typeBadge = isNonJob
-      ? '<span style="display:inline-block;font-size:9px;background:rgba(13,45,94,.08);color:var(--navy);padding:1px 6px;border-radius:8px;font-weight:700;margin-left:6px;letter-spacing:.04em;text-transform:uppercase;">' + (e.entry_type || '') + '</span>'
-      : '';
     return '<div class="entry-row">' +
       '<div class="entry-dot' + (active ? '' : ' done') + '"' + (isSalary ? ' style="background:#1565c0;"' : '') + '></div>' +
       '<div class="entry-info">' +
         '<div class="entry-times">' + (isSalary ? 'Salary — 8h' : fmtTime(e.clock_in) + (e.clock_out ? ' - ' + fmtTime(e.clock_out) : ' Active')) + '</div>' +
-        '<div class="entry-job">' + (e.job_name || 'No job') + typeBadge + '</div>' +
+        '<div class="entry-job">' + (e.job_name || 'No job') + '</div>' +
       '</div>' +
       '<div class="entry-dur" style="color:' + (active ? 'var(--green)' : isSalary ? '#1565c0' : 'var(--green)') + ';">' + fmtDur(mins) + '</div>' +
     '</div>';
@@ -1521,93 +1569,49 @@ async function loadJobs() {
   renderJobs();
 }
 // SCHEDULE
-// Reads from dispatch_assignments_v2 (NULL-dated + today-dated rows = today's effective schedule).
-// GATED: schedule is hidden until tech has clocked in at least once today.
-// This prevents techs from previewing the day's work before starting their shift.
 async function loadSchedule() {
   var el = document.getElementById('schedule-list');
   var marketEl = document.getElementById('schedule-market');
   if (!el) return;
 
-  if (!TC.employee || !TC.employee.id) {
-    el.innerHTML = '<div class="empty" style="padding:16px 0;">No employee data</div>';
-    return;
-  }
-
   try {
-    // 1) Check if this tech has clocked in at all today
-    // (clock_in >= today's start, regardless of whether they're currently clocked out)
-    var today = new Date().toISOString().split('T')[0];
-    var clockChecks = await sb(
-      '/rest/v1/time_entries?employee_id=eq.' + TC.employee.id +
-      '&clock_in=gte.' + today + 'T00:00:00&select=id&limit=1'
-    );
-    var hasClockedInToday = Array.isArray(clockChecks) && clockChecks.length > 0;
-
-    if (!hasClockedInToday) {
-      // GATE: schedule locked until first clock-in.
-      // Locked screen only offers Morning Meeting (the typical start-of-day path).
-      // Shop Time and other categories become available after schedule unlocks.
-      el.innerHTML =
-        '<div style="padding:20px 16px;text-align:center;border:1.5px dashed var(--border);border-radius:10px;background:rgba(13,45,94,.02);">' +
-        '<div style="font-size:30px;margin-bottom:8px;">🔒</div>' +
-        '<div style="font-size:13px;font-weight:600;color:var(--navy);margin-bottom:4px;">Schedule unlocks at clock-in</div>' +
-        '<div style="font-size:11px;color:var(--muted);line-height:1.5;margin-bottom:14px;">Start your day with a morning meeting, or punch into a job below.</div>' +
-        '<button onclick="startNonJobEntry(\'meeting\',\'Morning Meeting\')" ' +
-          'style="padding:10px 22px;border-radius:8px;border:1.5px solid var(--navy);background:#fff;color:var(--navy);font-size:13px;font-weight:700;cursor:pointer;font-family:\'DM Sans\',sans-serif;">' +
-          '☕ Start Morning Meeting</button>' +
-        '</div>';
-      if (marketEl) marketEl.textContent = '';
+    // Pull board_state to find this tech's assigned jobs
+    var bs = await sb('/rest/v1/board_state?id=eq.current&select=state');
+    if (!bs || !bs[0] || !bs[0].state) {
+      el.innerHTML = '<div class="empty" style="padding:16px 0;">No schedule data</div>';
       return;
     }
+    var state = bs[0].state;
+    var jobNames = state.jobNames || {};
+    var assignments = state.assignments || {};
+    var techName = TC.employee ? TC.employee.name : '';
+    var firstName = techName.split(' ')[0].toLowerCase();
 
-    // 2) Pull tech's assignments from dispatch_assignments_v2 for today
-    //    (matches NULL-dated rows OR today-dated rows = "effective today schedule")
-    var assigns = await sb(
-      '/rest/v1/dispatch_assignments_v2?tech_id=eq.' + TC.employee.id +
-      '&or=(scheduled_date.is.null,scheduled_date.eq.' + today + ')' +
-      '&select=job_id,market,position,scheduled_date&order=position'
-    );
-
-    if (!assigns || !assigns.length) {
-      el.innerHTML = '<div class="empty" style="padding:16px 0 12px;">No jobs assigned today</div>' +
-        '<div style="margin-top:10px;padding-top:12px;border-top:1px dashed var(--border);">' +
-          '<div style="font-size:10px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-bottom:8px;">Non-Job Time</div>' +
-          '<div style="display:flex;gap:8px;flex-wrap:wrap;">' +
-            '<button onclick="startNonJobEntry(\'meeting\',\'Morning Meeting\')" ' +
-              'style="padding:8px 14px;border-radius:7px;border:1.5px solid var(--border);background:#fff;color:var(--navy);font-size:12px;font-weight:600;cursor:pointer;font-family:\'DM Sans\',sans-serif;">' +
-              '☕ Meeting</button>' +
-            '<button onclick="startNonJobEntry(\'shop\',\'Shop Time\')" ' +
-              'style="padding:8px 14px;border-radius:7px;border:1.5px solid var(--border);background:#fff;color:var(--navy);font-size:12px;font-weight:600;cursor:pointer;font-family:\'DM Sans\',sans-serif;">' +
-              '🔧 Shop Time</button>' +
-          '</div>' +
-        '</div>';
-      if (marketEl) marketEl.textContent = '';
-      return;
-    }
-
-    // 3) Resolve job names. Try the legacy board_state JSONB cache first
-    //    (renamed to board_state_deprecated_2026_04_26 at cutover). Falls back to job_id if missing.
-    var jobNames = {};
-    try {
-      var bs = await sb('/rest/v1/board_state_deprecated_2026_04_26?id=eq.current&select=state');
-      if (bs && bs[0] && bs[0].state && bs[0].state.jobNames) {
-        jobNames = bs[0].state.jobNames;
-      }
-    } catch(e) { /* table may have been dropped — fall back to job_id */ }
-
-    // 4) Determine market for the badge (use the first assignment's market)
-    var v2mkt = assigns[0].market;
-    var displayMkt = v2mkt === 'stevens_point' ? 'Stevens Point' : 'Appleton';
-    if (marketEl) marketEl.textContent = displayMkt;
-
-    // 5) Build the schedule list
-    var myJobs = assigns.map(function(a) {
-      return { id: a.job_id, name: jobNames[a.job_id] || a.job_id, scheduled_date: a.scheduled_date };
+    // Find this employee's jobs across both markets
+    var myJobs = [];
+    var myMarket = '';
+    Object.keys(assignments).forEach(function(market) {
+      Object.keys(assignments[market] || {}).forEach(function(tech) {
+        var techFirst = tech.split(' ')[0].toLowerCase();
+        if (techFirst === firstName || tech.toLowerCase().includes(firstName)) {
+          myMarket = market === 'appleton' ? 'Appleton' : 'Stevens Point';
+          (assignments[market][tech] || []).forEach(function(jobId) {
+            var name = jobNames[jobId] || jobId;
+            myJobs.push({ id: jobId, name: name });
+          });
+        }
+      });
     });
 
+    if (marketEl) marketEl.textContent = myMarket || '';
+
+    if (!myJobs.length) {
+      el.innerHTML = '<div class="empty" style="padding:16px 0;">No jobs assigned today</div>';
+      return;
+    }
+
+    // Mark which job is currently active
     var activeJobId = TC.activeEntry ? TC.activeEntry.job_id : null;
-    var esc = function(s){ return String(s).replace(/'/g,"&#39;"); };
 
     el.innerHTML = myJobs.map(function(j) {
       var isActive = j.id === activeJobId;
@@ -1615,30 +1619,15 @@ async function loadSchedule() {
       var dotClass = isActive ? 'active' : '';
       var cardClass = isActive ? 'active-job' : '';
       var action = isActive ? '● Active' : (isCurrent ? '✓ Selected' : 'Tap to clock in');
-      // Mark pre-scheduled jobs (scheduled_date set = was planned ahead)
-      var preBadge = j.scheduled_date
-        ? '<span style="display:inline-block;font-size:9px;background:rgba(245,166,35,.15);color:#b06a00;padding:1px 6px;border-radius:8px;font-weight:700;margin-left:6px;">SCHEDULED</span>'
-        : '';
+      var esc = function(s){ return s.replace(/'/g,"&#39;"); };
       return '<div class="schedule-job ' + cardClass + '" onclick="selectJob(\'' + j.id + '\',\'' + esc(j.name) + '\',\'\')">' +
         '<div class="schedule-job-dot ' + dotClass + '"></div>' +
         '<div class="schedule-job-info">' +
-          '<div class="schedule-job-name">' + j.name + preBadge + '</div>' +
+          '<div class="schedule-job-name">' + j.name + '</div>' +
         '</div>' +
         '<div class="schedule-job-action">' + action + '</div>' +
       '</div>';
-    }).join('') +
-    // Non-job category buttons — shown after the schedule list once unlocked
-    '<div style="margin-top:14px;padding-top:12px;border-top:1px dashed var(--border);">' +
-      '<div style="font-size:10px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-bottom:8px;">Non-Job Time</div>' +
-      '<div style="display:flex;gap:8px;flex-wrap:wrap;">' +
-        '<button onclick="startNonJobEntry(\'meeting\',\'Morning Meeting\')" ' +
-          'style="padding:8px 14px;border-radius:7px;border:1.5px solid var(--border);background:#fff;color:var(--navy);font-size:12px;font-weight:600;cursor:pointer;font-family:\'DM Sans\',sans-serif;">' +
-          '☕ Meeting</button>' +
-        '<button onclick="startNonJobEntry(\'shop\',\'Shop Time\')" ' +
-          'style="padding:8px 14px;border-radius:7px;border:1.5px solid var(--border);background:#fff;color:var(--navy);font-size:12px;font-weight:600;cursor:pointer;font-family:\'DM Sans\',sans-serif;">' +
-          '🔧 Shop Time</button>' +
-      '</div>' +
-    '</div>';
+    }).join('');
 
   } catch(e) {
     console.warn('Schedule load failed:', e);
@@ -1883,73 +1872,16 @@ function openJobSheet(id, name, isSwitching) {
     btn.style.background = 'linear-gradient(135deg,#1565c0,#0d47a1)';
     btn.onclick = async function() {
       closeJobSheet();
-      if (!TC.activeEntry) { toast('Not clocked in'); return; }
-      // BUG FIX 2026-04-22: previously this PATCHed job_id on the current entry,
-      // which caused the entire day's time to be reattributed to the new job
-      // (losing all hours on the prior job). Now we properly close the current
-      // entry and create a new one — preserving per-job time attribution.
-      try {
-        var loc = await getLocation();
-        var now = new Date().toISOString();
-        var duration = Math.floor((Date.now() - TC.clockInTime) / 60000);
-        var priorJobName = TC.selectedJobName || TC.activeEntry.job_name || '(unknown)';
-
-        // 1. Close the current entry cleanly
-        var cr = await fetch(SB_URL + '/rest/v1/time_entries?id=eq.' + TC.activeEntry.id, {
-          method: 'PATCH',
-          headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            clock_out: now,
-            duration_minutes: duration,
-            clock_out_lat: loc ? loc.lat : null,
-            clock_out_lng: loc ? loc.lng : null,
-            status: 'complete',
-            notes: 'Job switch → ' + name
-          })
-        });
-        if (!cr.ok) { toast('Switch failed — try again'); return; }
-
-        logActivity('Job Switch', 'Switched from ' + priorJobName + ' to ' + name, 'time_clock');
-
-        // 2. Open a new entry for the new job
-        var newEntry = {
-          employee_id:   TC.employee ? TC.employee.id : null,
-          employee_name: TC.employee ? TC.employee.name : '',
-          job_id:        id || null,
-          job_name:      name,
-          clock_in:      now,
-          clock_in_lat:  loc ? loc.lat : null,
-          clock_in_lng:  loc ? loc.lng : null,
-          status:        'active',
-          market:        TC.employee ? (TC.employee.market || 'Appleton') : 'Appleton',
-          notes:         'Switched from ' + priorJobName
-        };
-        var ncr = await fetch(SB_URL + '/rest/v1/time_entries', {
-          method: 'POST',
-          headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=representation' },
-          body: JSON.stringify(newEntry)
-        });
-        if (!ncr.ok) {
-          toast('New entry failed — prior job closed, tap job to clock in');
-          TC.clockedIn = false;
-          TC.activeEntry = null;
-          renderStatus(); renderJobs();
-          return;
-        }
-        var rows = await ncr.json();
-        TC.activeEntry     = rows[0];
-        TC.clockInTime     = Date.now();
-        TC.selectedJobId   = id;
-        TC.selectedJobName = name;
-        try { startPinging(); } catch(e) {}
-        renderJobs();
-        renderStatus();
-        try { renderEntries(); } catch(e) {}
-        toast('✓ Switched to: ' + name);
-      } catch (err) {
-        console.error('Job switch error:', err);
-        toast('Switch failed — try again');
-      }
+      await fetch(SB_URL + '/rest/v1/time_entries?id=eq.' + TC.activeEntry.id, {
+        method: 'PATCH',
+        headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ job_id: id, job_name: name })
+      });
+      TC.activeEntry.job_id = id;
+      TC.activeEntry.job_name = name;
+      renderJobs();
+      renderStatus();
+      toast('✓ Switched to: ' + name);
     };
   } else {
     title.textContent = 'Clock In';
@@ -2062,118 +1994,6 @@ async function checkClockInCelebration(u) {
   } catch(e) {}
 }
 
-// Start a non-job time entry (meeting, shop time, etc).
-// If tech is already clocked in to a job or other non-job entry, this will
-// clock them OUT of the current entry and into the new non-job category —
-// same flow as switching jobs, just with no job_id set.
-async function startNonJobEntry(category, label) {
-  if (!TC.employee || !TC.employee.id) { toast('Employee record not found'); return; }
-
-  var validCategories = ['meeting','shop','travel','admin'];
-  if (validCategories.indexOf(category) === -1) {
-    toast('Invalid category'); return;
-  }
-
-  // If already clocked in, confirm before switching
-  if (TC.clockedIn && TC.activeEntry) {
-    var ok = confirm('You are currently clocked in. Clock out and start ' + label + '?');
-    if (!ok) return;
-  }
-
-  toast('Starting ' + label + '...');
-  try {
-    // Defensive: close any orphan open sessions (also handles the just-confirmed
-    // current session). One source of truth for closing — no double-PATCH paths.
-    await _closeAnyOpenSessions('switching to ' + label);
-
-    var loc = await getLocation();
-    var now = new Date().toISOString();
-
-    var payload = {
-      employee_id: TC.employee.id,
-      employee_name: TC.employee.name,
-      employee_email: TC.user.email,
-      job_id: null,                       // non-job entry — no Albi job
-      job_name: label,                    // human label for history view
-      market: TC.employee.market || 'Appleton',
-      clock_in: now,
-      clock_in_lat: loc ? loc.lat : null,
-      clock_in_lng: loc ? loc.lng : null,
-      notes: null,
-      status: 'active',
-      entry_type: category                // 'meeting' or 'shop'
-    };
-
-    var result = await sb('/rest/v1/time_entries', {
-      method: 'POST',
-      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=representation' },
-      body: JSON.stringify(payload)
-    });
-
-    if (result && result[0]) {
-      TC.activeEntry = result[0];
-      TC.clockedIn = true;
-      TC.clockInTime = Date.now();
-      TC.selectedJobId = '';
-      TC.selectedJobName = label;
-      TC.entries.push(result[0]);
-      startPinging();
-      if (typeof logActivity === 'function') {
-        logActivity('Clock In', 'Clocked in to ' + label + ' (' + category + ')', 'time_clock');
-      }
-      toast('Clocked in to ' + label);
-      // Refresh schedule so the locked screen unlocks (if first clock-in of day)
-      // and the active entry indicator updates
-      if (typeof loadSchedule === 'function') loadSchedule();
-      if (typeof renderStatus === 'function') renderStatus();
-      if (typeof renderEntries === 'function') renderEntries();
-      if (typeof updateStats === 'function') updateStats();
-    } else {
-      toast('Could not start ' + label);
-    }
-  } catch(e) {
-    console.error('startNonJobEntry error', e);
-    toast('Error starting ' + label);
-  }
-}
-
-// Defensively close any open time_entries rows for this tech.
-// Run before clocking into anything new — guards against bugs where a previous
-// switch failed silently, leaving an orphan session open. Idempotent.
-async function _closeAnyOpenSessions(reason) {
-  if (!TC.employee || !TC.employee.id) return false;
-  try {
-    var openRes = await fetch(SB_URL + '/rest/v1/time_entries?employee_id=eq.' + TC.employee.id + '&clock_out=is.null&select=id,clock_in', {
-      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
-    });
-    if (!openRes.ok) return false;
-    var openRows = await openRes.json();
-    if (!openRows.length) return true; // nothing to do
-    // Close each — set clock_out = now, compute duration from its clock_in
-    var now = new Date();
-    var nowIso = now.toISOString();
-    for (var i = 0; i < openRows.length; i++) {
-      var row = openRows[i];
-      var dur = Math.max(0, Math.floor((now - new Date(row.clock_in)) / 60000));
-      await fetch(SB_URL + '/rest/v1/time_entries?id=eq.' + row.id, {
-        method: 'PATCH',
-        headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          clock_out: nowIso,
-          duration_minutes: dur,
-          status: 'auto_closed',
-          notes: 'Auto-closed by ' + (reason || 'new clock-in')
-        })
-      });
-    }
-    console.log('[orphan-cleanup] closed ' + openRows.length + ' open session(s)');
-    return true;
-  } catch(e) {
-    console.warn('Orphan cleanup failed:', e);
-    return false;
-  }
-}
-
 async function clockIn() {
   if (!TC.employee || !TC.employee.id) { toast('Employee record not found'); return; }
   var role = TC.employee.role || 'Technician';
@@ -2185,10 +2005,6 @@ async function clockIn() {
   if (btn) { btn.style.opacity = '.6'; btn.style.pointerEvents = 'none'; }
   toast('Getting location...');
   try {
-
-  // Belt-and-suspenders: close any orphaned open sessions for this tech first.
-  // Prevents bugs where a previous switch failed silently and left a session open.
-  await _closeAnyOpenSessions('new clock-in');
 
   var loc = await getLocation();
   var now = new Date().toISOString();
@@ -2239,8 +2055,6 @@ async function clockIn() {
     } else {
       toast('Clocked in' + (loc ? ' with GPS' : ''));
     }
-    // Schedule was gated until first clock-in — reveal it now
-    loadSchedule();
   } else {
     console.error('Clock in result:', result);
     toast('Error clocking in — check connection and try again');
@@ -2700,29 +2514,112 @@ async function loadMySwapRequests() {
 }
 
 // ── NOTIFICATIONS ────────────────────────────────────────────────────────
+// Reads from BOTH oncall_notifications (legacy on-call swap stuff) AND the new
+// general-purpose notifications table. Merges by created_at and renders with
+// category-aware styling.
 async function loadNotifications() {
   if (!TC.user) return;
-  var bell = document.getElementById('notif-bell');
+  var bell  = document.getElementById('notif-bell');
   var badge = document.getElementById('notif-badge');
   if (!bell) return;
 
+  var email = encodeURIComponent(TC.user.email);
+  var H = { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY };
+
+  var notifs = [];
   try {
-    var r = await fetch(SB_URL + '/rest/v1/oncall_notifications?recipient_email=eq.' +
-      encodeURIComponent(TC.user.email) + '&order=created_at.desc&limit=20&select=*', {
-      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+    // Fetch both sources in parallel
+    var responses = await Promise.all([
+      fetch(SB_URL + '/rest/v1/oncall_notifications?recipient_email=eq.' + email +
+            '&order=created_at.desc&limit=20&select=*', { headers: H }),
+      fetch(SB_URL + '/rest/v1/notifications?recipient_email=eq.' + email +
+            '&order=created_at.desc&limit=30&select=*', { headers: H })
+    ]);
+    var oncall = (await responses[0].json()) || [];
+    var general = (await responses[1].json()) || [];
+
+    // Tag source so we know which table to PATCH on read
+    oncall.forEach(function(n){ n._src = 'oncall_notifications'; n._is_oncall = true; });
+    general.forEach(function(n){ n._src = 'notifications'; });
+
+    // Filter expired notifications (general table has expires_at)
+    var now = new Date();
+    general = general.filter(function(n){
+      return !n.expires_at || new Date(n.expires_at) > now;
     });
-    var notifs = await r.json() || [];
-    var unread = notifs.filter(function(n){ return !n.read; });
-    bell.style.display = 'block';
-    if (unread.length) {
-      badge.style.display = 'flex';
-      badge.textContent = unread.length > 9 ? '9+' : unread.length;
-    } else {
-      badge.style.display = 'none';
-    }
-    // Store for sheet display
-    bell._notifs = notifs;
-  } catch(e) {}
+
+    // Merge + sort newest first
+    notifs = oncall.concat(general).sort(function(a, b){
+      return new Date(b.created_at) - new Date(a.created_at);
+    }).slice(0, 30);
+  } catch(e) {
+    console.warn('loadNotifications error:', e);
+  }
+
+  var unread = notifs.filter(function(n){ return !n.read; });
+  bell.style.display = 'block';
+  if (unread.length) {
+    badge.style.display = 'flex';
+    badge.textContent = unread.length > 9 ? '9+' : unread.length;
+  } else {
+    badge.style.display = 'none';
+  }
+  bell._notifs = notifs;
+}
+
+function _renderNotifBlock(n) {
+  var ts = new Date(n.created_at).toLocaleDateString('en-US', {
+    month:'short', day:'numeric', hour:'numeric', minute:'2-digit'
+  });
+
+  // Legacy on-call notifications keep their original rendering
+  if (n._is_oncall) {
+    var isApproved = n.status === 'approved';
+    var bg = isApproved ? 'rgba(46,125,50,.06)' : 'rgba(198,40,40,.06)';
+    var border = isApproved ? '#2e7d32' : '#c62828';
+    return '<div style="padding:12px;border-radius:10px;background:' + bg + ';border-left:3px solid ' + border + ';margin-bottom:8px;' + (n.read ? 'opacity:.6;' : '') + '">' +
+      '<div style="font-size:13px;font-weight:600;color:var(--text);line-height:1.4;">' + (n.message || '(no message)') + '</div>' +
+      '<div style="font-size:10px;color:var(--muted);margin-top:4px;">' + ts + '</div>' +
+      '</div>';
+  }
+
+  // New general-purpose notifications: severity + category styling
+  var sevColors = {
+    info:    { bg:'rgba(13,45,94,.05)',   border:'#0d2d5e' },
+    warning: { bg:'rgba(230,81,0,.06)',   border:'#e65100' },
+    urgent:  { bg:'rgba(198,40,40,.06)',  border:'#c62828' },
+    success: { bg:'rgba(46,125,50,.06)',  border:'#2e7d32' }
+  };
+  var sev = sevColors[n.severity] || sevColors.info;
+
+  var catIcons = {
+    timeclock:  '⏱',
+    dispatch:   '🚐',
+    oncall:     '📞',
+    rebuild:    '🔨',
+    correction: '✏️',
+    system:     '⚙️',
+    admin:      '🔔'
+  };
+  var icon = catIcons[n.category] || '🔔';
+
+  var html = '<div style="padding:12px;border-radius:10px;background:' + sev.bg + ';border-left:3px solid ' + sev.border + ';margin-bottom:8px;' + (n.read ? 'opacity:.6;' : '') + '">';
+  html += '<div style="display:flex;align-items:flex-start;gap:8px;">';
+  html += '<div style="font-size:16px;line-height:1.3;">' + icon + '</div>';
+  html += '<div style="flex:1;min-width:0;">';
+  if (n.title) {
+    html += '<div style="font-size:13px;font-weight:700;color:var(--text);line-height:1.3;">' + n.title + '</div>';
+  }
+  if (n.body) {
+    html += '<div style="font-size:12px;color:var(--text);line-height:1.4;margin-top:2px;">' + n.body + '</div>';
+  }
+  if (n.action_url) {
+    var label = n.action_label || 'Open';
+    html += '<a href="' + n.action_url + '" style="display:inline-block;margin-top:6px;font-size:11px;font-weight:700;color:' + sev.border + ';text-decoration:none;">' + label + ' →</a>';
+  }
+  html += '<div style="font-size:10px;color:var(--muted);margin-top:4px;">' + ts + '</div>';
+  html += '</div></div></div>';
+  return html;
 }
 
 function openNotifications() {
@@ -2733,29 +2630,37 @@ function openNotifications() {
   if (!notifs.length) {
     list.innerHTML = '<div class="empty">No notifications yet</div>';
   } else {
-    list.innerHTML = notifs.map(function(n) {
-      var isApproved = n.status === 'approved';
-      var bg = isApproved ? 'rgba(46,125,50,.06)' : 'rgba(198,40,40,.06)';
-      var border = isApproved ? '#2e7d32' : '#c62828';
-      return '<div style="padding:12px;border-radius:10px;background:' + bg + ';border-left:3px solid ' + border + ';margin-bottom:8px;">' +
-        '<div style="font-size:13px;font-weight:600;color:var(--text);line-height:1.4;">' + n.message + '</div>' +
-        '<div style="font-size:10px;color:var(--muted);margin-top:4px;">' + new Date(n.created_at).toLocaleDateString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}) + '</div>' +
-        '</div>';
-    }).join('');
+    list.innerHTML = notifs.map(_renderNotifBlock).join('');
   }
 
   var sheet = document.getElementById('notif-sheet');
   if (sheet) sheet.classList.add('open');
 
-  // Mark all as read
-  if (TC.user && notifs.some(function(n){ return !n.read; })) {
-    fetch(SB_URL + '/rest/v1/oncall_notifications?recipient_email=eq.' + encodeURIComponent(TC.user.email) + '&read=eq.false', {
-      method: 'PATCH',
-      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ read: true })
-    }).then(function() {
+  // Mark all unread as read in BOTH tables
+  if (!TC.user) return;
+  var email = encodeURIComponent(TC.user.email);
+  var H = { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' };
+
+  var hasUnreadOncall  = notifs.some(function(n){ return !n.read && n._is_oncall; });
+  var hasUnreadGeneral = notifs.some(function(n){ return !n.read && !n._is_oncall; });
+
+  var promises = [];
+  if (hasUnreadOncall) {
+    promises.push(fetch(SB_URL + '/rest/v1/oncall_notifications?recipient_email=eq.' + email + '&read=eq.false', {
+      method: 'PATCH', headers: H, body: JSON.stringify({ read: true })
+    }));
+  }
+  if (hasUnreadGeneral) {
+    promises.push(fetch(SB_URL + '/rest/v1/notifications?recipient_email=eq.' + email + '&read=eq.false', {
+      method: 'PATCH', headers: H, body: JSON.stringify({ read: true, read_at: new Date().toISOString() })
+    }));
+  }
+  if (promises.length) {
+    Promise.all(promises).then(function(){
       var badge = document.getElementById('notif-badge');
       if (badge) badge.style.display = 'none';
+      // Update local state so the dim styling applies if reopened
+      notifs.forEach(function(n){ n.read = true; });
     });
   }
 }
@@ -2928,6 +2833,8 @@ function renderSwitchJobs(jobs) {
     var jid   = String(j.id || j.projectId || '');
     var jname = j.name || j.projectName || jid;
     var jnum  = j.number || j.projectNumber || '';
+    var safeId   = jid.replace(/"/g,'&quot;');
+    var safeName = jname.replace(/"/g,'&quot;');
     var isCurrent = jid === String(TC.selectedJobId);
     // Section headers when not filtered
     if (!isFiltered) {
@@ -2937,14 +2844,10 @@ function renderSwitchJobs(jobs) {
         html += '<div style="padding:6px 14px;font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;background:rgba(0,0,0,.03);">All Active Jobs</div>';
       }
     }
-    var escId   = jid.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-    var escName = jname.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-    var escJname = jname.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-    var escJnum = jnum ? jnum.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;') : '';
-    html += '<div class="switch-job-row" data-job-id="' + escId + '" data-job-name="' + escName + '" style="padding:11px 14px;border-bottom:1px solid var(--border);cursor:pointer;display:flex;align-items:center;gap:10px;' + (isCurrent ? 'background:rgba(13,45,94,.05);' : '') + (i < _switchMyJobCount && !isFiltered ? 'border-left:3px solid #1565c0;' : '') + '">' +
+    html += '<div onclick="selectSwitchJob(\"' + safeId + '\",\"' + safeName + '\")" style="padding:11px 14px;border-bottom:1px solid var(--border);cursor:pointer;display:flex;align-items:center;gap:10px;' + (isCurrent ? 'background:rgba(13,45,94,.05);' : '') + (i < _switchMyJobCount && !isFiltered ? 'border-left:3px solid #1565c0;' : '') + '">' +
       '<div style="flex:1;">' +
-        '<div style="font-size:13px;font-weight:600;color:var(--navy);">' + escJname + '</div>' +
-        (jnum ? '<div style="font-size:11px;color:var(--muted);">#' + escJnum + '</div>' : '') +
+        '<div style="font-size:13px;font-weight:600;color:var(--navy);">' + jname + '</div>' +
+        (jnum ? '<div style="font-size:11px;color:var(--muted);">#' + jnum + '</div>' : '') +
       '</div>' +
       (isCurrent ? '<span style="font-size:10px;color:var(--muted);">current</span>' : '') +
     '</div>';
@@ -2957,21 +2860,6 @@ function closeSwitchJob() {
   var sheet = document.getElementById('switch-job-sheet');
   if (sheet) sheet.classList.remove('open');
 }
-
-// Event delegation for switch job rows — fixes selection bug where
-// inline-string onclick with escaped quotes broke for job names containing
-// special characters (apostrophes, quotes, ampersands, etc.)
-document.addEventListener('click', function(ev) {
-  var row = ev.target.closest && ev.target.closest('.switch-job-row');
-  if (!row) return;
-  var id   = row.getAttribute('data-job-id')   || '';
-  var name = row.getAttribute('data-job-name') || '';
-  // Decode HTML entities back to raw values for the selection state
-  var tmp = document.createElement('textarea');
-  tmp.innerHTML = id;   id   = tmp.value;
-  tmp.innerHTML = name; name = tmp.value;
-  selectSwitchJob(id, name);
-});
 
 function switchJobSearch() {
   var q = ((document.getElementById('switch-job-input') || {}).value || '').toLowerCase().trim();
@@ -3002,38 +2890,20 @@ async function submitSwitchJob() {
   var btn = document.querySelector('#switch-job-sheet button');
   if (btn) { btn.textContent = 'Switching...'; btn.disabled = true; }
 
-  // 1. Clock out current job — VERIFY success before proceeding
+  // 1. Clock out current job
   var loc = await getLocation();
   var now = new Date().toISOString();
   var duration = Math.floor((Date.now() - TC.clockInTime) / 60000);
-  var oldEntryId = TC.activeEntry.id;
 
-  var closeRes;
-  try {
-    closeRes = await fetch(SB_URL + '/rest/v1/time_entries?id=eq.' + oldEntryId, {
-      method: 'PATCH',
-      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ clock_out: now, duration_minutes: duration, clock_out_lat: loc ? loc.lat : null, clock_out_lng: loc ? loc.lng : null, status: 'complete', notes: 'Job switch → ' + _switchJobName })
-    });
-  } catch(e) {
-    console.error('Clock-out network error:', e);
-    toast('Network error closing current job — check connection and retry');
-    if (btn) { btn.textContent = 'Switch Job'; btn.disabled = false; }
-    return;
-  }
+  await fetch(SB_URL + '/rest/v1/time_entries?id=eq.' + TC.activeEntry.id, {
+    method: 'PATCH',
+    headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ clock_out: now, duration_minutes: duration, clock_out_lat: loc ? loc.lat : null, clock_out_lng: loc ? loc.lng : null, status: 'complete', notes: 'Job switch → ' + _switchJobName })
+  });
 
-  if (!closeRes || !closeRes.ok) {
-    console.error('Clock-out PATCH failed:', closeRes && closeRes.status);
-    toast('Could not close current job — try again');
-    if (btn) { btn.textContent = 'Switch Job'; btn.disabled = false; }
-    return; // ABORT — never create the new entry while old is still open
-  }
+  logActivity('Job Switch', 'Switched from ' + (TC.selectedJobName||TC.selectedJobId) + ' to ' + _switchJobName, 'time_clock');
 
-  if (typeof logActivity === 'function') {
-    logActivity('Job Switch', 'Switched from ' + (TC.selectedJobName||TC.selectedJobId) + ' to ' + _switchJobName, 'time_clock');
-  }
-
-  // 2. Clock into new job
+  // 2. Clock into new job — keep same day link
   var newEntry = {
     employee_id:   TC.employee ? TC.employee.id : null,
     employee_name: TC.employee ? TC.employee.name : '',
@@ -3047,51 +2917,25 @@ async function submitSwitchJob() {
     notes:         'Switched from ' + (TC.selectedJobName || TC.selectedJobId)
   };
 
-  var cr;
-  try {
-    cr = await fetch(SB_URL + '/rest/v1/time_entries', {
-      method: 'POST',
-      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=representation' },
-      body: JSON.stringify(newEntry)
-    });
-  } catch(e) {
-    console.error('Clock-in network error:', e);
-    cr = null;
-  }
+  var cr = await fetch(SB_URL + '/rest/v1/time_entries', {
+    method: 'POST',
+    headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=representation' },
+    body: JSON.stringify(newEntry)
+  });
 
-  if (cr && cr.ok) {
+  if (cr.ok) {
     var newRows = await cr.json();
     TC.activeEntry   = newRows[0];
     TC.clockInTime   = Date.now();
     TC.selectedJobId = _switchJobId;
     TC.selectedJobName = _switchJobName;
-    // Update entries list — close the old, push the new
-    var oldIdx = TC.entries.findIndex(function(e) { return e.id === oldEntryId; });
-    if (oldIdx !== -1) {
-      TC.entries[oldIdx].clock_out = now;
-      TC.entries[oldIdx].duration_minutes = duration;
-      TC.entries[oldIdx].status = 'complete';
-    }
-    TC.entries.push(newRows[0]);
     startPinging();
     closeSwitchJob();
     toast('✓ Switched to ' + _switchJobName);
     renderStatus();
     renderEntries();
   } else {
-    // ROLLBACK — re-open the closed entry so tech isn't left in limbo
-    console.error('Clock-in failed, attempting rollback of close', cr && cr.status);
-    try {
-      await fetch(SB_URL + '/rest/v1/time_entries?id=eq.' + oldEntryId, {
-        method: 'PATCH',
-        headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ clock_out: null, duration_minutes: null, clock_out_lat: null, clock_out_lng: null, status: 'active', notes: null })
-      });
-      toast('Switch failed — original job restored, try again');
-    } catch(e) {
-      console.error('Rollback also failed:', e);
-      toast('Switch failed — contact office, your time may need a manual fix');
-    }
+    toast('Error switching job — try again');
     if (btn) { btn.textContent = 'Switch Job'; btn.disabled = false; }
   }
 }
@@ -4237,7 +4081,7 @@ function initRealtimeSync() {
       window.JGSupabase = window.JGSupabase || {};
       window.JGSupabase.client = _rtClient;
     }
-    var tables = ["time_entries","employees","oncall_schedule","oncall_swap_requests","oncall_notifications","board_state"];
+    var tables = ["time_entries","employees","oncall_schedule","oncall_swap_requests","oncall_notifications","notifications","board_state"];
     tables.forEach(function(table) {
       var ch = _rtClient.channel('rt_' + table)
         .on('postgres_changes', { event: '*', schema: 'public', table: table }, function(payload) {
@@ -4280,7 +4124,7 @@ function onRealtimeChange(table, payload) {
       if (typeof loadMySwapRequests === 'function') loadMySwapRequests();
     }
   }
-  if (table === 'oncall_notifications') {
+  if (table === 'oncall_notifications' || table === 'notifications') {
     loadNotifications();
   }
 }
@@ -4413,7 +4257,7 @@ function showAnniversaryCelebration(name, years) {
 }
 
 </script>
-<script src="tc-dispatch.js?v=20260422-switch2"></script>
+<script src="tc-dispatch.js?v=20260419-1"></script>
 <script src="presence.js?v=20260419-1"></script>
 <!-- Sidebar only on tablet/desktop (>1024px). Mobile timeclock stays full-screen. -->
 <script>

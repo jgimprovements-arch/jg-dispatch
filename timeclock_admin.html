@@ -1390,6 +1390,37 @@ async function sendVerificationReminders() {
   toast('✓ Sent ' + sent + ' verification reminder(s)' + (skipped ? ', skipped ' + skipped : ''));
 }
 
+// Flow 4: Trigger the in-app reminder rules engine on demand
+async function _runReminderRules() {
+  if (!confirm('Run timecard reminder rules now? This will create in-app notifications for: forgot punch-out, unverified hours, period closing, and admin pending corrections.')) return;
+  try {
+    var r = await fetch(SB_URL + '/rest/v1/rpc/dispatch_timecard_reminders', {
+      method: 'POST',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({})
+    });
+    if (!r.ok) {
+      var errText = await r.text();
+      toast('⚠ Failed: ' + (errText || r.status));
+      return;
+    }
+    var rows = await r.json();
+    if (!Array.isArray(rows) || !rows.length) {
+      toast('Rules ran but returned no data');
+      return;
+    }
+    var summary = rows.map(function(row){
+      var label = ({forgot_punch_out:'Forgot punch-out', unverified_hours:'Unverified', period_closing:'Period closing', pending_corrections:'Pending corrections'})[row.rule] || row.rule;
+      return label + ': ' + row.inserted;
+    }).join(' • ');
+    toast('✓ ' + summary);
+    logActivity('Reminders Sent', summary, 'time_clock');
+  } catch(e) {
+    console.error(e);
+    toast('⚠ Error running reminders');
+  }
+}
+
 // Flow 3: Fire when admin resolves a correction request
 async function smsCorrectionUpdate(correction, status, adminNote) {
   var emp = ST.employees.find(function(x){ return x.name === correction.employee_name; });
@@ -2813,6 +2844,7 @@ function renderTimesheets() {
       h += '<button class="btn btn-primary" style="background:#2e7d32;border-color:#2e7d32;" onclick="_tcApproveAll()">&#10003; Approve All</button>';
       h += '<button class="btn" onclick="openAbsenceModal()" style="background:var(--orange);color:#fff;border-color:var(--orange);">+ Log Absence</button>';
       h += '<button class="btn" onclick="sendVerificationReminders()" style="background:#0d2d5e;color:#fff;border-color:#0d2d5e;">📱 Text Unverified</button>';
+      h += '<button class="btn" onclick="_runReminderRules()" style="background:#6a1b9a;color:#fff;border-color:#6a1b9a;">🔔 Send Reminders</button>';
       h += '<button class="btn btn-primary" onclick="_tcPayrollReport()">📥 Paychex Export</button>';
       h += '</div></div>';
     }
