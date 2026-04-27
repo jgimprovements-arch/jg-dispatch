@@ -56,6 +56,7 @@
   Questions? Call <a href="tel:9204284200">Appleton: (920) 428-4200</a> or <a href="tel:7156003883">Stevens Point: (715) 600-3883</a>
 </div>
 
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script type="module">
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 const SB_URL = 'https://nuykvchgecpiuikoerze.supabase.co';
@@ -91,12 +92,15 @@ async function render() {
   const attachHtml = attachments.length ? `
     <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--line);">
       <div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;margin-bottom:8px;">Sketches / Reference Files</div>
-      <div style="display:flex;flex-wrap:wrap;gap:8px;">
-        ${attachments.map(url => {
+      <div style="display:flex;flex-wrap:wrap;gap:12px;">
+        ${attachments.map((url, i) => {
           const name = url.split('/').pop().split('?')[0];
           const isImage = /\.(jpg|jpeg|png|gif|webp)$/i.test(name);
           return isImage
-            ? `<a href="${url}" target="_blank" style="display:block;"><img src="${url}" style="max-width:200px;max-height:200px;border:1px solid var(--line);border-radius:4px;"></a>`
+            ? `<div style="display:flex;flex-direction:column;align-items:flex-start;gap:6px;">
+                 <a href="${url}" target="_blank" style="display:block;"><img src="${url}" style="max-width:200px;max-height:200px;border:1px solid var(--line);border-radius:4px;"></a>
+                 <button class="btn dl-pdf-btn" data-url="${url}" data-name="${name}" data-idx="${i}" style="font-size:11px;padding:5px 10px;">📥 Download as PDF</button>
+               </div>`
             : `<a href="${url}" target="_blank" style="display:inline-flex;align-items:center;gap:6px;padding:8px 12px;background:#eef0f7;border-radius:6px;text-decoration:none;color:var(--navy);font-weight:600;font-size:13px;">📎 ${name}</a>`;
         }).join('')}
       </div>
@@ -220,6 +224,50 @@ async function render() {
   };
   document.getElementById('v_qty').addEventListener('input', recalc);
   document.getElementById('v_unit_cost').addEventListener('input', recalc);
+
+  // Wire "Download as PDF" buttons for image attachments
+  document.querySelectorAll('.dl-pdf-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const url = btn.dataset.url;
+      const name = btn.dataset.name;
+      btn.disabled = true; btn.textContent = '⏳ Generating…';
+      try {
+        // Load image
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        await new Promise((res, rej) => {
+          img.onload = res;
+          img.onerror = rej;
+          img.src = url;
+        });
+        const { jsPDF } = window.jspdf;
+        // Letter portrait, generous margins
+        const pdf = new jsPDF({ unit: 'pt', format: 'letter' });
+        const pageW = pdf.internal.pageSize.getWidth();
+        const pageH = pdf.internal.pageSize.getHeight();
+        const margin = 36;
+        const maxW = pageW - margin*2;
+        const maxH = pageH - margin*2 - 40;
+        let w = img.naturalWidth, h = img.naturalHeight;
+        const ratio = Math.min(maxW/w, maxH/h);
+        w *= ratio; h *= ratio;
+        const x = (pageW - w) / 2;
+        // Header
+        pdf.setFontSize(14); pdf.setTextColor(13,45,94);
+        pdf.text('JG Restoration — Reference Image', margin, margin);
+        pdf.setFontSize(10); pdf.setTextColor(120,132,160);
+        pdf.text(name, margin, margin + 14);
+        // Image
+        pdf.addImage(img, 'JPEG', x, margin + 30, w, h);
+        const cleanName = name.replace(/\.(jpg|jpeg|png|gif|webp)$/i, '') + '.pdf';
+        pdf.save(cleanName);
+      } catch (e) {
+        alert('Failed to download as PDF: ' + e.message);
+      } finally {
+        btn.disabled = false; btn.textContent = '📥 Download as PDF';
+      }
+    });
+  });
 
   // File staging
   let stagedFiles = [];
