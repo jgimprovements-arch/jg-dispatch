@@ -1066,7 +1066,12 @@ const state = {
   filterStatus: 'all',
   filterPm: 'all',
   search: '',
-  pmEmail: 'pm@jg-restoration.com',
+  pmEmail: (() => {
+    try {
+      const u = JSON.parse(localStorage.getItem('jg_platform_user') || 'null');
+      return (u && u.email) ? u.email.toLowerCase() : null;
+    } catch { return null; }
+  })(),
   tab: 'phases',
 };
 
@@ -1475,7 +1480,7 @@ JG Restoration`;
 
 async function sendCustomerScheduleEmail(project, body, link) {
   if (!project?.customer_email) { toast('No customer email'); return; }
-  const fromEmail = project.albi_pm_email || state.pmEmail || 'office@jg-restoration.com';
+  const fromEmail = project.albi_pm_email || state.pmEmail || 'josh@jg-restoration.com';
   const fromName = project.albi_pm_name || 'JG Restoration';
   // Save to messages
   const { data: insertedArr } = await sb.from('rebuild_messages').insert({
@@ -1531,7 +1536,7 @@ async function notifyCustomerOfChange(changeText) {
   const p = state.activeProject;
   if (!p?.customer_email || !p?.customer_token) return;
   const link = customerLink(p);
-  const fromEmail = p.albi_pm_email || state.pmEmail || 'office@jg-restoration.com';
+  const fromEmail = p.albi_pm_email || state.pmEmail || 'josh@jg-restoration.com';
   const fromName = p.albi_pm_name || 'JG Restoration';
   const pmFirst = fromName.split(' ')[0];
   const pmPhone = p.albi_pm_phone ? fmtPhone(p.albi_pm_phone) : '(920) 428-4200';
@@ -3479,7 +3484,7 @@ async function sendMessage() {
     if (channel === 'email' && !recipient.email) { toast('No email on file for that recipient'); return; }
   }
 
-  const fromEmail = p.albi_pm_email || state.pmEmail || 'office@jg-restoration.com';
+  const fromEmail = p.albi_pm_email || state.pmEmail || 'josh@jg-restoration.com';
   const fromName = p.albi_pm_name || 'JG Restoration';
 
   // Insert into Supabase first (source of truth)
@@ -4056,7 +4061,7 @@ function setupRealtime() {
                 body: JSON.stringify({
                   channel: 'email',
                   to_email: n.recipient_email,
-                  from_email: 'office@jg-restoration.com',
+                  from_email: 'josh@jg-restoration.com',
                   from_name: 'JG Platform',
                   recipient_name: n.recipient_email,
                   recipient_type: 'pm_alert',
@@ -4090,6 +4095,43 @@ async function loadNotifications() {
     .limit(50);
   state.notifications = data || [];
   renderNotifBadge();
+
+  // Send any backlogged email alerts that never went out (e.g., PM was offline when trigger fired)
+  // Atomic claim: only send if email_sent_at is still NULL.
+  for (const n of state.notifications.filter(x => !x.email_sent_at)) {
+    try {
+      const { data: claimed } = await sb.from('rebuild_notifications')
+        .update({ email_sent_at: new Date().toISOString() })
+        .eq('id', n.id)
+        .is('email_sent_at', null)
+        .select();
+      if (!claimed || !claimed.length) continue;
+      await fetch(MESSAGE_HOOK, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          channel: 'email',
+          to_email: n.recipient_email,
+          from_email: 'josh@jg-restoration.com',
+          from_name: 'JG Platform',
+          recipient_name: n.recipient_email,
+          recipient_type: 'pm_alert',
+          subject: '🔔 ' + n.title + ' — JG Platform',
+          body: buildBrandedEmail({
+            preheader: n.title,
+            headline: n.title,
+            intro: n.body || '',
+            bodyHtml: '',
+            ctaLabel: 'Open Rebuild Scheduler',
+            ctaUrl: 'https://jgimprovements-arch.github.io/jg-dispatch/rebuild.html',
+            signoffName: 'JG Platform',
+          }),
+          attachment_count: 0, attachment_urls: '',
+        }),
+        mode: 'no-cors',
+      });
+    } catch (e) { console.error('Backfill notif email failed:', e); }
+  }
 }
 
 function renderNotifBadge() {
