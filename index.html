@@ -2667,8 +2667,33 @@ document.addEventListener('keydown', function(e){
 // ── ON-CALL ROTATION ─────────────────────
 let ocMonthOffset = 0;
 let ocData = JSON.parse(localStorage.getItem('jg_oncall_v2') || '{}');
-const OC_ROLES = ['On-Call Tech','Backup Tech','On-Call PM'];
+const OC_ROLES = ['On-Call Tech','Backup Tech','On-Call PM','On-Call Carpenter'];
 const DAYS_SHORT = ['Su','Mo','Tu','We','Th','Fr','Sa'];
+
+// Carpenter roster — loaded once when On-Call tab is opened.
+// Per-market like the other roles. Source: employees WHERE role='Carpenter'.
+let ocCarpenters = { appleton: [], stevens: [] };
+async function loadCarpenters(){
+  try {
+    const r = await fetch(SB_URL + '/rest/v1/employees?role=eq.Carpenter&active=eq.true&select=name,market', {
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+    });
+    if (!r.ok) return;
+    const rows = await r.json();
+    const grouped = { appleton: [], stevens: [] };
+    rows.forEach(e => {
+      if (!e.name) return;
+      const m = (e.market || 'Appleton').toLowerCase();
+      const lane = (m.includes('stevens') || m.includes('point')) ? 'stevens' : 'appleton';
+      grouped[lane].push(e.name);
+    });
+    grouped.appleton.sort();
+    grouped.stevens.sort();
+    ocCarpenters = grouped;
+  } catch(e) {
+    console.warn('Carpenter load failed:', e);
+  }
+}
 
 function getOCMonthDate(offset=0){
   const d = new Date();
@@ -2688,6 +2713,7 @@ async function switchToOnCall(el){
   document.getElementById('dispatch-view').style.display='none';
   document.getElementById('oncall-panel').style.display='block';
   await loadOCData();
+  await loadCarpenters();
   renderOCMonth();
   loadOCSwapRequests();
 }
@@ -3162,12 +3188,14 @@ function renderOCMonth(){
 const OC_COLORS = {
   'On-Call Tech': '#1565c0',
   'Backup Tech':  '#6a1b9a',
-  'On-Call PM':   '#2e7d32'
+  'On-Call PM':   '#2e7d32',
+  'On-Call Carpenter': '#c54a00'
 };
 const OC_LABELS = {
   'On-Call Tech': 'Tech',
   'Backup Tech':  'Bkp',
-  'On-Call PM':   'PM'
+  'On-Call PM':   'PM',
+  'On-Call Carpenter': 'Carp'
 };
 
 function applyWeekTemplate(locKey, mKey, mondayDate){
@@ -3291,7 +3319,9 @@ function renderOCLocation(locKey, monthDate, mKey){
       blank.value=''; blank.textContent='—';
       sel.appendChild(blank);
 
-      techs.forEach(name=>{
+      // Use carpenter list for the carpenter role; tech list for the other three
+      const optionList = (role === 'On-Call Carpenter') ? (ocCarpenters[locKey] || []) : techs;
+      optionList.forEach(name=>{
         const opt = document.createElement('option');
         opt.value=name; opt.textContent=name.split(' ')[0];
         if(val===name) opt.selected=true;
