@@ -75,6 +75,94 @@
     border-radius: 10px;
     font-weight: 600;
   }
+  .notif-bell {
+    background: none;
+    border: 0;
+    cursor: pointer;
+    font-size: 16px;
+    position: relative;
+    padding: 4px 6px;
+    border-radius: 6px;
+  }
+  .notif-bell:hover { background: var(--bg); }
+  .notif-badge {
+    position: absolute;
+    top: -2px;
+    right: -2px;
+    background: var(--orange);
+    color: #fff;
+    font-size: 10px;
+    font-weight: 700;
+    border-radius: 9px;
+    min-width: 18px;
+    height: 18px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 5px;
+    border: 2px solid var(--card);
+  }
+  .notif-panel {
+    position: fixed;
+    top: 60px;
+    right: 16px;
+    width: 380px;
+    max-height: 70vh;
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    box-shadow: 0 10px 32px rgba(13,45,94,.18);
+    z-index: 9999;
+    display: none;
+    flex-direction: column;
+  }
+  .notif-panel.on { display: flex; }
+  .notif-panel-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--line);
+  }
+  .notif-panel-head h3 { margin: 0; font-size: 14px; color: var(--navy); }
+  .notif-panel-head button {
+    background: none; border: 0; color: var(--orange);
+    font-size: 11px; font-weight: 700; cursor: pointer; text-transform: uppercase;
+  }
+  .notif-list {
+    overflow-y: auto;
+    flex: 1;
+  }
+  .notif-item {
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--line);
+    cursor: pointer;
+    transition: background .15s;
+  }
+  .notif-item:hover { background: var(--bg); }
+  .notif-item.unread { background: #fff8ed; border-left: 3px solid var(--orange); }
+  .notif-item .notif-title { font-weight: 700; color: var(--navy); font-size: 13px; }
+  .notif-item .notif-body { color: var(--muted); font-size: 12px; margin-top: 3px; }
+  .notif-item .notif-time { color: var(--muted); font-size: 10px; margin-top: 4px; text-transform: uppercase; letter-spacing: .3px; }
+  .notif-empty { padding: 30px 20px; text-align: center; color: var(--muted); font-size: 13px; }
+  .notif-toast {
+    position: fixed;
+    top: 16px;
+    right: 16px;
+    background: var(--navy);
+    color: #fff;
+    padding: 14px 18px;
+    border-radius: 8px;
+    box-shadow: 0 6px 24px rgba(0,0,0,.2);
+    z-index: 10000;
+    max-width: 360px;
+    cursor: pointer;
+    animation: notif-slide-in .25s ease-out;
+    border-left: 4px solid var(--orange);
+  }
+  .notif-toast .nt-title { font-weight: 700; font-size: 13px; }
+  .notif-toast .nt-body { font-size: 12px; opacity: .9; margin-top: 3px; }
+  @keyframes notif-slide-in { from { transform: translateX(20px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
   .rail .filters { display: flex; gap: 4px; flex-wrap: wrap; }
   .rail .filters button {
     background: var(--bg);
@@ -849,7 +937,11 @@
     <!-- LEFT RAIL -->
     <aside class="rail">
       <div class="rail-head">
-        <h2>Rebuilds <span class="count" id="projCount">0</span></h2>
+        <h2>Rebuilds <span class="count" id="projCount">0</span>
+          <button class="notif-bell" id="notifBell" title="Notifications" style="float:right;">
+            🔔<span class="notif-badge" id="notifBadge" style="display:none;">0</span>
+          </button>
+        </h2>
         <div class="filters" id="statusFilters">
           <button class="on" data-st="all">All</button>
           <button data-st="planning">Planning</button>
@@ -927,6 +1019,19 @@
 
 <div class="toast" id="toast"></div>
 
+<!-- Notification panel -->
+<div class="notif-panel" id="notifPanel">
+  <div class="notif-panel-head">
+    <h3>Notifications</h3>
+    <div>
+      <button id="notifMarkAll">Mark all read</button>
+    </div>
+  </div>
+  <div class="notif-list" id="notifList">
+    <div class="notif-empty">No notifications yet</div>
+  </div>
+</div>
+
 <!-- ──────────── SCRIPT ──────────── -->
 <!-- Supabase JS via CDN; project-specific config inline (matches platform pattern) -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
@@ -956,10 +1061,12 @@ const state = {
   selections: [],
   messages: [],
   history: [],
+  notifications: [],
+  notifPanelOpen: false,
   filterStatus: 'all',
   filterPm: 'all',
   search: '',
-  pmEmail: 'pm@jg-restoration.com',  // TODO: pull from Google SSO via auth.js
+  pmEmail: 'pm@jg-restoration.com',
   tab: 'phases',
 };
 
@@ -3683,9 +3790,178 @@ function setupRealtime() {
         () => loadProjects())
     .on('postgres_changes', { event: '*', schema: 'public', table: 'rebuild_phases' },
         () => { if (state.activeProjectId) { loadPhases().then(() => renderDetail()); } })
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'rebuild_customer_selections' },
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'rebuild_selections' },
         () => { if (state.activeProjectId) { loadSelections().then(() => renderDetail()); } })
+    .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'rebuild_notifications' },
+        async (payload) => {
+          const n = payload.new;
+          if (!n) return;
+          const isMine = (n.recipient_email || '').toLowerCase() === (state.pmEmail || '').toLowerCase();
+          if (isMine) {
+            state.notifications.unshift(n);
+            renderNotifBadge();
+            if (state.notifPanelOpen) renderNotifList();
+            showNotifToast(n);
+          }
+          // ANY open session tries to claim and send the email — first one wins
+          // (atomic: only update if email_sent_at is still NULL)
+          const { data: claimed } = await sb.from('rebuild_notifications')
+            .update({ email_sent_at: new Date().toISOString() })
+            .eq('id', n.id)
+            .is('email_sent_at', null)
+            .select();
+          if (claimed && claimed.length) {
+            try {
+              await fetch(MESSAGE_HOOK, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  channel: 'email',
+                  to_email: n.recipient_email,
+                  from_email: 'office@jg-restoration.com',
+                  from_name: 'JG Platform',
+                  recipient_name: n.recipient_email,
+                  recipient_type: 'pm_alert',
+                  subject: '🔔 ' + n.title + ' — JG Platform',
+                  body: n.title + '\n\n' + (n.body || '') + '\n\nOpen the rebuild scheduler:\nhttps://jgimprovements-arch.github.io/jg-dispatch/rebuild.html',
+                  attachment_count: 0, attachment_urls: '',
+                }),
+                mode: 'no-cors',
+              });
+            } catch (e) { console.error('Notif email failed:', e); }
+          }
+        })
     .subscribe();
+}
+
+// ──── Notifications ────
+async function loadNotifications() {
+  if (!sb || !state.pmEmail) return;
+  const { data } = await sb.from('rebuild_notifications')
+    .select('*')
+    .eq('recipient_email', state.pmEmail.toLowerCase())
+    .order('created_at', { ascending: false })
+    .limit(50);
+  state.notifications = data || [];
+  renderNotifBadge();
+}
+
+function renderNotifBadge() {
+  const unread = state.notifications.filter(n => !n.read_at).length;
+  const badge = $('#notifBadge');
+  if (!badge) return;
+  if (unread > 0) {
+    badge.textContent = unread > 99 ? '99+' : unread;
+    badge.style.display = 'inline-flex';
+  } else {
+    badge.style.display = 'none';
+  }
+}
+
+function renderNotifList() {
+  const wrap = $('#notifList');
+  if (!wrap) return;
+  if (!state.notifications.length) {
+    wrap.innerHTML = '<div class="notif-empty">No notifications yet</div>';
+    return;
+  }
+  wrap.innerHTML = state.notifications.map(n => {
+    const icon = {
+      vendor_submitted: '📋',
+      customer_approved: '✅',
+      customer_rejected: '❌',
+      customer_changes_requested: '↻',
+      install_approved: '📅',
+      install_changes_requested: '↻',
+    }[n.event_type] || '🔔';
+    return `
+      <div class="notif-item ${n.read_at ? '' : 'unread'}" data-id="${n.id}" data-project="${n.project_id || ''}">
+        <div class="notif-title">${icon} ${n.title}</div>
+        <div class="notif-body">${n.body || ''}</div>
+        <div class="notif-time">${timeAgo(n.created_at)}</div>
+      </div>`;
+  }).join('');
+  wrap.querySelectorAll('.notif-item').forEach(el => {
+    el.addEventListener('click', async () => {
+      const id = el.dataset.id;
+      const projId = el.dataset.project;
+      // Mark read
+      const n = state.notifications.find(x => x.id === id);
+      if (n && !n.read_at) {
+        n.read_at = new Date().toISOString();
+        await sb.from('rebuild_notifications').update({ read_at: n.read_at }).eq('id', id);
+        renderNotifBadge();
+        renderNotifList();
+      }
+      // Jump to project + selections tab
+      if (projId && projId !== state.activeProjectId) {
+        state.activeProjectId = projId;
+        state.tab = 'selections';
+        await loadProjectDetail();
+      } else if (projId) {
+        state.tab = 'selections';
+        renderDetail();
+      }
+      // Close panel
+      $('#notifPanel').classList.remove('on');
+      state.notifPanelOpen = false;
+    });
+  });
+}
+
+function timeAgo(iso) {
+  const s = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
+  if (s < 60) return 'just now';
+  if (s < 3600) return Math.floor(s/60) + 'm ago';
+  if (s < 86400) return Math.floor(s/3600) + 'h ago';
+  if (s < 604800) return Math.floor(s/86400) + 'd ago';
+  return new Date(iso).toLocaleDateString();
+}
+
+function showNotifToast(n) {
+  const t = document.createElement('div');
+  t.className = 'notif-toast';
+  t.innerHTML = `<div class="nt-title">🔔 ${n.title}</div><div class="nt-body">${n.body || ''}</div>`;
+  document.body.appendChild(t);
+  t.addEventListener('click', () => {
+    t.remove();
+    $('#notifBell')?.click();
+  });
+  setTimeout(() => t.remove(), 6000);
+}
+
+function wireNotifBell() {
+  const bell = $('#notifBell');
+  const panel = $('#notifPanel');
+  const markAll = $('#notifMarkAll');
+  if (!bell || !panel) return;
+  bell.addEventListener('click', (e) => {
+    e.stopPropagation();
+    state.notifPanelOpen = !state.notifPanelOpen;
+    if (state.notifPanelOpen) {
+      renderNotifList();
+      panel.classList.add('on');
+    } else {
+      panel.classList.remove('on');
+    }
+  });
+  // Click outside closes
+  document.addEventListener('click', (e) => {
+    if (!state.notifPanelOpen) return;
+    if (!panel.contains(e.target) && !bell.contains(e.target)) {
+      panel.classList.remove('on');
+      state.notifPanelOpen = false;
+    }
+  });
+  markAll.addEventListener('click', async () => {
+    const unread = state.notifications.filter(n => !n.read_at);
+    if (!unread.length) return;
+    const ids = unread.map(n => n.id);
+    await sb.from('rebuild_notifications').update({ read_at: new Date().toISOString() }).in('id', ids);
+    state.notifications.forEach(n => { if (!n.read_at) n.read_at = new Date().toISOString(); });
+    renderNotifBadge();
+    renderNotifList();
+  });
 }
 
 // ──── Boot ────
@@ -3693,12 +3969,16 @@ function setupRealtime() {
   // Load cached projects + roster in parallel — renders board instantly
   await Promise.all([loadProjects(), loadSubs(), loadEmployees()]);
   setupRealtime();
+  wireNotifBell();
+  loadNotifications();
 
   // Auto-sync from Albi in background (doesn't block the UI)
   runAlbiSync({ silent: true });
 
   // Re-sync every 5 minutes thereafter
   setInterval(() => runAlbiSync({ silent: true }), 5 * 60 * 1000);
+  // Refresh notifications every 60s as a fallback for missed realtime
+  setInterval(loadNotifications, 60 * 1000);
 })();
 
 </script>
