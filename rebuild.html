@@ -896,7 +896,8 @@ function renderProjects() {
   }
   list.innerHTML = items.map(p => {
     const pct = projectProgress(p.id);
-    const scopeStr = p.scope_amount ? '$' + Number(p.scope_amount).toLocaleString() : null;
+    const amt = p.estimated_revenue || p.scope_amount;
+    const scopeStr = amt ? '$' + Number(amt).toLocaleString(undefined,{maximumFractionDigits:0}) : null;
     return `
       <div class="project-card ${p.id === state.activeProjectId ? 'active' : ''}" data-id="${p.id}">
         <div class="pc-top">
@@ -1013,34 +1014,35 @@ async function syncOneProject(p) {
   const albiId = String(p.id || p.projectId || '');
   if (!albiId) return { skipped: true, reason: 'no_id' };
 
-  // Albi returns scope amount under various field names depending on tenant config.
-  // Try the most common candidates in priority order. First non-null wins.
-  const scopeAmount = parseFloat(
-    p.totalApproved || p.total_approved ||
-    p.estimateTotal || p.estimate_total ||
-    p.totalEstimate || p.total_estimate ||
-    p.scopeAmount || p.scope_amount ||
-    p.contractTotal || p.contract_total ||
-    p.totalAmount || p.total_amount ||
-    p.amount || 0
-  ) || null;
+  const num = v => (v == null || v === '') ? null : (parseFloat(v) || null);
 
   const params = {
     p_albi_project_id: albiId,
     p_albi_job_number: jobNumber,
     p_albi_status: p.status || null,
-    p_albi_project_type: p.projectType || p.project_type || p.type || null,
-    p_market: marketFromLocation(p.location || p.locationId),
-    p_customer_name: p.customerName || p.customer_name || null,
-    p_customer_phone: p.customerPhone || p.customer_phone || null,
-    p_customer_email: p.customerEmail || p.customer_email || null,
-    p_property_address: p.address1 || p.address || null,
-    p_scope_amount: scopeAmount,
-    p_estimated_start: p.estimatedStart || p.estimated_start || null,
-    p_estimated_completion: p.estimatedCompletion || p.estimated_completion || null,
-    p_pm_email: state.pmEmail,
+    p_albi_project_type: p.projectType || null,
+    p_market: marketFromLocation(p.location),
+    p_customer_name: p.customerName || null,
+    p_customer_phone: p.customerPhoneNumber || null,
+    p_customer_email: p.customerEmail || null,
+    p_property_address: p.address || p.address1 || null,
+    p_scope_amount: num(p.estimatedRevenue),
+    p_estimated_start: p.estimatedStart || null,
+    p_estimated_completion: p.estimatedCompletion || null,
+    p_pm_email: p.projectManagerEmail || state.pmEmail,
     p_sync_source: 'manual',
     p_raw_payload: p,
+    p_estimated_revenue: num(p.estimatedRevenue),
+    p_budget_revenue: num(p.budgetRevenue),
+    p_actual_revenue: num(p.actualRevenue),
+    p_paid_amount: num(p.paidAmount),
+    p_total_cogs: num(p.totalCogs),
+    p_gross_profit: num(p.grossProfit),
+    p_gross_margin_pct: num(p.grossMargin),
+    p_billed_pct: num(p.projectBilledPercent),
+    p_albi_pm_name: p.projectManager || null,
+    p_albi_pm_email: p.projectManagerEmail || null,
+    p_albi_url: p.url || null,
   };
 
   if (!sb) return { skipped: true, reason: 'no_supabase' };
@@ -1210,28 +1212,56 @@ function renderDetail() {
 
     <div class="kpis">
       <div class="kpi">
+        <div class="label">Estimated</div>
+        <div class="value" style="font-size:18px;">${p.estimated_revenue ? '$' + Number(p.estimated_revenue).toLocaleString(undefined,{maximumFractionDigits:0}) : '—'}</div>
+        <div class="sub">revenue</div>
+      </div>
+      <div class="kpi">
+        <div class="label">Budgeted</div>
+        <div class="value" style="font-size:18px;">${p.budget_revenue ? '$' + Number(p.budget_revenue).toLocaleString(undefined,{maximumFractionDigits:0}) : '—'}</div>
+        <div class="sub">${p.budgeted_gross_margin_pct ? p.budgeted_gross_margin_pct + '% target' : 'no target'}</div>
+      </div>
+      <div class="kpi">
+        <div class="label">Billed</div>
+        <div class="value" style="font-size:18px;">${p.actual_revenue ? '$' + Number(p.actual_revenue).toLocaleString(undefined,{maximumFractionDigits:0}) : '—'}</div>
+        <div class="sub">${p.billed_pct != null ? Number(p.billed_pct).toFixed(0) + '% complete' : ''}</div>
+      </div>
+      <div class="kpi">
+        <div class="label">Paid</div>
+        <div class="value" style="font-size:18px;">${p.paid_amount ? '$' + Number(p.paid_amount).toLocaleString(undefined,{maximumFractionDigits:0}) : '—'}</div>
+        <div class="sub">${p.actual_revenue && p.paid_amount ? Math.round((p.paid_amount / p.actual_revenue) * 100) + '% of billed' : 'collected'}</div>
+      </div>
+      <div class="kpi">
+        <div class="label">Margin</div>
+        <div class="value" style="font-size:18px;color:${p.gross_margin_pct >= 30 ? 'var(--green)' : p.gross_margin_pct >= 15 ? 'var(--amber)' : 'var(--red)'};">${p.gross_margin_pct != null ? Number(p.gross_margin_pct).toFixed(1) + '%' : '—'}</div>
+        <div class="sub">${p.gross_profit ? '$' + Number(p.gross_profit).toLocaleString(undefined,{maximumFractionDigits:0}) + ' GP' : 'gross'}</div>
+      </div>
+    </div>
+
+    <div class="kpis" style="grid-template-columns:repeat(5, 1fr);">
+      <div class="kpi">
         <div class="label">Phase Progress</div>
-        <div class="value">${completedPhases}/${state.phases.length}</div>
+        <div class="value" style="font-size:18px;">${completedPhases}/${state.phases.length}</div>
         <div class="sub">${inProgPhases} in progress</div>
       </div>
       <div class="kpi ${blockedPhases ? 'alert' : ''}">
         <div class="label">Blocked</div>
-        <div class="value">${blockedPhases}</div>
+        <div class="value" style="font-size:18px;">${blockedPhases}</div>
         <div class="sub">phases halted</div>
       </div>
       <div class="kpi ${overdueSelections ? 'alert' : ''}">
         <div class="label">Selections</div>
-        <div class="value">${pendingSelections}</div>
+        <div class="value" style="font-size:18px;">${pendingSelections}</div>
         <div class="sub">${overdueSelections} overdue</div>
       </div>
       <div class="kpi">
-        <div class="label">Est. Completion</div>
-        <div class="value" style="font-size:15px;">${fmtDate(p.estimated_completion)}</div>
-        <div class="sub">${p.actual_completion ? 'Done ' + fmtDate(p.actual_completion) : 'projected'}</div>
+        <div class="label">PM</div>
+        <div class="value" style="font-size:14px;">${p.albi_pm_name || '—'}</div>
+        <div class="sub">${p.albi_pm_email || ''}</div>
       </div>
       <div class="kpi">
         <div class="label">Status</div>
-        <div class="value" style="font-size:14px;text-transform:uppercase;">${titleCase(p.status)}</div>
+        <div class="value" style="font-size:14px;">${titleCase(p.status)}</div>
         <div class="sub">updated ${fmtRelative(p.updated_at)}</div>
       </div>
     </div>
