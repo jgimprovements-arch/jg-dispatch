@@ -1166,6 +1166,7 @@ async function syncOneProject(p) {
     p_billed_pct: num(p.projectBilledPercent),
     p_albi_pm_name: p.projectManager || null,
     p_albi_pm_email: p.projectManagerEmail || null,
+    p_albi_pm_phone: p.projectManagerPhoneNumber || null,
     p_albi_url: p.url || null,
   };
 
@@ -1522,16 +1523,13 @@ function renderTabContent() {
     const attachWrap = $('#msg_attachments_wrap');
     const attachList = $('#msg_attachments_list');
     const fileInput = $('#msg_file_input');
+    const bodyEl = $('#msg_body');
 
-    // Reset staged files when re-entering tab
     state.stagedAttachments = [];
 
     const renderStaged = () => {
       if (!attachList) return;
-      if (!state.stagedAttachments.length) {
-        attachList.innerHTML = '';
-        return;
-      }
+      if (!state.stagedAttachments.length) { attachList.innerHTML = ''; return; }
       attachList.innerHTML = state.stagedAttachments.map((f, i) => `
         <span class="msg-att-chip">
           📄 ${f.name} <span style="color:var(--muted);">(${(f.size/1024).toFixed(0)} KB)</span>
@@ -1546,16 +1544,56 @@ function renderTabContent() {
       });
     };
 
+    // Build greeting + signature based on current selection
+    const buildTemplate = () => {
+      const p = state.activeProject;
+      const isInternal = toEl.value === 'internal';
+      if (isInternal) return '';
+      const isSms = channelEl.value === 'sms';
+
+      // Recipient first name
+      let firstName = '';
+      if (toEl.value === 'customer') {
+        firstName = (p.customer_name || '').split(' ')[0] || '';
+      } else if (toEl.value.startsWith('sub:')) {
+        const sub = state.subs.find(s => s.id === toEl.value.substring(4));
+        if (sub) firstName = (sub.primary_contact || sub.company_name || '').split(' ')[0] || '';
+      }
+
+      // Sender PM name + phone (assigned PM on this project)
+      const pmFirst = (p.albi_pm_name || 'JG Restoration').split(' ')[0];
+      const pmPhone = p.albi_pm_phone ? fmtPhone(p.albi_pm_phone) : '(920) 428-4200';
+
+      const greeting = firstName ? `Hi ${firstName},` : 'Hi,';
+      const closing = `Please call me at ${pmPhone} if you have any questions.\n\nThanks,\n${pmFirst}\nJG Restoration`;
+
+      // SMS gets a tighter version
+      if (isSms) {
+        return `${greeting}\n\n\n\n${pmFirst} · JG Restoration · ${pmPhone}`;
+      }
+      return `${greeting}\n\n\n\n${closing}`;
+    };
+
+    // Pre-fill body if user hasn't typed anything custom yet
+    const prefillBody = () => {
+      if (!bodyEl) return;
+      // Only pre-fill if body matches a previous template OR is empty
+      const tpl = buildTemplate();
+      const current = bodyEl.value;
+      if (!current || current === state._lastTemplate) {
+        bodyEl.value = tpl;
+        state._lastTemplate = tpl;
+      }
+    };
+
     const updateUi = () => {
       const isEmail = channelEl.value === 'email';
       const isInternal = toEl.value === 'internal';
       if (subWrap) subWrap.style.display = (isEmail && !isInternal) ? 'block' : 'none';
-      // Attachments only available for email (per spec — email-only)
       const showAttach = isEmail && !isInternal;
       if (attachBtn) attachBtn.style.display = showAttach ? 'inline-block' : 'none';
       if (attachWrap) attachWrap.style.display = (showAttach && state.stagedAttachments.length) ? 'block' : 'none';
-      if (isInternal) channelEl.disabled = true;
-      else channelEl.disabled = false;
+      channelEl.disabled = isInternal;
 
       const p = state.activeProject;
       let hint = '';
@@ -1571,6 +1609,17 @@ function renderTabContent() {
         }
       }
       if (info) info.textContent = hint;
+
+      // Auto-fill subject for email (only if empty or default-ish)
+      const subjEl = $('#msg_subject');
+      if (subjEl && isEmail && !isInternal) {
+        if (!subjEl.value || subjEl.value === state._lastSubject) {
+          subjEl.value = `Re: ${p.albi_job_number || 'project'}`;
+          state._lastSubject = subjEl.value;
+        }
+      }
+
+      prefillBody();
     };
 
     if (attachBtn && fileInput) {
