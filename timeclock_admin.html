@@ -2551,9 +2551,29 @@ function renderTimesheets() {
     if (isEarlyClockIn(e.clock_in) && !e.approved_early) byEmp[e.employee_name].earlyFlags++;
   });
 
+  // Bug fix 2026-04-27: Salaried employees with zero clock-ins still need a
+  // timecard for the period (their salary is the basis). Same for anyone with
+  // commissions earned this period. Add them to byEmp with empty entries.
+  if (curPer) {
+    var perEndIncl = new Date(curPer.end); perEndIncl.setHours(23,59,59,999);
+    (ST.employees || []).forEach(function(emp){
+      if (!emp || emp.active === false) return;
+      if (ST.filterEmp !== 'All' && emp.name !== ST.filterEmp) return;
+      var isSalary = parseFloat(emp.annual_salary || 0) > 0;
+      var hasComms = (ST.commissions || []).some(function(c){
+        if (c.employee_name !== emp.name) return false;
+        var dc = new Date((c.earned_date||'') + 'T00:00:00');
+        return dc >= curPer.start && dc <= perEndIncl;
+      });
+      if ((isSalary || hasComms) && !byEmp[emp.name]) {
+        byEmp[emp.name] = { entries: [], totalBillable: 0, totalActual: 0, earlyFlags: 0 };
+      }
+    });
+  }
+
   if (!curPer) {
     h += '<div class="card"><div class="empty" style="padding:24px;">Select a pay period above</div></div>';
-  } else if (!filtered.length) {
+  } else if (!Object.keys(byEmp).length) {
     h += '<div class="card"><div class="empty" style="padding:24px;">No entries for this pay period</div></div>';
   } else {
     // Populate callback index for approval buttons
