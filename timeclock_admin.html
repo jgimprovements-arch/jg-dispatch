@@ -2635,8 +2635,10 @@ function renderTimesheets() {
         totalPay += ptoPayForCard + trainingPayForCard;
       }
 
-      h += '<div class="card" style="padding:16px;margin:0;">';
-      h += '<div style="font-size:13px;font-weight:700;color:var(--navy);margin-bottom:10px;">'+nm+'</div>';
+      // Card is clickable — opens full timecard modal for this employee
+      var safeNm = nm.replace(/'/g, "\\'");
+      h += '<div class="card timecard-clickable" style="padding:16px;margin:0;cursor:pointer;transition:box-shadow .15s;" onclick="openTimecardDetail(\''+safeNm+'\')" onmouseover="this.style.boxShadow=\'0 4px 12px rgba(13,45,94,.12)\'" onmouseout="this.style.boxShadow=\'\'">';
+      h += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;"><div style="font-size:13px;font-weight:700;color:var(--navy);">'+nm+'</div><span style="font-size:10px;color:var(--muted);">📋 Click to open</span></div>';
       h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:10px;">';
       h += '<div style="background:rgba(13,45,94,.04);border-radius:8px;padding:8px;text-align:center;"><div style="font-size:16px;font-weight:700;color:var(--navy);">'+fmtHM(ot.regMins)+'</div><div style="font-size:10px;color:var(--muted);font-weight:600;">REG HRS</div></div>';
       h += '<div style="background:'+(ot.otMins>0?'rgba(198,40,40,.06)':'rgba(13,45,94,.04)')+'";border-radius:8px;padding:8px;text-align:center;"><div style="font-size:16px;font-weight:700;color:'+(ot.otMins>0?'#c62828':'var(--muted)')+';">'+fmtHM(ot.otMins)+'</div><div style="font-size:10px;color:var(--muted);font-weight:600;">OT HRS</div></div>';
@@ -2949,9 +2951,13 @@ function renderTimesheets() {
       h += '<div style="display:flex;align-items:center;justify-content:space-between;padding:12px 16px;background:rgba(245,166,35,.06);border:1px solid rgba(245,166,35,.4);border-radius:10px;margin-bottom:16px;flex-wrap:wrap;gap:8px;">';
       h += '<div style="font-size:13px;font-weight:700;color:var(--warn);">&#8987; '+approvedCount+' of '+empNamesInPeriod.length+' timecards approved</div>';
       h += '<div style="display:flex;gap:8px;flex-wrap:wrap;">';
-      h += '<button class="btn btn-primary" style="background:#2e7d32;border-color:#2e7d32;" onclick="_tcApproveAll()">&#10003; Approve All</button>';
+      // Approve All hidden 2026-04-27 — Josh wants individual approvals only.
+      // To re-enable: uncomment this line. Function _tcApproveAll() and approveAllTimecards() remain in place.
+      // h += '<button class="btn btn-primary" style="background:#2e7d32;border-color:#2e7d32;" onclick="_tcApproveAll()">&#10003; Approve All</button>';
       h += '<button class="btn" onclick="openAbsenceModal()" style="background:var(--orange);color:#fff;border-color:var(--orange);">+ Log Absence</button>';
-      h += '<button class="btn" onclick="sendVerificationReminders()" style="background:#0d2d5e;color:#fff;border-color:#0d2d5e;">📱 Text Unverified</button>';
+      // Text Unverified hidden 2026-04-27 — replaced by automated rules engine + 🔔 Send Reminders.
+      // Function sendVerificationReminders() retained in case the SMS path is ever needed again.
+      // h += '<button class="btn" onclick="sendVerificationReminders()" style="background:#0d2d5e;color:#fff;border-color:#0d2d5e;">📱 Text Unverified</button>';
       h += '<button class="btn" onclick="_runReminderRules()" style="background:#6a1b9a;color:#fff;border-color:#6a1b9a;">🔔 Send Reminders</button>';
       h += '<button class="btn btn-primary" onclick="_tcPayrollReport()">📥 Paychex Export</button>';
       h += '</div></div>';
@@ -10179,6 +10185,189 @@ function showModal(title, bodyHtml, saveCall) {
   document.body.appendChild(m);
 }
 function closeModal() { var m=document.getElementById('tc-modal'); if(m)m.remove(); ST.editEmp=null; }
+
+// ── TIMECARD DETAIL MODAL ─────────────────────────────────────────────────
+// Opens a full-screen modal with the employee's complete period detail —
+// header summary, all time entries, edit/fix actions, approval state, and
+// a prominent Approve button at top.
+function openTimecardDetail(empName) {
+  var periodLabel = ST.tab === 'timesheets' ? (typeof selPeriod !== 'undefined' ? selPeriod : '') : '';
+  if (!periodLabel) {
+    var sel = document.getElementById('period-select');
+    if (sel) periodLabel = sel.value;
+  }
+  if (!periodLabel) { toast('No pay period selected'); return; }
+
+  var emp = ST.employees.find(function(e){ return e.name === empName; });
+  var periods = getPayPeriods(ST.payPeriod.type, ST.payPeriod.start, 6);
+  var curPer = periods.find(function(p){ return p.label === periodLabel; });
+  if (!curPer) { toast('Period not found'); return; }
+
+  var perEnd = new Date(curPer.end); perEnd.setHours(23,59,59,999);
+  var entries = ST.entries.filter(function(e) {
+    if (e.employee_name !== empName) return false;
+    if (!e.clock_in) return false;
+    var d = new Date(e.clock_in);
+    return d >= curPer.start && d <= perEnd;
+  }).sort(function(a,b){ return new Date(a.clock_in) - new Date(b.clock_in); });
+
+  var ot = calcOT(entries);
+  var rate = emp ? parseFloat(emp.hourly_rate || 0) : 0;
+  var isSalary = emp && parseFloat(emp.annual_salary || 0) > 0;
+  var regPay = 0, otPay = 0, totalPay = 0;
+  if (isSalary && emp.annual_salary) {
+    var annSal = parseFloat(emp.annual_salary);
+    var perPeriodDays = ST.payPeriod.type === 'weekly' ? 5 : 10;
+    var periodPay = annSal / (ST.payPeriod.type === 'weekly' ? 52 : ST.payPeriod.type === 'biweekly' ? 26 : 24);
+    var workedDays = new Set(entries.map(function(e){return e.clock_in.split('T')[0];})).size;
+    var missedDays = Math.max(0, perPeriodDays - workedDays);
+    regPay = periodPay - missedDays * (periodPay / perPeriodDays); totalPay = regPay;
+  } else {
+    regPay = rate * (ot.regMins / 60);
+    otPay = rate * 1.5 * (ot.otMins / 60);
+    totalPay = regPay + otPay;
+  }
+
+  var approvalStatus = getApprovalStatus(periodLabel, empName);
+  var isApproved = approvalStatus === 'approved';
+  var approvalInfo = ST.approvals[getApprovalKey(periodLabel, empName)] || {};
+  var absBrk = getAbsenceHoursForPeriod(empName, curPer.start, curPer.end);
+
+  // Build modal HTML
+  var safeNm = empName.replace(/'/g, "\\'");
+  var h = '';
+  h += '<div id="tc-detail-modal" style="position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:2100;display:flex;align-items:flex-start;justify-content:center;padding:20px;overflow-y:auto;" onclick="if(event.target===this)closeTimecardDetail()">';
+  h += '<div style="background:#fff;border-radius:12px;width:100%;max-width:1200px;margin:auto;box-shadow:0 20px 60px rgba(0,0,0,.3);" onclick="event.stopPropagation()">';
+
+  // Header bar
+  var hdrBg = isApproved ? 'linear-gradient(135deg,rgba(46,125,50,.12),rgba(46,125,50,.04))' : 'linear-gradient(135deg,rgba(13,45,94,.06),rgba(13,45,94,.02))';
+  var hdrBorder = isApproved ? '#2e7d32' : 'var(--navy)';
+  h += '<div style="padding:20px 24px;background:'+hdrBg+';border-bottom:2px solid '+hdrBorder+';border-radius:12px 12px 0 0;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;">';
+  h += '<div>';
+  h += '<div style="font-size:18px;font-weight:700;color:var(--navy);">📋 '+empName+'</div>';
+  h += '<div style="font-size:12px;color:var(--muted);margin-top:2px;">Pay Period: '+periodLabel+'  •  '+entries.length+' entries</div>';
+  h += '</div>';
+  h += '<div style="display:flex;gap:8px;flex-wrap:wrap;">';
+  if (isApproved) {
+    h += '<div style="font-size:12px;color:#2e7d32;font-weight:700;padding:6px 12px;background:rgba(46,125,50,.1);border-radius:8px;display:flex;align-items:center;">✓ Approved by '+(approvalInfo.approved_by || 'Admin')+'</div>';
+    if (typeof isAdmin === 'function' && isAdmin()) {
+      h += '<button class="btn" onclick="closeTimecardDetail();unlockTimecard(\''+(periodLabel.replace(/'/g,"\\'"))+'\',\''+safeNm+'\')">🔓 Unlock</button>';
+    }
+  } else {
+    h += '<button class="btn btn-primary" style="background:#2e7d32;border-color:#2e7d32;font-size:14px;padding:10px 18px;" onclick="approveTimecard(\''+(periodLabel.replace(/'/g,"\\'"))+'\',\''+safeNm+'\').then(function(){closeTimecardDetail();render();})">✓ Approve Timecard</button>';
+  }
+  h += '<button class="btn" onclick="closeTimecardDetail()">✕ Close</button>';
+  h += '</div></div>';
+
+  // Summary strip
+  h += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:1px;background:var(--border);">';
+  function statBox(label, value, color) {
+    return '<div style="background:#fff;padding:14px 16px;text-align:center;">'+
+      '<div style="font-size:10px;color:var(--muted);text-transform:uppercase;font-weight:700;letter-spacing:.04em;margin-bottom:4px;">'+label+'</div>'+
+      '<div style="font-size:18px;font-weight:700;color:'+(color||'var(--navy)')+';">'+value+'</div>'+
+    '</div>';
+  }
+  h += statBox('Regular', fmtHM(ot.regMins));
+  h += statBox('Overtime', fmtHM(ot.otMins), ot.otMins > 0 ? '#c62828' : 'var(--muted)');
+  if (absBrk.ptoPaidHours > 0) h += statBox('PTO', absBrk.ptoPaidHours.toFixed(1) + 'h', '#1565c0');
+  if (rate || isSalary) h += statBox('Est. Pay', '$' + totalPay.toFixed(2), '#2e7d32');
+  if (rate) h += statBox('Rate', '$' + rate.toFixed(2) + '/hr');
+  if (isSalary) h += statBox('Salary', '$' + Number(emp.annual_salary).toLocaleString() + '/yr');
+  h += '</div>';
+
+  // Entries table
+  h += '<div style="padding:20px 24px;">';
+  if (!entries.length) {
+    h += '<div style="padding:40px;text-align:center;color:var(--muted);font-size:13px;">No entries for this period.</div>';
+  } else {
+    h += '<div style="font-size:12px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:8px;">Time Entries ('+entries.length+')</div>';
+    h += '<div style="overflow-x:auto;"><table class="tc-table" style="width:100%;font-size:13px;"><thead><tr><th>Date</th><th>Clock In</th><th>Clock Out</th><th>Actual</th><th>Billable</th><th>Break</th><th>Job</th><th>Verified</th><th>Flags</th><th></th></tr></thead><tbody>';
+    entries.forEach(function(e) {
+      var breaks = ST.breaks.filter(function(b){ return b.entry_id === e.id; });
+      var actual = e.duration_minutes || durMins(e);
+      var bill = billableMins(e, breaks);
+      var bkMins = breaks.reduce(function(s,b){ return s + (b.duration_minutes || 0); }, 0);
+      var early = isEarlyClockIn(e.clock_in);
+      var active = !e.clock_out;
+      var missedCO = active && ((Date.now() - new Date(e.clock_in).getTime()) > 12*60*60*1000);
+      var flagCell = '';
+      if (missedCO) {
+        flagCell = '<span style="color:#c62828;font-size:11px;font-weight:700;">⚠ Missed CO<br><button class="btn btn-sm" onclick="editEntry(\''+e.id+'\')">Fix</button> <button class="btn btn-sm" onclick="notifyMissedCO(\''+e.id+'\')" style="background:#6a1b9a;color:#fff;border-color:#6a1b9a;">🔔 Notify</button></span>';
+      } else if (early && !e.approved_early) {
+        flagCell = '<span style="color:#c62828;font-size:11px;font-weight:700;">Early<br><button class="btn btn-sm" onclick="approveEarly(\''+e.id+'\')">Approve</button></span>';
+      } else if (early && e.approved_early) {
+        flagCell = '<span style="color:#2e7d32;font-size:11px;">Early OK</span>';
+      }
+      var verifiedCell;
+      if (e.self_verified) {
+        verifiedCell = '<span title="Verified — click to unverify" style="color:#2e7d32;font-size:16px;font-weight:700;cursor:pointer;" onclick="toggleVerified(\''+e.id+'\',false)">✓</span>';
+      } else if (active) {
+        verifiedCell = '<span style="color:var(--muted);font-size:11px;">—</span>';
+      } else {
+        verifiedCell = (typeof isAdmin === 'function' && isAdmin())
+          ? '<button title="Mark as verified" onclick="toggleVerified(\''+e.id+'\',true)" style="padding:2px 8px;border:1px solid #c62828;background:transparent;color:#c62828;border-radius:4px;font-size:10px;font-weight:700;cursor:pointer;font-family:inherit;">unverified</button>'
+          : '<span style="color:#c62828;font-size:11px;">unverified</span>';
+      }
+      var rowBg = missedCO ? 'background:rgba(198,40,40,.08);' : (early && !e.approved_early ? 'background:rgba(198,40,40,.04);' : '');
+      h += '<tr style="'+rowBg+'">';
+      h += '<td>'+fmtD(new Date(e.clock_in))+'</td>';
+      h += '<td class="mono"'+(early && !e.approved_early ? ' style="color:#c62828;font-weight:700;"' : '')+'>'+fmt(e.clock_in)+'</td>';
+      h += '<td class="mono">'+(active ? (missedCO ? '<span class="badge" style="background:#c62828;color:#fff;">MISSED</span>' : '<span class="badge badge-green">Active</span>') : fmt(e.clock_out))+'</td>';
+      h += '<td>'+fmtDur(actual)+'</td>';
+      h += '<td><strong>'+fmtDur(bill)+'</strong></td>';
+      h += '<td>'+(bkMins ? fmtDur(bkMins) : '-')+'</td>';
+      h += '<td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+(e.job_name || '-')+'</td>';
+      h += '<td style="text-align:center;">'+verifiedCell+'</td>';
+      h += '<td>'+flagCell+'</td>';
+      if (!isApproved && typeof isAdmin === 'function' && isAdmin()) {
+        h += '<td><button class="btn btn-sm" onclick="editEntry(\''+e.id+'\')">Edit</button></td>';
+      } else {
+        h += '<td></td>';
+      }
+      h += '</tr>';
+    });
+    h += '</tbody></table></div>';
+  }
+
+  // Absence rows for this period (uses breakdown.records shape from getAbsenceHoursForPeriod)
+  if (absBrk.records && absBrk.records.length) {
+    h += '<div style="margin-top:20px;font-size:12px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:8px;">Absences / PTO ('+absBrk.records.length+')</div>';
+    h += '<div style="display:flex;flex-direction:column;gap:6px;">';
+    absBrk.records.forEach(function(rec) {
+      var a = rec.absence;
+      var c = rec.classification;
+      var paid = c.category === 'pto_paid' || c.category === 'regular_paid';
+      var bg = paid ? 'rgba(46,125,50,.06)' : 'rgba(198,40,40,.06)';
+      var color = paid ? '#2e7d32' : '#c62828';
+      var detail = paid ? ' (paid '+(c.paidHours||0)+'h, '+c.category.replace('_',' ')+')' : ' (unpaid)';
+      h += '<div style="padding:8px 12px;background:'+bg+';border-left:3px solid '+color+';border-radius:6px;font-size:12px;">';
+      h += '<strong>'+a.date+'</strong> — '+(a.reason||'Absent')+detail;
+      if (a.notes) h += '<div style="font-size:11px;color:var(--muted);margin-top:2px;">'+a.notes+'</div>';
+      h += '</div>';
+    });
+    h += '</div>';
+  }
+
+  h += '</div>';
+  h += '</div>';
+  h += '</div>';
+
+  // Insert + bind escape key
+  var existing = document.getElementById('tc-detail-modal');
+  if (existing) existing.remove();
+  document.body.insertAdjacentHTML('beforeend', h);
+  document.addEventListener('keydown', _tcDetailEscHandler);
+}
+
+function _tcDetailEscHandler(e) {
+  if (e.key === 'Escape') closeTimecardDetail();
+}
+
+function closeTimecardDetail() {
+  var m = document.getElementById('tc-detail-modal');
+  if (m) m.remove();
+  document.removeEventListener('keydown', _tcDetailEscHandler);
+}
 
 // ── TOAST ─────────────────────────────────────────────────────────────────
 function toast(msg) {
