@@ -1100,6 +1100,206 @@ async function logToAlbi(eventType, noteText, opts) {
     console.warn('logToAlbi failed:', e);
   }
 }
+
+const CUSTOMER_PORTAL_BASE = 'https://jgimprovements-arch.github.io/jg-dispatch/customer.html';
+
+function customerLink(project) {
+  if (!project?.customer_token) return null;
+  return `${CUSTOMER_PORTAL_BASE}?t=${project.customer_token}`;
+}
+
+function openShareCustomerModal() {
+  const p = state.activeProject;
+  if (!p) return;
+  const link = customerLink(p);
+  if (!link) { toast('No customer token on this project'); return; }
+  const customerEmail = p.customer_email || '';
+  const customerName = p.customer_name || 'customer';
+  const pmFirst = (p.albi_pm_name || 'JG Restoration').split(' ')[0];
+  const pmPhone = p.albi_pm_phone ? fmtPhone(p.albi_pm_phone) : '(920) 428-4200';
+
+  const body = `Hi ${customerName.split(' ')[0]},
+
+You can view your project schedule anytime here:
+${link}
+
+This page updates automatically as we schedule and complete each phase, so you'll always see the latest status. Bookmark it for easy access.
+
+Please call me at ${pmPhone} if you have any questions.
+
+Thanks,
+${pmFirst}
+JG Restoration`;
+
+  // Build a simple share modal — copy link or send via email through messages hook
+  const html = `
+    <div style="padding:8px 0;">
+      <label style="display:block;font-size:11px;font-weight:700;color:var(--muted);margin-bottom:4px;text-transform:uppercase;">Customer Schedule Link</label>
+      <div style="display:flex;gap:6px;align-items:center;margin-bottom:14px;">
+        <input id="share_url" readonly value="${link}" style="flex:1;border:1px solid var(--line);border-radius:6px;padding:8px 10px;font-size:12px;font-family:monospace;background:var(--bg);">
+        <button class="btn" id="share_copy">Copy</button>
+        <button class="btn" id="share_open">Open</button>
+      </div>
+      <hr style="border:none;border-top:1px solid var(--line);margin:14px 0;">
+      <p style="font-size:12px;color:var(--muted);margin:0 0 10px;">Or email this link directly to ${customerEmail || 'the customer'}:</p>
+      <textarea id="share_body" rows="8" style="width:100%;border:1px solid var(--line);border-radius:6px;padding:8px 10px;font-size:13px;font-family:inherit;">${body}</textarea>
+      <div style="display:flex;justify-content:flex-end;gap:6px;margin-top:10px;">
+        <button class="btn" id="share_close">Cancel</button>
+        <button class="btn primary" id="share_send" ${customerEmail ? '' : 'disabled title="No customer email on file"'}>Send Email to Customer</button>
+      </div>
+    </div>
+  `;
+
+  // Inject a quick modal
+  let modal = document.getElementById('modalShareCustomer');
+  if (!modal) {
+    modal = document.createElement('div');
+    modal.id = 'modalShareCustomer';
+    modal.className = 'modal';
+    modal.innerHTML = `<div class="modal-box" style="max-width:580px;"><div class="modal-head"><h3>Share Schedule with Customer</h3><button class="modal-x" data-close="modalShareCustomer">×</button></div><div class="modal-body" id="shareBody"></div></div>`;
+    document.body.appendChild(modal);
+    modal.querySelector('[data-close]').addEventListener('click', () => modal.classList.remove('open'));
+  }
+  modal.querySelector('#shareBody').innerHTML = html;
+  modal.classList.add('open');
+
+  modal.querySelector('#share_copy').onclick = async () => {
+    try { await navigator.clipboard.writeText(link); toast('Link copied'); } catch { toast('Copy failed'); }
+  };
+  modal.querySelector('#share_open').onclick = () => window.open(link, '_blank');
+  modal.querySelector('#share_close').onclick = () => modal.classList.remove('open');
+  const sendBtn = modal.querySelector('#share_send');
+  if (sendBtn) sendBtn.onclick = async () => {
+    const finalBody = modal.querySelector('#share_body').value;
+    await sendCustomerScheduleEmail(p, finalBody, link);
+    modal.classList.remove('open');
+  };
+}
+
+async function sendCustomerScheduleEmail(project, body, link) {
+  if (!project?.customer_email) { toast('No customer email'); return; }
+  const fromEmail = project.albi_pm_email || state.pmEmail || 'office@jg-restoration.com';
+  const fromName = project.albi_pm_name || 'JG Restoration';
+  // Save to messages
+  const { data: insertedArr } = await sb.from('rebuild_messages').insert({
+    project_id: project.id,
+    recipient_type: 'customer',
+    recipient_name: project.customer_name,
+    recipient_email: project.customer_email,
+    channel: 'email',
+    direction: 'outbound',
+    subject: `Your Project Schedule · ${project.albi_job_number || 'JG Restoration'}`,
+    body: body,
+    sent_by_email: fromEmail,
+    sent_by_name: fromName,
+    status: 'queued',
+  }).select();
+  const inserted = insertedArr?.[0];
+
+  // Fire to Zapier (same hook as messages)
+  try {
+    await fetch(MESSAGE_HOOK, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        message_id: inserted?.id,
+        project_id: project.id,
+        albi_project_id: project.albi_project_id,
+        job_number: project.albi_job_number,
+        channel: 'email',
+        to_email: project.customer_email,
+        from_email: fromEmail,
+        from_name: fromName,
+        recipient_name: project.customer_name,
+        recipient_type: 'customer',
+        subject: `Your Project Schedule · ${project.albi_job_number || 'JG Restoration'}`,
+        body: body,
+        attachment_count: 0,
+        attachment_urls: '',
+      }),
+      mode: 'no-cors',
+    });
+    if (inserted) await sb.from('rebuild_messages').update({ status: 'sent' }).eq('id', inserted.id);
+  } catch (e) {
+    console.error(e);
+    if (inserted) await sb.from('rebuild_messages').update({ status: 'failed', error_message: String(e) }).eq('id', inserted.id);
+  }
+  logToAlbi('customer_schedule_shared', `Schedule link sent to customer ${project.customer_name} (${project.customer_email})`);
+  toast('Schedule link sent');
+  await loadMessages();
+}
+
+// Send a brief change-alert email to customer (silently — fire and forget)
+async function notifyCustomerOfChange(changeText) {
+  const p = state.activeProject;
+  if (!p?.customer_email || !p?.customer_token) return;
+  const link = customerLink(p);
+  const fromEmail = p.albi_pm_email || state.pmEmail || 'office@jg-restoration.com';
+  const fromName = p.albi_pm_name || 'JG Restoration';
+  const pmFirst = fromName.split(' ')[0];
+  const pmPhone = p.albi_pm_phone ? fmtPhone(p.albi_pm_phone) : '(920) 428-4200';
+  const body = `Hi ${(p.customer_name || '').split(' ')[0] || 'there'},
+
+A quick update on your project:
+
+${changeText}
+
+You can see the latest schedule here anytime:
+${link}
+
+Please call me at ${pmPhone} if you have any questions.
+
+Thanks,
+${pmFirst}
+JG Restoration`;
+
+  const subject = `Update on Your Project · ${p.albi_job_number || ''}`;
+
+  // Save to messages
+  const { data: insertedArr } = await sb.from('rebuild_messages').insert({
+    project_id: p.id,
+    recipient_type: 'customer',
+    recipient_name: p.customer_name,
+    recipient_email: p.customer_email,
+    channel: 'email',
+    direction: 'outbound',
+    subject,
+    body,
+    sent_by_email: fromEmail,
+    sent_by_name: fromName,
+    status: 'queued',
+  }).select();
+  const inserted = insertedArr?.[0];
+
+  try {
+    await fetch(MESSAGE_HOOK, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        message_id: inserted?.id,
+        project_id: p.id,
+        albi_project_id: p.albi_project_id,
+        job_number: p.albi_job_number,
+        channel: 'email',
+        to_email: p.customer_email,
+        from_email: fromEmail,
+        from_name: fromName,
+        recipient_name: p.customer_name,
+        recipient_type: 'customer',
+        subject,
+        body,
+        attachment_count: 0,
+        attachment_urls: '',
+      }),
+      mode: 'no-cors',
+    });
+    if (inserted) await sb.from('rebuild_messages').update({ status: 'sent' }).eq('id', inserted.id);
+  } catch (e) {
+    console.warn('Customer change alert failed:', e);
+    if (inserted) await sb.from('rebuild_messages').update({ status: 'failed' }).eq('id', inserted.id);
+  }
+}
+
 const ACTIVE_STATUSES = new Set([
   'new','waiting for mit','estimate shipped','down payment received',
   'material hold','wo scheduling','active construction','final construction'
@@ -1341,6 +1541,7 @@ function renderDetail() {
       <div class="detail-actions">
         <button class="btn" id="btnSyncAlbi" title="Re-pull this single project from Albi">⟳ Pull from Albi</button>
         <button class="btn" id="btnPushNote">↗ Push timeline note</button>
+        <button class="btn" id="btnShareCustomer" title="Get the customer-facing schedule link">🔗 Share Schedule</button>
         <button class="btn" id="btnExportPdf" title="Export branded project report (PDF)">📄 Export PDF</button>
         <button class="btn primary" id="btnOpenInAlbi" title="Open this project in Albi for edits">↗ Edit in Albi</button>
       </div>
@@ -1428,6 +1629,7 @@ function renderDetail() {
     await logToAlbi('manual_note', text.trim());
     toast('Note pushed to Albi');
   });
+  $('#btnShareCustomer').addEventListener('click', () => openShareCustomerModal());
   $('#btnExportPdf').addEventListener('click', () => exportProjectPdf());
   $('#btnOpenInAlbi').addEventListener('click', () => {
     const albiId = state.activeProject?.albi_project_id;
@@ -2192,6 +2394,7 @@ async function addNewPhase() {
   });
   if (error) { toast('Add failed: ' + error.message); return; }
   logToAlbi('phase_added', `Phase "${name.trim()}" added to schedule`);
+  notifyCustomerOfChange(`A new phase "${name.trim()}" has been added to your project schedule.`);
   toast('Phase added');
   await loadPhases(); await loadHistory();
   renderDetail();
@@ -2292,8 +2495,10 @@ function openPhaseEditor(phaseId) {
 
     // ── Log meaningful changes to Albi timeline ──
     const phaseName = updates.phase_name || before.phase_name;
+    const customerNotices = [];
     if (before.status !== updates.status) {
       logToAlbi('phase_status', `Phase "${phaseName}": ${titleCase(before.status)} → ${titleCase(updates.status)}`);
+      customerNotices.push(`"${phaseName}" is now ${titleCase(updates.status)}.`);
     }
     const beforeAssignee = before.assigned_sub_id
       ? (state.subs.find(s => s.id === before.assigned_sub_id)?.company_name || 'Sub')
@@ -2316,6 +2521,13 @@ function openPhaseEditor(phaseId) {
     if (oldStart !== newStart || oldEnd !== newEnd) {
       const range = newStart ? (fmtDate(newStart) + (newEnd ? ' → ' + fmtDate(newEnd) : '')) : 'unscheduled';
       logToAlbi('phase_scheduled', `Phase "${phaseName}" scheduled: ${range}`);
+      if (newStart) customerNotices.push(`"${phaseName}" is scheduled for ${range}.`);
+      else customerNotices.push(`"${phaseName}" has been unscheduled and we'll update you once a new date is set.`);
+    }
+
+    // Send change alert to customer if anything customer-facing changed
+    if (customerNotices.length) {
+      notifyCustomerOfChange(customerNotices.join('\n\n'));
     }
 
     toast('Phase saved');
@@ -2328,6 +2540,7 @@ function openPhaseEditor(phaseId) {
     const phaseName = ph.phase_name;
     if (sb) await sb.from('rebuild_phases').delete().eq('id', phaseId);
     logToAlbi('phase_deleted', `Phase "${phaseName}" removed from schedule`);
+    notifyCustomerOfChange(`The "${phaseName}" phase has been removed from your project schedule.`);
     closeModal('modalEditPhase');
     await loadPhases(); await loadHistory();
     renderDetail();
@@ -2348,6 +2561,7 @@ async function advancePhaseStatus(phaseId) {
   if (next === 'complete' && !ph.actual_end) updates.actual_end = new Date().toISOString();
   if (sb) await sb.from('rebuild_phases').update(updates).eq('id', phaseId);
   logToAlbi('phase_status', `Phase "${ph.phase_name}": ${titleCase(ph.status)} → ${titleCase(next)}`);
+  notifyCustomerOfChange(`"${ph.phase_name}" is now ${titleCase(next)}.`);
   toast(`→ ${titleCase(next)}`);
   await loadPhases(); await loadHistory();
   renderDetail();
