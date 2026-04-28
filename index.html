@@ -2071,15 +2071,31 @@ function markSick(nm){
   if(orphans.length)triggerAI(nm,orphans);
   else showToast(nm.split(' ')[0]+' marked out — jobs already covered');
 }
-function undoSick(nm){
+async function undoSick(nm){
   sick.delete(nm);
   var mkt = _findTechMarket(nm);
   markLaneChanged(mkt, nm);
   _shieldSickChange();
   closeAI();
   render();
+  // Delete the absence_records row for this tech on the current board date.
+  // Without this, the next reload/realtime/date-switch re-adds them to `sick`
+  // because absence_records still has the row.
+  try {
+    const targetDate = currentBoardDate || _getDispatchToday();
+    const filter = 'employee_name=eq.' + encodeURIComponent(nm) + '&date=eq.' + targetDate;
+    const r = await sbFetch('/rest/v1/absence_records?' + filter, { method: 'DELETE' });
+    if (r && r.ok) {
+      showToast(nm.split(' ')[0] + ' restored');
+    } else {
+      console.warn('[undoSick] DELETE failed', r && r.status);
+      showToast(nm.split(' ')[0] + ' restored (sync failed — refresh may revert)');
+    }
+  } catch(e) {
+    console.warn('[undoSick] DELETE error', e);
+    showToast(nm.split(' ')[0] + ' restored (sync failed)');
+  }
   saveBoardState();
-  showToast(nm.split(' ')[0]+' restored');
 }
 
 async function triggerAI(sickNm,orphans){
