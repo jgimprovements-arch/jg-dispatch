@@ -10207,18 +10207,18 @@ function showModal(title, bodyHtml, saveCall) {
 function closeModal() { var m=document.getElementById('tc-modal'); if(m)m.remove(); ST.editEmp=null; }
 
 // ── TIMECARD DETAIL MODAL ─────────────────────────────────────────────────
-// Opens a full-screen modal with the employee's complete period detail —
-// header summary, all time entries, edit/fix actions, approval state, and
-// a prominent Approve button at top.
+// Opens a full-screen modal with the employee's complete period detail.
+// Handles three cases:
+//   (a) hourly with entries — shows entries table
+//   (b) salaried (any) — also shows day grid for the period with absence editing
+//   (c) commission earners — shows commission section
 function openTimecardDetail(empName) {
   // Local copies of helpers that are scoped inside renderTimesheets
-  // (fmt, fmtDur, durMins, calcOT, fmtHM are NOT global)
   var fmt = function(iso){ if(!iso)return ''; var d=new Date(iso),h=d.getHours()%12||12,m=d.getMinutes(),ap=d.getHours()>=12?'PM':'AM'; return h+':'+(m<10?'0':'')+m+' '+ap; };
   var fmtDur = function(mins){ if(!mins&&mins!==0)return '-'; return Math.floor(mins/60)+'h '+(mins%60)+'m'; };
   var durMins = function(e){ var out=e.clock_out?new Date(e.clock_out):new Date(); return Math.floor((out-new Date(e.clock_in))/60000); };
   var fmtHM = function(mins){ var h=Math.floor(mins/60),m=Math.round(mins%60); return h+'h '+(m<10?'0':'')+m+'m'; };
   var calcOT = function(entries){
-    // OT calculation: weekly threshold 40h, anything beyond is OT
     var weeklyMins = {};
     entries.forEach(function(e){
       if (!e.clock_out) return;
@@ -10236,7 +10236,6 @@ function openTimecardDetail(empName) {
     return { regMins: regMins, otMins: otMins };
   };
 
-  // selPeriod is local to renderTimesheets; the canonical store is ST.selPeriod
   var periods = getPayPeriods(ST.payPeriod.type, ST.payPeriod.start, 6);
   var periodLabel = ST.selPeriod || (periods[0] ? periods[0].label : null);
   if (!periodLabel) { toast('No pay period selected'); return; }
@@ -10253,22 +10252,38 @@ function openTimecardDetail(empName) {
     return d >= curPer.start && d <= perEnd;
   }).sort(function(a,b){ return new Date(a.clock_in) - new Date(b.clock_in); });
 
+  // Commissions for this employee in this period
+  var empCommissions = (ST.commissions || []).filter(function(c) {
+    if (c.employee_name !== empName) return false;
+    if (c.status === 'paid') return false;
+    var dc = new Date((c.earned_date||'') + 'T00:00:00');
+    return dc >= curPer.start && dc <= perEnd;
+  });
+  var commissionTotal = empCommissions.reduce(function(s,c){ return s + parseFloat(c.amount || 0); }, 0);
+
   var ot = calcOT(entries);
   var rate = emp ? parseFloat(emp.hourly_rate || 0) : 0;
   var isSalary = emp && parseFloat(emp.annual_salary || 0) > 0;
-  var regPay = 0, otPay = 0, totalPay = 0;
+  var regPay = 0, otPay = 0, totalPay = 0, periodPay = 0, perPeriodDays = 10, workedDays = 0, missedDays = 0, deduction = 0;
   if (isSalary && emp.annual_salary) {
     var annSal = parseFloat(emp.annual_salary);
-    var perPeriodDays = ST.payPeriod.type === 'weekly' ? 5 : 10;
-    var periodPay = annSal / (ST.payPeriod.type === 'weekly' ? 52 : ST.payPeriod.type === 'biweekly' ? 26 : 24);
-    var workedDays = new Set(entries.map(function(e){return e.clock_in.split('T')[0];})).size;
-    var missedDays = Math.max(0, perPeriodDays - workedDays);
-    regPay = periodPay - missedDays * (periodPay / perPeriodDays); totalPay = regPay;
+    perPeriodDays = ST.payPeriod.type === 'weekly' ? 5 : 10;
+    periodPay = annSal / (ST.payPeriod.type === 'weekly' ? 52 : ST.payPeriod.type === 'biweekly' ? 26 : 24);
+    workedDays = new Set(entries.map(function(e){return e.clock_in.split('T')[0];})).size;
+    // Salary deducts ONLY for explicit unpaid absences (Vacation w/o PTO, etc).
+    // Days with no entry AND no absence record stay paid — salary covers them.
+    var absBrkPre = getAbsenceHoursForPeriod(empName, curPer.start, curPer.end);
+    missedDays = absBrkPre.unpaidDays || 0;
+    deduction = missedDays * (periodPay / perPeriodDays);
+    regPay = periodPay - deduction;
+    totalPay = regPay;
   } else {
     regPay = rate * (ot.regMins / 60);
     otPay = rate * 1.5 * (ot.otMins / 60);
     totalPay = regPay + otPay;
   }
+  // Add commissions to total pay
+  totalPay += commissionTotal;
 
   var approvalStatus = getApprovalStatus(periodLabel, empName);
   var isApproved = approvalStatus === 'approved';
@@ -10277,6 +10292,7 @@ function openTimecardDetail(empName) {
 
   // Build modal HTML
   var safeNm = empName.replace(/'/g, "\\'");
+  var safePeriod = periodLabel.replace(/'/g, "\\'");
   var h = '';
   h += '<div id="tc-detail-modal" style="position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:2100;display:flex;align-items:flex-start;justify-content:center;padding:20px;overflow-y:auto;" onclick="if(event.target===this)closeTimecardDetail()">';
   h += '<div style="background:#fff;border-radius:12px;width:100%;max-width:1200px;margin:auto;box-shadow:0 20px 60px rgba(0,0,0,.3);" onclick="event.stopPropagation()">';
@@ -10287,16 +10303,19 @@ function openTimecardDetail(empName) {
   h += '<div style="padding:20px 24px;background:'+hdrBg+';border-bottom:2px solid '+hdrBorder+';border-radius:12px 12px 0 0;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;">';
   h += '<div>';
   h += '<div style="font-size:18px;font-weight:700;color:var(--navy);">📋 '+empName+'</div>';
-  h += '<div style="font-size:12px;color:var(--muted);margin-top:2px;">Pay Period: '+periodLabel+'  •  '+entries.length+' entries</div>';
+  var subtitle = 'Pay Period: '+periodLabel+'  •  '+entries.length+' entries';
+  if (isSalary) subtitle += '  •  Salary';
+  if (commissionTotal > 0) subtitle += '  •  $'+commissionTotal.toFixed(2)+' comm';
+  h += '<div style="font-size:12px;color:var(--muted);margin-top:2px;">'+subtitle+'</div>';
   h += '</div>';
   h += '<div style="display:flex;gap:8px;flex-wrap:wrap;">';
   if (isApproved) {
     h += '<div style="font-size:12px;color:#2e7d32;font-weight:700;padding:6px 12px;background:rgba(46,125,50,.1);border-radius:8px;display:flex;align-items:center;">✓ Approved by '+(approvalInfo.approved_by || 'Admin')+'</div>';
     if (typeof isAdmin === 'function' && isAdmin()) {
-      h += '<button class="btn" onclick="closeTimecardDetail();unlockTimecard(\''+(periodLabel.replace(/'/g,"\\'"))+'\',\''+safeNm+'\')">🔓 Unlock</button>';
+      h += '<button class="btn" onclick="closeTimecardDetail();unlockTimecard(\''+safePeriod+'\',\''+safeNm+'\')">🔓 Unlock</button>';
     }
   } else {
-    h += '<button class="btn btn-primary" style="background:#2e7d32;border-color:#2e7d32;font-size:14px;padding:10px 18px;" onclick="approveTimecard(\''+(periodLabel.replace(/'/g,"\\'"))+'\',\''+safeNm+'\').then(function(){closeTimecardDetail();render();})">✓ Approve Timecard</button>';
+    h += '<button class="btn btn-primary" style="background:#2e7d32;border-color:#2e7d32;font-size:14px;padding:10px 18px;" onclick="approveTimecard(\''+safePeriod+'\',\''+safeNm+'\').then(function(){closeTimecardDetail();render();})">✓ Approve Timecard</button>';
   }
   h += '<button class="btn" onclick="closeTimecardDetail()">✕ Close</button>';
   h += '</div></div>';
@@ -10309,19 +10328,106 @@ function openTimecardDetail(empName) {
       '<div style="font-size:18px;font-weight:700;color:'+(color||'var(--navy)')+';">'+value+'</div>'+
     '</div>';
   }
-  h += statBox('Regular', fmtHM(ot.regMins));
-  h += statBox('Overtime', fmtHM(ot.otMins), ot.otMins > 0 ? '#c62828' : 'var(--muted)');
+  if (isSalary) {
+    h += statBox('Days Worked', workedDays + ' / ' + perPeriodDays, missedDays > 0 ? '#c62828' : '#2e7d32');
+    h += statBox('Period Pay', '$' + periodPay.toFixed(2));
+    if (deduction > 0) h += statBox('Deduction', '-$' + deduction.toFixed(2), '#c62828');
+  } else {
+    h += statBox('Regular', fmtHM(ot.regMins));
+    h += statBox('Overtime', fmtHM(ot.otMins), ot.otMins > 0 ? '#c62828' : 'var(--muted)');
+  }
   if (absBrk.ptoPaidHours > 0) h += statBox('PTO', absBrk.ptoPaidHours.toFixed(1) + 'h', '#1565c0');
+  if (commissionTotal > 0) h += statBox('Commissions', '$' + commissionTotal.toFixed(2), '#6a1b9a');
   if (rate || isSalary) h += statBox('Est. Pay', '$' + totalPay.toFixed(2), '#2e7d32');
   if (rate) h += statBox('Rate', '$' + rate.toFixed(2) + '/hr');
   if (isSalary) h += statBox('Salary', '$' + Number(emp.annual_salary).toLocaleString() + '/yr');
   h += '</div>';
 
-  // Entries table
+  // Body
   h += '<div style="padding:20px 24px;">';
-  if (!entries.length) {
-    h += '<div style="padding:40px;text-align:center;color:var(--muted);font-size:13px;">No entries for this period.</div>';
-  } else {
+
+  // ── Salaried day grid: shows each working day in period ──
+  if (isSalary) {
+    var startDate = new Date(curPer.start); startDate.setHours(0,0,0,0);
+    var endDate = new Date(curPer.end); endDate.setHours(0,0,0,0);
+    var dayList = [];
+    var iterDate = new Date(startDate);
+    while (iterDate <= endDate) {
+      var dow = iterDate.getDay();
+      if (dow >= 1 && dow <= 5) { // Mon-Fri only
+        dayList.push(new Date(iterDate));
+      }
+      iterDate.setDate(iterDate.getDate() + 1);
+    }
+    var workedDaySet = new Set(entries.map(function(e){ return e.clock_in.split('T')[0]; }));
+    var absencesByDate = {};
+    (absBrk.records || []).forEach(function(rec){
+      absencesByDate[rec.absence.date] = rec;
+    });
+
+    h += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">';
+    h += '<div style="font-size:12px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;">Day Grid — '+dayList.length+' working days</div>';
+    if (!isApproved && typeof isAdmin === 'function' && isAdmin()) {
+      h += '<button class="btn btn-sm" onclick="_dgMarkAllWorked(\''+safeNm+'\',\''+safePeriod+'\')" style="background:#2e7d32;color:#fff;border-color:#2e7d32;">✓ Mark All Worked</button>';
+    }
+    h += '</div>';
+
+    h += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:6px;margin-bottom:20px;">';
+    dayList.forEach(function(d) {
+      var dateStr = d.toISOString().split('T')[0];
+      var dayLabel = d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+      var worked = workedDaySet.has(dateStr);
+      var absRec = absencesByDate[dateStr];
+      var bg, color, status, statusIcon;
+      if (worked) {
+        bg = 'rgba(46,125,50,.06)'; color = '#2e7d32'; status = 'Worked'; statusIcon = '✓';
+      } else if (absRec) {
+        var paid = absRec.classification.category === 'pto_paid' || absRec.classification.category === 'regular_paid';
+        bg = paid ? 'rgba(21,101,192,.06)' : 'rgba(198,40,40,.06)';
+        color = paid ? '#1565c0' : '#c62828';
+        status = absRec.absence.reason || 'Absent';
+        statusIcon = paid ? '🏖' : '✗';
+      } else {
+        bg = 'rgba(230,81,0,.06)'; color = '#e65100'; status = 'Not recorded'; statusIcon = '?';
+      }
+      var clickable = !isApproved && typeof isAdmin === 'function' && isAdmin();
+      var cursor = clickable ? 'cursor:pointer;' : '';
+      var onclick = clickable ? 'onclick="_dgEditDay(\''+safeNm+'\',\''+dateStr+'\')"' : '';
+      h += '<div '+onclick+' style="padding:10px;background:'+bg+';border:1px solid '+color+';border-radius:8px;'+cursor+'transition:transform .1s;" onmouseover="this.style.transform=\'scale(1.02)\'" onmouseout="this.style.transform=\'\'">';
+      h += '<div style="font-size:11px;font-weight:700;color:var(--navy);">'+dayLabel+'</div>';
+      h += '<div style="font-size:11px;color:'+color+';font-weight:600;margin-top:2px;">'+statusIcon+' '+status+'</div>';
+      if (absRec && absRec.absence.notes) {
+        h += '<div style="font-size:10px;color:var(--muted);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+absRec.absence.notes+'</div>';
+      }
+      h += '</div>';
+    });
+    h += '</div>';
+  }
+
+  // ── Commissions section ──
+  if (empCommissions.length) {
+    h += '<div style="font-size:12px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:8px;">Commissions ('+empCommissions.length+') — $'+commissionTotal.toFixed(2)+'</div>';
+    h += '<div style="display:flex;flex-direction:column;gap:6px;margin-bottom:20px;">';
+    empCommissions.forEach(function(c) {
+      var bg = c.status === 'approved' ? 'rgba(46,125,50,.06)' : 'rgba(106,27,154,.06)';
+      var color = c.status === 'approved' ? '#2e7d32' : '#6a1b9a';
+      var earnedD = c.earned_date ? new Date(c.earned_date+'T00:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric'}) : '—';
+      h += '<div style="padding:10px 14px;background:'+bg+';border-left:3px solid '+color+';border-radius:6px;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">';
+      h += '<div>';
+      h += '<div style="font-size:13px;font-weight:700;color:var(--navy);">'+(c.description || c.commission_type || 'Commission')+'</div>';
+      h += '<div style="font-size:11px;color:var(--muted);margin-top:2px;">'+earnedD+(c.notes ? ' • ' + c.notes : '')+'</div>';
+      h += '</div>';
+      h += '<div style="display:flex;align-items:center;gap:10px;">';
+      h += '<span style="font-size:10px;color:'+color+';text-transform:uppercase;font-weight:700;">'+(c.status || 'pending')+'</span>';
+      h += '<span style="font-size:16px;font-weight:700;color:'+color+';">$'+parseFloat(c.amount||0).toFixed(2)+'</span>';
+      h += '</div>';
+      h += '</div>';
+    });
+    h += '</div>';
+  }
+
+  // ── Entries table ──
+  if (entries.length) {
     h += '<div style="font-size:12px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:8px;">Time Entries ('+entries.length+')</div>';
     h += '<div style="overflow-x:auto;"><table class="tc-table" style="width:100%;font-size:13px;"><thead><tr><th>Date</th><th>Clock In</th><th>Clock Out</th><th>Actual</th><th>Billable</th><th>Break</th><th>Job</th><th>Verified</th><th>Flags</th><th></th></tr></thead><tbody>';
     entries.forEach(function(e) {
@@ -10369,10 +10475,12 @@ function openTimecardDetail(empName) {
       h += '</tr>';
     });
     h += '</tbody></table></div>';
+  } else if (!isSalary && empCommissions.length === 0) {
+    h += '<div style="padding:40px;text-align:center;color:var(--muted);font-size:13px;">No entries for this period.</div>';
   }
 
-  // Absence rows for this period (uses breakdown.records shape from getAbsenceHoursForPeriod)
-  if (absBrk.records && absBrk.records.length) {
+  // ── Other absences (anything not on the day grid for hourly, or PTO summary for salary) ──
+  if (absBrk.records && absBrk.records.length && !isSalary) {
     h += '<div style="margin-top:20px;font-size:12px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:8px;">Absences / PTO ('+absBrk.records.length+')</div>';
     h += '<div style="display:flex;flex-direction:column;gap:6px;">';
     absBrk.records.forEach(function(rec) {
@@ -10394,7 +10502,6 @@ function openTimecardDetail(empName) {
   h += '</div>';
   h += '</div>';
 
-  // Insert + bind escape key
   var existing = document.getElementById('tc-detail-modal');
   if (existing) existing.remove();
   document.body.insertAdjacentHTML('beforeend', h);
@@ -10409,6 +10516,131 @@ function closeTimecardDetail() {
   var m = document.getElementById('tc-detail-modal');
   if (m) m.remove();
   document.removeEventListener('keydown', _tcDetailEscHandler);
+}
+
+// ── Day Grid: edit/mark a single day ─────────────────────────────────────
+async function _dgEditDay(empName, dateStr) {
+  if (typeof isAdmin === 'function' && !isAdmin()) { toast('Admin access required'); return; }
+  var emp = ST.employees.find(function(x){ return x.name === empName; });
+  var dateLabel = new Date(dateStr+'T12:00:00').toLocaleDateString('en-US', { weekday:'long', month:'short', day:'numeric' });
+
+  // Check existing absence on this date
+  var existing = (ST.absences || []).find(function(a){ return a.employee_name === empName && a.date === dateStr; });
+
+  var body = '<div style="font-size:13px;color:var(--navy);margin-bottom:14px;">'+dateLabel+'</div>';
+  if (existing) {
+    body += '<div style="padding:10px;background:rgba(13,45,94,.05);border-radius:8px;margin-bottom:14px;font-size:12px;color:var(--navy);">';
+    body += '<strong>Currently logged:</strong> '+(existing.reason || 'Absent')+(existing.notes ? ' — ' + existing.notes : '');
+    body += '</div>';
+  }
+  body += '<label style="display:block;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:5px;">Status for this day</label>';
+  body += '<select id="dg-status" style="width:100%;padding:10px 12px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;font-family:DM Sans,sans-serif;outline:none;background:#fff;margin-bottom:12px;">';
+  body += '<option value="worked">✓ Worked (no time entry needed for salary)</option>';
+  body += '<option value="PTO"'+(existing && existing.reason==='PTO' ? ' selected' : '')+'>🏖 PTO (paid)</option>';
+  body += '<option value="Vacation"'+(existing && existing.reason==='Vacation' ? ' selected' : '')+'>🏖 Vacation (paid)</option>';
+  body += '<option value="Sick"'+(existing && existing.reason==='Sick' ? ' selected' : '')+'>🤒 Sick</option>';
+  body += '<option value="Personal"'+(existing && existing.reason==='Personal' ? ' selected' : '')+'>👤 Personal</option>';
+  body += '<option value="Holiday"'+(existing && existing.reason==='Holiday' ? ' selected' : '')+'>🎉 Holiday (paid)</option>';
+  body += '<option value="Unpaid"'+(existing && existing.reason==='Unpaid' ? ' selected' : '')+'>✗ Unpaid Absence</option>';
+  body += '</select>';
+  body += '<label style="display:block;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:5px;">Notes (optional)</label>';
+  body += '<textarea id="dg-notes" rows="2" placeholder="Optional context..." style="width:100%;padding:10px 12px;border:1.5px solid var(--border);border-radius:10px;font-size:13px;font-family:DM Sans,sans-serif;outline:none;resize:none;box-sizing:border-box;">'+(existing && existing.notes ? existing.notes : '')+'</textarea>';
+  if (existing) {
+    body += '<button class="btn" onclick="_dgRemoveDay(\''+existing.id+'\')" style="margin-top:10px;background:#fff;color:#c62828;border-color:#c62828;width:100%;">🗑 Remove this absence</button>';
+  }
+
+  showModal('📅 '+empName+' — '+dateLabel, body, '_dgSaveDay(\''+empName.replace(/\'/g,"\\'") + '\',\''+dateStr+'\')');
+}
+
+async function _dgSaveDay(empName, dateStr) {
+  var status = (document.getElementById('dg-status') || {}).value || 'worked';
+  var notes = ((document.getElementById('dg-notes') || {}).value || '').trim();
+  var emp = ST.employees.find(function(x){ return x.name === empName; });
+  if (!emp) { toast('Employee not found'); return; }
+
+  // Find existing absence record on this date for this person
+  var existing = (ST.absences || []).find(function(a){ return a.employee_name === empName && a.date === dateStr; });
+
+  if (status === 'worked') {
+    // Mark as worked = remove any existing absence record
+    if (existing) {
+      await fetch(SB_URL + '/rest/v1/absence_records?id=eq.' + existing.id, {
+        method: 'DELETE',
+        headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+      });
+      ST.absences = (ST.absences || []).filter(function(a){ return a.id !== existing.id; });
+      toast('✓ Marked as worked');
+    } else {
+      toast('Already counted as worked');
+    }
+  } else {
+    var payload = {
+      employee_name: empName,
+      date: dateStr,
+      reason: status,
+      notes: notes,
+      market: emp.market || 'Appleton',
+      logged_by: 'admin',
+      hours: 8
+    };
+    if (existing) {
+      // Update existing
+      await fetch(SB_URL + '/rest/v1/absence_records?id=eq.' + existing.id, {
+        method: 'PATCH',
+        headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason: status, notes: notes })
+      });
+      existing.reason = status;
+      existing.notes = notes;
+      toast('✓ Updated');
+    } else {
+      // Create new
+      var r = await fetch(SB_URL + '/rest/v1/absence_records', {
+        method: 'POST',
+        headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=representation' },
+        body: JSON.stringify(payload)
+      });
+      if (r.ok) {
+        var rows = await r.json();
+        if (rows && rows.length) (ST.absences = ST.absences || []).push(rows[0]);
+      }
+      toast('✓ Marked as ' + status);
+    }
+  }
+
+  closeModal();
+  closeTimecardDetail();
+  // Reopen modal with fresh data
+  setTimeout(function(){ openTimecardDetail(empName); }, 100);
+  if (typeof logActivity === 'function') {
+    logActivity('Day Status Updated', empName + ' — ' + dateStr + ' → ' + status, 'time_clock', empName);
+  }
+}
+
+async function _dgRemoveDay(absenceId) {
+  if (!confirm('Remove this absence record?')) return;
+  await fetch(SB_URL + '/rest/v1/absence_records?id=eq.' + absenceId, {
+    method: 'DELETE',
+    headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+  });
+  var removed = (ST.absences || []).find(function(a){ return a.id === absenceId; });
+  ST.absences = (ST.absences || []).filter(function(a){ return a.id !== absenceId; });
+  toast('Absence removed');
+  if (removed) {
+    closeModal();
+    closeTimecardDetail();
+    setTimeout(function(){ openTimecardDetail(removed.employee_name); }, 100);
+  }
+}
+
+async function _dgMarkAllWorked(empName, periodLabel) {
+  if (!confirm('Mark ALL non-recorded days as worked for '+empName+'?\n\nThis removes any "Not recorded" status. Existing absences (PTO, Sick, etc.) are kept.')) return;
+  // For salary, "worked" with no entry just means: no absence record exists.
+  // We don't actually create anything — we just note this in activity log.
+  toast('✓ All days assumed worked (no missing absences need entries)');
+  if (typeof logActivity === 'function') {
+    logActivity('All Days Worked', empName + ' — ' + periodLabel + ' marked as fully worked', 'time_clock', empName);
+  }
 }
 
 // ── TOAST ─────────────────────────────────────────────────────────────────
