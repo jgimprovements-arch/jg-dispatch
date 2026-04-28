@@ -4047,7 +4047,11 @@ async function loadMyHours() {
   el.innerHTML = entries.map(function(e){
     var mins = e.duration_minutes || Math.floor(((e.clock_out?new Date(e.clock_out):new Date())-new Date(e.clock_in))/60000);
     var active = !e.clock_out;
-    return '<div class="team-member" style="flex-wrap:wrap;gap:6px;">'+
+    var fixBtnLabel = active ? '✏️ Fix Punch' : '✏️ Fix';
+    var fixBtnStyle = active
+      ? 'font-size:11px;padding:4px 10px;border-radius:6px;border:1px solid var(--orange);background:var(--orange);color:#fff;cursor:pointer;font-family:DM Sans,sans-serif;font-weight:700;'
+      : 'font-size:10px;padding:2px 8px;border-radius:6px;border:1px solid var(--border);background:transparent;cursor:pointer;color:var(--muted);font-family:DM Sans,sans-serif;';
+    return '<div class="team-member" data-entry-id="'+e.id+'" id="entry-'+e.id+'" style="flex-wrap:wrap;gap:6px;transition:background .3s;">'+
       '<div style="font-size:10px;font-weight:700;color:var(--muted);min-width:44px;text-align:center;">'+fmtDate(e.clock_in)+'</div>'+
       '<div class="team-info">'+
         '<div class="team-name">'+(e.job_name||'No job')+'</div>'+
@@ -4055,14 +4059,76 @@ async function loadMyHours() {
       '</div>'+
       '<div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px;">'+
         '<div class="team-dur" style="color:'+(active?'var(--green)':'var(--navy)')+';">'+fmtDur(mins)+'</div>'+
-        (!active?'<button onclick="openCorrectionRequest(\''+e.id+'\',\''+fmtDate(e.clock_in)+' '+fmtTime(e.clock_in)+'\',\''+fmtTime(e.clock_out)+'\',\''+e.job_name+'\')" style="font-size:10px;padding:2px 8px;border-radius:6px;border:1px solid var(--border);background:transparent;cursor:pointer;color:var(--muted);font-family:DM Sans,sans-serif;">✏️ Fix</button>':'')+
+        '<button onclick="openCorrectionRequest(\''+e.id+'\',\''+fmtDate(e.clock_in)+' '+fmtTime(e.clock_in)+'\',\''+(e.clock_out?fmtTime(e.clock_out):'(still clocked in)')+'\',\''+(e.job_name||'No job')+'\')" style="'+fixBtnStyle+'">'+fixBtnLabel+'</button>'+
       '</div>'+
     '</div>';
   }).join('');
 }
 
+// ── DEEP-LINK HANDLER ────────────────────────────────────────────────────
+// Notifications include URL hashes like:
+//   #entry=<id>&action=correct  → switch to Hours tab, scroll to entry, open correction
+//   #verify                     → switch to Hours tab, scroll to top of unverified list
+//   #timecard                   → switch to Hours tab
+// This runs after the initial app load and after Hours-tab data is present.
+function _handleNotificationDeepLink() {
+  var hash = window.location.hash || '';
+  if (!hash || hash.length < 2) return;
+  var hashContent = hash.substring(1); // strip leading #
+  var params = {};
+  hashContent.split('&').forEach(function(pair){
+    var eq = pair.indexOf('=');
+    if (eq < 0) { params[pair] = true; }
+    else { params[pair.substring(0, eq)] = decodeURIComponent(pair.substring(eq+1)); }
+  });
+
+  // Clear the hash so subsequent reloads don't re-fire
+  history.replaceState(null, '', window.location.pathname + window.location.search);
+
+  function scrollToEntry(entryId, doCorrect) {
+    var row = document.getElementById('entry-' + entryId);
+    if (!row) return false;
+    row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    // Highlight pulse
+    row.style.background = 'rgba(232,93,4,.15)';
+    setTimeout(function(){ row.style.background = ''; }, 2000);
+    if (doCorrect) {
+      // Find the Fix button and click it (preserves existing modal logic)
+      setTimeout(function(){
+        var btn = row.querySelector('button[onclick*="openCorrectionRequest"]');
+        if (btn) btn.click();
+      }, 600);
+    }
+    return true;
+  }
+
+  // Decide target tab + action
+  if (params.entry || params.verify || params.timecard) {
+    if (typeof switchTab === 'function') switchTab('hours');
+    // History/entries load is async — wait for the list to populate before scrolling
+    var attempts = 0;
+    var tryScroll = function() {
+      attempts++;
+      var listEl = document.getElementById('history-list') || document.querySelector('[data-history-list]');
+      var hasEntries = listEl && listEl.children.length > 0;
+      if (params.entry) {
+        if (scrollToEntry(params.entry, params.action === 'correct')) return;
+      } else if (params.verify || params.timecard) {
+        // Just need the hours tab visible — scrollIntoView the tab's content
+        var hoursPanel = document.getElementById('view-hours') || document.getElementById('tab-hours');
+        if (hoursPanel) hoursPanel.scrollIntoView({ behavior:'smooth', block:'start' });
+        if (hasEntries) return;
+      }
+      if (attempts < 12) setTimeout(tryScroll, 250);
+    };
+    setTimeout(tryScroll, 400);
+  }
+}
+
 // START
 document.addEventListener('DOMContentLoaded', function() {
+  // Fire deep-link handler after a delay so initial data has time to load
+  setTimeout(_handleNotificationDeepLink, 1500);
   var u = checkAuth();
   if (u) { initApp(u); return; }
   document.getElementById('login-screen').style.display = 'flex';
