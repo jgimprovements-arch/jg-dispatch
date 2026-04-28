@@ -1526,33 +1526,23 @@ async function loadJobs() {
     console.warn('Albi proxy failed:', e.message);
   }
 
-  // FALLBACK: board_state if proxy returned nothing
+  // FALLBACK: dispatch_assignments_v2 if Albi proxy returned nothing
+  // Pulls all of today's dispatched jobs as a basic backup so techs can still see jobs.
   if (!jobs.length) {
     try {
-      var bs = await sb('/rest/v1/board_state?id=eq.current&select=state');
-      if (bs && bs[0] && bs[0].state) {
-        var state = bs[0].state;
-        var jobNames = state.jobNames || {};
-        var assignments = state.assignments || {};
-        ['appleton','stevens'].forEach(function(mkt) {
-          var mktLabel = mkt === 'appleton' ? 'Appleton' : 'Stevens Point';
-          Object.keys(assignments[mkt] || {}).forEach(function(tech) {
-            (assignments[mkt][tech] || []).forEach(function(jobId) {
-              if (!jobMap[jobId]) {
-                jobMap[jobId] = { id: jobId, name: jobNames[jobId] || jobId, market: mktLabel };
-                jobs.push(jobMap[jobId]);
-              }
-            });
-          });
-          ((state.unassigned || {})[mkt] || []).forEach(function(jobId) {
-            if (!jobMap[jobId]) {
-              jobMap[jobId] = { id: jobId, name: jobNames[jobId] || jobId, market: mktLabel };
-              jobs.push(jobMap[jobId]);
-            }
-          });
-        });
-      }
-    } catch(e) { console.warn('board_state fallback failed:', e.message); }
+      var todayISO = new Date().toISOString().split('T')[0];
+      var rows = await sb('/rest/v1/dispatch_assignments_v2'
+        + '?or=(scheduled_date.eq.' + todayISO + ',scheduled_date.is.null)'
+        + '&select=job_id,market');
+      (rows || []).forEach(function(r) {
+        var jobId = String(r.job_id);
+        var mktLabel = r.market === 'appleton' ? 'Appleton' : r.market === 'stevens_point' ? 'Stevens Point' : '';
+        if (!jobMap[jobId]) {
+          jobMap[jobId] = { id: jobId, name: jobId, market: mktLabel };
+          jobs.push(jobMap[jobId]);
+        }
+      });
+    } catch(e) { console.warn('dispatch_assignments_v2 fallback failed:', e.message); }
   }
 
   // Sort newest-first by Albi createdAt. Jobs without createdAt (e.g. from
@@ -1569,46 +1559,47 @@ async function loadJobs() {
   renderJobs();
 }
 // SCHEDULE
+// Reads from dispatch_assignments_v2 (per-row architecture, post-2026-04-26 cutover).
+// Filters to today's date OR rows with scheduled_date IS NULL (legacy "today" rows).
 async function loadSchedule() {
   var el = document.getElementById('schedule-list');
   var marketEl = document.getElementById('schedule-market');
   if (!el) return;
 
   try {
-    // Pull board_state to find this tech's assigned jobs
-    var bs = await sb('/rest/v1/board_state?id=eq.current&select=state');
-    if (!bs || !bs[0] || !bs[0].state) {
+    if (!TC.employee || !TC.employee.id) {
       el.innerHTML = '<div class="empty" style="padding:16px 0;">No schedule data</div>';
       return;
     }
-    var state = bs[0].state;
-    var jobNames = state.jobNames || {};
-    var assignments = state.assignments || {};
-    var techName = TC.employee ? TC.employee.name : '';
-    var firstName = techName.split(' ')[0].toLowerCase();
+    var techId = TC.employee.id;
 
-    // Find this employee's jobs across both markets
-    var myJobs = [];
-    var myMarket = '';
-    Object.keys(assignments).forEach(function(market) {
-      Object.keys(assignments[market] || {}).forEach(function(tech) {
-        var techFirst = tech.split(' ')[0].toLowerCase();
-        if (techFirst === firstName || tech.toLowerCase().includes(firstName)) {
-          myMarket = market === 'appleton' ? 'Appleton' : 'Stevens Point';
-          (assignments[market][tech] || []).forEach(function(jobId) {
-            var name = jobNames[jobId] || jobId;
-            myJobs.push({ id: jobId, name: name });
-          });
-        }
-      });
-    });
-
-    if (marketEl) marketEl.textContent = myMarket || '';
-
-    if (!myJobs.length) {
+    // Fetch today's assignments (or unscheduled "today" rows) for this tech
+    var todayISO = new Date().toISOString().split('T')[0];
+    var url = '/rest/v1/dispatch_assignments_v2'
+            + '?tech_id=eq.' + techId
+            + '&or=(scheduled_date.eq.' + todayISO + ',scheduled_date.is.null)'
+            + '&select=id,job_id,market,position,scheduled_date'
+            + '&order=position.asc';
+    var rows = await sb(url);
+    if (!rows || !rows.length) {
       el.innerHTML = '<div class="empty" style="padding:16px 0;">No jobs assigned today</div>';
+      if (marketEl) marketEl.textContent = '';
       return;
     }
+
+    // Resolve job names via existing TC.jobs cache (Albi data already loaded)
+    var jobNameById = {};
+    (TC.jobs || []).forEach(function(j){ jobNameById[String(j.id)] = j.name || j.id; });
+
+    var myJobs = rows.map(function(r){
+      return { id: String(r.job_id), name: jobNameById[String(r.job_id)] || r.job_id };
+    });
+
+    // Show market label from first row (techs typically work one market)
+    var firstMarket = rows[0].market;
+    var myMarket = firstMarket === 'appleton' ? 'Appleton' : firstMarket === 'stevens_point' ? 'Stevens Point' : '';
+
+    if (marketEl) marketEl.textContent = myMarket || '';
 
     // Mark which job is currently active
     var activeJobId = TC.activeEntry ? TC.activeEntry.job_id : null;
@@ -1788,19 +1779,35 @@ function renderJobs() {
   el.innerHTML = html;
 }
 
-// Fetch today's dispatch board assignments so we can highlight "My Jobs" at top of picker
+// Fetch today's dispatch_assignments_v2 rows for THIS tech, used to highlight
+// "My Jobs Today" at top of the picker. Returns a Set of job_ids the tech is on.
 async function loadMyAssignedJobs() {
   try {
-    var br = await fetch(SB_URL + '/rest/v1/board_state?id=eq.current&select=state', {
+    if (!TC.employee || !TC.employee.id) return;
+    var todayISO = new Date().toISOString().split('T')[0];
+    var url = SB_URL + '/rest/v1/dispatch_assignments_v2'
+            + '?tech_id=eq.' + TC.employee.id
+            + '&or=(scheduled_date.eq.' + todayISO + ',scheduled_date.is.null)'
+            + '&select=job_id,market';
+    var br = await fetch(url, {
       headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
     });
     if (!br.ok) return;
-    var brows = await br.json();
-    var boardState = brows && brows[0] && brows[0].state ? brows[0].state : {};
-    TC._boardAssignments = boardState.assignments || {};
-    TC._boardJobNames = boardState.jobNames || {};
+    var rows = await br.json() || [];
+
+    // Match the legacy shape: TC._boardAssignments[market][techName] = [jobIds...]
+    // so the picker code that already exists works without changes.
+    var techName = TC.employee.name;
+    TC._boardAssignments = {};
+    rows.forEach(function(r){
+      var mkt = r.market;
+      if (!TC._boardAssignments[mkt]) TC._boardAssignments[mkt] = {};
+      if (!TC._boardAssignments[mkt][techName]) TC._boardAssignments[mkt][techName] = [];
+      TC._boardAssignments[mkt][techName].push(String(r.job_id));
+    });
+    TC._boardJobNames = {}; // names come from TC.jobs cache, not from board_state anymore
     if (typeof renderJobs === 'function') renderJobs();
-  } catch(e) { /* silent — just means no "my jobs" section, full list still works */ }
+  } catch(e) { /* silent — no "my jobs" section, full list still works */ }
 }
 // ACTIONS 
 function selectJob(elOrId, name, market) {
@@ -2754,29 +2761,26 @@ async function openSwitchJob() {
     var myJobs    = [];
     var otherJobs = [];
 
-    // Try board_state first for today's assigned jobs
+    // Try dispatch_assignments_v2 first for today's assigned jobs
     try {
-      var br = await fetch(SB_URL + '/rest/v1/board_state?id=eq.current&select=state', {
+      var todayISO2 = new Date().toISOString().split('T')[0];
+      var techId = TC.employee && TC.employee.id ? TC.employee.id : null;
+
+      // Fetch ALL of today's assignments. We split mine vs others by tech_id.
+      var br = await fetch(SB_URL + '/rest/v1/dispatch_assignments_v2'
+        + '?or=(scheduled_date.eq.' + todayISO2 + ',scheduled_date.is.null)'
+        + '&select=tech_id,job_id,market', {
         headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
       });
       if (br.ok) {
-        var brows = await br.json();
-        var boardState = brows && brows[0] && brows[0].state ? brows[0].state : {};
-        var assignments = boardState.assignments || {};
-        var jobNames    = boardState.jobNames    || {};
-        // assignments: { locKey: { techName: [jobId, ...] } }
-        Object.values(assignments).forEach(function(locObj) {
-          Object.entries(locObj).forEach(function(kv) {
-            var tname = kv[0], jids = kv[1] || [];
-            jids.forEach(function(jid) {
-              var entry = { id: String(jid), name: jobNames[jid] || String(jid), number: '' };
-              if (techName && tname.toLowerCase().includes(techName.split(' ')[0].toLowerCase())) {
-                myJobs.push(entry);
-              } else {
-                if (!otherJobs.some(function(o){ return o.id === entry.id; })) otherJobs.push(entry);
-              }
-            });
-          });
+        var rows = await br.json() || [];
+        rows.forEach(function(r) {
+          var entry = { id: String(r.job_id), name: String(r.job_id), number: '' };
+          if (techId && r.tech_id === techId) {
+            myJobs.push(entry);
+          } else {
+            if (!otherJobs.some(function(o){ return o.id === entry.id; })) otherJobs.push(entry);
+          }
         });
       }
     } catch(e) {}
@@ -4081,7 +4085,7 @@ function initRealtimeSync() {
       window.JGSupabase = window.JGSupabase || {};
       window.JGSupabase.client = _rtClient;
     }
-    var tables = ["time_entries","employees","oncall_schedule","oncall_swap_requests","oncall_notifications","notifications","board_state"];
+    var tables = ["time_entries","employees","oncall_schedule","oncall_swap_requests","oncall_notifications","notifications","dispatch_assignments_v2"];
     tables.forEach(function(table) {
       var ch = _rtClient.channel('rt_' + table)
         .on('postgres_changes', { event: '*', schema: 'public', table: table }, function(payload) {
@@ -4101,7 +4105,7 @@ function onRealtimeChange(table, payload) {
     loadTeamData();
     if (_currentTab === 'hours') loadMyHours();
   }
-  if (table === 'board_state') {
+  if (table === 'dispatch_assignments_v2') {
     // Dispatcher made a change — refresh this tech's assigned jobs at top of picker
     if (typeof loadMyAssignedJobs === 'function') loadMyAssignedJobs();
   }
