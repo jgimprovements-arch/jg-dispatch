@@ -965,18 +965,27 @@ function filteredPartners() {
       }
     }
     if(q) {
-      // Match on name, company, city, AND phone (stripped of non-digits for
-      // fuzzy phone lookups like "920555" matching "(920) 555-1234").
+      // Phone match — strip non-digits on both sides and substring-compare.
+      // Lets "920555" match "(920) 555-1234" etc.
       var phoneMatch = false;
       if (p.phone) {
         var digits = String(p.phone).replace(/\D/g,'');
         var qDigits = q.replace(/\D/g,'');
         if (qDigits && digits.indexOf(qDigits) !== -1) phoneMatch = true;
       }
-      if (!phoneMatch
-          && !(p.name||'').toLowerCase().includes(q)
-          && !(p.company||'').toLowerCase().includes(q)
-          && !(p.city||'').toLowerCase().includes(q)) return false;
+      if (!phoneMatch) {
+        // Token-based text match. Split the query on whitespace; every token
+        // must appear somewhere in the combined searchable fields. This makes
+        // "sure dry" match both "Sure Dry" AND "Sure-Dry Basement Systems"
+        // (the punctuation between tokens doesn't matter — only that all
+        // tokens appear in the haystack). Previously we did a single
+        // .includes(q) which required the exact phrase including spacing,
+        // so hyphenated/punctuated company names silently failed to match.
+        var haystack = ((p.name||'') + ' ' + (p.company||'') + ' ' + (p.city||'')).toLowerCase();
+        var tokens = q.split(/\s+/).filter(function(t){ return t.length > 0; });
+        var allMatch = tokens.every(function(t){ return haystack.indexOf(t) !== -1; });
+        if (!allMatch) return false;
+      }
     }
     return true;
   });
@@ -1163,13 +1172,25 @@ function _renderNow() {
     // totals. A customer count could be added as a separate stat if useful.
     var nonCust = ST.partners.filter(function(p){ return p.type !== 'Customer'; });
     var refPartnerCount = nonCust.length;
+    var totalPartnerCount = ST.partners.length;
     var tierA = nonCust.filter(function(p){ return p.tier === 'A'; }).length;
     var tierB = nonCust.filter(function(p){ return p.tier === 'B'; }).length;
     var tierC = nonCust.filter(function(p){ return p.tier === 'C'; }).length;
     var totalRefs = nonCust.reduce(function(s,p){ return s + (p.referral_count||0); }, 0);
 
     h += '<div class="sales-stat-row">';
-    h += '<div class="sales-stat"><div class="sales-stat-val">' + refPartnerCount + '</div><div class="sales-stat-lbl">Referral Partners</div></div>';
+    // Combined Referral / Total Partners card. Two numbers in one card makes
+    // the comparison obvious — readers see "586 of 6,422" and immediately
+    // understand that most contacts aren't tagged as referral partners.
+    // Useful while data is being cleaned up post-import (many records
+    // imported as 'Customer' that are actually referral partners).
+    h += '<div class="sales-stat" style="display:flex;flex-direction:column;justify-content:center;">';
+    h += '<div style="display:flex;align-items:baseline;gap:6px;">';
+    h += '<span class="sales-stat-val" style="font-size:24px;">' + refPartnerCount.toLocaleString() + '</span>';
+    h += '<span style="font-size:13px;color:var(--muted);font-weight:600;">of ' + totalPartnerCount.toLocaleString() + '</span>';
+    h += '</div>';
+    h += '<div class="sales-stat-lbl">Referral / Total Partners</div>';
+    h += '</div>';
     h += '<div class="sales-stat"><div class="sales-stat-val" style="color:#2e7d32;">' + tierA + '</div><div class="sales-stat-lbl">A-Tier (Top)</div></div>';
     h += '<div class="sales-stat"><div class="sales-stat-val" style="color:#1565c0;">' + tierB + '</div><div class="sales-stat-lbl">B-Tier (Active)</div></div>';
     h += '<div class="sales-stat"><div class="sales-stat-val" style="color:var(--muted);">' + tierC + '</div><div class="sales-stat-lbl">C-Tier (Cold)</div></div>';
