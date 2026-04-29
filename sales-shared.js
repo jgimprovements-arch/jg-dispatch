@@ -63,6 +63,14 @@
     'josh.greil@jg-restoration.com': 'Josh'
   };
 
+  // Live rep → home market map. Populated from the employees table at app
+  // init via _refreshAllRepMarkets(). Key is the rep's display name (e.g.
+  // "Kristina"), value is "Appleton" / "Stevens Point" / null. null means
+  // employee record exists but has no market assigned — treat as "both".
+  // Reps not in this map are unknown / former employees — also treat as
+  // "both" so historical touches don't disappear.
+  var _repMarketsByName = {};
+
   // Admin emails (lowercased). Admins bypass canEdit/canDelete checks.
   var ADMINS = [
     'josh@jg-restoration.com',
@@ -161,11 +169,15 @@
           _repMarket = cached[email];
           // Still kick off a background refresh — don't await it
           _refreshMarketCache(sbFetch, email).catch(function(){});
+          // Also refresh the all-reps map for the Touches tab filter
+          _refreshAllRepMarkets(sbFetch).catch(function(){});
           return Promise.resolve(_repMarket);
         }
       } catch(e) {}
 
-      // Cache miss — fetch synchronously
+      // Cache miss — fetch synchronously. Also kick off the all-reps fetch
+      // in parallel since the Touches tab filter depends on it.
+      _refreshAllRepMarkets(sbFetch).catch(function(){});
       return _refreshMarketCache(sbFetch, email).then(function(m){
         _repMarket = m || DEFAULT_MARKET;
         return _repMarket;
@@ -197,6 +209,62 @@
         _repMarket = m;
         return m;
       });
+  }
+
+  // Build the rep_name → market map from the employees table. Called by
+  // init() so it's ready before the Touches tab renders. Keyed by display
+  // name (matching what shows up in touches.logged_by) instead of email.
+  // Best-effort — if the fetch fails, _repMarketsByName stays empty and
+  // every rep gets "show in both markets" treatment via repMatchesMarket.
+  function _refreshAllRepMarkets(sbFetch) {
+    if (typeof sbFetch !== 'function') return Promise.resolve();
+    return sbFetch('/rest/v1/employees?active=eq.true&select=email,name,market')
+      .then(function(r){
+        if (!r || !r.ok) return null;
+        return r.json();
+      })
+      .then(function(rows){
+        if (!rows || !rows.length) return;
+        var map = {};
+        rows.forEach(function(emp){
+          if (!emp.email) return;
+          // Match against our REPS dict so the key is the display name we
+          // actually use elsewhere (Kristina, not kristina@jg-...). Falls
+          // back to the employee's `name` field if not in REPS, and finally
+          // to a name derived from the employee record.
+          var displayName = REPS[(emp.email||'').toLowerCase()];
+          if (!displayName && emp.name) {
+            // Take first name from the employee record (e.g. "Kristina K." → "Kristina")
+            displayName = String(emp.name).split(/\s+/)[0];
+          }
+          if (!displayName) return;
+          var m = emp.market;
+          // Validate market value — only Appleton or Stevens Point. null/missing
+          // means "no specific market" → treated as both.
+          if (m && MARKETS.indexOf(m) === -1) m = null;
+          map[displayName] = m;
+        });
+        _repMarketsByName = map;
+      })
+      .catch(function(){ /* best-effort, leave map empty */ });
+  }
+
+  // Returns whether a rep should be visible in the given market tab.
+  // Logic:
+  //   - touch with no logged_by → show in all markets
+  //   - market filter is 'All' → show in all markets
+  //   - rep is in the map with a specific market → match exactly
+  //   - rep is in the map but has null market → show in both (no specified home)
+  //   - rep is NOT in the map (former employee, unknown name) → show in both
+  // Bias is toward showing data, not hiding it. Hiding rep activity by
+  // mistake is more confusing than seeing too much.
+  function repMatchesMarket(repName, market) {
+    if (!repName) return true;
+    if (!market || market === 'All') return true;
+    if (!(repName in _repMarketsByName)) return true;  // unknown / former
+    var home = _repMarketsByName[repName];
+    if (!home) return true;  // employee record exists, no market set
+    return home === market;
   }
 
   // Returns the rep's home market. DEFAULT_MARKET if init() hasn't completed
@@ -237,6 +305,7 @@
     ADMINS: ADMINS,
     MARKETS: MARKETS,
     DEFAULT_MARKET: DEFAULT_MARKET,
+    repMatchesMarket: repMatchesMarket,
     auth: {
       currentUser: currentUser,
       currentEmail: currentEmail,

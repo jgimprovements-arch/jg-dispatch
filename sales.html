@@ -659,7 +659,7 @@ async function loadAll() {
   // Fire all four in parallel — big perceived speedup since they no longer block each other
   var results = await Promise.allSettled([
     fetchAllPartners(),
-    sbSafe('/rest/v1/sales_touches?market=eq.'+mq+'&order=touch_date.desc&limit=200'),
+    sbSafe('/rest/v1/sales_touches?order=touch_date.desc&limit=400'),
     sbSafe('/rest/v1/sales_followups?market=eq.'+mq+'&completed=eq.false&order=due_date.asc&limit=500'),
     sbSafe('/rest/v1/sales_routes?market=eq.'+mq+'&order=route_date.desc&limit=30')
   ]);
@@ -1482,13 +1482,36 @@ function _renderNow() {
 
   // ── TOUCHES TAB ───────────────────────────────────────────────────────────
   if (ST.tab === 'touches') {
+    // ── Compute base set first (rep home market filter applied) ──────────
+    // The stats cards below reflect this scoped pool, not the full ST.touches.
+    // That way "Today / This Week / Positive / Total" answer the question
+    // "what's happening in THIS market tab," and they update further when a
+    // rep filter is applied.
+    var statBase = ST.touches.slice();
+    if (window.JG_SHARED && typeof window.JG_SHARED.repMatchesMarket === 'function') {
+      statBase = statBase.filter(function(t){
+        return window.JG_SHARED.repMatchesMarket(t.logged_by, ST.market);
+      });
+    }
+    // Apply the active Rep filter to the stat pool too, so "select David →
+    // see David's totals" works the way you'd expect.
+    if (ST.touchFilterRep !== 'All') {
+      statBase = statBase.filter(function(t){ return t.logged_by === ST.touchFilterRep; });
+    }
+
     var weekAgo = new Date(); weekAgo.setDate(weekAgo.getDate()-7);
-    var todayTouches = ST.touches.filter(function(t){ return t.touch_date === ST.today; }).length;
-    var weekTouches  = ST.touches.filter(function(t){ return new Date(t.touch_date) >= weekAgo; }).length;
-    var positiveTouches = ST.touches.filter(function(t){ return t.outcome === 'Positive'; }).length;
+    var weekAgoStr = weekAgo.toISOString().split('T')[0];
+    var todayTouches    = statBase.filter(function(t){ return t.touch_date === ST.today; }).length;
+    var weekTouches     = statBase.filter(function(t){ return t.touch_date >= weekAgoStr; }).length;
+    var positiveTouches = statBase.filter(function(t){ return t.outcome === 'Positive'; }).length;
+    var totalTouches    = statBase.length;
+
+    // Top bar headline reflects the scope: include "for {Rep}" when filtered.
+    var headline = totalTouches + ' touches recorded';
+    if (ST.touchFilterRep !== 'All') headline += ' for ' + ST.touchFilterRep;
 
     h += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">';
-    h += '<div style="font-size:13px;font-weight:700;color:var(--navy);">' + ST.touches.length + ' touches recorded</div>';
+    h += '<div style="font-size:13px;font-weight:700;color:var(--navy);">' + headline + '</div>';
     h += '<button class="btn btn-gold" onclick="ST.modal=\'log-touch\';ST.selected=null;render()">+ Log Touch</button>';
     h += '</div>';
 
@@ -1496,8 +1519,35 @@ function _renderNow() {
     h += '<div class="sales-stat"><div class="sales-stat-val">' + todayTouches + '</div><div class="sales-stat-lbl">Today</div></div>';
     h += '<div class="sales-stat"><div class="sales-stat-val">' + weekTouches + '</div><div class="sales-stat-lbl">This Week</div></div>';
     h += '<div class="sales-stat"><div class="sales-stat-val" style="color:var(--ok);">' + positiveTouches + '</div><div class="sales-stat-lbl">Positive</div></div>';
-    h += '<div class="sales-stat"><div class="sales-stat-val">' + ST.touches.length + '</div><div class="sales-stat-lbl">Total Logged</div></div>';
+    h += '<div class="sales-stat"><div class="sales-stat-val">' + totalTouches + '</div><div class="sales-stat-lbl">Total Logged</div></div>';
     h += '</div>';
+
+    // By-type breakdown — only shown when a specific rep is selected. Gives
+    // a quick read on rep activity mix (Calls vs Visits vs Drop-ins) for
+    // performance review. When "All reps" is active, this row hides because
+    // the team-wide aggregate is less actionable.
+    if (ST.touchFilterRep !== 'All') {
+      var byType = {};
+      statBase.forEach(function(t){
+        var k = t.touch_type || 'Other';
+        byType[k] = (byType[k]||0) + 1;
+      });
+      // Display order: most-common touch types first, then anything unusual
+      var TYPE_ORDER = ['Visit','Call','Drop-in','Email','Text','Event'];
+      var orderedTypes = TYPE_ORDER.filter(function(t){ return byType[t]; });
+      Object.keys(byType).forEach(function(k){
+        if (TYPE_ORDER.indexOf(k) === -1) orderedTypes.push(k);
+      });
+
+      if (orderedTypes.length) {
+        h += '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:16px;padding:10px 14px;background:rgba(13,45,94,.04);border-radius:8px;border:1px solid var(--border);">';
+        h += '<span style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-right:4px;">By Type:</span>';
+        orderedTypes.forEach(function(k){
+          h += '<span style="font-size:12px;font-weight:600;color:var(--navy);background:#fff;padding:4px 10px;border-radius:6px;border:1px solid var(--border);">' + _ve(k) + ': <span style="color:var(--orange);">' + byType[k] + '</span></span>';
+        });
+        h += '</div>';
+      }
+    }
 
     // ── Filter / search / group-by row ─────────────────────────────────────
     // Rep list sourced from JG_SHARED when available (same pattern as the
@@ -1557,6 +1607,19 @@ function _renderNow() {
     // Visibility: ALL reps see ALL touches now (was admin-only previously).
     // Team-transparency shift — matches the open-reassignment decision.
     var filteredTouches = ST.touches.slice();
+
+    // Filter by rep's home market, NOT by the touch's own market field.
+    // Kristina/Rylan are Appleton reps; David/Brent are Stevens Point;
+    // Josh works both. Source of truth is the employees table — see
+    // JG_SHARED.repMatchesMarket() in sales-shared.js. If JG_SHARED isn't
+    // ready yet, the helper returns true for everyone (fail-open) so the
+    // user sees data while the lookup populates.
+    if (window.JG_SHARED && typeof window.JG_SHARED.repMatchesMarket === 'function') {
+      filteredTouches = filteredTouches.filter(function(t){
+        return window.JG_SHARED.repMatchesMarket(t.logged_by, ST.market);
+      });
+    }
+
     if (ST.touchFilterRep !== 'All') {
       filteredTouches = filteredTouches.filter(function(t){ return t.logged_by === ST.touchFilterRep; });
     }
