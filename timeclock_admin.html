@@ -2288,19 +2288,32 @@ async function toggleVerified(entryId, newState) {
   if (newState) body.self_verified_at = nowIso;
   else body.self_verified_at = null;
 
-  var r = await fetch(SB_URL + '/rest/v1/time_entries?id=eq.' + entryId, {
-    method: 'PATCH',
-    headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
-  });
-  if (r.ok) {
-    entry.self_verified = !!newState;
-    entry.self_verified_at = newState ? nowIso : null;
-    toast(newState ? '✓ Marked verified' : 'Verification removed');
-    logActivity(newState ? 'Entry Verified (admin)' : 'Entry Unverified (admin)', entry.employee_name + ' — ' + new Date(entry.clock_in).toLocaleString(), 'time_clock', entry.employee_name);
-    render();
-  } else {
-    toast('Update failed');
+  // Optimistic update — flip state and re-render immediately, server PATCH happens in background
+  entry.self_verified = !!newState;
+  entry.self_verified_at = newState ? nowIso : null;
+  toast(newState ? '✓ Marked verified' : 'Verification removed');
+  render();
+  _refreshTimecardModalIfOpen();
+
+  try {
+    var r = await fetch(SB_URL + '/rest/v1/time_entries?id=eq.' + entryId, {
+      method: 'PATCH',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    if (!r.ok) {
+      // Revert optimistic state on failure
+      entry.self_verified = !newState;
+      entry.self_verified_at = !newState ? nowIso : null;
+      toast('⚠ Update failed — reverted');
+      render();
+      _refreshTimecardModalIfOpen();
+      return;
+    }
+    if (typeof logActivity === 'function') logActivity(newState ? 'Entry Verified (admin)' : 'Entry Unverified (admin)', entry.employee_name + ' — ' + new Date(entry.clock_in).toLocaleString(), 'time_clock', entry.employee_name);
+  } catch(e) {
+    console.error('toggleVerified error:', e);
+    toast('⚠ Network error');
   }
 }
 
@@ -3072,7 +3085,7 @@ function renderTimesheets() {
       if (tcApproved) {
         h += '<td><span style="font-size:10px;color:var(--muted);">🔒 Locked</span></td>';
       } else {
-        h += '<td>'+(isAdmin()?'<button class="btn btn-sm" onclick="editEntry(\''+e.id+'\')">Edit</button> <button class="btn btn-sm" onclick="openBreakEditor(\''+e.id+'\')" style="background:#6a1b9a;color:#fff;border-color:#6a1b9a;" title="Edit breaks">☕</button> <button class="btn btn-sm" onclick="openSplitEntry(\''+e.id+'\')" style="background:#0d2d5e;color:#fff;border-color:#0d2d5e;" title="Split into two entries">✂️</button> <button class="btn btn-sm" onclick="deleteEntry(\''+e.id+'\')" style="background:#c62828;color:#fff;border-color:#c62828;" title="Delete entry">🗑</button>':'<button class="btn btn-sm" onclick="viewEntry(\''+e.id+'\')">View</button>')+'</td>';
+        h += '<td>'+(isAdmin()?'<button class="btn btn-sm" onclick="editEntry(\''+e.id+'\')">Edit</button> <button class="btn btn-sm" onclick="openBreakEditor(\''+e.id+'\')" style="background:#f5a623;color:#fff;border-color:#f5a623;font-size:14px;" title="Edit breaks">🥪</button> <button class="btn btn-sm" onclick="openSplitEntry(\''+e.id+'\')" style="background:#0d2d5e;color:#fff;border-color:#0d2d5e;" title="Split into two entries">✂️</button> <button class="btn btn-sm" onclick="deleteEntry(\''+e.id+'\')" style="background:#c62828;color:#fff;border-color:#c62828;" title="Delete entry">🗑</button>':'<button class="btn btn-sm" onclick="viewEntry(\''+e.id+'\')">View</button>')+'</td>';
       }
       h += '</tr>';
     });
@@ -10965,7 +10978,7 @@ function openTimecardDetail(empName) {
       h += '<td style="text-align:center;">'+verifiedCell+'</td>';
       h += '<td>'+flagCell+'</td>';
       if (!isApproved && typeof isAdmin === 'function' && isAdmin()) {
-        h += '<td><button class="btn btn-sm" onclick="editEntry(\''+e.id+'\')">Edit</button> <button class="btn btn-sm" onclick="openBreakEditor(\''+e.id+'\')" style="background:#6a1b9a;color:#fff;border-color:#6a1b9a;" title="Edit breaks">☕</button> <button class="btn btn-sm" onclick="openSplitEntry(\''+e.id+'\')" style="background:#0d2d5e;color:#fff;border-color:#0d2d5e;" title="Split into two entries">✂️</button> <button class="btn btn-sm" onclick="deleteEntry(\''+e.id+'\')" style="background:#c62828;color:#fff;border-color:#c62828;" title="Delete entry">🗑</button></td>';
+        h += '<td><button class="btn btn-sm" onclick="editEntry(\''+e.id+'\')">Edit</button> <button class="btn btn-sm" onclick="openBreakEditor(\''+e.id+'\')" style="background:#f5a623;color:#fff;border-color:#f5a623;font-size:14px;" title="Edit breaks">🥪</button> <button class="btn btn-sm" onclick="openSplitEntry(\''+e.id+'\')" style="background:#0d2d5e;color:#fff;border-color:#0d2d5e;" title="Split into two entries">✂️</button> <button class="btn btn-sm" onclick="deleteEntry(\''+e.id+'\')" style="background:#c62828;color:#fff;border-color:#c62828;" title="Delete entry">🗑</button></td>';
       } else {
         h += '<td></td>';
       }
