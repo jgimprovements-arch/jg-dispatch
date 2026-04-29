@@ -3072,7 +3072,7 @@ function renderTimesheets() {
       if (tcApproved) {
         h += '<td><span style="font-size:10px;color:var(--muted);">🔒 Locked</span></td>';
       } else {
-        h += '<td>'+(isAdmin()?'<button class="btn btn-sm" onclick="editEntry(\''+e.id+'\')">Edit</button> <button class="btn btn-sm" onclick="openBreakEditor(\''+e.id+'\')" style="background:#6a1b9a;color:#fff;border-color:#6a1b9a;" title="Edit breaks">☕</button> <button class="btn btn-sm" onclick="openSplitEntry(\''+e.id+'\')" style="background:#0d2d5e;color:#fff;border-color:#0d2d5e;" title="Split into two entries">✂️</button>':'<button class="btn btn-sm" onclick="viewEntry(\''+e.id+'\')">View</button>')+'</td>';
+        h += '<td>'+(isAdmin()?'<button class="btn btn-sm" onclick="editEntry(\''+e.id+'\')">Edit</button> <button class="btn btn-sm" onclick="openBreakEditor(\''+e.id+'\')" style="background:#6a1b9a;color:#fff;border-color:#6a1b9a;" title="Edit breaks">☕</button> <button class="btn btn-sm" onclick="openSplitEntry(\''+e.id+'\')" style="background:#0d2d5e;color:#fff;border-color:#0d2d5e;" title="Split into two entries">✂️</button> <button class="btn btn-sm" onclick="deleteEntry(\''+e.id+'\')" style="background:#c62828;color:#fff;border-color:#c62828;" title="Delete entry">🗑</button>':'<button class="btn btn-sm" onclick="viewEntry(\''+e.id+'\')">View</button>')+'</td>';
       }
       h += '</tr>';
     });
@@ -10281,6 +10281,67 @@ function showModal(title, bodyHtml, saveCall) {
   m.addEventListener('click', function(e){ if(e.target===m) closeModal(); });
   document.body.appendChild(m);
 }
+// ── DELETE ENTRY ──────────────────────────────────────────────────────────
+// Hard delete a time_entries row. Admin only. Cascades to time_breaks because
+// the FK has ON DELETE CASCADE (or breaks reference entry_id and we clean
+// them ourselves below as a safety).
+async function deleteEntry(entryId) {
+  if (!isAdmin()) { toast('Admin access required'); return; }
+  var entry = ST.entries.find(function(e){ return e.id === entryId; });
+  if (!entry) { toast('Entry not found'); return; }
+
+  // Build a clear confirmation message showing exactly what we'll delete
+  var dt = new Date(entry.clock_in);
+  var dateLabel = dt.toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' });
+  var timeLabel = dt.toLocaleTimeString('en-US', { hour:'numeric', minute:'2-digit' });
+  var durLabel = entry.clock_out
+    ? Math.floor((entry.duration_minutes||0)/60) + 'h ' + ((entry.duration_minutes||0)%60) + 'm'
+    : 'still active';
+
+  var confirmMsg = '⚠ PERMANENT DELETE — cannot be undone.\n\n' +
+                   'Entry: ' + (entry.employee_name || '?') + '\n' +
+                   'Date: ' + dateLabel + ' at ' + timeLabel + '\n' +
+                   'Duration: ' + durLabel + '\n' +
+                   'Job: ' + (entry.job_name || 'No job') + '\n\n' +
+                   'This will also delete any breaks linked to this entry.\n\n' +
+                   'Type DELETE in the next prompt to confirm.';
+  if (!confirm(confirmMsg)) return;
+
+  var typed = prompt('Type DELETE (all caps) to confirm permanent removal:');
+  if (typed !== 'DELETE') { toast('Cancelled — text did not match'); return; }
+
+  // Optimistic local removal
+  ST.entries = ST.entries.filter(function(e){ return e.id !== entryId; });
+  ST.breaks = ST.breaks.filter(function(b){ return b.entry_id !== entryId; });
+  toast('Deleting entry...');
+  render();
+  _refreshTimecardModalIfOpen();
+
+  // Persist: delete linked breaks first, then the entry itself
+  try {
+    await fetch(SB_URL + '/rest/v1/time_breaks?entry_id=eq.' + entryId, {
+      method: 'DELETE',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+    });
+    var r = await fetch(SB_URL + '/rest/v1/time_entries?id=eq.' + entryId, {
+      method: 'DELETE',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+    });
+    if (r.ok) {
+      toast('✓ Entry deleted');
+      if (typeof logActivity === 'function') {
+        logActivity('Entry Deleted', (entry.employee_name||'?') + ' — ' + dateLabel + ' ' + timeLabel + ' (' + (entry.job_name||'no job') + ', ' + durLabel + ')', 'time_clock', entry.employee_name);
+      }
+    } else {
+      toast('⚠ Server delete failed — refreshing');
+    }
+  } catch(e) {
+    console.error('Delete failed:', e);
+    toast('⚠ Delete error — refreshing');
+  }
+  await loadAll();
+}
+
 // ── FIX EARLY CLOCK-IN ────────────────────────────────────────────────────
 // One-click action to push a too-early clock_in to 7:30 AM same day.
 async function fixEarlyTo730(entryId) {
@@ -10904,7 +10965,7 @@ function openTimecardDetail(empName) {
       h += '<td style="text-align:center;">'+verifiedCell+'</td>';
       h += '<td>'+flagCell+'</td>';
       if (!isApproved && typeof isAdmin === 'function' && isAdmin()) {
-        h += '<td><button class="btn btn-sm" onclick="editEntry(\''+e.id+'\')">Edit</button> <button class="btn btn-sm" onclick="openBreakEditor(\''+e.id+'\')" style="background:#6a1b9a;color:#fff;border-color:#6a1b9a;" title="Edit breaks">☕</button> <button class="btn btn-sm" onclick="openSplitEntry(\''+e.id+'\')" style="background:#0d2d5e;color:#fff;border-color:#0d2d5e;" title="Split into two entries">✂️</button></td>';
+        h += '<td><button class="btn btn-sm" onclick="editEntry(\''+e.id+'\')">Edit</button> <button class="btn btn-sm" onclick="openBreakEditor(\''+e.id+'\')" style="background:#6a1b9a;color:#fff;border-color:#6a1b9a;" title="Edit breaks">☕</button> <button class="btn btn-sm" onclick="openSplitEntry(\''+e.id+'\')" style="background:#0d2d5e;color:#fff;border-color:#0d2d5e;" title="Split into two entries">✂️</button> <button class="btn btn-sm" onclick="deleteEntry(\''+e.id+'\')" style="background:#c62828;color:#fff;border-color:#c62828;" title="Delete entry">🗑</button></td>';
       } else {
         h += '<td></td>';
       }
