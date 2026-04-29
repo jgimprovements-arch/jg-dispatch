@@ -983,8 +983,11 @@ function _canEdit(partner) {
   return partner.assigned_to === APP.repName;
 }
 function _canDelete() {
-  if (window.JG_SHARED && window.JG_SHARED.auth) return window.JG_SHARED.auth.canDelete();
-  return false; // fail-closed: only admins should ever delete
+  // Delete is now open to all reps (matches desktop and the team's
+  // small-team trust decision today). The confirm dialog inside
+  // deletePartnerApp provides the friction. Previously admin-only via
+  // JG_SHARED.auth.canDelete().
+  return true;
 }
 function _canReassign() {
   // Reassignment is fully open — any rep can reassign any partner to anyone.
@@ -2321,21 +2324,69 @@ function openPartnerDetail(pid) {
 }
 
 async function deletePartnerApp(pid, pname) {
-  // Defense in depth: button is hidden for non-admins via _canDelete() in
-  // openPartnerDetail, but guard here too in case this is called some other way.
-  if (!_canDelete()) { toast('Only admins can delete partners'); return; }
-  if (!confirm('Delete ' + pname + '?\nThis cannot be undone.')) return;
+  // Permission gate (open to all reps now, matches desktop and the
+  // team's small-team trust decision).
+  if (!_canDelete()) { toast('Not authorized'); return; }
+
+  // Count what's attached so we can warn the user about the cascade impact.
+  // sales_partners FKs aren't CASCADE in Supabase — touches and follow-ups
+  // need to be explicitly deleted first or the partner DELETE will fail.
+  var touchCount = APP.touches.filter(function(t){ return t.partner_id === pid; }).length;
+  var fuCount    = APP.followups.filter(function(f){ return f.partner_id === pid; }).length;
+
+  var msg;
+  if (touchCount === 0 && fuCount === 0) {
+    msg = 'Delete ' + pname + '?\n\nNo touches or follow-ups attached.\n\nThis cannot be undone.';
+  } else {
+    var bits = [];
+    if (touchCount) bits.push(touchCount + ' touch' + (touchCount===1?'':'es'));
+    if (fuCount)    bits.push(fuCount + ' follow-up' + (fuCount===1?'':'s'));
+    msg = '⚠ Delete ' + pname + '?\n\n' +
+          'This will also DELETE ' + bits.join(' and ') + '.\n\n' +
+          'If you are cleaning up duplicates, use Merge on the desktop instead — that preserves the touches.\n\n' +
+          'Cannot be undone. Continue?';
+  }
+  if (!confirm(msg)) return;
+
   try {
-    await fetch(SB_URL + '/rest/v1/sales_partners?id=eq.' + pid, {
+    // 1. Delete touches first
+    if (touchCount > 0) {
+      await fetch(SB_URL + '/rest/v1/sales_touches?partner_id=eq.' + pid, {
+        method: 'DELETE',
+        headers: {'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY}
+      });
+    }
+    // 2. Delete follow-ups
+    if (fuCount > 0) {
+      await fetch(SB_URL + '/rest/v1/sales_followups?partner_id=eq.' + pid, {
+        method: 'DELETE',
+        headers: {'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY}
+      });
+    }
+    // 3. Delete the partner
+    var resp = await fetch(SB_URL + '/rest/v1/sales_partners?id=eq.' + pid, {
       method: 'DELETE',
-      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+      headers: {'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY}
     });
-    APP.partners = APP.partners.filter(function(p){ return p.id !== pid; });
+    if (!resp.ok) {
+      var errTxt = await resp.text();
+      toast('Delete failed: ' + errTxt.slice(0, 60));
+      return;
+    }
+
+    // Local state cleanup so the UI updates immediately
+    APP.partners  = APP.partners.filter(function(p){ return p.id !== pid; });
+    APP.touches   = APP.touches.filter(function(t){ return t.partner_id !== pid; });
+    APP.followups = APP.followups.filter(function(f){ return f.partner_id !== pid; });
+
     closePartnerDetail();
     toast('✓ ' + pname + ' deleted');
     renderPartners();
     renderHome();
-  } catch(e) { toast('Error deleting partner'); }
+    if (typeof renderFollowups === 'function') renderFollowups();
+  } catch(e) {
+    toast('Error: ' + (e.message || 'delete failed'));
+  }
 }
 
 function closePartnerDetail() {

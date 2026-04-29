@@ -363,6 +363,73 @@ function _updateBulkBar() {
   }
 }
 
+// Delete a single partner. Counts attached touches/follow-ups, surfaces
+// them in the confirm dialog so the user knows what they're losing, then
+// deletes attachments before deleting the partner itself (matches the
+// merge function's pattern — Supabase foreign keys aren't CASCADE so the
+// attachments must be removed first or the DELETE will fail).
+async function deletePartner(partnerId) {
+  if (!partnerId) return;
+  var p = ST.partners.find(function(x){ return x.id === partnerId; });
+  if (!p) { alert('Partner not found.'); return; }
+
+  // Count what's attached so the warning can be specific.
+  var touchCount = ST.touches.filter(function(t){ return t.partner_id === partnerId; }).length;
+  var fuCount    = ST.followups.filter(function(f){ return f.partner_id === partnerId; }).length;
+
+  // Build the confirm message. Empty partner = soft warning. Partner with
+  // history = much louder warning + suggest merge as the alternative.
+  var msg;
+  if (touchCount === 0 && fuCount === 0) {
+    msg = 'Delete ' + p.name + '?\n\nThis partner has no touches or follow-ups attached.\n\nThis cannot be undone.';
+  } else {
+    var bits = [];
+    if (touchCount) bits.push(touchCount + ' touch' + (touchCount===1?'':'es'));
+    if (fuCount)    bits.push(fuCount + ' follow-up' + (fuCount===1?'':'s'));
+    msg = '⚠ Delete ' + p.name + '?\n\n' +
+          'This will also DELETE the partner\'s ' + bits.join(' and ') + '.\n\n' +
+          'If you are trying to clean up duplicates, use Merge instead — that preserves the touches and re-points them to the surviving partner.\n\n' +
+          'This cannot be undone. Continue?';
+  }
+  if (!confirm(msg)) return;
+
+  try {
+    // 1. Delete attached touches (must happen before partner DELETE due to FK)
+    if (touchCount > 0) {
+      await sb('/rest/v1/sales_touches?partner_id=eq.' + partnerId, { method:'DELETE' });
+    }
+    // 2. Delete attached follow-ups
+    if (fuCount > 0) {
+      await sb('/rest/v1/sales_followups?partner_id=eq.' + partnerId, { method:'DELETE' });
+    }
+    // 3. Delete the partner record itself
+    var resp = await fetch(SB_URL + '/rest/v1/sales_partners?id=eq.' + partnerId, {
+      method: 'DELETE',
+      headers: {'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY}
+    });
+    if (!resp.ok) {
+      var errTxt = await resp.text();
+      alert('Delete failed: ' + errTxt.slice(0, 200) + '\n\nThe partner\'s touches/follow-ups may have been removed but the partner itself was not. Refresh and check.');
+      return;
+    }
+
+    // Local state cleanup so the UI updates immediately without a full reload.
+    ST.partners  = ST.partners.filter(function(x){ return x.id !== partnerId; });
+    ST.touches   = ST.touches.filter(function(t){ return t.partner_id !== partnerId; });
+    ST.followups = ST.followups.filter(function(f){ return f.partner_id !== partnerId; });
+
+    // Close the modal and re-render
+    ST.modal = null;
+    ST.selected = null;
+    render();
+    if (typeof showOk === 'function') showOk('✓ Deleted ' + p.name);
+    else console.log('Deleted ' + p.name);
+  } catch(e) {
+    alert('Delete failed: ' + (e.message||e) + '\n\nThe partner may be in a partial state. Refresh and check.');
+    console.error('deletePartner error:', e);
+  }
+}
+
 async function bulkDeleteSelected() {
   var ids = [];
   for (var k in ST.selectedIds) if (ST.selectedIds[k]) ids.push(k);
@@ -2188,6 +2255,10 @@ function _buildModalHtml() {
         mh += '<button style="padding:8px 16px;border-radius:6px;border:none;background:var(--orange);color:#fff;font-size:12px;font-weight:600;cursor:pointer;flex:1;min-width:120px;" onclick="ST.modal=\'log-touch\';render()">📋 Log Touch</button>';
         mh += '<button style="padding:8px 16px;border-radius:6px;border:1.5px solid var(--navy);background:transparent;color:var(--navy);font-size:12px;font-weight:600;cursor:pointer;" onclick="editPartner(\'' + p.id + '\')">✏️ Edit</button>';
         mh += '<button style="padding:8px 16px;border-radius:6px;border:1.5px solid var(--danger);background:transparent;color:var(--danger);font-size:12px;font-weight:600;cursor:pointer;" onclick="openMergePicker(\'' + p.id + '\')">⇄ Merge</button>';
+        // Delete — solid red to distinguish from Merge (outlined red). Both
+        // are destructive but Delete is the more drastic of the two: Merge
+        // preserves data (touches re-pointed), Delete throws data away.
+        mh += '<button style="padding:8px 16px;border-radius:6px;border:none;background:var(--danger);color:#fff;font-size:12px;font-weight:600;cursor:pointer;" onclick="deletePartner(\'' + p.id + '\')">🗑 Delete</button>';
         mh += '<button style="padding:8px 16px;border-radius:6px;border:1.5px solid var(--border);background:transparent;font-size:12px;cursor:pointer;" onclick="ST.modal=null;ST.selected=null;render()">Close</button>';
         mh += '</div>';
       }
@@ -2256,9 +2327,14 @@ function _buildModalHtml() {
         })();
         mh += '</div></div>';
         mh += '<div style="font-size:11px;color:var(--danger);margin-bottom:14px;line-height:1.5;"><strong>⚠ Cannot be undone.</strong> ' + ml.name + "'s record will be permanently deleted. All touches and follow-ups will be re-pointed to " + mk.name + '.</div>';
-        mh += '<div style="display:flex;gap:8px;justify-content:flex-end;">';
-        mh += '<button style="padding:8px 16px;border-radius:6px;border:1.5px solid var(--border);background:transparent;cursor:pointer;font-size:12px;" onclick="ST.modal=\'merge-picker\';ST.mergeLoser=null;render()">← Back</button>';
-        mh += '<button style="padding:8px 20px;border-radius:6px;border:none;background:var(--danger);color:#fff;font-size:12px;font-weight:600;cursor:pointer;" onclick="confirmMerge()">⇄ Merge & Delete</button>';
+        // Footer restructured: primary action (Merge & Delete) is full-width
+        // and on top so it can never be clipped by narrow modal width or
+        // overflow. Back button is below as a smaller secondary link.
+        // Previously these were side-by-side and the Merge button was
+        // sometimes invisible on narrower viewports.
+        mh += '<button style="width:100%;padding:12px;border-radius:8px;border:none;background:var(--danger);color:#fff;font-size:13px;font-weight:700;cursor:pointer;font-family:DM Sans,sans-serif;" onclick="confirmMerge()">⇄ Merge & Delete ' + ml.name + '</button>';
+        mh += '<div style="text-align:center;margin-top:10px;">';
+        mh += '<button style="padding:8px 16px;border-radius:6px;border:none;background:transparent;color:var(--muted);cursor:pointer;font-size:12px;font-family:DM Sans,sans-serif;text-decoration:underline;" onclick="ST.modal=\'merge-picker\';ST.mergeLoser=null;render()">← Back</button>';
         mh += '</div>';
       }
     }
