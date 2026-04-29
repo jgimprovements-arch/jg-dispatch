@@ -251,6 +251,20 @@ function mkTierFilters() {
 // markup from special characters in partner names, notes, etc. Previously
 // defined only inside the add-partner modal scope; hoisted here so every
 // render function can use it.
+// Returns today's date in the user's LOCAL timezone as YYYY-MM-DD.
+// Critical: do NOT use new Date().toISOString().split('T')[0] for this —
+// that returns UTC date, which is "tomorrow" by Wisconsin time after
+// 7 PM CDT (6 PM CST). Resulted in touches logged late in the day not
+// showing up under "Today" filters because the comparison was against
+// the UTC date, not the local one.
+function _localDateStr(d) {
+  d = d || new Date();
+  var y = d.getFullYear();
+  var m = String(d.getMonth() + 1).padStart(2, '0');
+  var dd = String(d.getDate()).padStart(2, '0');
+  return y + '-' + m + '-' + dd;
+}
+
 function _ve(v) {
   if (v == null) return '';
   return String(v)
@@ -581,7 +595,7 @@ var ST = {
   touchFilterRange:   'All',   // 'All' | 'today' | '7d' | '30d' | '90d'
   touchSearchQ:       '',
   touchGroupBy:       'none',  // 'none' | 'rep' | 'date' | 'partner' | 'outcome'
-  today: new Date().toISOString().split('T')[0],
+  today: _localDateStr(),
   apiKey: localStorage.getItem('jg_key')||''
 };
 
@@ -1292,6 +1306,13 @@ function _renderNow() {
   var a = document.getElementById('app');
   if (!a) return;
 
+  // Refresh ST.today on every render. ST is initialized once at module load,
+  // so if a tab is left open across midnight, ST.today goes stale and the
+  // "Today" filter on the Touches tab silently shows zero results. Cheap
+  // recompute, so just do it every render to make sure date math always
+  // reflects the user's actual current local date.
+  ST.today = _localDateStr();
+
   // Short-circuit: if only the modal state changed, skip the expensive
   // 1000-card background rebuild and only repaint the modal layer.
   var sig = _bgSignature();
@@ -1500,7 +1521,7 @@ function _renderNow() {
     }
 
     var weekAgo = new Date(); weekAgo.setDate(weekAgo.getDate()-7);
-    var weekAgoStr = weekAgo.toISOString().split('T')[0];
+    var weekAgoStr = _localDateStr(weekAgo);
     var todayTouches    = statBase.filter(function(t){ return t.touch_date === ST.today; }).length;
     var weekTouches     = statBase.filter(function(t){ return t.touch_date >= weekAgoStr; }).length;
     var positiveTouches = statBase.filter(function(t){ return t.outcome === 'Positive'; }).length;
@@ -2169,7 +2190,7 @@ function _buildModalHtml() {
       mh += '<div style="display:flex;align-items:center;gap:10px;">';
       mh += '<input type="checkbox" id="tFollowup" style="width:16px;height:16px;accent-color:var(--orange);">';
       mh += '<label for="tFollowup" style="font-size:12px;font-weight:600;cursor:pointer;">Schedule follow-up</label>';
-      mh += '<input class="form-input" type="date" id="tFollowupDate" style="width:160px;margin-left:auto;" value="' + new Date(Date.now()+7*86400000).toISOString().split('T')[0] + '">';
+      mh += '<input class="form-input" type="date" id="tFollowupDate" style="width:160px;margin-left:auto;" value="' + _localDateStr(new Date(Date.now()+7*86400000)) + '">';
       mh += '</div>';
       mh += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px;">';
       mh += '<div><label style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;display:block;margin-bottom:4px;">Priority</label><select class="form-select" id="tFollowupPriority" style="padding:6px 10px;font-size:12px;"><option>Normal</option><option>High</option><option>Low</option></select></div>';
@@ -2270,7 +2291,7 @@ function _buildModalHtml() {
       mh += '<div class="modal-title">🔔 Add Follow-up</div>';
       mh += '<div class="form-group"><label class="form-label">Partner</label>' + _partnerCombobox('fuPartner') + '</div>';
       mh += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">';
-      mh += '<div class="form-group"><label class="form-label">Due Date</label><input class="form-input" type="date" id="fuDate" value="' + new Date(Date.now()+3*86400000).toISOString().split('T')[0] + '"></div>';
+      mh += '<div class="form-group"><label class="form-label">Due Date</label><input class="form-input" type="date" id="fuDate" value="' + _localDateStr(new Date(Date.now()+3*86400000)) + '"></div>';
       mh += '<div class="form-group"><label class="form-label">Priority</label><select class="form-select" id="fuPriority"><option>Normal</option><option>High</option><option>Low</option></select></div>';
       mh += '</div>';
       mh += '<div class="form-group"><label class="form-label">Reason / Notes</label><input class="form-input" id="fuReason" placeholder="e.g. Check in on referral"></div>';
