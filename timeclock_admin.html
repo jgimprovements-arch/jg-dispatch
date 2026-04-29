@@ -403,6 +403,16 @@ function isSwapOnlyPM() {
 var SB_URL = 'https://nuykvchgecpiuikoerze.supabase.co';
 var SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im51eWt2Y2hnZWNwaXVpa29lcnplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYyNjM3ODYsImV4cCI6MjA5MTgzOTc4Nn0.39hZ8DdjT_0iFJXPeAL2FXUSLw8FZBirDVzxZTO1W9s';
 
+// Normalize a market value to the canonical DB form: 'appleton' or 'stevens_point'.
+// Accepts any common variant: 'Appleton', 'appleton', 'Stevens Point', 'stevens_point', etc.
+// Used everywhere we save market to the DB so dispatch board lane routing stays consistent.
+function normalizeMarket(m) {
+  if (!m) return 'appleton';
+  var s = String(m).toLowerCase().trim();
+  if (s.indexOf('stevens') !== -1 || s.indexOf('point') !== -1) return 'stevens_point';
+  return 'appleton';
+}
+
 async function sb(path, opts) {
   opts = opts || {};
   var baseHeaders = { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' };
@@ -1088,7 +1098,7 @@ async function addAbsence() {
   var date   = (document.getElementById('abs-date')   || {}).value || '';
   var reason = (document.getElementById('abs-reason') || {}).value || 'Sick';
   var notes  = (document.getElementById('abs-notes')  || {}).value || '';
-  var market = (document.getElementById('abs-market') || {}).value || 'Appleton';
+  var market = normalizeMarket((document.getElementById('abs-market') || {}).value || 'Appleton');
   if (!name || !date) { toast('Name and date required'); return; }
 
   // Store hours on the absence record (default 8, future: allow custom)
@@ -2719,8 +2729,17 @@ function renderTimesheets() {
         var annSal=parseFloat(emp.annual_salary);
         var perPeriodDays=ST.payPeriod.type==='weekly'?5:10;
         var periodPay=annSal/(ST.payPeriod.type==='weekly'?52:ST.payPeriod.type==='biweekly'?26:24);
-        var workedDays=new Set(d.entries.map(function(e){return e.clock_in.split('T')[0];})).size;
-        var missedDays=Math.max(0,perPeriodDays-workedDays);
+        // Salary deducts ONLY for explicit unpaid absences. Future days don't deduct.
+        var absBrkSal = getAbsenceHoursForPeriod(nm, curPer.start, curPer.end);
+        var missedDays = absBrkSal.unpaidDays || 0;
+        // Days Worked counter counts only elapsed weekdays (not future days)
+        var todayMid_card = new Date(); todayMid_card.setHours(0,0,0,0);
+        var elapsedWorkingDays_card = 0;
+        for (var dCur = new Date(curPer.start); dCur <= curPer.end && dCur <= todayMid_card; dCur.setDate(dCur.getDate()+1)) {
+          var dow_c = dCur.getDay();
+          if (dow_c !== 0 && dow_c !== 6) elapsedWorkingDays_card++;
+        }
+        var workedDays = elapsedWorkingDays_card;
         regPay=periodPay-missedDays*(periodPay/perPeriodDays); totalPay=regPay;
       } else {
         regPay=rate*(ot.regMins/60); otPay=rate*1.5*(ot.otMins/60); totalPay=regPay+otPay;
@@ -2739,10 +2758,18 @@ function renderTimesheets() {
       var safeNm = nm.replace(/'/g, "\\'");
       h += '<div class="card timecard-clickable" style="padding:16px;margin:0;cursor:pointer;transition:box-shadow .15s;" onclick="openTimecardDetail(\''+safeNm+'\')" onmouseover="this.style.boxShadow=\'0 4px 12px rgba(13,45,94,.12)\'" onmouseout="this.style.boxShadow=\'\'">';
       h += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;"><div style="font-size:13px;font-weight:700;color:var(--navy);">'+nm+'</div><span style="font-size:10px;color:var(--muted);">📋 Click to open</span></div>';
-      h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:10px;">';
-      h += '<div style="background:rgba(13,45,94,.04);border-radius:8px;padding:8px;text-align:center;"><div style="font-size:16px;font-weight:700;color:var(--navy);">'+fmtHM(ot.regMins)+'</div><div style="font-size:10px;color:var(--muted);font-weight:600;">REG HRS</div></div>';
-      h += '<div style="background:'+(ot.otMins>0?'rgba(198,40,40,.06)':'rgba(13,45,94,.04)')+'";border-radius:8px;padding:8px;text-align:center;"><div style="font-size:16px;font-weight:700;color:'+(ot.otMins>0?'#c62828':'var(--muted)')+';">'+fmtHM(ot.otMins)+'</div><div style="font-size:10px;color:var(--muted);font-weight:600;">OT HRS</div></div>';
-      h += '</div>';
+      // For salaried employees, hide OT (it's not a thing for salary). Show a single full-width box with total worked hours.
+      if (isSalary) {
+        var totalMins = ot.regMins + ot.otMins;
+        h += '<div style="display:grid;grid-template-columns:1fr;gap:6px;margin-bottom:10px;">';
+        h += '<div style="background:rgba(13,45,94,.04);border-radius:8px;padding:8px;text-align:center;"><div style="font-size:16px;font-weight:700;color:var(--navy);">'+fmtHM(totalMins)+'</div><div style="font-size:10px;color:var(--muted);font-weight:600;">HOURS WORKED</div></div>';
+        h += '</div>';
+      } else {
+        h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:10px;">';
+        h += '<div style="background:rgba(13,45,94,.04);border-radius:8px;padding:8px;text-align:center;"><div style="font-size:16px;font-weight:700;color:var(--navy);">'+fmtHM(ot.regMins)+'</div><div style="font-size:10px;color:var(--muted);font-weight:600;">REG HRS</div></div>';
+        h += '<div style="background:'+(ot.otMins>0?'rgba(198,40,40,.06)':'rgba(13,45,94,.04)')+'";border-radius:8px;padding:8px;text-align:center;"><div style="font-size:16px;font-weight:700;color:'+(ot.otMins>0?'#c62828':'var(--muted)')+';">'+fmtHM(ot.otMins)+'</div><div style="font-size:10px;color:var(--muted);font-weight:600;">OT HRS</div></div>';
+        h += '</div>';
+      }
 
       // PTO / training / unpaid breakdown row — only show if any absences in period
       if (absBrk.ptoPaidHours > 0 || absBrk.regularPaidHours > 0 || absBrk.unpaidDays > 0) {
@@ -6592,7 +6619,7 @@ async function _submitQuickInvite() {
   var personalEmail = ((document.getElementById('qi-personal-email')||{}).value || '').trim().toLowerCase();
   var phone = (document.getElementById('qi-phone')||{}).value.trim();
   var role = (document.getElementById('qi-role')||{}).value;
-  var market = (document.getElementById('qi-market')||{}).value;
+  var market = normalizeMarket((document.getElementById('qi-market')||{}).value);
   var payType = (document.getElementById('qi-paytype')||{}).value;
   var rate = parseFloat((document.getElementById('qi-rate')||{}).value) || 0;
 
@@ -6746,7 +6773,7 @@ async function _submitInvite() {
   var email = (document.getElementById('inv-email')||{}).value.trim().toLowerCase();
   var phone = (document.getElementById('inv-phone')||{}).value.trim();
   var role = (document.getElementById('inv-role')||{}).value;
-  var market = (document.getElementById('inv-market')||{}).value;
+  var market = normalizeMarket((document.getElementById('inv-market')||{}).value);
   var payType = (document.getElementById('inv-paytype')||{}).value;
   var channelEl = document.querySelector('input[name="inv-channel"]:checked');
   var channel = channelEl ? channelEl.value : 'link';
@@ -7546,7 +7573,7 @@ async function sendInviteFromModal() {
   var name   = (document.getElementById('emp-name')   || {}).value || '';
   var email  = (document.getElementById('emp-email')  || {}).value || '';
   var role   = (document.getElementById('emp-role')   || {}).value || 'Technician';
-  var market = (document.getElementById('emp-market') || {}).value || 'Appleton';
+  var market = normalizeMarket((document.getElementById('emp-market') || {}).value || 'Appleton');
   var rate   = (document.getElementById('emp-rate')   || {}).value || '0';
   if (!name.trim() || !email.trim()) { toast('Name and email are required'); return; }
 
@@ -10283,7 +10310,7 @@ async function sendInvite() {
   var name  = (document.getElementById('inv-name')  || {}).value || '';
   var email = (document.getElementById('inv-email') || {}).value || '';
   var role  = (document.getElementById('inv-role')  || {}).value || 'Technician';
-  var market = (document.getElementById('inv-market')|| {}).value || 'Appleton';
+  var market = normalizeMarket((document.getElementById('inv-market')|| {}).value || 'Appleton');
   var rate  = (document.getElementById('inv-rate')  || {}).value || '0';
   var statusEl = document.getElementById('invite-status');
 
