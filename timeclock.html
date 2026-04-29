@@ -4226,16 +4226,16 @@ async function loadMyHours() {
   }).join('');
 }
 
-// ── DEEP-LINK HANDLER ────────────────────────────────────────────────────
-// Notifications include URL hashes like:
-//   #entry=<id>&action=correct  → switch to Hours tab, scroll to entry, open correction
-//   #verify                     → switch to Hours tab, scroll to top of unverified list
-//   #timecard                   → switch to Hours tab
-// This runs after the initial app load and after Hours-tab data is present.
+// ── NOTIFICATION DEEP-LINK / SINGLE-ENTRY MODAL ──────────────────────────
+// Tapping a notification now opens an in-app modal showing JUST the entries
+// referenced by the notification — no tab switching, no scrolling through
+// other people's data on a phone screen. This handles two types of URL hashes:
+//   #entry=<id>&action=correct  → modal showing one entry with Fix Punch button
+//   #verify                     → modal showing all unverified entries with Verify buttons
 function _handleNotificationDeepLink() {
   var hash = window.location.hash || '';
   if (!hash || hash.length < 2) return;
-  var hashContent = hash.substring(1); // strip leading #
+  var hashContent = hash.substring(1);
   var params = {};
   hashContent.split('&').forEach(function(pair){
     var eq = pair.indexOf('=');
@@ -4243,47 +4243,213 @@ function _handleNotificationDeepLink() {
     else { params[pair.substring(0, eq)] = decodeURIComponent(pair.substring(eq+1)); }
   });
 
-  // Clear the hash so subsequent reloads don't re-fire
+  // Clear the hash so reloads don't re-fire
   history.replaceState(null, '', window.location.pathname + window.location.search);
 
-  function scrollToEntry(entryId, doCorrect) {
-    var row = document.getElementById('entry-' + entryId);
-    if (!row) return false;
-    row.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    // Highlight pulse
-    row.style.background = 'rgba(232,93,4,.15)';
-    setTimeout(function(){ row.style.background = ''; }, 2000);
-    if (doCorrect) {
-      // Find the Fix button and click it (preserves existing modal logic)
-      setTimeout(function(){
-        var btn = row.querySelector('button[onclick*="openCorrectionRequest"]');
-        if (btn) btn.click();
-      }, 600);
+  // Wait briefly for entries to load before opening modal
+  var attempts = 0;
+  var tryOpen = function() {
+    attempts++;
+    if (!TC.entries || !TC.entries.length) {
+      if (attempts < 12) return setTimeout(tryOpen, 250);
+      // If no entries loaded after 3s, give up gracefully
+      _openSingleEntryModal([], { mode: params.action === 'correct' ? 'correct' : 'view', source: params });
+      return;
     }
-    return true;
+    if (params.entry) {
+      var entry = TC.entries.find(function(e){ return e.id === params.entry; });
+      if (entry) {
+        _openSingleEntryModal([entry], { mode: params.action === 'correct' ? 'correct' : 'view' });
+      } else if (attempts < 12) {
+        return setTimeout(tryOpen, 250);
+      } else {
+        toast('Entry not found — it may have been deleted');
+      }
+    } else if (params.verify) {
+      // All entries from last 14 days, not self_verified, not active
+      var cutoff = Date.now() - 14*24*60*60*1000;
+      var toVerify = TC.entries.filter(function(e){
+        if (!e.clock_out) return false;
+        if (e.self_verified) return false;
+        if (e.status !== 'complete') return false;
+        return new Date(e.clock_in).getTime() > cutoff;
+      }).sort(function(a,b){ return new Date(a.clock_in) - new Date(b.clock_in); });
+      _openSingleEntryModal(toVerify, { mode: 'verify' });
+    } else if (params.timecard) {
+      // Open Hours tab as a fallback (user wants to see whole timecard)
+      if (typeof switchTab === 'function') switchTab('hours');
+    }
+  };
+  setTimeout(tryOpen, 500);
+}
+
+// Build and show a focused entry-action modal. Reused for both single-entry
+// (forgot punch) and multi-entry (verify hours) flows.
+function _openSingleEntryModal(entries, opts) {
+  opts = opts || {};
+  var existing = document.getElementById('single-entry-modal');
+  if (existing) existing.remove();
+
+  var titleText, subTitleText;
+  if (opts.mode === 'correct') {
+    titleText = '⚠ Time Entry Needs Attention';
+    subTitleText = 'Forgot to punch out? Tap "Fix Punch" to request a correction.';
+  } else if (opts.mode === 'verify') {
+    titleText = '❓ Verify Your Hours';
+    subTitleText = entries.length === 1 ? 'Confirm this entry is correct.' : 'You have ' + entries.length + ' entries to review before payroll.';
+  } else {
+    titleText = '🕐 Time Entry';
+    subTitleText = '';
   }
 
-  // Decide target tab + action
-  if (params.entry || params.verify || params.timecard) {
-    if (typeof switchTab === 'function') switchTab('hours');
-    // History/entries load is async — wait for the list to populate before scrolling
-    var attempts = 0;
-    var tryScroll = function() {
-      attempts++;
-      var listEl = document.getElementById('history-list') || document.querySelector('[data-history-list]');
-      var hasEntries = listEl && listEl.children.length > 0;
-      if (params.entry) {
-        if (scrollToEntry(params.entry, params.action === 'correct')) return;
-      } else if (params.verify || params.timecard) {
-        // Just need the hours tab visible — scrollIntoView the tab's content
-        var hoursPanel = document.getElementById('view-hours') || document.getElementById('tab-hours');
-        if (hoursPanel) hoursPanel.scrollIntoView({ behavior:'smooth', block:'start' });
-        if (hasEntries) return;
-      }
-      if (attempts < 12) setTimeout(tryScroll, 250);
-    };
-    setTimeout(tryScroll, 400);
+  var html = '';
+  html += '<div id="single-entry-modal" style="position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:3000;display:flex;align-items:flex-end;justify-content:center;" onclick="if(event.target===this)_closeSingleEntryModal()">';
+  html += '<div style="background:#fff;width:100%;max-width:560px;border-radius:16px 16px 0 0;max-height:90vh;overflow-y:auto;box-shadow:0 -8px 24px rgba(0,0,0,.2);">';
+
+  // Sticky header
+  html += '<div style="position:sticky;top:0;background:#fff;border-bottom:1px solid var(--border,#e5e7eb);padding:16px;z-index:1;">';
+  html += '<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;">';
+  html += '<div style="flex:1;min-width:0;">';
+  html += '<div style="font-size:16px;font-weight:700;color:var(--navy,#0d2d5e);">'+titleText+'</div>';
+  if (subTitleText) html += '<div style="font-size:12px;color:var(--muted,#6b7280);margin-top:2px;">'+subTitleText+'</div>';
+  html += '</div>';
+  html += '<button onclick="_closeSingleEntryModal()" style="background:transparent;border:none;font-size:24px;color:var(--muted,#6b7280);cursor:pointer;padding:0 4px;line-height:1;">×</button>';
+  html += '</div>';
+  html += '</div>';
+
+  // Body
+  html += '<div style="padding:12px 16px;">';
+
+  if (!entries.length) {
+    html += '<div style="text-align:center;padding:40px 20px;color:var(--muted,#6b7280);font-size:14px;">'
+         +  'Nothing to review here. The notification may be out of date.'
+         +  '</div>';
+  } else {
+    entries.forEach(function(e, idx) {
+      html += _renderEntryCard(e, opts.mode);
+    });
+
+    // Bulk verify button if multiple unverified
+    if (opts.mode === 'verify' && entries.length > 1) {
+      var ids = entries.map(function(e){return e.id;}).join(',');
+      html += '<button onclick="_verifyAllInModal(\''+ids+'\')" style="width:100%;padding:14px;background:var(--green,#2e7d32);color:#fff;border:none;border-radius:10px;font-weight:700;font-size:14px;cursor:pointer;font-family:inherit;margin-top:8px;">✓ Verify All '+entries.length+' Entries</button>';
+    }
   }
+
+  html += '</div>';
+
+  // Footer with close
+  html += '<div style="padding:12px 16px 20px;border-top:1px solid var(--border,#e5e7eb);">';
+  html += '<button onclick="_closeSingleEntryModal()" style="width:100%;padding:12px;background:#f3f4f6;color:var(--navy,#0d2d5e);border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:inherit;font-size:14px;">Close</button>';
+  html += '</div>';
+
+  html += '</div></div>';
+  document.body.insertAdjacentHTML('beforeend', html);
+}
+
+function _renderEntryCard(e, mode) {
+  var cIn = new Date(e.clock_in);
+  var cOut = e.clock_out ? new Date(e.clock_out) : null;
+  var dateStr = cIn.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+  var timeStart = cIn.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+  var timeEnd = cOut ? cOut.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }) : 'still active';
+  var dur = e.duration_minutes != null ? e.duration_minutes : (cOut ? Math.floor((cOut-cIn)/60000) : Math.floor((Date.now()-cIn.getTime())/60000));
+  var durStr = Math.floor(dur/60) + 'h ' + (dur%60) + 'm';
+  var isActive = !cOut;
+  var hoursOpen = isActive ? Math.round((Date.now()-cIn.getTime())/3600000) : null;
+
+  var bgColor = '#fff', borderColor = 'var(--border,#e5e7eb)', borderLeftColor = '#e85d04';
+  var statusBadge = '';
+  if (isActive && hoursOpen >= 12) {
+    bgColor = 'rgba(198,40,40,.04)';
+    borderLeftColor = '#c62828';
+    statusBadge = '<div style="font-size:11px;color:#c62828;font-weight:700;margin-bottom:4px;">⚠ ACTIVE — '+hoursOpen+' HRS OPEN</div>';
+  } else if (mode === 'verify' && !e.self_verified) {
+    borderLeftColor = '#e65100';
+    statusBadge = '<div style="font-size:11px;color:#e65100;font-weight:700;margin-bottom:4px;">❓ UNVERIFIED</div>';
+  }
+
+  var html = '<div data-entry-id="'+e.id+'" style="background:'+bgColor+';border:1px solid '+borderColor+';border-left:4px solid '+borderLeftColor+';border-radius:10px;padding:12px;margin-bottom:10px;">';
+  html += statusBadge;
+  html += '<div style="font-size:13px;font-weight:700;color:var(--navy,#0d2d5e);">'+dateStr+'</div>';
+  html += '<div style="font-size:13px;color:var(--text,#1f2937);margin-top:2px;">'+timeStart+' → '+timeEnd+'</div>';
+  html += '<div style="font-size:12px;color:var(--muted,#6b7280);margin-top:2px;">'+durStr+' · '+(e.job_name||'No job')+'</div>';
+
+  // Action buttons
+  html += '<div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;">';
+  // Fix Punch — always available
+  html += '<button onclick="_handleSingleFixPunch(\''+e.id+'\')" style="flex:1;min-width:120px;padding:10px;background:var(--orange,#e85d04);color:#fff;border:none;border-radius:8px;font-weight:700;cursor:pointer;font-family:inherit;font-size:13px;">✏️ Fix Punch</button>';
+  // Verify — only if not active and not yet verified
+  if (!isActive && !e.self_verified) {
+    html += '<button onclick="_verifyEntryInModal(\''+e.id+'\')" style="flex:1;min-width:100px;padding:10px;background:var(--green,#2e7d32);color:#fff;border:none;border-radius:8px;font-weight:700;cursor:pointer;font-family:inherit;font-size:13px;">✓ Verify</button>';
+  } else if (e.self_verified) {
+    html += '<div style="flex:1;min-width:100px;padding:10px;background:rgba(46,125,50,.1);color:var(--green,#2e7d32);border-radius:8px;font-weight:700;font-size:13px;text-align:center;">✓ Verified</div>';
+  }
+  html += '</div>';
+
+  html += '</div>';
+  return html;
+}
+
+function _closeSingleEntryModal() {
+  var m = document.getElementById('single-entry-modal');
+  if (m) m.remove();
+}
+
+function _handleSingleFixPunch(entryId) {
+  var entry = TC.entries.find(function(e){ return e.id === entryId; });
+  if (!entry) { toast('Entry not found'); return; }
+  // Close the single-entry modal and open the existing correction request flow
+  _closeSingleEntryModal();
+  var cIn = new Date(entry.clock_in);
+  var cOut = entry.clock_out ? new Date(entry.clock_out) : null;
+  setTimeout(function(){
+    if (typeof openCorrectionRequest === 'function') {
+      openCorrectionRequest(entry.id,
+        cIn.toLocaleDateString('en-US') + ' ' + cIn.toLocaleTimeString('en-US', {hour:'numeric',minute:'2-digit'}),
+        cOut ? cOut.toLocaleTimeString('en-US', {hour:'numeric',minute:'2-digit'}) : '(still clocked in)',
+        entry.job_name || 'No job');
+    }
+  }, 200);
+}
+
+async function _verifyEntryInModal(entryId) {
+  var entry = TC.entries.find(function(e){ return e.id === entryId; });
+  if (!entry) return;
+  var nowIso = new Date().toISOString();
+  // Optimistic update
+  entry.self_verified = true;
+  entry.self_verified_at = nowIso;
+  // Re-render the card in place
+  var card = document.querySelector('#single-entry-modal [data-entry-id="'+entryId+'"]');
+  if (card) card.outerHTML = _renderEntryCard(entry, 'verify');
+  toast('✓ Verified');
+
+  try {
+    await fetch(SB_URL + '/rest/v1/time_entries?id=eq.' + entryId, {
+      method: 'PATCH',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ self_verified: true, self_verified_at: nowIso })
+    });
+    if (typeof renderEntries === 'function') renderEntries();
+  } catch(e) {
+    console.error('Verify failed:', e);
+    entry.self_verified = false;
+    entry.self_verified_at = null;
+    toast('⚠ Verify failed — tap to retry');
+    if (card) card.outerHTML = _renderEntryCard(entry, 'verify');
+  }
+}
+
+async function _verifyAllInModal(idsCsv) {
+  var ids = idsCsv.split(',');
+  if (!confirm('Verify all ' + ids.length + ' entries?\n\nThis confirms each entry\'s hours are correct. Only do this if you\'ve checked them.')) return;
+  toast('Verifying ' + ids.length + ' entries...');
+  for (var i = 0; i < ids.length; i++) {
+    await _verifyEntryInModal(ids[i]);
+  }
+  toast('✓ All verified');
+  setTimeout(_closeSingleEntryModal, 800);
 }
 
 // START
