@@ -619,10 +619,19 @@ if ('serviceWorker' in navigator) {
       <div class="greeting-sub" id="greeting-date">Loading...</div>
     </div>
 
-    <button class="log-touch-btn" onclick="openLogTouch(null)">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 5v14M5 12h14"/></svg>
-      Log a Touch
-    </button>
+    <!-- Quick Actions: Log Touch is the primary action (orange, takes more
+         width), Add Partner is the secondary action (navy outline). Keeps
+         "Log a Touch" visually dominant since it's the most-used action. -->
+    <div style="display:flex;gap:8px;margin-bottom:16px;">
+      <button class="log-touch-btn" style="flex:2;margin-bottom:0;" onclick="openLogTouch(null)">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 5v14M5 12h14"/></svg>
+        Log a Touch
+      </button>
+      <button onclick="openAddPartnerSA()" style="flex:1;padding:12px 8px;background:var(--surface);color:var(--navy);border:1.5px solid var(--navy);border-radius:12px;font-size:13px;font-weight:700;font-family:'DM Sans',sans-serif;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:6px;transition:transform .1s;" ontouchstart="this.style.transform='scale(.97)'" ontouchend="this.style.transform=''">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M19 8v6M22 11h-6"/></svg>
+        Add Partner
+      </button>
+    </div>
 
     <div class="section-title">Today's Route</div>
     <div id="home-route">
@@ -2587,6 +2596,169 @@ function _afPick(pid, pname) {
     selected.textContent = '✓ ' + pname;
     selected.style.display = 'block';
   }
+}
+
+
+// ══════════════════════════════════════════════════════════════════════════
+// ── ADD PARTNER (MOBILE) ──────────────────────────────────────────────────
+// Full form (Name, Type, Company, Phone, Email, City, Tier, Notes, Assigned)
+// Auto-assigns to current rep but the dropdown is on-form so they can hand
+// off to someone else. Dupe check: as the user types the Name, we look for
+// similar partners and show a "Did you mean?" hint to prevent accidental
+// duplicates. Cheaper than cleaning up dupes after the fact.
+// ══════════════════════════════════════════════════════════════════════════
+
+function openAddPartnerSA() {
+  var overlay = document.createElement('div');
+  overlay.className = 'sheet-overlay open';
+  overlay.style.zIndex = '700';
+
+  var sheet = document.createElement('div');
+  sheet.className = 'sheet';
+  sheet.style.transform = 'translateY(0)';
+
+  // Type list — matches desktop's standard partner types. Order is
+  // intentional: most common first so taps are faster.
+  var TYPES = ['Plumber','Insurance Agent','Property Manager','GC','Contractor','Realtor','Fire Department','Restoration','Other','Customer'];
+  var typeOpts = TYPES.map(function(t){ return '<option>' + _teMob(t) + '</option>'; }).join('');
+
+  // Tier list — A is the goal partner type, C is default starting point.
+  var tierOpts = ['C','B','A'].map(function(t){
+    return '<option' + (t === 'C' ? ' selected' : '') + '>' + t + '</option>';
+  }).join('');
+
+  // Market — derived from the rep's market by default. Reps in the field
+  // assume their own market; can override on the form if adding a partner
+  // for the other market.
+  var defaultMarket = APP.repMarket || 'Appleton';
+  var marketOpts = ['Appleton','Stevens Point'].map(function(m){
+    return '<option' + (m === defaultMarket ? ' selected' : '') + '>' + m + '</option>';
+  }).join('');
+
+  var html = '<div class="sheet-handle"></div>';
+  html += '<div class="sheet-title">+ Add Partner</div>';
+
+  html += '<div class="field-label">Name *</div>';
+  html += '<input type="text" id="ap-name" class="field-input" placeholder="Partner name" autocomplete="off" autocapitalize="words" oninput="_apDupeCheck(this.value)" style="margin:0;">';
+  // Dupe-check container — populated by _apDupeCheck on input
+  html += '<div id="ap-dupes" style="display:none;margin-top:6px;background:rgba(245,166,35,.10);border:1px solid rgba(245,166,35,.3);border-radius:10px;padding:10px 12px;font-size:12px;"></div>';
+
+  html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px;">';
+  html += '<div><div class="field-label" style="margin-top:0;">Type *</div><select id="ap-type" class="field-select" style="margin:0;">' + typeOpts + '</select></div>';
+  html += '<div><div class="field-label" style="margin-top:0;">Tier</div><select id="ap-tier" class="field-select" style="margin:0;">' + tierOpts + '</select></div>';
+  html += '</div>';
+
+  html += '<div class="field-label">Company</div>';
+  html += '<input type="text" id="ap-company" class="field-input" placeholder="Company name" autocomplete="off" autocapitalize="words" style="margin:0;">';
+
+  html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px;">';
+  html += '<div><div class="field-label" style="margin-top:0;">Phone</div><input type="tel" id="ap-phone" class="field-input" placeholder="(555) 555-5555" autocomplete="off" inputmode="tel" style="margin:0;"></div>';
+  html += '<div><div class="field-label" style="margin-top:0;">City</div><input type="text" id="ap-city" class="field-input" placeholder="City" autocomplete="off" autocapitalize="words" style="margin:0;"></div>';
+  html += '</div>';
+
+  html += '<div class="field-label">Email</div>';
+  html += '<input type="email" id="ap-email" class="field-input" placeholder="email@example.com" autocomplete="off" autocapitalize="off" inputmode="email" style="margin:0;">';
+
+  html += '<div class="field-label">Market</div>';
+  html += '<select id="ap-market" class="field-select" style="margin:0;">' + marketOpts + '</select>';
+
+  html += '<div class="field-label">Assigned To</div>';
+  html += '<select id="ap-assigned" class="field-select" style="margin:0;">' + _mobileRepOptions(APP.repName) + '</select>';
+
+  html += '<div class="field-label">Notes</div>';
+  html += '<textarea id="ap-notes" class="field-input" rows="2" placeholder="Anything worth remembering..." style="resize:none;"></textarea>';
+
+  html += '<div style="display:flex;gap:8px;margin-top:16px;">';
+  html += '<button id="ap-cancel" style="flex:1;padding:13px;border-radius:12px;border:1.5px solid var(--border);background:transparent;color:var(--navy);font-size:14px;font-weight:700;font-family:inherit;cursor:pointer;">Cancel</button>';
+  html += '<button id="ap-save" style="flex:2;padding:13px;border-radius:12px;border:none;background:var(--orange);color:#fff;font-size:14px;font-weight:700;font-family:inherit;cursor:pointer;">Save Partner</button>';
+  html += '</div>';
+
+  sheet.innerHTML = html;
+  overlay.appendChild(sheet);
+  document.body.appendChild(overlay);
+  overlay.offsetHeight;
+
+  var close = function(){
+    overlay.classList.remove('open');
+    setTimeout(function(){ if (overlay.parentNode) overlay.remove(); }, 320);
+  };
+  overlay.addEventListener('click', function(e){ if (e.target === overlay) close(); });
+  sheet.querySelector('#ap-cancel').addEventListener('click', close);
+
+  sheet.querySelector('#ap-save').addEventListener('click', async function(){
+    var name = sheet.querySelector('#ap-name').value.trim();
+    if (!name) { toast('Name is required'); return; }
+
+    // Allowlist body — only fields that exist on the real sales_partners
+    // schema. status defaults to 'Active' for newly-added partners.
+    var body = {
+      name:         name,
+      company:      sheet.querySelector('#ap-company').value.trim() || null,
+      type:         sheet.querySelector('#ap-type').value,
+      tier:         sheet.querySelector('#ap-tier').value,
+      phone:        sheet.querySelector('#ap-phone').value.trim() || null,
+      email:        sheet.querySelector('#ap-email').value.trim() || null,
+      city:         sheet.querySelector('#ap-city').value.trim() || null,
+      market:       sheet.querySelector('#ap-market').value,
+      assigned_to:  sheet.querySelector('#ap-assigned').value || APP.repName,
+      notes:        sheet.querySelector('#ap-notes').value || null,
+      status:       'Active'
+    };
+
+    try {
+      var r = await fetch(SB_URL + '/rest/v1/sales_partners', {
+        method: 'POST',
+        headers: {'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json','Prefer':'return=representation'},
+        body: JSON.stringify(body)
+      });
+      if (!r.ok) {
+        var errTxt = await r.text();
+        toast('Save failed: ' + errTxt.slice(0, 80));
+        return;
+      }
+      // Add the new partner to local state so it's immediately searchable
+      // in Log Touch and visible in Partners without a full reload.
+      try {
+        var created = await r.json();
+        if (created && created.length) APP.partners.push(created[0]);
+      } catch(e) { /* loadAll will pick it up */ }
+      close();
+      toast('✓ Added ' + name);
+      // Refresh whichever screen is visible
+      if (APP.screen === 'home') renderHome();
+      else if (APP.screen === 'partners' && typeof renderPartners === 'function') renderPartners();
+    } catch(e) {
+      toast('Save failed: ' + (e.message || 'network error'));
+    }
+  });
+}
+
+// Dupe check — runs as the user types the Name field. Looks for partners
+// with similar names already in APP.partners. Shows up to 3 matches as a
+// "Did you mean?" hint with tap-to-cancel option (which closes the sheet
+// and opens that partner's detail instead). Doesn't block the save —
+// users can still proceed, but they're informed.
+function _apDupeCheck(name) {
+  var box = document.getElementById('ap-dupes');
+  if (!box) return;
+  var q = (name||'').toLowerCase().trim();
+  if (q.length < 3) { box.style.display = 'none'; return; }
+  // Match partners whose name contains the typed string. Limit to 3 to
+  // avoid overwhelming the form.
+  var matches = APP.partners.filter(function(p){
+    return (p.name||'').toLowerCase().indexOf(q) !== -1;
+  }).slice(0, 3);
+  if (!matches.length) { box.style.display = 'none'; return; }
+  var html = '<div style="font-size:11px;font-weight:700;color:#a55b00;margin-bottom:6px;">⚠ Possible duplicates:</div>';
+  matches.forEach(function(p){
+    html += '<div style="padding:6px 0;border-top:1px solid rgba(245,166,35,.2);font-size:12px;">';
+    html += '<div style="font-weight:700;color:var(--navy);">' + _teMob(p.name) + '</div>';
+    html += '<div style="font-size:10px;color:var(--muted);">' + _teMob(p.type||'') + (p.company ? ' · ' + _teMob(p.company) : '') + (p.city ? ' · ' + _teMob(p.city) : '') + '</div>';
+    html += '</div>';
+  });
+  html += '<div style="font-size:10px;color:var(--muted);margin-top:6px;font-style:italic;">If your partner is one of these, cancel and search Partners instead.</div>';
+  box.innerHTML = html;
+  box.style.display = 'block';
 }
 
 
