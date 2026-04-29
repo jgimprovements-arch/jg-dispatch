@@ -10920,9 +10920,15 @@ function openTimecardDetail(empName) {
     // Days with no entry AND no absence record stay paid — salary covers them.
     var absBrkPre = getAbsenceHoursForPeriod(empName, curPer.start, curPer.end);
     missedDays = absBrkPre.unpaidDays || 0;
-    // Salaried days worked = total period days minus explicit unpaid absences.
-    // (Salaried employees don't need to clock in to count as having worked.)
-    workedDays = Math.max(0, perPeriodDays - missedDays);
+    // Salaried days worked counter only counts days that have actually elapsed.
+    // (Future days in the period shouldn't be counted as worked yet.)
+    var todayMid = new Date(); todayMid.setHours(0,0,0,0);
+    var elapsedWorkingDays = 0;
+    for (var dCursor = new Date(curPer.start); dCursor <= curPer.end && dCursor <= todayMid; dCursor.setDate(dCursor.getDate()+1)) {
+      var dow = dCursor.getDay();
+      if (dow !== 0 && dow !== 6) elapsedWorkingDays++;
+    }
+    workedDays = Math.max(0, elapsedWorkingDays - missedDays);
     deduction = missedDays * (periodPay / perPeriodDays);
     regPay = periodPay - deduction;
     totalPay = regPay;
@@ -11036,11 +11042,20 @@ function openTimecardDetail(empName) {
         color = paid ? '#1565c0' : '#c62828';
         status = absRec.absence.reason || 'Absent';
         statusIcon = paid ? '🏖' : '✗';
-      } else if (isSalary) {
-        // Salaried employees: assume worked unless an absence is logged
-        bg = 'rgba(46,125,50,.04)'; color = '#2e7d32'; status = 'Worked (auto)'; statusIcon = '✓';
       } else {
-        bg = 'rgba(230,81,0,.06)'; color = '#e65100'; status = 'Not recorded'; statusIcon = '?';
+        // Determine if this day is in the future (vs past or today)
+        var todayMidnight = new Date(); todayMidnight.setHours(0,0,0,0);
+        var isFuture = d > todayMidnight;
+        if (isFuture) {
+          // Upcoming days — neutral, no work assumption yet
+          bg = 'rgba(13,45,94,.03)'; color = 'var(--muted)'; status = 'Upcoming'; statusIcon = '·';
+        } else if (isSalary) {
+          // Salaried employees: past day with no entry/absence → assume worked
+          bg = 'rgba(46,125,50,.04)'; color = '#2e7d32'; status = 'Worked (auto)'; statusIcon = '✓';
+        } else {
+          // Hourly past day with no entry/absence → flag as missing
+          bg = 'rgba(230,81,0,.06)'; color = '#e65100'; status = 'Not recorded'; statusIcon = '?';
+        }
       }
       var clickable = !isApproved && typeof isAdmin === 'function' && isAdmin();
       var cursor = clickable ? 'cursor:pointer;' : '';
