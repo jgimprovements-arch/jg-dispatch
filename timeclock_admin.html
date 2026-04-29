@@ -10079,9 +10079,29 @@ async function saveEntry(id) {
       job_id: jobId || null, job_name: jobVal, notes: notesVal
     });
   }
-  closeModal();
-  render();  // Re-render with optimistic data — user sees change immediately
+
+  // Capture which timecard detail modal (if any) was open BEFORE we close the edit modal,
+  // so we can re-open it with fresh data after save.
+  var openTimecardEmp = null;
+  var detailModal = document.getElementById('tc-detail-modal');
+  if (detailModal) {
+    // Pull employee name from the modal header
+    var hdr = detailModal.querySelector('div[style*="font-size:18px"]');
+    if (hdr) {
+      var t = hdr.textContent || '';
+      openTimecardEmp = t.replace(/^📋\s*/, '').trim();
+    }
+  }
+
+  closeModal();  // closes the edit modal (showModal-based)
+  render();      // Re-render the page with optimistic data
   toast('✓ Entry updated');
+
+  // If the timecard detail modal was open, refresh it in place with new data
+  if (openTimecardEmp && typeof openTimecardDetail === 'function') {
+    closeTimecardDetail();
+    openTimecardDetail(openTimecardEmp);
+  }
 
   // Now persist to server and reload (slower path; happens in background)
   try {
@@ -10259,6 +10279,20 @@ function showModal(title, bodyHtml, saveCall) {
   m.addEventListener('click', function(e){ if(e.target===m) closeModal(); });
   document.body.appendChild(m);
 }
+// Helper: if the timecard detail modal is open, capture its employee name then
+// re-open it after some other modal closes — keeps users in context.
+function _refreshTimecardModalIfOpen() {
+  var detailModal = document.getElementById('tc-detail-modal');
+  if (!detailModal) return;
+  var hdr = detailModal.querySelector('div[style*="font-size:18px"]');
+  if (!hdr) return;
+  var empName = (hdr.textContent || '').replace(/^📋\s*/, '').trim();
+  if (empName && typeof openTimecardDetail === 'function') {
+    closeTimecardDetail();
+    setTimeout(function(){ openTimecardDetail(empName); }, 50);
+  }
+}
+
 // ── BREAK MANAGEMENT (admin-side) ─────────────────────────────────────────
 // Edit/add/delete breaks on any time entry. Reuses the showModal infrastructure.
 async function openBreakEditor(entryId) {
@@ -10272,40 +10306,53 @@ async function openBreakEditor(entryId) {
   var entryDur = Math.floor((entryEnd - entryStart) / 60000);
   var totalBkMins = breaks.reduce(function(s,b){ return s + (b.duration_minutes || 0); }, 0);
 
+  // Smart defaults for "Add a break" — same date as entry, noon to 12:30
+  // datetime-local format = "YYYY-MM-DDTHH:MM" in LOCAL time
+  function localDtStr(d) {
+    var pad = function(n){ return n<10?'0'+n:''+n; };
+    return d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate())+'T'+pad(d.getHours())+':'+pad(d.getMinutes());
+  }
+  var defaultStart = new Date(entryStart); defaultStart.setHours(12, 0, 0, 0);
+  var defaultEnd = new Date(entryStart); defaultEnd.setHours(12, 30, 0, 0);
+  var defStartStr = localDtStr(defaultStart);
+  var defEndStr = localDtStr(defaultEnd);
+
   var body = '';
-  body += '<div style="font-size:13px;margin-bottom:12px;padding:12px;background:rgba(13,45,94,.04);border-radius:8px;">';
-  body += '<div style="font-weight:700;color:var(--navy);">'+(entry.employee_name || 'Tech')+' — '+(entry.job_name || 'No job')+'</div>';
-  body += '<div style="font-size:11px;color:var(--muted);margin-top:2px;">Entry: '+entryStart.toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'})+' → '+(entry.clock_out ? entryEnd.toLocaleString('en-US',{hour:'numeric',minute:'2-digit'}) : 'Active')+' · '+Math.floor(entryDur/60)+'h '+(entryDur%60)+'m total · '+totalBkMins+'m breaks</div>';
+  // Compact header — single line
+  body += '<div style="font-size:11px;color:var(--muted);margin-bottom:10px;padding:8px 10px;background:rgba(13,45,94,.04);border-radius:6px;">';
+  body += '<strong style="color:var(--navy);font-size:12px;">'+(entry.employee_name || 'Tech')+'</strong> · '+(entry.job_name || 'No job')+' · '+entryStart.toLocaleDateString('en-US',{month:'short',day:'numeric'})+' '+entryStart.toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'})+'→'+(entry.clock_out ? entryEnd.toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'}) : 'Active')+' · '+Math.floor(entryDur/60)+'h '+(entryDur%60)+'m total';
+  if (totalBkMins) body += ' · '+totalBkMins+'m breaks';
   body += '</div>';
 
-  body += '<div id="bk-list">';
-  if (!breaks.length) {
-    body += '<div style="text-align:center;padding:20px;color:var(--muted);font-size:13px;">No breaks logged.</div>';
-  } else {
+  // Existing breaks — tighter rows
+  if (breaks.length) {
+    body += '<div style="margin-bottom:10px;">';
     breaks.forEach(function(b, i) {
       var bs = new Date(b.break_start);
       var be = b.break_end ? new Date(b.break_end) : null;
-      var bsLocal = bs.toISOString().slice(0,16); // for datetime-local input
-      var beLocal = be ? be.toISOString().slice(0,16) : '';
-      body += '<div data-bkid="'+b.id+'" style="border:1px solid var(--border);border-radius:8px;padding:10px;margin-bottom:8px;background:#fff;">';
-      body += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;"><strong style="font-size:12px;">Break '+(i+1)+'</strong><button class="btn btn-sm" onclick="_bkDelete(\''+b.id+'\',\''+entryId+'\')" style="background:#c62828;color:#fff;border-color:#c62828;">Delete</button></div>';
-      body += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">';
-      body += '<label style="font-size:11px;color:var(--muted);">Start<input type="datetime-local" id="bk-start-'+b.id+'" value="'+bsLocal+'" style="display:block;width:100%;padding:6px;border:1px solid var(--border);border-radius:6px;font-family:inherit;"></label>';
-      body += '<label style="font-size:11px;color:var(--muted);">End<input type="datetime-local" id="bk-end-'+b.id+'" value="'+beLocal+'" style="display:block;width:100%;padding:6px;border:1px solid var(--border);border-radius:6px;font-family:inherit;"></label>';
+      var bsLocal = localDtStr(bs);
+      var beLocal = be ? localDtStr(be) : '';
+      body += '<div style="border:1px solid var(--border);border-radius:6px;padding:8px;margin-bottom:6px;background:#fff;">';
+      body += '<div style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted);margin-bottom:4px;"><strong style="color:var(--navy);">Break '+(i+1)+'</strong> · '+(b.duration_minutes || 0)+' min</div>';
+      body += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;">';
+      body += '<input type="datetime-local" id="bk-start-'+b.id+'" value="'+bsLocal+'" style="padding:5px;border:1px solid var(--border);border-radius:5px;font-family:inherit;font-size:12px;">';
+      body += '<input type="datetime-local" id="bk-end-'+b.id+'" value="'+beLocal+'" style="padding:5px;border:1px solid var(--border);border-radius:5px;font-family:inherit;font-size:12px;">';
       body += '</div>';
-      body += '<div style="margin-top:6px;font-size:11px;color:var(--muted);">'+(b.duration_minutes || 0)+' min · </div>';
-      body += '<button class="btn btn-sm" onclick="_bkUpdate(\''+b.id+'\',\''+entryId+'\')" style="margin-top:6px;background:#0d2d5e;color:#fff;border-color:#0d2d5e;">Save Changes</button>';
-      body += '</div>';
+      body += '<div style="display:flex;gap:6px;margin-top:6px;">';
+      body += '<button class="btn btn-sm" onclick="_bkUpdate(\''+b.id+'\',\''+entryId+'\')" style="background:#0d2d5e;color:#fff;border-color:#0d2d5e;flex:1;">Save</button>';
+      body += '<button class="btn btn-sm" onclick="_bkDelete(\''+b.id+'\',\''+entryId+'\')" style="background:#c62828;color:#fff;border-color:#c62828;">Delete</button>';
+      body += '</div></div>';
     });
+    body += '</div>';
   }
-  body += '</div>';
 
-  body += '<div style="border-top:1px solid var(--border);margin-top:12px;padding-top:12px;">';
-  body += '<div style="font-size:12px;font-weight:700;color:var(--navy);margin-bottom:6px;">Add a break</div>';
-  body += '<div style="display:grid;grid-template-columns:1fr 1fr 80px;gap:8px;">';
-  body += '<label style="font-size:11px;color:var(--muted);">Start<input type="datetime-local" id="bk-add-start" style="display:block;width:100%;padding:6px;border:1px solid var(--border);border-radius:6px;font-family:inherit;"></label>';
-  body += '<label style="font-size:11px;color:var(--muted);">End<input type="datetime-local" id="bk-add-end" style="display:block;width:100%;padding:6px;border:1px solid var(--border);border-radius:6px;font-family:inherit;"></label>';
-  body += '<button class="btn btn-sm" onclick="_bkAdd(\''+entryId+'\')" style="background:#2e7d32;color:#fff;border-color:#2e7d32;align-self:end;">+ Add</button>';
+  // Add a break — smart defaults pre-filled
+  body += '<div style="border-top:1px solid var(--border);padding-top:10px;">';
+  body += '<div style="font-size:11px;font-weight:700;color:var(--navy);margin-bottom:6px;">+ Add break (defaults to 12:00–12:30 on entry date)</div>';
+  body += '<div style="display:grid;grid-template-columns:1fr 1fr 70px;gap:6px;">';
+  body += '<input type="datetime-local" id="bk-add-start" value="'+defStartStr+'" style="padding:5px;border:1px solid var(--border);border-radius:5px;font-family:inherit;font-size:12px;">';
+  body += '<input type="datetime-local" id="bk-add-end" value="'+defEndStr+'" style="padding:5px;border:1px solid var(--border);border-radius:5px;font-family:inherit;font-size:12px;">';
+  body += '<button class="btn btn-sm" onclick="_bkAdd(\''+entryId+'\')" style="background:#2e7d32;color:#fff;border-color:#2e7d32;">+ Add</button>';
   body += '</div></div>';
 
   showModal('☕ Breaks — '+(entry.employee_name || ''), body, null);
@@ -10333,6 +10380,7 @@ async function _bkUpdate(breakId, entryId) {
       body: JSON.stringify({ break_start: sISO, break_end: eISO, duration_minutes: dur })
     });
   } catch(e) { toast('⚠ Save failed'); }
+  _refreshTimecardModalIfOpen();
   await loadAll();
 }
 
@@ -10348,6 +10396,7 @@ async function _bkDelete(breakId, entryId) {
       headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY}
     });
   } catch(e) { toast('⚠ Delete failed'); }
+  _refreshTimecardModalIfOpen();
   await loadAll();
 }
 
@@ -10375,6 +10424,7 @@ async function _bkAdd(entryId) {
   } catch(e) { toast('⚠ Add error'); }
   closeModal();
   render();
+  _refreshTimecardModalIfOpen();
   await loadAll();
 }
 
