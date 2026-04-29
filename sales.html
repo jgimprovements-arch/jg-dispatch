@@ -739,6 +739,108 @@ function selectMergeLoser(loserId) {
   render();
 }
 
+// Build the candidate list HTML for the merge picker. When the user has not
+// typed anything yet, we proactively rank candidates by similarity to the
+// keeper — same-phone matches first, then partners whose name shares tokens
+// with the keeper's name. When the user IS typing, we just match against
+// their query using the same token-based search the rest of the app uses.
+function _renderMergeCandidates(keeper, query) {
+  var q = (query||'').toLowerCase().trim();
+  var keeperName = (keeper.name||'').toLowerCase();
+  var keeperCompany = (keeper.company||'').toLowerCase();
+  var keeperPhoneDigits = (keeper.phone||'').replace(/\D/g,'');
+
+  // Tokens from the keeper's name+company — used to rank similarity when no
+  // search query is active. Filter out very short tokens (1-2 chars) which
+  // would create too many false matches (e.g. "of" in "Hall of Famers").
+  var keeperTokens = (keeperName + ' ' + keeperCompany).split(/\s+/)
+    .filter(function(t){ return t.length >= 3; });
+
+  var candidates = [];
+
+  if (q) {
+    // User is searching — token-based filter, no ranking beyond the order
+    // they already exist in ST.partners.
+    var qTokens = q.split(/\s+/).filter(function(t){ return t.length > 0; });
+    var qDigits = q.replace(/\D/g,'');
+    ST.partners.forEach(function(p){
+      if (p.id === keeper.id) return;
+      var hay = ((p.name||'') + ' ' + (p.company||'') + ' ' + (p.city||'')).toLowerCase();
+      var phoneHit = qDigits && (p.phone||'').replace(/\D/g,'').indexOf(qDigits) !== -1;
+      var textHit = qTokens.every(function(t){ return hay.indexOf(t) !== -1; });
+      if (phoneHit || textHit) candidates.push({p: p, score: 0});
+    });
+  } else {
+    // No search query — rank by similarity to the keeper. Score:
+    //  +100 same phone (digits only) — strong dupe signal
+    //  +20  per matching token between keeper name+company and candidate name+company
+    //  +5   matching first letter of name (weakest signal, just to surface alphabet neighbors)
+    ST.partners.forEach(function(p){
+      if (p.id === keeper.id) return;
+      var score = 0;
+      var pHay = ((p.name||'') + ' ' + (p.company||'')).toLowerCase();
+      var pPhoneDigits = (p.phone||'').replace(/\D/g,'');
+
+      if (keeperPhoneDigits && pPhoneDigits && keeperPhoneDigits === pPhoneDigits) {
+        score += 100;
+      }
+      keeperTokens.forEach(function(t){
+        if (pHay.indexOf(t) !== -1) score += 20;
+      });
+      if (keeperName && (p.name||'').toLowerCase().charAt(0) === keeperName.charAt(0)) {
+        score += 5;
+      }
+      // Only include partners with at least SOME similarity signal. Avoids
+      // dumping the entire 6,422-row partner list into the merge dialog.
+      if (score >= 20) candidates.push({p: p, score: score});
+    });
+    // Sort highest-score first
+    candidates.sort(function(a,b){ return b.score - a.score; });
+  }
+
+  candidates = candidates.slice(0, 50);
+
+  if (!candidates.length) {
+    if (q) {
+      return '<div style="padding:20px;text-align:center;color:var(--muted);font-size:12px;">No partners match.</div>';
+    }
+    return '<div style="padding:20px;text-align:center;color:var(--muted);font-size:12px;line-height:1.6;">No similar partners found automatically.<br><span style="font-size:11px;">Type above to search the full partner list.</span></div>';
+  }
+
+  var html = '';
+  candidates.forEach(function(c){
+    var p = c.p;
+    var simBadge = '';
+    if (!q && c.score >= 100) {
+      simBadge = '<span style="font-size:9px;font-weight:700;padding:1px 6px;border-radius:4px;background:rgba(192,32,32,.1);color:var(--danger);margin-left:6px;">SAME PHONE</span>';
+    } else if (!q && c.score >= 40) {
+      simBadge = '<span style="font-size:9px;font-weight:700;padding:1px 6px;border-radius:4px;background:rgba(232,93,4,.1);color:var(--orange);margin-left:6px;">SIMILAR NAME</span>';
+    }
+    html += '<div style="padding:10px 12px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;cursor:pointer;" onclick="selectMergeLoser(\'' + p.id + '\')">';
+    html += '<div class="partner-avatar" style="background:' + tierColor(p.tier||'C') + ';width:32px;height:32px;font-size:12px;">' + partnerInitials(p.name) + '</div>';
+    html += '<div style="flex:1;min-width:0;">';
+    html += '<div style="font-size:13px;font-weight:600;color:var(--navy);">' + (p.name||'') + simBadge + '</div>';
+    html += '<div style="font-size:11px;color:var(--muted);">' + (p.company||'—') + ' · ' + (p.phone||'no phone') + '</div>';
+    html += '</div>';
+    html += '<div style="font-size:11px;color:var(--muted);">' + (p.touch_count||0) + ' touches</div>';
+    html += '</div>';
+  });
+  return html;
+}
+
+// Typing handler for the merge-picker search input. Critically, this does
+// NOT call render() — that would tear down the input and lose focus,
+// meaning the user could only type one letter at a time before having
+// to click back into the field. Instead, we just rebuild the candidate
+// list and inject it into the existing wrapper div.
+function _mergePickerType(value) {
+  ST.mergeSearch = value;
+  var keeper = ST.partners.find(function(x){ return x.id === ST.mergeKeeper; });
+  if (!keeper) return;
+  var wrap = document.getElementById('merge-results-wrap');
+  if (wrap) wrap.innerHTML = _renderMergeCandidates(keeper, value);
+}
+
 // Auto-pick non-empty: if keeper has value, use it; otherwise take loser's.
 // This way we never blow away existing data — we only fill in blanks.
 function _mergeFields(keeper, loser) {
@@ -2097,30 +2199,12 @@ function _buildModalHtml() {
       if (keeper) {
         mh += '<div class="modal-title">⇄ Merge Into: ' + keeper.name + '</div>';
         mh += '<div style="font-size:12px;color:var(--muted);margin-bottom:12px;line-height:1.5;">Pick the duplicate partner to merge into <strong>' + keeper.name + '</strong>. Their touches and revenue will combine onto this record, and the duplicate will be deleted.</div>';
-        mh += '<input class="form-input" id="merge-search" placeholder="Search by name, company, or phone..." oninput="ST.mergeSearch=this.value;render()" value="' + (ST.mergeSearch||'').replace(/"/g,'&quot;') + '" style="margin-bottom:10px;">';
-        var q = (ST.mergeSearch||'').toLowerCase().trim();
-        var candidates = ST.partners.filter(function(p){
-          if (p.id === keeper.id) return false;
-          if (!q) return true;
-          return (p.name||'').toLowerCase().indexOf(q) !== -1
-              || (p.company||'').toLowerCase().indexOf(q) !== -1
-              || (p.phone||'').indexOf(q) !== -1;
-        }).slice(0, 50);
-        mh += '<div style="max-height:360px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;">';
-        if (!candidates.length) {
-          mh += '<div style="padding:20px;text-align:center;color:var(--muted);font-size:12px;">No partners match.</div>';
-        } else {
-          candidates.forEach(function(p){
-            mh += '<div style="padding:10px 12px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;cursor:pointer;" onclick="selectMergeLoser(\'' + p.id + '\')">';
-            mh += '<div class="partner-avatar" style="background:' + tierColor(p.tier||'C') + ';width:32px;height:32px;font-size:12px;">' + partnerInitials(p.name) + '</div>';
-            mh += '<div style="flex:1;min-width:0;">';
-            mh += '<div style="font-size:13px;font-weight:600;color:var(--navy);">' + p.name + '</div>';
-            mh += '<div style="font-size:11px;color:var(--muted);">' + (p.company||'—') + ' · ' + (p.phone||'no phone') + '</div>';
-            mh += '</div>';
-            mh += '<div style="font-size:11px;color:var(--muted);">' + (p.touch_count||0) + ' touches</div>';
-            mh += '</div>';
-          });
-        }
+        // Input now updates a local var on the input element via oninput
+        // calling _mergePickerType() which re-renders ONLY the candidate list,
+        // not the whole modal. This keeps focus on the input as the user types.
+        mh += '<input class="form-input" id="merge-search" placeholder="Search by name, company, or phone..." oninput="_mergePickerType(this.value)" value="' + (ST.mergeSearch||'').replace(/"/g,'&quot;') + '" style="margin-bottom:10px;" autocomplete="off">';
+        mh += '<div id="merge-results-wrap" style="max-height:360px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;">';
+        mh += _renderMergeCandidates(keeper, ST.mergeSearch || '');
         mh += '</div>';
         mh += '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">';
         mh += '<button style="padding:8px 16px;border-radius:6px;border:1.5px solid var(--border);background:transparent;cursor:pointer;font-size:12px;" onclick="ST.modal=\'partner-detail\';ST.mergeKeeper=null;ST.mergeSearch=\'\';render()">Cancel</button>';
