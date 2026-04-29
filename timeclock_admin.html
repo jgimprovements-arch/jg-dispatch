@@ -305,6 +305,22 @@ function billableMins(entry, breaks) {
   return Math.max(0, raw - bkMins);
 }
 
+// After-hours detection (admin-side mirror of timeclock.html's isAfterHours).
+// Returns true if clock_in falls in: weekday before 7am, weekday 5pm or later,
+// any weekend, or any holiday in ST.holidays.
+function isAfterHoursAdmin(clockInISO) {
+  if (!clockInISO) return false;
+  var d = new Date(clockInISO);
+  var dow = d.getDay();
+  if (dow === 0 || dow === 6) return true;
+  var hr = d.getHours();
+  if (hr < 7) return true;
+  if (hr >= 17) return true;
+  var iso = d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
+  if (Array.isArray(ST.holidays) && ST.holidays.indexOf(iso) !== -1) return true;
+  return false;
+}
+
 function isEarlyClockIn(clockInISO) {
   var dt = new Date(clockInISO);
   return dt.getHours() < 7 || (dt.getHours() === 7 && dt.getMinutes() < 30);
@@ -508,6 +524,14 @@ async function loadAll() {
 
   var brks = await sb('/rest/v1/time_breaks?select=*');
   ST.breaks = brks || [];
+
+  // Holiday calendar for after-hours / on-call detection
+  try {
+    var hols = await sb('/rest/v1/holidays?select=date,name');
+    ST.holidays = (hols || []).map(function(h){ return h.date; });
+    ST.holidayNames = {};
+    (hols || []).forEach(function(h){ ST.holidayNames[h.date] = h.name; });
+  } catch(e) { ST.holidays = []; ST.holidayNames = {}; }
 
   var abs = await sb('/rest/v1/absence_records?date=gte.' + since + '&order=date.desc&limit=200&select=*');
   ST.absences = abs || [];
@@ -3064,6 +3088,23 @@ function renderTimesheets() {
         flagCell='<span style="color:#c62828;font-size:11px;font-weight:700;">&#9888; Missed clock-out<br><button class="btn btn-sm" onclick="editEntry(\''+e.id+'\')">Fix</button> <button class="btn btn-sm" onclick="notifyMissedCO(\''+e.id+'\')" style="background:#6a1b9a;color:#fff;border-color:#6a1b9a;">🔔 Notify</button></span>';
       }
       else if(early&&!e.approved_early) flagCell='<span style="color:#c62828;font-size:11px;font-weight:700;">Early<br><button class="btn btn-sm" onclick="approveEarly(\''+e.id+'\')">Approve</button> <button class="btn btn-sm" onclick="fixEarlyTo730(\''+e.id+'\')" style="background:#e85d04;color:#fff;border-color:#e85d04;" title="Move clock-in to 7:30 AM">→ 7:30</button></span>';
+      // After-hours / on-call flag — append (independent of other flags)
+      if (isAfterHoursAdmin(e.clock_in)) {
+        var ocStatus_t = e.on_call_status || 'na';
+        var ocChip_t = '';
+        if (ocStatus_t === 'yes') {
+          if (e.on_call_bonus_id) {
+            ocChip_t = '<div style="color:#2e7d32;font-size:11px;font-weight:700;margin-top:4px;">🌙 ✓ $50 bonus paid</div>';
+          } else {
+            ocChip_t = '<div style="margin-top:4px;"><div style="color:#e65100;font-size:11px;font-weight:700;margin-bottom:2px;">🌙 On-call</div><button class="btn btn-sm" onclick="addOnCallBonus(\''+e.id+'\')" style="background:#2e7d32;color:#fff;border-color:#2e7d32;">+ $50 Bonus</button></div>';
+          }
+        } else if (ocStatus_t === 'no') {
+          ocChip_t = '<div style="color:var(--muted);font-size:11px;margin-top:4px;">🌙 After-hrs (not on-call)</div>';
+        } else {
+          ocChip_t = '<div style="color:#e65100;font-size:11px;font-weight:700;margin-top:4px;">🌙 Awaiting tech confirm</div>';
+        }
+        flagCell = (flagCell || '') + ocChip_t;
+      }
       else if(early&&e.approved_early) flagCell='<span style="color:#2e7d32;font-size:11px;">Early OK</span>';
       // Verified indicator — admin can manually toggle for cleanup of legacy data
       var verifiedCell;
@@ -10301,6 +10342,77 @@ function showModal(title, bodyHtml, saveCall) {
   m.addEventListener('click', function(e){ if(e.target===m) closeModal(); });
   document.body.appendChild(m);
 }
+// ── ON-CALL BONUS ─────────────────────────────────────────────────────────
+// Admin clicks "+ $50 Bonus" on an on-call entry. Creates a commission row of
+// type 'on_call_bonus', then marks the entry's on_call_bonus_id so we don't
+// double-pay if the button gets re-clicked or the screen is re-rendered.
+async function addOnCallBonus(entryId) {
+  if (!isAdmin()) { toast('Admin access required'); return; }
+  var entry = ST.entries.find(function(e){ return e.id === entryId; });
+  if (!entry) { toast('Entry not found'); return; }
+  if (entry.on_call_bonus_id) { toast('Bonus already paid for this entry'); return; }
+  if (entry.on_call_status !== 'yes') { toast('Tech has not confirmed this as on-call'); return; }
+
+  var dt = new Date(entry.clock_in);
+  var dateLabel = dt.toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' });
+  var timeLabel = dt.toLocaleTimeString('en-US', { hour:'numeric', minute:'2-digit' });
+  var confirmMsg = 'Add $50 on-call bonus for ' + entry.employee_name + '?\n\n' +
+                   'Entry: ' + dateLabel + ' at ' + timeLabel + '\n' +
+                   'Job: ' + (entry.job_name || 'No job') + '\n\n' +
+                   'A commission row will be created and shown on the timecard.';
+  if (!confirm(confirmMsg)) return;
+
+  var commissionPayload = {
+    employee_id: entry.employee_id,
+    employee_name: entry.employee_name,
+    commission_type: 'on_call_bonus',
+    amount: 50,
+    earned_date: entry.clock_in.split('T')[0],
+    job_id: entry.job_id || null,
+    job_name: entry.job_name || null,
+    status: 'approved',
+    notes: 'On-call response — ' + dateLabel + ' ' + timeLabel
+  };
+
+  try {
+    // Create commission row
+    var r = await fetch(SB_URL + '/rest/v1/commissions', {
+      method: 'POST',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=representation' },
+      body: JSON.stringify(commissionPayload)
+    });
+    if (!r.ok) {
+      var err = await r.text();
+      toast('⚠ Bonus failed: ' + err);
+      return;
+    }
+    var rows = await r.json();
+    var bonusRow = rows && rows[0];
+    if (!bonusRow) { toast('⚠ Bonus inserted but no ID returned'); return; }
+
+    // Link bonus to the entry so we don't double-pay
+    await fetch(SB_URL + '/rest/v1/time_entries?id=eq.' + entryId, {
+      method: 'PATCH',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ on_call_bonus_id: bonusRow.id })
+    });
+
+    // Optimistic local update
+    entry.on_call_bonus_id = bonusRow.id;
+    if (Array.isArray(ST.commissions)) ST.commissions.push(bonusRow);
+    toast('✓ $50 on-call bonus added');
+    if (typeof logActivity === 'function') {
+      logActivity('On-Call Bonus', '$50 bonus to ' + entry.employee_name + ' for ' + dateLabel + ' ' + timeLabel, 'time_clock', entry.employee_name);
+    }
+    render();
+    _refreshTimecardModalIfOpen();
+    await loadAll();
+  } catch(e) {
+    console.error('addOnCallBonus error:', e);
+    toast('⚠ Bonus error');
+  }
+}
+
 // ── DELETE ENTRY ──────────────────────────────────────────────────────────
 // Hard delete a time_entries row. Admin only. Cascades to time_breaks because
 // the FK has ON DELETE CASCADE (or breaks reference entry_id and we clean
@@ -10962,6 +11074,23 @@ function openTimecardDetail(empName) {
         flagCell = '<span style="color:#c62828;font-size:11px;font-weight:700;">Early<br><button class="btn btn-sm" onclick="approveEarly(\''+e.id+'\')">Approve</button> <button class="btn btn-sm" onclick="fixEarlyTo730(\''+e.id+'\')" style="background:#e85d04;color:#fff;border-color:#e85d04;" title="Move clock-in to 7:30 AM">→ 7:30</button></span>';
       } else if (early && e.approved_early) {
         flagCell = '<span style="color:#2e7d32;font-size:11px;">Early OK</span>';
+      }
+      // After-hours / on-call flag — independent, append regardless of early/missed status
+      if (isAfterHoursAdmin(e.clock_in)) {
+        var ocStatus_m = e.on_call_status || 'na';
+        var ocChip_m = '';
+        if (ocStatus_m === 'yes') {
+          if (e.on_call_bonus_id) {
+            ocChip_m = '<div style="color:#2e7d32;font-size:11px;font-weight:700;margin-top:4px;">🌙 ✓ $50 bonus paid</div>';
+          } else {
+            ocChip_m = '<div style="margin-top:4px;"><div style="color:#e65100;font-size:11px;font-weight:700;margin-bottom:2px;">🌙 On-call</div><button class="btn btn-sm" onclick="addOnCallBonus(\''+e.id+'\')" style="background:#2e7d32;color:#fff;border-color:#2e7d32;">+ $50 Bonus</button></div>';
+          }
+        } else if (ocStatus_m === 'no') {
+          ocChip_m = '<div style="color:var(--muted);font-size:11px;margin-top:4px;">🌙 After-hrs (not on-call)</div>';
+        } else {
+          ocChip_m = '<div style="color:#e65100;font-size:11px;font-weight:700;margin-top:4px;">🌙 Awaiting tech confirm</div>';
+        }
+        flagCell = (flagCell || '') + ocChip_m;
       }
       var verifiedCell;
       if (e.self_verified) {

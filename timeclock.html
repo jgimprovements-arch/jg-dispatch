@@ -932,6 +932,8 @@ var TC = {
   employee: null,
   clockedIn: false,
   onBreak: false,
+  holidays: null, // YYYY-MM-DD strings, lazy-loaded
+
   activeEntry: null,
   activeBreak: null,
   jobs: [],
@@ -2001,6 +2003,104 @@ async function checkClockInCelebration(u) {
   } catch(e) {}
 }
 
+// ── ON-CALL / AFTER-HOURS ────────────────────────────────────────────────
+// Loads the holiday calendar once per session; subsequent calls are no-ops.
+async function loadHolidays() {
+  if (TC.holidays) return TC.holidays;
+  try {
+    var rows = await sb('/rest/v1/holidays?select=date');
+    TC.holidays = (rows || []).map(function(r){ return r.date; });
+  } catch(e) {
+    console.warn('Holiday load failed:', e.message);
+    TC.holidays = [];
+  }
+  return TC.holidays;
+}
+
+// Returns true if the given Date is in an after-hours window:
+//  - Mon-Fri before 7:00 AM
+//  - Mon-Fri 5:00 PM or later
+//  - All day Saturday or Sunday
+//  - Any date in TC.holidays
+function isAfterHours(d) {
+  if (!(d instanceof Date)) d = new Date(d);
+  var dow = d.getDay();
+  // Weekend
+  if (dow === 0 || dow === 6) return true;
+  // Hour-based weekday window
+  var hr = d.getHours();
+  if (hr < 7) return true;
+  if (hr >= 17) return true;
+  // Holiday lookup (cache might be empty if call failed; that's fine, just no holiday match)
+  var iso = d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
+  if (Array.isArray(TC.holidays) && TC.holidays.indexOf(iso) !== -1) return true;
+  return false;
+}
+
+// Show the on-call confirmation banner above the entry list. The banner
+// disappears once the tech taps Yes or No.
+function _renderOnCallBanner() {
+  var existing = document.getElementById('on-call-banner');
+  if (existing) existing.remove();
+
+  if (!TC.activeEntry) return;
+  if (TC.activeEntry.on_call_status !== 'unconfirmed') return;
+
+  var html = '<div id="on-call-banner" style="background:linear-gradient(135deg,#ffe082,#ffca28);border:2px solid #ff8f00;border-radius:12px;padding:14px 16px;margin:12px;box-shadow:0 4px 12px rgba(255,143,0,.25);">'
+    + '<div style="font-size:14px;font-weight:700;color:#e65100;margin-bottom:6px;">🌙 After-hours clock-in detected</div>'
+    + '<div style="font-size:12px;color:#5d4037;margin-bottom:10px;">Was this an on-call emergency response? Confirm so admin can review your bonus.</div>'
+    + '<div style="display:flex;gap:8px;">'
+    + '<button onclick="_confirmOnCall(\'yes\')" style="flex:1;padding:10px;background:var(--green,#2e7d32);color:#fff;border:none;border-radius:8px;font-weight:700;cursor:pointer;font-family:inherit;font-size:13px;">✓ Yes — On-call</button>'
+    + '<button onclick="_confirmOnCall(\'no\')" style="flex:1;padding:10px;background:#fff;color:#5d4037;border:1.5px solid #ff8f00;border-radius:8px;font-weight:700;cursor:pointer;font-family:inherit;font-size:13px;">No — Regular work</button>'
+    + '</div></div>';
+
+  // Insert at top of the main body content
+  var anchor = document.getElementById('schedule-list') || document.querySelector('.tab-content') || document.body;
+  if (anchor && anchor.parentNode) {
+    anchor.insertAdjacentHTML('beforebegin', html);
+  } else {
+    document.body.insertAdjacentHTML('afterbegin', html);
+  }
+}
+
+async function _confirmOnCall(status) {
+  if (!TC.activeEntry) return;
+  if (status !== 'yes' && status !== 'no') return;
+  var btnContainer = document.getElementById('on-call-banner');
+  if (btnContainer) {
+    var btns = btnContainer.querySelectorAll('button');
+    btns.forEach(function(b){ b.disabled = true; b.style.opacity = '.5'; });
+  }
+
+  try {
+    await fetch(SB_URL + '/rest/v1/time_entries?id=eq.' + TC.activeEntry.id, {
+      method: 'PATCH',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ on_call_status: status })
+    });
+    TC.activeEntry.on_call_status = status;
+    var idx = TC.entries.findIndex(function(e){ return e.id === TC.activeEntry.id; });
+    if (idx !== -1) TC.entries[idx].on_call_status = status;
+    if (typeof logActivity === 'function') {
+      logActivity('On-Call Confirmed', status === 'yes' ? 'On-call emergency response' : 'Not on-call (after-hours but regular work)', 'time_clock');
+    }
+    if (status === 'yes') {
+      toast('🌙 On-call confirmed — admin will review bonus');
+    } else {
+      toast('Confirmed — regular after-hours work');
+    }
+    var banner = document.getElementById('on-call-banner');
+    if (banner) banner.remove();
+  } catch(e) {
+    console.error('Confirm on-call failed:', e);
+    toast('⚠ Save failed — try again');
+    if (btnContainer) {
+      var btns2 = btnContainer.querySelectorAll('button');
+      btns2.forEach(function(b){ b.disabled = false; b.style.opacity = '1'; });
+    }
+  }
+}
+
 async function clockIn() {
   if (!TC.employee || !TC.employee.id) { toast('Employee record not found'); return; }
   var role = TC.employee.role || 'Technician';
@@ -2047,6 +2147,23 @@ async function clockIn() {
       TC.selectedJobName = 'Office Hours';
     }
     TC.entries.push(result[0]);
+
+    // ── On-call detection: if clock-in was after-hours, flag the entry ──
+    var clockInDt = new Date(now);
+    if (isAfterHours(clockInDt)) {
+      TC.activeEntry.on_call_status = 'unconfirmed';
+      // Persist the flag so admin sees it right away
+      try {
+        await fetch(SB_URL + '/rest/v1/time_entries?id=eq.' + TC.activeEntry.id, {
+          method: 'PATCH',
+          headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ on_call_status: 'unconfirmed' })
+        });
+      } catch(e) { /* non-fatal */ }
+      // Show the confirmation banner
+      setTimeout(_renderOnCallBanner, 300);
+    }
+
     startPinging();
     logActivity('Clock In', 'Clocked in — ' + (isOfficeHours ? 'Office Hours (non-job)' : 'Job: ' + (TC.selectedJob ? TC.selectedJob.name : 'None')), 'time_clock');
     // Birthday & anniversary — fire on first clock-in on or after the date
@@ -2079,6 +2196,13 @@ async function clockIn() {
 
 async function clockOut() {
   if (!TC.activeEntry) return;
+
+  // If after-hours flag is still unconfirmed, force a decision before clocking out
+  if (TC.activeEntry.on_call_status === 'unconfirmed') {
+    var resp = confirm('🌙 You haven\'t confirmed whether this was an on-call response.\n\nClick OK if this WAS an on-call emergency response (eligible for bonus).\nClick Cancel if it was regular after-hours work.');
+    await _confirmOnCall(resp ? 'yes' : 'no');
+  }
+
   var btn = document.getElementById('main-btn');
   btn.style.opacity = '.6'; btn.style.pointerEvents = 'none';
   toast('Getting location...');
@@ -4166,6 +4290,14 @@ function _handleNotificationDeepLink() {
 document.addEventListener('DOMContentLoaded', function() {
   // Fire deep-link handler after a delay so initial data has time to load
   setTimeout(_handleNotificationDeepLink, 1500);
+  // Load holiday calendar (used by isAfterHours detection on next clock-in)
+  setTimeout(loadHolidays, 1000);
+  // Re-render on-call banner if active entry already needs confirmation (from prior session)
+  setTimeout(function(){
+    if (TC.activeEntry && TC.activeEntry.on_call_status === 'unconfirmed') {
+      _renderOnCallBanner();
+    }
+  }, 2000);
   var u = checkAuth();
   if (u) { initApp(u); return; }
   document.getElementById('login-screen').style.display = 'flex';
