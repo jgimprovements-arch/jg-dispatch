@@ -3041,7 +3041,7 @@ function renderTimesheets() {
       if(missedCO) {
         flagCell='<span style="color:#c62828;font-size:11px;font-weight:700;">&#9888; Missed clock-out<br><button class="btn btn-sm" onclick="editEntry(\''+e.id+'\')">Fix</button> <button class="btn btn-sm" onclick="notifyMissedCO(\''+e.id+'\')" style="background:#6a1b9a;color:#fff;border-color:#6a1b9a;">🔔 Notify</button></span>';
       }
-      else if(early&&!e.approved_early) flagCell='<span style="color:#c62828;font-size:11px;font-weight:700;">Early<br><button class="btn btn-sm" onclick="approveEarly(\''+e.id+'\')">Approve</button></span>';
+      else if(early&&!e.approved_early) flagCell='<span style="color:#c62828;font-size:11px;font-weight:700;">Early<br><button class="btn btn-sm" onclick="approveEarly(\''+e.id+'\')">Approve</button> <button class="btn btn-sm" onclick="fixEarlyTo730(\''+e.id+'\')" style="background:#e85d04;color:#fff;border-color:#e85d04;" title="Move clock-in to 7:30 AM">→ 7:30</button></span>';
       else if(early&&e.approved_early) flagCell='<span style="color:#2e7d32;font-size:11px;">Early OK</span>';
       // Verified indicator — admin can manually toggle for cleanup of legacy data
       var verifiedCell;
@@ -3070,7 +3070,7 @@ function renderTimesheets() {
       if (tcApproved) {
         h += '<td><span style="font-size:10px;color:var(--muted);">🔒 Locked</span></td>';
       } else {
-        h += '<td>'+(isAdmin()?'<button class="btn btn-sm" onclick="editEntry(\''+e.id+'\')">Edit</button> <button class="btn btn-sm" onclick="openBreakEditor(\''+e.id+'\')" style="background:#6a1b9a;color:#fff;border-color:#6a1b9a;" title="Edit breaks">☕</button>':'<button class="btn btn-sm" onclick="viewEntry(\''+e.id+'\')">View</button>')+'</td>';
+        h += '<td>'+(isAdmin()?'<button class="btn btn-sm" onclick="editEntry(\''+e.id+'\')">Edit</button> <button class="btn btn-sm" onclick="openBreakEditor(\''+e.id+'\')" style="background:#6a1b9a;color:#fff;border-color:#6a1b9a;" title="Edit breaks">☕</button> <button class="btn btn-sm" onclick="openSplitEntry(\''+e.id+'\')" style="background:#0d2d5e;color:#fff;border-color:#0d2d5e;" title="Split into two entries">✂️</button>':'<button class="btn btn-sm" onclick="viewEntry(\''+e.id+'\')">View</button>')+'</td>';
       }
       h += '</tr>';
     });
@@ -10279,6 +10279,201 @@ function showModal(title, bodyHtml, saveCall) {
   m.addEventListener('click', function(e){ if(e.target===m) closeModal(); });
   document.body.appendChild(m);
 }
+// ── FIX EARLY CLOCK-IN ────────────────────────────────────────────────────
+// One-click action to push a too-early clock_in to 7:30 AM same day.
+async function fixEarlyTo730(entryId) {
+  var entry = ST.entries.find(function(e){ return e.id === entryId; });
+  if (!entry) { toast('Entry not found'); return; }
+
+  var oldClockIn = new Date(entry.clock_in);
+  var newClockIn = new Date(oldClockIn);
+  newClockIn.setHours(7, 30, 0, 0);
+
+  if (newClockIn <= oldClockIn) {
+    toast('Already at or after 7:30 AM');
+    return;
+  }
+  if (entry.clock_out && newClockIn >= new Date(entry.clock_out)) {
+    toast('⚠ 7:30 would be after clock-out — fix manually');
+    return;
+  }
+
+  var newClockInISO = newClockIn.toISOString();
+  var newDur = entry.clock_out
+    ? Math.max(0, Math.floor((new Date(entry.clock_out) - newClockIn) / 60000))
+    : null;
+
+  // Optimistic update
+  var idx = ST.entries.findIndex(function(e){ return e.id === entryId; });
+  if (idx >= 0) {
+    ST.entries[idx].clock_in = newClockInISO;
+    if (newDur !== null) ST.entries[idx].duration_minutes = newDur;
+    ST.entries[idx].approved_early = true; // also mark approved since we corrected it
+  }
+  toast('✓ Moved to 7:30 AM');
+  render();
+  _refreshTimecardModalIfOpen();
+
+  // Persist
+  try {
+    var body = { clock_in: newClockInISO, approved_early: true };
+    if (newDur !== null) body.duration_minutes = newDur;
+    await fetch(SB_URL+'/rest/v1/time_entries?id=eq.'+entryId, {
+      method:'PATCH',
+      headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json'},
+      body: JSON.stringify(body)
+    });
+    if (typeof logActivity === 'function') logActivity('Time Adjusted', 'Early punch fixed to 7:30 AM for ' + entry.employee_name, 'time_clock', entry.employee_name);
+  } catch(e) { toast('⚠ Save failed'); }
+  await loadAll();
+}
+
+// ── SPLIT ENTRY ───────────────────────────────────────────────────────────
+// Split one time entry into two. Original entry's clock_out becomes the split
+// time, and a new entry is created from split time → original clock_out with
+// the chosen second job.
+async function openSplitEntry(entryId) {
+  var entry = ST.entries.find(function(e){ return e.id === entryId; });
+  if (!entry) { toast('Entry not found'); return; }
+  if (!entry.clock_out) {
+    toast('⚠ Cannot split an active entry. Clock it out first.');
+    return;
+  }
+
+  var startMs = new Date(entry.clock_in).getTime();
+  var endMs = new Date(entry.clock_out).getTime();
+  var entryDur = Math.floor((endMs - startMs) / 60000);
+  if (entryDur < 2) { toast('⚠ Entry too short to split'); return; }
+
+  // Default split time: midpoint
+  var midMs = startMs + Math.floor((endMs - startMs) / 2);
+  function localDtStr(d) {
+    var pad = function(n){ return n<10?'0'+n:''+n; };
+    return d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate())+'T'+pad(d.getHours())+':'+pad(d.getMinutes());
+  }
+  var defaultSplitStr = localDtStr(new Date(midMs));
+  var entryStartFmt = new Date(startMs).toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'});
+  var entryEndFmt = new Date(endMs).toLocaleString('en-US',{hour:'numeric',minute:'2-digit'});
+
+  var body = '';
+  body += '<div style="font-size:11px;color:var(--muted);margin-bottom:10px;padding:8px 10px;background:rgba(13,45,94,.04);border-radius:6px;">';
+  body += '<strong style="color:var(--navy);font-size:12px;">'+(entry.employee_name || 'Tech')+'</strong> · '+(entry.job_name || 'No job')+'<br>';
+  body += entryStartFmt+' → '+entryEndFmt+' · '+Math.floor(entryDur/60)+'h '+(entryDur%60)+'m total';
+  body += '</div>';
+
+  body += '<div style="font-size:13px;margin-bottom:8px;">Set the split time. The original entry will end at this time, and a new entry will start at this time using the second job below.</div>';
+
+  body += '<label style="display:block;font-size:11px;color:var(--muted);font-weight:700;margin-bottom:4px;">Split time</label>';
+  body += '<input type="datetime-local" id="split-time" value="'+defaultSplitStr+'" min="'+localDtStr(new Date(startMs))+'" max="'+localDtStr(new Date(endMs))+'" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;font-family:inherit;font-size:13px;margin-bottom:12px;">';
+
+  body += '<label style="display:block;font-size:11px;color:var(--muted);font-weight:700;margin-bottom:4px;">Second job (Albi)</label>';
+  body += '<div style="position:relative;margin-bottom:6px;">';
+  body += '<input type="text" id="split-job-search" placeholder="Type to search jobs..." oninput="_filterSplitJobs(this.value)" autocomplete="off" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;font-family:inherit;font-size:13px;">';
+  body += '<input type="hidden" id="split-job-id">';
+  body += '<input type="hidden" id="split-job-name">';
+  body += '<div id="split-job-dropdown" style="display:none;position:absolute;top:100%;left:0;right:0;background:#fff;border:1px solid var(--border);border-radius:6px;max-height:200px;overflow-y:auto;z-index:10;box-shadow:0 4px 16px rgba(0,0,0,.12);margin-top:2px;"></div>';
+  body += '</div>';
+
+  body += '<div style="display:flex;gap:6px;margin-top:10px;">';
+  body += '<button class="btn btn-primary" onclick="_submitSplit(\''+entryId+'\')" style="background:#2e7d32;border-color:#2e7d32;flex:1;">✂️ Split Entry</button>';
+  body += '<button class="btn" onclick="closeModal()">Cancel</button>';
+  body += '</div>';
+
+  showModal('✂️ Split Entry — '+(entry.employee_name || ''), body, null);
+}
+
+function _filterSplitJobs(q) {
+  var dd = document.getElementById('split-job-dropdown');
+  if (!dd) return;
+  if (!q || q.length < 2 || !_albiJobs) { dd.style.display = 'none'; return; }
+  var matches = _albiJobs.filter(function(j){ return j.name.toLowerCase().indexOf(q.toLowerCase()) !== -1; }).slice(0, 15);
+  if (!matches.length) { dd.innerHTML = '<div style="padding:10px;color:var(--muted);font-size:12px;">No matches</div>'; dd.style.display = 'block'; return; }
+  dd.innerHTML = matches.map(function(j){
+    var safeName = (j.name||'').replace(/'/g,"\\'").replace(/"/g,'&quot;');
+    return '<div onclick="_selectSplitJob(\''+j.id+'\',&quot;'+safeName+'&quot;)" style="padding:8px 10px;cursor:pointer;border-bottom:1px solid var(--border);font-size:13px;" onmouseover="this.style.background=\'rgba(13,45,94,.06)\'" onmouseout="this.style.background=\'\'">'+(j.name||'')+'</div>';
+  }).join('');
+  dd.style.display = 'block';
+}
+
+function _selectSplitJob(jobId, jobName) {
+  document.getElementById('split-job-id').value = jobId;
+  document.getElementById('split-job-name').value = jobName;
+  document.getElementById('split-job-search').value = jobName;
+  document.getElementById('split-job-dropdown').style.display = 'none';
+}
+
+async function _submitSplit(entryId) {
+  var splitVal = document.getElementById('split-time').value;
+  var jobId = document.getElementById('split-job-id').value;
+  var jobName = document.getElementById('split-job-name').value;
+
+  if (!splitVal) { toast('Split time required'); return; }
+  if (!jobId || !jobName) { toast('Pick a second job from the search'); return; }
+
+  var entry = ST.entries.find(function(e){ return e.id === entryId; });
+  if (!entry) { toast('Entry not found'); return; }
+
+  var splitISO = new Date(splitVal).toISOString();
+  var splitMs = new Date(splitISO).getTime();
+  var startMs = new Date(entry.clock_in).getTime();
+  var endMs = new Date(entry.clock_out).getTime();
+
+  if (splitMs <= startMs || splitMs >= endMs) {
+    toast('⚠ Split time must be between clock-in and clock-out');
+    return;
+  }
+
+  var firstDur = Math.floor((splitMs - startMs) / 60000);
+  var secondDur = Math.floor((endMs - splitMs) / 60000);
+  var origClockOut = entry.clock_out;
+
+  // 1) PATCH original entry to end at split time
+  try {
+    var r1 = await fetch(SB_URL+'/rest/v1/time_entries?id=eq.'+entryId, {
+      method:'PATCH',
+      headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json'},
+      body: JSON.stringify({ clock_out: splitISO, duration_minutes: firstDur })
+    });
+    if (!r1.ok) { toast('⚠ Failed to update original entry'); return; }
+  } catch(e) { toast('⚠ Network error'); return; }
+
+  // 2) INSERT new entry from split time → original clock_out, with new job
+  try {
+    var newRow = {
+      employee_id: entry.employee_id,
+      employee_name: entry.employee_name,
+      employee_email: entry.employee_email,
+      job_id: jobId,
+      job_name: jobName,
+      market: entry.market,
+      clock_in: splitISO,
+      clock_out: origClockOut,
+      duration_minutes: secondDur,
+      status: 'complete',
+      entry_type: entry.entry_type || 'work',
+      notes: '(split from earlier entry)'
+    };
+    var r2 = await fetch(SB_URL+'/rest/v1/time_entries', {
+      method:'POST',
+      headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json','Prefer':'return=minimal'},
+      body: JSON.stringify(newRow)
+    });
+    if (!r2.ok) {
+      toast('⚠ Original updated but new entry failed — check entries');
+      return;
+    }
+  } catch(e) {
+    toast('⚠ Original updated but new entry failed — check entries');
+    return;
+  }
+
+  toast('✓ Entry split');
+  if (typeof logActivity === 'function') logActivity('Entry Split', entry.employee_name + ' — split at ' + new Date(splitISO).toLocaleString(), 'time_clock', entry.employee_name);
+  closeModal();
+  await loadAll();
+  _refreshTimecardModalIfOpen();
+}
+
 // Helper: if the timecard detail modal is open, capture its employee name then
 // re-open it after some other modal closes — keeps users in context.
 function _refreshTimecardModalIfOpen() {
@@ -10666,7 +10861,7 @@ function openTimecardDetail(empName) {
       if (missedCO) {
         flagCell = '<span style="color:#c62828;font-size:11px;font-weight:700;">⚠ Missed CO<br><button class="btn btn-sm" onclick="editEntry(\''+e.id+'\')">Fix</button> <button class="btn btn-sm" onclick="notifyMissedCO(\''+e.id+'\')" style="background:#6a1b9a;color:#fff;border-color:#6a1b9a;">🔔 Notify</button></span>';
       } else if (early && !e.approved_early) {
-        flagCell = '<span style="color:#c62828;font-size:11px;font-weight:700;">Early<br><button class="btn btn-sm" onclick="approveEarly(\''+e.id+'\')">Approve</button></span>';
+        flagCell = '<span style="color:#c62828;font-size:11px;font-weight:700;">Early<br><button class="btn btn-sm" onclick="approveEarly(\''+e.id+'\')">Approve</button> <button class="btn btn-sm" onclick="fixEarlyTo730(\''+e.id+'\')" style="background:#e85d04;color:#fff;border-color:#e85d04;" title="Move clock-in to 7:30 AM">→ 7:30</button></span>';
       } else if (early && e.approved_early) {
         flagCell = '<span style="color:#2e7d32;font-size:11px;">Early OK</span>';
       }
@@ -10692,7 +10887,7 @@ function openTimecardDetail(empName) {
       h += '<td style="text-align:center;">'+verifiedCell+'</td>';
       h += '<td>'+flagCell+'</td>';
       if (!isApproved && typeof isAdmin === 'function' && isAdmin()) {
-        h += '<td><button class="btn btn-sm" onclick="editEntry(\''+e.id+'\')">Edit</button> <button class="btn btn-sm" onclick="openBreakEditor(\''+e.id+'\')" style="background:#6a1b9a;color:#fff;border-color:#6a1b9a;" title="Edit breaks">☕</button></td>';
+        h += '<td><button class="btn btn-sm" onclick="editEntry(\''+e.id+'\')">Edit</button> <button class="btn btn-sm" onclick="openBreakEditor(\''+e.id+'\')" style="background:#6a1b9a;color:#fff;border-color:#6a1b9a;" title="Edit breaks">☕</button> <button class="btn btn-sm" onclick="openSplitEntry(\''+e.id+'\')" style="background:#0d2d5e;color:#fff;border-color:#0d2d5e;" title="Split into two entries">✂️</button></td>';
       } else {
         h += '<td></td>';
       }
