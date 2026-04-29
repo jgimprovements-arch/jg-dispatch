@@ -282,9 +282,9 @@ function _repOptions(currentVal, placeholder) {
   return html;
 }
 
-function setTypeFilter(t){ST.filterType=t;render();}
-function setTierFilter(t){ST.filterTier=t;render();}
-function setRepFilter(r){ST.filterRep=r||'All';render();}
+function setTypeFilter(t){ST.filterType=t;ST.partnerPageSize=200;render();}
+function setTierFilter(t){ST.filterTier=t;ST.partnerPageSize=200;render();}
+function setRepFilter(r){ST.filterRep=r||'All';ST.partnerPageSize=200;render();}
 
 // ── BULK SELECTION & DELETE ───────────────────────────────────────────────
 // Selection mode toggles checkboxes on partner rows. Small-team tool, no
@@ -500,6 +500,12 @@ var ST = {
   selectionMode: false,  // when true, partner rows show checkboxes instead of click-to-open
   selectedIds: {},       // {id: true} for O(1) lookup of checked rows
   _lastSelectIdx: -1,    // index of the last row interacted with, for Shift+click range select
+  // Partner list pagination — caps visible rows to keep initial render fast.
+  // Without this, rendering 6,000+ partner cards freezes the main thread for
+  // 5+ seconds on first load (which also caused the Supabase auth-lock
+  // warning to fire). User can click "Load more" to expand. Resets when
+  // filters/search change so a fresh filter starts from the top.
+  partnerPageSize: 200,
   // Touches tab organization — filters, search, grouping. All default to
   // "no filter" so the unfiltered view is the same as before.
   touchFilterRep:     'All',   // 'All' | <rep name>
@@ -1008,7 +1014,15 @@ function renderPartnerList() {
   if (!fp.length) {
     h = '<div style="text-align:center;padding:40px;color:var(--muted);">No partners found.</div>';
   }
-  fp.forEach(function(p, idx) {
+  // Pagination: only render the first N partner cards. Without this, ~6000
+  // partner cards block the main thread for several seconds on first paint.
+  // Search-as-you-type works against the FULL fp array (filteredPartners()
+  // already returns everything matching the filters), only the rendering
+  // is capped.
+  var totalMatching = fp.length;
+  var pageSize = ST.partnerPageSize || 200;
+  var fpVisible = fp.slice(0, pageSize);
+  fpVisible.forEach(function(p, idx) {
     var lastTouch = p.last_touch_date ? fmtDate(p.last_touch_date) : 'Never';
     var daysSince = p.last_touch_date ? Math.round((new Date() - new Date(p.last_touch_date+'T00:00:00'))/(1000*60*60*24)) : 999;
     var stale = daysSince > 30;
@@ -1043,6 +1057,20 @@ function renderPartnerList() {
     }
     h += '</div>';
   });
+  // "Load more" footer — only when there are matching partners we haven't
+  // rendered yet. Increments the page size by 200 each click. Acceptable
+  // tradeoff: power user wanting to see the whole list clicks 30 times
+  // and gets a 5-second freeze; everyone else sees a fast page.
+  if (totalMatching > fpVisible.length) {
+    var remaining = totalMatching - fpVisible.length;
+    h += '<div style="text-align:center;padding:14px;">';
+    h += '<button onclick="ST.partnerPageSize=(ST.partnerPageSize||200)+200;renderPartnerList();" style="padding:8px 18px;border-radius:8px;border:1.5px solid var(--border);background:var(--surface);color:var(--navy);font-size:12px;font-weight:700;cursor:pointer;font-family:DM Sans,sans-serif;">Load 200 more · ' + remaining.toLocaleString() + ' left</button>';
+    if (remaining <= 1000) {
+      h += '<button onclick="ST.partnerPageSize=999999;renderPartnerList();" style="margin-left:8px;padding:8px 18px;border-radius:8px;border:1.5px solid var(--border);background:transparent;color:var(--muted);font-size:12px;font-weight:600;cursor:pointer;font-family:DM Sans,sans-serif;">Show all</button>';
+    }
+    h += '<div style="font-size:10px;color:var(--muted);margin-top:6px;">Tip: use search to find specific partners faster.</div>';
+    h += '</div>';
+  }
   listEl.innerHTML = h;
 }
 
@@ -1149,7 +1177,7 @@ function _renderNow() {
     h += '</div>';
 
     h += '<div style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;align-items:center;">';
-    h += '<input id="partner-search" style="padding:7px 12px;border-radius:6px;border:1.5px solid var(--border);font-size:12px;font-family:DM Sans,sans-serif;outline:none;width:200px;" placeholder="Search partners..." value="' + ST.searchQ + '" oninput="ST.searchQ=this.value;renderPartnerList()">';
+    h += '<input id="partner-search" style="padding:7px 12px;border-radius:6px;border:1.5px solid var(--border);font-size:12px;font-family:DM Sans,sans-serif;outline:none;width:200px;" placeholder="Search partners..." value="' + ST.searchQ + '" oninput="ST.searchQ=this.value;ST.partnerPageSize=200;renderPartnerList()">';
     h += mkTypeFilters();
     h += mkTierFilters();
     h += mkRepFilter();
@@ -1201,7 +1229,12 @@ function _renderNow() {
     if (!fp.length) {
       h += '<div style="text-align:center;padding:40px;color:var(--muted);">No partners found. Add your first partner or import from Albi.</div>';
     }
-    fp.forEach(function(p, idx) {
+    // Pagination cap — see ST.partnerPageSize. Initial render of 6,000+
+    // partner cards freezes the UI thread; cap to 200 with "Load more".
+    var totalMatching = fp.length;
+    var pageSize = ST.partnerPageSize || 200;
+    var fpVisible = fp.slice(0, pageSize);
+    fpVisible.forEach(function(p, idx) {
       var lastTouch = p.last_touch_date ? fmtDate(p.last_touch_date) : 'Never';
       var daysSince = p.last_touch_date ? Math.round((new Date() - new Date(p.last_touch_date + 'T00:00:00')) / (1000*60*60*24)) : 999;
       var stale = daysSince > 30;
@@ -1234,6 +1267,17 @@ function _renderNow() {
       }
       h += '</div>';
     });
+    // "Load more" footer if there are matching partners we haven't rendered yet.
+    if (totalMatching > fpVisible.length) {
+      var remaining = totalMatching - fpVisible.length;
+      h += '<div style="text-align:center;padding:14px;">';
+      h += '<button onclick="ST.partnerPageSize=(ST.partnerPageSize||200)+200;render();" style="padding:8px 18px;border-radius:8px;border:1.5px solid var(--border);background:var(--surface);color:var(--navy);font-size:12px;font-weight:700;cursor:pointer;font-family:DM Sans,sans-serif;">Load 200 more · ' + remaining.toLocaleString() + ' left</button>';
+      if (remaining <= 1000) {
+        h += '<button onclick="ST.partnerPageSize=999999;render();" style="margin-left:8px;padding:8px 18px;border-radius:8px;border:1.5px solid var(--border);background:transparent;color:var(--muted);font-size:12px;font-weight:600;cursor:pointer;font-family:DM Sans,sans-serif;">Show all</button>';
+      }
+      h += '<div style="font-size:10px;color:var(--muted);margin-top:6px;">Tip: use search to find specific partners faster.</div>';
+      h += '</div>';
+    }
     h += '</div>'; // end partner-list
   }
 
