@@ -2662,7 +2662,7 @@ function renderTimesheets() {
     if (pendingKeys.length) {
       h += '<div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:10px;">⏳ Pending Review ('+pendingKeys.length+')</div>';
       h += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px;margin-bottom:16px;">';
-      Object.entries(pendingEmps).forEach(function(kv){
+      Object.entries(pendingEmps).sort(function(a,b){ return a[0].localeCompare(b[0]); }).forEach(function(kv){
       var nm=kv[0], d=kv[1];
       var emp=ST.employees.find(function(e){return e.name===nm;});
       var isSalary = emp && emp.pay_type==='salary';
@@ -2796,7 +2796,7 @@ function renderTimesheets() {
       h += '<table class="tc-table" style="margin:0;background:#fff;border-radius:8px;overflow:hidden;">';
       h += '<thead><tr><th>Employee</th><th style="text-align:right;">Total Hrs</th><th style="text-align:right;">Reg</th><th style="text-align:right;">OT</th><th style="text-align:right;">PTO/Sick</th><th style="text-align:right;">Gross</th><th>Approved By</th><th>Approved At</th><th></th></tr></thead><tbody>';
 
-      Object.entries(approvedEmps).forEach(function(kv) {
+      Object.entries(approvedEmps).sort(function(a,b){ return a[0].localeCompare(b[0]); }).forEach(function(kv) {
         var nm3 = kv[0], d3 = kv[1];
         var emp3 = ST.employees.find(function(e){ return e.name === nm3; });
         var rate3 = emp3 ? parseFloat(emp3.hourly_rate||0) : 0;
@@ -2857,7 +2857,7 @@ function renderTimesheets() {
 
       // Totals row for approved — include PTO/sick hours
       var appRegMins=0, appOtMins=0, appPtoHrs=0, appGross=0;
-      Object.entries(approvedEmps).forEach(function(kv){
+      Object.entries(approvedEmps).sort(function(a,b){ return a[0].localeCompare(b[0]); }).forEach(function(kv){
         var d4 = kv[1]; var emp4 = ST.employees.find(function(e){ return e.name === kv[0]; });
         var ot5 = calcOT(d4.entries);
         var absBrk4 = getAbsenceHoursForPeriod(kv[0], curPer.start, curPer.end);
@@ -10339,6 +10339,11 @@ async function openSplitEntry(entryId) {
     toast('⚠ Cannot split an active entry. Clock it out first.');
     return;
   }
+  // Ensure Albi jobs cache is loaded so the search works immediately.
+  if (!_albiJobs && typeof ensureAlbiJobsLoaded === 'function') {
+    toast('Loading jobs...');
+    try { await ensureAlbiJobsLoaded(); } catch(e) {}
+  }
 
   var startMs = new Date(entry.clock_in).getTime();
   var endMs = new Date(entry.clock_out).getTime();
@@ -10368,7 +10373,7 @@ async function openSplitEntry(entryId) {
 
   body += '<label style="display:block;font-size:11px;color:var(--muted);font-weight:700;margin-bottom:4px;">Second job (Albi)</label>';
   body += '<div style="position:relative;margin-bottom:6px;">';
-  body += '<input type="text" id="split-job-search" placeholder="Type to search jobs..." oninput="_filterSplitJobs(this.value)" autocomplete="off" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;font-family:inherit;font-size:13px;">';
+  body += '<input type="text" id="split-job-search" placeholder="Click or type to search jobs..." oninput="_filterSplitJobs(this.value)" onfocus="_filterSplitJobs(this.value||\'\')" autocomplete="off" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;font-family:inherit;font-size:13px;">';
   body += '<input type="hidden" id="split-job-id">';
   body += '<input type="hidden" id="split-job-name">';
   body += '<div id="split-job-dropdown" style="display:none;position:absolute;top:100%;left:0;right:0;background:#fff;border:1px solid var(--border);border-radius:6px;max-height:200px;overflow-y:auto;z-index:10;box-shadow:0 4px 16px rgba(0,0,0,.12);margin-top:2px;"></div>';
@@ -10385,8 +10390,18 @@ async function openSplitEntry(entryId) {
 function _filterSplitJobs(q) {
   var dd = document.getElementById('split-job-dropdown');
   if (!dd) return;
-  if (!q || q.length < 2 || !_albiJobs) { dd.style.display = 'none'; return; }
-  var matches = _albiJobs.filter(function(j){ return j.name.toLowerCase().indexOf(q.toLowerCase()) !== -1; }).slice(0, 15);
+  if (!_albiJobs || !_albiJobs.length) {
+    dd.innerHTML = '<div style="padding:10px;color:var(--muted);font-size:12px;">Albi jobs still loading...</div>';
+    dd.style.display = 'block';
+    return;
+  }
+  // Show ALL jobs (capped at 15) if no query yet, else filter
+  var matches;
+  if (!q || q.length === 0) {
+    matches = _albiJobs.slice(0, 15);
+  } else {
+    matches = _albiJobs.filter(function(j){ return j.name.toLowerCase().indexOf(q.toLowerCase()) !== -1; }).slice(0, 15);
+  }
   if (!matches.length) { dd.innerHTML = '<div style="padding:10px;color:var(--muted);font-size:12px;">No matches</div>'; dd.style.display = 'block'; return; }
   dd.innerHTML = matches.map(function(j){
     var safeName = (j.name||'').replace(/'/g,"\\'").replace(/"/g,'&quot;');
