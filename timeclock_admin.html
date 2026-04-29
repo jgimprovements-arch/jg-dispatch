@@ -3070,7 +3070,7 @@ function renderTimesheets() {
       if (tcApproved) {
         h += '<td><span style="font-size:10px;color:var(--muted);">🔒 Locked</span></td>';
       } else {
-        h += '<td>'+(isAdmin()?'<button class="btn btn-sm" onclick="editEntry(\''+e.id+'\')">Edit</button>':'<button class="btn btn-sm" onclick="viewEntry(\''+e.id+'\')">View</button>')+'</td>';
+        h += '<td>'+(isAdmin()?'<button class="btn btn-sm" onclick="editEntry(\''+e.id+'\')">Edit</button> <button class="btn btn-sm" onclick="openBreakEditor(\''+e.id+'\')" style="background:#6a1b9a;color:#fff;border-color:#6a1b9a;" title="Edit breaks">☕</button>':'<button class="btn btn-sm" onclick="viewEntry(\''+e.id+'\')">View</button>')+'</td>';
       }
       h += '</tr>';
     });
@@ -10069,9 +10069,27 @@ async function saveEntry(id) {
   var inISO = inVal ? new Date(inVal).toISOString() : null;
   var outISO = outVal ? new Date(outVal).toISOString() : null;
   var dur = (inISO && outISO) ? Math.floor((new Date(outISO)-new Date(inISO))/60000) : null;
-  await fetch(SB_URL+'/rest/v1/time_entries?id=eq.'+id, {method:'PATCH', headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json'}, body:JSON.stringify({clock_in:inISO,clock_out:outISO,duration_minutes:dur,job_id:jobId||null,job_name:jobVal,notes:notesVal})});
-  toast('✓ Entry updated');
+
+  // Optimistic update — patch ST.entries locally so UI reflects change instantly,
+  // BEFORE waiting for the slow full reload.
+  var localIdx = ST.entries.findIndex(function(e){ return e.id === id; });
+  if (localIdx >= 0) {
+    Object.assign(ST.entries[localIdx], {
+      clock_in: inISO, clock_out: outISO, duration_minutes: dur,
+      job_id: jobId || null, job_name: jobVal, notes: notesVal
+    });
+  }
   closeModal();
+  render();  // Re-render with optimistic data — user sees change immediately
+  toast('✓ Entry updated');
+
+  // Now persist to server and reload (slower path; happens in background)
+  try {
+    var r = await fetch(SB_URL+'/rest/v1/time_entries?id=eq.'+id, {method:'PATCH', headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json'}, body:JSON.stringify({clock_in:inISO,clock_out:outISO,duration_minutes:dur,job_id:jobId||null,job_name:jobVal,notes:notesVal})});
+    if (!r.ok) {
+      toast('⚠ Save failed — refreshing');
+    }
+  } catch(e) { toast('⚠ Save error — refreshing'); }
   await loadAll();
 }
 
@@ -10241,6 +10259,125 @@ function showModal(title, bodyHtml, saveCall) {
   m.addEventListener('click', function(e){ if(e.target===m) closeModal(); });
   document.body.appendChild(m);
 }
+// ── BREAK MANAGEMENT (admin-side) ─────────────────────────────────────────
+// Edit/add/delete breaks on any time entry. Reuses the showModal infrastructure.
+async function openBreakEditor(entryId) {
+  var entry = ST.entries.find(function(e){ return e.id === entryId; });
+  if (!entry) { toast('Entry not found'); return; }
+  var breaks = ST.breaks.filter(function(b){ return b.entry_id === entryId; })
+                        .sort(function(a,b){ return new Date(a.break_start) - new Date(b.break_start); });
+
+  var entryStart = new Date(entry.clock_in);
+  var entryEnd = entry.clock_out ? new Date(entry.clock_out) : new Date();
+  var entryDur = Math.floor((entryEnd - entryStart) / 60000);
+  var totalBkMins = breaks.reduce(function(s,b){ return s + (b.duration_minutes || 0); }, 0);
+
+  var body = '';
+  body += '<div style="font-size:13px;margin-bottom:12px;padding:12px;background:rgba(13,45,94,.04);border-radius:8px;">';
+  body += '<div style="font-weight:700;color:var(--navy);">'+(entry.employee_name || 'Tech')+' — '+(entry.job_name || 'No job')+'</div>';
+  body += '<div style="font-size:11px;color:var(--muted);margin-top:2px;">Entry: '+entryStart.toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'})+' → '+(entry.clock_out ? entryEnd.toLocaleString('en-US',{hour:'numeric',minute:'2-digit'}) : 'Active')+' · '+Math.floor(entryDur/60)+'h '+(entryDur%60)+'m total · '+totalBkMins+'m breaks</div>';
+  body += '</div>';
+
+  body += '<div id="bk-list">';
+  if (!breaks.length) {
+    body += '<div style="text-align:center;padding:20px;color:var(--muted);font-size:13px;">No breaks logged.</div>';
+  } else {
+    breaks.forEach(function(b, i) {
+      var bs = new Date(b.break_start);
+      var be = b.break_end ? new Date(b.break_end) : null;
+      var bsLocal = bs.toISOString().slice(0,16); // for datetime-local input
+      var beLocal = be ? be.toISOString().slice(0,16) : '';
+      body += '<div data-bkid="'+b.id+'" style="border:1px solid var(--border);border-radius:8px;padding:10px;margin-bottom:8px;background:#fff;">';
+      body += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;"><strong style="font-size:12px;">Break '+(i+1)+'</strong><button class="btn btn-sm" onclick="_bkDelete(\''+b.id+'\',\''+entryId+'\')" style="background:#c62828;color:#fff;border-color:#c62828;">Delete</button></div>';
+      body += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">';
+      body += '<label style="font-size:11px;color:var(--muted);">Start<input type="datetime-local" id="bk-start-'+b.id+'" value="'+bsLocal+'" style="display:block;width:100%;padding:6px;border:1px solid var(--border);border-radius:6px;font-family:inherit;"></label>';
+      body += '<label style="font-size:11px;color:var(--muted);">End<input type="datetime-local" id="bk-end-'+b.id+'" value="'+beLocal+'" style="display:block;width:100%;padding:6px;border:1px solid var(--border);border-radius:6px;font-family:inherit;"></label>';
+      body += '</div>';
+      body += '<div style="margin-top:6px;font-size:11px;color:var(--muted);">'+(b.duration_minutes || 0)+' min · </div>';
+      body += '<button class="btn btn-sm" onclick="_bkUpdate(\''+b.id+'\',\''+entryId+'\')" style="margin-top:6px;background:#0d2d5e;color:#fff;border-color:#0d2d5e;">Save Changes</button>';
+      body += '</div>';
+    });
+  }
+  body += '</div>';
+
+  body += '<div style="border-top:1px solid var(--border);margin-top:12px;padding-top:12px;">';
+  body += '<div style="font-size:12px;font-weight:700;color:var(--navy);margin-bottom:6px;">Add a break</div>';
+  body += '<div style="display:grid;grid-template-columns:1fr 1fr 80px;gap:8px;">';
+  body += '<label style="font-size:11px;color:var(--muted);">Start<input type="datetime-local" id="bk-add-start" style="display:block;width:100%;padding:6px;border:1px solid var(--border);border-radius:6px;font-family:inherit;"></label>';
+  body += '<label style="font-size:11px;color:var(--muted);">End<input type="datetime-local" id="bk-add-end" style="display:block;width:100%;padding:6px;border:1px solid var(--border);border-radius:6px;font-family:inherit;"></label>';
+  body += '<button class="btn btn-sm" onclick="_bkAdd(\''+entryId+'\')" style="background:#2e7d32;color:#fff;border-color:#2e7d32;align-self:end;">+ Add</button>';
+  body += '</div></div>';
+
+  showModal('☕ Breaks — '+(entry.employee_name || ''), body, null);
+}
+
+async function _bkUpdate(breakId, entryId) {
+  var sVal = document.getElementById('bk-start-'+breakId).value;
+  var eVal = document.getElementById('bk-end-'+breakId).value;
+  if (!sVal) { toast('Start required'); return; }
+  var sISO = new Date(sVal).toISOString();
+  var eISO = eVal ? new Date(eVal).toISOString() : null;
+  var dur = eISO ? Math.max(0, Math.floor((new Date(eISO)-new Date(sISO))/60000)) : null;
+
+  // Optimistic update
+  var idx = ST.breaks.findIndex(function(b){ return b.id === breakId; });
+  if (idx >= 0) Object.assign(ST.breaks[idx], { break_start: sISO, break_end: eISO, duration_minutes: dur });
+  toast('✓ Break updated');
+  closeModal();
+  render();
+
+  try {
+    await fetch(SB_URL+'/rest/v1/time_breaks?id=eq.'+breakId, {
+      method:'PATCH',
+      headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json'},
+      body: JSON.stringify({ break_start: sISO, break_end: eISO, duration_minutes: dur })
+    });
+  } catch(e) { toast('⚠ Save failed'); }
+  await loadAll();
+}
+
+async function _bkDelete(breakId, entryId) {
+  if (!confirm('Delete this break?')) return;
+  ST.breaks = ST.breaks.filter(function(b){ return b.id !== breakId; });
+  toast('✓ Break deleted');
+  closeModal();
+  render();
+  try {
+    await fetch(SB_URL+'/rest/v1/time_breaks?id=eq.'+breakId, {
+      method:'DELETE',
+      headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY}
+    });
+  } catch(e) { toast('⚠ Delete failed'); }
+  await loadAll();
+}
+
+async function _bkAdd(entryId) {
+  var sVal = document.getElementById('bk-add-start').value;
+  var eVal = document.getElementById('bk-add-end').value;
+  if (!sVal) { toast('Start required'); return; }
+  var sISO = new Date(sVal).toISOString();
+  var eISO = eVal ? new Date(eVal).toISOString() : null;
+  var dur = eISO ? Math.max(0, Math.floor((new Date(eISO)-new Date(sISO))/60000)) : null;
+
+  try {
+    var r = await fetch(SB_URL+'/rest/v1/time_breaks', {
+      method:'POST',
+      headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json','Prefer':'return=representation'},
+      body: JSON.stringify({ entry_id: entryId, break_start: sISO, break_end: eISO, duration_minutes: dur })
+    });
+    if (r.ok) {
+      var rows = await r.json();
+      if (rows && rows[0]) ST.breaks.push(rows[0]);
+      toast('✓ Break added');
+    } else {
+      toast('⚠ Add failed');
+    }
+  } catch(e) { toast('⚠ Add error'); }
+  closeModal();
+  render();
+  await loadAll();
+}
+
 function closeModal() { var m=document.getElementById('tc-modal'); if(m)m.remove(); ST.editEmp=null; }
 
 // ── TIMECARD DETAIL MODAL ─────────────────────────────────────────────────
@@ -10505,7 +10642,7 @@ function openTimecardDetail(empName) {
       h += '<td style="text-align:center;">'+verifiedCell+'</td>';
       h += '<td>'+flagCell+'</td>';
       if (!isApproved && typeof isAdmin === 'function' && isAdmin()) {
-        h += '<td><button class="btn btn-sm" onclick="editEntry(\''+e.id+'\')">Edit</button></td>';
+        h += '<td><button class="btn btn-sm" onclick="editEntry(\''+e.id+'\')">Edit</button> <button class="btn btn-sm" onclick="openBreakEditor(\''+e.id+'\')" style="background:#6a1b9a;color:#fff;border-color:#6a1b9a;" title="Edit breaks">☕</button></td>';
       } else {
         h += '<td></td>';
       }

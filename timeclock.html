@@ -2102,6 +2102,43 @@ async function clockOut() {
     })
   });
 
+  // ── AUTO 30-MIN LUNCH BREAK ─────────────────────────────────────────────
+  // If entry exceeded 6.5 hours AND no break records exist for it, auto-create
+  // a 30-min lunch break centered around midpoint. Real DB record so it shows
+  // in admin views and reduces billable_minutes correctly via existing logic.
+  try {
+    if (duration >= 390) { // 6.5hr = 390 min
+      // Check existing breaks for this entry
+      var bRes = await fetch(SB_URL + '/rest/v1/time_breaks?entry_id=eq.' + TC.activeEntry.id + '&select=id,duration_minutes', {
+        headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+      });
+      var existingBreaks = bRes.ok ? (await bRes.json()) : [];
+      var existingBkMins = existingBreaks.reduce(function(s,b){ return s + (b.duration_minutes||0); }, 0);
+
+      // Only auto-add if NO breaks logged or total breaks under 25 min (gives some buffer)
+      if (existingBkMins < 25) {
+        var entryStartMs = TC.clockInTime;
+        var entryEndMs = Date.now();
+        var midpointMs = entryStartMs + Math.floor((entryEndMs - entryStartMs) / 2);
+        var lunchStartMs = midpointMs - 15*60*1000; // 15 min before midpoint
+        var lunchEndMs = midpointMs + 15*60*1000;   // 15 min after midpoint
+        var lunchStartISO = new Date(lunchStartMs).toISOString();
+        var lunchEndISO = new Date(lunchEndMs).toISOString();
+        await fetch(SB_URL + '/rest/v1/time_breaks', {
+          method: 'POST',
+          headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
+          body: JSON.stringify({
+            entry_id: TC.activeEntry.id,
+            break_start: lunchStartISO,
+            break_end: lunchEndISO,
+            duration_minutes: 30
+          })
+        });
+        toast('☕ 30-min lunch auto-logged');
+      }
+    }
+  } catch(e) { console.warn('Auto-lunch failed:', e); /* not fatal */ }
+
  // Update local entry
   var idx = TC.entries.findIndex(function(e){ return e.id === TC.activeEntry.id; });
   if (idx !== -1) { TC.entries[idx].clock_out = now; TC.entries[idx].duration_minutes = duration; }
