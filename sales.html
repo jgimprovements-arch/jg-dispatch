@@ -587,6 +587,10 @@ var ST = {
   // warning to fire). User can click "Load more" to expand. Resets when
   // filters/search change so a fresh filter starts from the top.
   partnerPageSize: 200,
+  // Partner detail modal: when expanded, show the full touch history
+  // instead of just the 5-row preview. Reset whenever a partner detail
+  // modal is opened so each visit starts collapsed.
+  touchHistoryExpanded: false,
   // Touches tab organization — filters, search, grouping. All default to
   // "no filter" so the unfiltered view is the same as before.
   touchFilterRep:     'All',   // 'All' | <rep name>
@@ -1298,7 +1302,9 @@ function _bgSignature() {
     ST.selectionMode ? 1 : 0,
     selCount,
     // Pagination — Load More clicks need to repaint the partner list.
-    ST.partnerPageSize || 200
+    ST.partnerPageSize || 200,
+    // Touch history toggle on partner detail
+    ST.touchHistoryExpanded ? 1 : 0
   ].join('|');
 }
 
@@ -2326,24 +2332,63 @@ function _buildModalHtml() {
         mh += '<div style="background:rgba(46,125,50,.06);border-radius:6px;padding:8px;text-align:center;"><div style="font-size:16px;font-weight:700;color:var(--ok);">$' + (p.referral_revenue?Math.round(p.referral_revenue).toLocaleString():0) + '</div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;">Rev</div></div>';
         mh += '</div>';
         if (p.notes) mh += '<div style="background:rgba(245,166,35,.06);border-radius:8px;padding:10px 12px;margin-bottom:12px;font-size:12px;">' + p.notes + '</div>';
-        mh += '<div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;margin-bottom:8px;">Recent Touches</div>';
-        if (!ptouches.length) mh += '<div style="font-size:12px;color:var(--muted);margin-bottom:12px;">No touches logged yet.</div>';
-        ptouches.slice(0,5).forEach(function(t){
-          mh += '<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);">';
-          mh += '<span>' + touchIcon(t.touch_type) + '</span>';
-          mh += '<span style="font-size:12px;flex:1;">' + (t.notes||t.touch_type||'') + '</span>';
-          mh += '<span style="font-size:10px;color:var(--muted);">' + fmtDate(t.touch_date) + '</span>';
+        // Touch history — 5-row preview by default with a Show all toggle.
+        // Each row is two-line (icon+type+date on top, notes underneath) so
+        // notes don't get truncated. Click count link to expand/collapse.
+        var totalTouchCount = ptouches.length;
+        var showAllTouches = ST.touchHistoryExpanded;
+        var visibleTouches = showAllTouches ? ptouches : ptouches.slice(0, 5);
+
+        mh += '<div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:8px;">';
+        mh += '<span style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;">Touch History (' + totalTouchCount + ')</span>';
+        if (totalTouchCount > 5) {
+          var toggleLabel = showAllTouches ? 'Show recent only' : 'Show all ' + totalTouchCount;
+          mh += '<button onclick="ST.touchHistoryExpanded=' + (!showAllTouches) + ';render()" style="font-size:11px;color:var(--orange);background:transparent;border:none;cursor:pointer;font-weight:700;padding:0;font-family:DM Sans,sans-serif;">' + toggleLabel + ' →</button>';
+        }
+        mh += '</div>';
+
+        if (!visibleTouches.length) {
+          mh += '<div style="font-size:12px;color:var(--muted);margin-bottom:12px;">No touches logged yet.</div>';
+        } else {
+          // Wrap in a scroll container if the user expanded the list — keeps
+          // long histories from blowing out the modal height.
+          var scrollStyle = showAllTouches && totalTouchCount > 8
+            ? 'max-height:280px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;padding:0 10px;margin-bottom:8px;'
+            : 'margin-bottom:8px;';
+          mh += '<div style="' + scrollStyle + '">';
+          visibleTouches.forEach(function(t){
+            mh += '<div style="padding:8px 0;border-bottom:1px solid var(--border);">';
+            mh += '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">';
+            mh += '<span>' + touchIcon(t.touch_type) + '</span>';
+            mh += '<span style="font-size:11px;font-weight:700;padding:1px 7px;border-radius:4px;background:rgba(13,45,94,.08);color:var(--navy);">' + _ve(t.touch_type||'—') + '</span>';
+            if (t.outcome) mh += '<span style="font-size:11px;color:' + outcomeColor(t.outcome) + ';font-weight:600;">' + _ve(t.outcome) + '</span>';
+            mh += '<span style="font-size:10px;color:var(--muted);margin-left:auto;">' + fmtDate(t.touch_date) + (t.logged_by ? ' · ' + _ve(t.logged_by) : '') + '</span>';
+            mh += '</div>';
+            if (t.notes) {
+              mh += '<div style="font-size:12px;color:var(--txt);margin-top:4px;margin-left:24px;line-height:1.45;">' + _ve(t.notes) + '</div>';
+            }
+            mh += '</div>';
+          });
           mh += '</div>';
-        });
-        mh += '<div style="display:flex;gap:8px;margin-top:16px;flex-wrap:wrap;">';
-        mh += '<button style="padding:8px 16px;border-radius:6px;border:none;background:var(--orange);color:#fff;font-size:12px;font-weight:600;cursor:pointer;flex:1;min-width:120px;" onclick="ST.modal=\'log-touch\';render()">📋 Log Touch</button>';
-        mh += '<button style="padding:8px 16px;border-radius:6px;border:1.5px solid var(--navy);background:transparent;color:var(--navy);font-size:12px;font-weight:600;cursor:pointer;" onclick="editPartner(\'' + p.id + '\')">✏️ Edit</button>';
-        mh += '<button style="padding:8px 16px;border-radius:6px;border:1.5px solid var(--danger);background:transparent;color:var(--danger);font-size:12px;font-weight:600;cursor:pointer;" onclick="openMergePicker(\'' + p.id + '\')">⇄ Merge</button>';
+        }
+
+        // Footer buttons — split into two rows. Primary action (Log Touch)
+        // is full-width on top so it's always visible and obviously the
+        // main thing to do. Secondary actions (Edit / Merge / Delete /
+        // Close) sit on a second row. This avoids the wrap-and-clip issue
+        // where adding a 5th button to a single-row footer pushed the
+        // last button below the visible modal area.
+        mh += '<div style="margin-top:16px;">';
+        mh += '<button style="width:100%;padding:11px;border-radius:8px;border:none;background:var(--orange);color:#fff;font-size:13px;font-weight:700;cursor:pointer;font-family:DM Sans,sans-serif;" onclick="ST.modal=\'log-touch\';render()">📋 Log Touch</button>';
+        mh += '<div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;">';
+        mh += '<button style="flex:1;padding:8px 12px;border-radius:6px;border:1.5px solid var(--navy);background:transparent;color:var(--navy);font-size:12px;font-weight:600;cursor:pointer;font-family:DM Sans,sans-serif;" onclick="editPartner(\'' + p.id + '\')">✏️ Edit</button>';
+        mh += '<button style="flex:1;padding:8px 12px;border-radius:6px;border:1.5px solid var(--danger);background:transparent;color:var(--danger);font-size:12px;font-weight:600;cursor:pointer;font-family:DM Sans,sans-serif;" onclick="openMergePicker(\'' + p.id + '\')">⇄ Merge</button>';
         // Delete — solid red to distinguish from Merge (outlined red). Both
-        // are destructive but Delete is the more drastic of the two: Merge
-        // preserves data (touches re-pointed), Delete throws data away.
-        mh += '<button style="padding:8px 16px;border-radius:6px;border:none;background:var(--danger);color:#fff;font-size:12px;font-weight:600;cursor:pointer;" onclick="deletePartner(\'' + p.id + '\')">🗑 Delete</button>';
-        mh += '<button style="padding:8px 16px;border-radius:6px;border:1.5px solid var(--border);background:transparent;font-size:12px;cursor:pointer;" onclick="ST.modal=null;ST.selected=null;render()">Close</button>';
+        // are destructive but Delete is the more drastic: Merge preserves
+        // data (touches re-pointed), Delete throws data away.
+        mh += '<button style="flex:1;padding:8px 12px;border-radius:6px;border:none;background:var(--danger);color:#fff;font-size:12px;font-weight:600;cursor:pointer;font-family:DM Sans,sans-serif;" onclick="deletePartner(\'' + p.id + '\')">🗑 Delete</button>';
+        mh += '<button style="flex:1;padding:8px 12px;border-radius:6px;border:1.5px solid var(--border);background:transparent;font-size:12px;cursor:pointer;font-family:DM Sans,sans-serif;" onclick="ST.modal=null;ST.selected=null;ST.touchHistoryExpanded=false;render()">Close</button>';
+        mh += '</div>';
         mh += '</div>';
       }
     }
