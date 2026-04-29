@@ -1461,8 +1461,44 @@ async function syncToV2(){
       console.log('[v2-sync] no changes');
       return;
     }
-    await Promise.all(ops);
-    console.log('[v2-sync] +' + assignsToInsert.length + ' assigns, -' + assignsToDelete.length + ' assigns, ~' + assignsToUpdate.length + ' assigns; +' + unToInsert.length + '/-' + unToDelete.length + '/~' + unToUpdate.length + ' unassigned');
+    // TEMPORARY DEBUG: dump what we're about to do, broken down by market
+    try {
+      const insByMkt = {}; assignsToInsert.forEach(a => insByMkt[a.market]=(insByMkt[a.market]||0)+1);
+      const delByMkt = {}; assignsToDelete.forEach(r => delByMkt[r.market]=(delByMkt[r.market]||0)+1);
+      const desByMkt = {}; desiredAssigns.forEach(a => desByMkt[a.market]=(desByMkt[a.market]||0)+1);
+      console.log('[v2-sync DEBUG] desired by market:', desByMkt, 'inserts by market:', insByMkt, 'deletes by market:', delByMkt);
+      // If we're about to DELETE Stevens Point rows, show exactly what
+      const spDeletes = assignsToDelete.filter(r => r.market === 'stevens_point');
+      if (spDeletes.length) {
+        console.warn('[v2-sync DEBUG] about to DELETE Stevens Point rows:', spDeletes.map(r => ({tech_id: r.tech_id, job_id: r.job_id, scheduled_date: r.scheduled_date})));
+        // Also log what techQ.stevens looks like at this moment
+        const spState = {};
+        for (const [nm, t] of Object.entries(techQ.stevens || {})) {
+          spState[nm] = { id: t.id, jobs: [...(t.jobs || [])] };
+        }
+        console.warn('[v2-sync DEBUG] techQ.stevens at delete time:', spState);
+      }
+    } catch(e) { /* ignore */ }
+    const opResults = await Promise.all(ops.map(p => p.catch(e => ({ ok: false, _err: e }))));
+    let okCount = 0, failCount = 0;
+    for (const r of opResults) {
+      if (r && r.ok) okCount++;
+      else {
+        failCount++;
+        if (r && typeof r.text === 'function') {
+          try {
+            const errText = await r.text();
+            console.error('[v2-sync] op failed', r.status, errText);
+          } catch(e) { console.error('[v2-sync] op failed', r && r.status); }
+        } else {
+          console.error('[v2-sync] op error', r);
+        }
+      }
+    }
+    console.log('[v2-sync] +' + assignsToInsert.length + ' assigns, -' + assignsToDelete.length + ' assigns, ~' + assignsToUpdate.length + ' assigns; +' + unToInsert.length + '/-' + unToDelete.length + '/~' + unToUpdate.length + ' unassigned (ops: ' + okCount + ' ok, ' + failCount + ' failed)');
+    if (failCount > 0) {
+      showToast('⚠ ' + failCount + ' write(s) failed — check console');
+    }
   } catch(e) {
     console.warn('[v2-sync] error:', e);
   }
@@ -1533,14 +1569,25 @@ async function loadFromV2(){
     }
 
     let restored = 0;
+    let _stevensSkipped = 0, _appletonSkipped = 0, _stevensRouted = 0, _appletonRouted = 0;
     for (const [uuid, jids] of Object.entries(techAssigns)) {
       const t = uuidToTech[uuid];
-      if (!t) continue; // tech not on board (terminated, hidden, etc.)
+      if (!t) {
+        // tech not on board (terminated, hidden, etc.)
+        // Log which market the orphaned assignments belong to via dbAssigns
+        const sampleRow = dbAssigns.find(r => r.tech_id === uuid);
+        if (sampleRow && sampleRow.market === 'stevens_point') _stevensSkipped += jids.length;
+        else if (sampleRow && sampleRow.market === 'appleton') _appletonSkipped += jids.length;
+        continue;
+      }
       if (techQ[t.loc] && techQ[t.loc][t.name]) {
         techQ[t.loc][t.name].jobs = jids;
         restored += jids.length;
+        if (t.loc === 'stevens') _stevensRouted += jids.length;
+        else _appletonRouted += jids.length;
       }
     }
+    console.log('[v2-read DEBUG] routed: appleton=' + _appletonRouted + ', stevens=' + _stevensRouted + ' | skipped (no tech): appleton=' + _appletonSkipped + ', stevens=' + _stevensSkipped + ' | techQ.stevens techs:', Object.keys(techQ.stevens||{}).length, 'techQ.appleton techs:', Object.keys(techQ.appleton||{}).length);
 
     // Unassigned pool — only when viewing today.
     // For non-today dates, the pool shows what's currently unassigned today
