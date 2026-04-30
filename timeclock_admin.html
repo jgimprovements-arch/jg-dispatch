@@ -406,6 +406,11 @@ var SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZ
 // Normalize a market value to the canonical DB form: 'appleton' or 'stevens_point'.
 // Accepts any common variant: 'Appleton', 'appleton', 'Stevens Point', 'stevens_point', etc.
 // Used everywhere we save market to the DB so dispatch board lane routing stays consistent.
+//
+// CRITICAL: every market write to the employees table MUST go through this function.
+// The dispatch board (index.html) expects employees.market to be lowercase canonical.
+// Capitalized values silently break Stevens Point lane assignments — see 2026-04-29 incident.
+// If you're editing this file and tempted to remove a normalizeMarket() wrapper, DON'T.
 function normalizeMarket(m) {
   if (!m) return 'appleton';
   var s = String(m).toLowerCase().trim();
@@ -2363,8 +2368,69 @@ function exportPayrollReport(periodLabel, byEmp, curPer) {
 
   // ─── Paychex Flex Import Format ───
   // Columns: Employee ID, Worked Date, Earnings Code, Hours, Department
+  // ─── Paychex SPI Flexible Import format ───
+  // Spec: Company ID + Worker ID required. Pay Component must match earning names
+  // configured in Paychex. Hours go in column 9, flat-dollar items go in column 12.
+  // 17 columns covers everything we use; remaining SPI columns (18+) are for Manual
+  // checks which we don't import.
+  var PAYCHEX_COMPANY_ID = '12054799';
+
+  // Map our internal codes → exact Paychex earning names (case-sensitive!)
+  // If a code isn't in this map it falls through as-is.
+  var PAYCHEX_PAY_COMPONENT = {
+    'REG': 'Hourly',
+    'OVT': 'Overtime',
+    'OT':  'Overtime',
+    'SAL': 'Salary',
+    'BON': 'Bonus',
+    'COM': 'Commission',
+    'VAC': 'Vacation',
+    'PTO': 'Vacation',  // we treat PTO and Vacation as the same Paychex earning
+    'SIC': 'Sick',
+    'HOL': 'Holiday'
+  };
+  function _payComp(code) { return PAYCHEX_PAY_COMPONENT[code] || code; }
+
   var paychexRows = [];
-  paychexRows.push(['Employee ID', 'Worked Date', 'Earnings Code', 'Hours', 'Department']);
+  // Header row — exact column names from SPI spec, in order, columns 1-17
+  paychexRows.push([
+    'Company ID',     // 1 (required)
+    'Worker ID',      // 2 (required)
+    'Org',            // 3
+    'Job Number',     // 4
+    'Job Name',       // 5
+    'Pay Component',  // 6 (required)
+    'Rate',           // 7
+    'Rate #',         // 8
+    'Hours',          // 9
+    'Units',          // 10
+    'Date',           // 11
+    'Amount',         // 12
+    'Check Seq Number', // 13
+    'Override State',   // 14
+    'Override Local',   // 15
+    'Override Local Jurisdiction', // 16
+    'Labor Override'    // 17
+  ]);
+
+  function _row(workerId, payComponent, hours, dateStr, amount) {
+    return [
+      PAYCHEX_COMPANY_ID,                   // 1 Company ID
+      workerId || '',                       // 2 Worker ID
+      '',                                   // 3 Org
+      '',                                   // 4 Job Number
+      '',                                   // 5 Job Name
+      _payComp(payComponent),               // 6 Pay Component (mapped to Paychex name)
+      '',                                   // 7 Rate
+      '',                                   // 8 Rate #
+      hours != null ? hours : '',           // 9 Hours
+      '',                                   // 10 Units
+      dateStr || '',                        // 11 Date
+      amount != null ? amount : '',         // 12 Amount (for flat-dollar items)
+      '',                                   // 13 Check Seq Number
+      '', '', '', ''                        // 14-17 (overrides, all blank)
+    ];
+  }
 
   var missingIds = [];
   var notApproved = [];
@@ -2373,13 +2439,13 @@ function exportPayrollReport(periodLabel, byEmp, curPer) {
     var nm = kv[0], d = kv[1];
     var emp = ST.employees.find(function(e){ return e.name === nm; });
     var paychexId = emp && emp.paychex_id ? emp.paychex_id : '';
-    var dept = emp && emp.market ? emp.market : '';
+    var isSalaryEmp = emp && parseFloat(emp.annual_salary || 0) > 0;
 
     if (!paychexId) missingIds.push(nm);
     if (getApprovalStatus(periodLabel, nm) !== 'approved') notApproved.push(nm);
 
-    // Paychex wants daily hours per employee, split reg/OT at 40/week
-    // Group entries by week, then apply OT at the week level but distribute back to days
+    // Paychex wants daily hours per employee, split reg/OT at 40/week.
+    // Group entries by week, apply OT at week level but distribute back to days.
     var dailyMap = {};  // date → total minutes
     d.entries.forEach(function(e) {
       var eb = ST.breaks.filter(function(b){ return b.entry_id === e.id; });
@@ -2389,6 +2455,7 @@ function exportPayrollReport(periodLabel, byEmp, curPer) {
     });
 
     // Week-level OT calculation: for each week, total > 40hrs = OT
+    // Note: salaried employees skip OT entirely — salary covers their hours.
     var weekBuckets = {};
     Object.keys(dailyMap).sort().forEach(function(day) {
       var wk = _getWeekKey(day);
@@ -2404,63 +2471,63 @@ function exportPayrollReport(periodLabel, byEmp, curPer) {
         var weekAfter = runningTotal + dayMins;
         var regMins, otMins;
 
-        if (weekAfter <= 2400) {
-          // Entire day is regular
+        if (isSalaryEmp || weekAfter <= 2400) {
+          // Salaried = no OT split; or under 40hrs = all regular
           regMins = dayMins; otMins = 0;
         } else if (weekSoFar >= 2400) {
-          // Entire day is OT
           regMins = 0; otMins = dayMins;
         } else {
-          // Split day
           regMins = 2400 - weekSoFar;
           otMins = dayMins - regMins;
         }
 
         if (regMins > 0) {
-          paychexRows.push([paychexId, dayObj.day, 'REG', (regMins/60).toFixed(2), dept]);
+          // For salary, use Salary code; for hourly, use Hourly
+          var regCode = isSalaryEmp ? 'SAL' : 'REG';
+          paychexRows.push(_row(paychexId, regCode, (regMins/60).toFixed(2), dayObj.day, null));
         }
         if (otMins > 0) {
-          paychexRows.push([paychexId, dayObj.day, 'OVT', (otMins/60).toFixed(2), dept]);
+          paychexRows.push(_row(paychexId, 'OVT', (otMins/60).toFixed(2), dayObj.day, null));
         }
         runningTotal = weekAfter;
       });
     });
 
-    // Emit absence rows for this employee in this period
+    // Emit absence rows (PTO/Sick/Vacation) for this employee in this period
     try {
       var periodsForAbs = getPayPeriods(ST.payPeriod.type, ST.payPeriod.start, 80);
       var periodMatch = periodsForAbs.find(function(p){ return p.label === periodLabel; });
       if (periodMatch) {
-        var emp = ST.employees.find(function(x){ return x.name === nm; });
         (ST.absences || []).forEach(function(a) {
           if (a.employee_name !== nm) return;
           var ad = new Date(a.date + 'T00:00:00');
           if (ad < periodMatch.start || ad > periodMatch.end) return;
           var c = classifyAbsence(a, emp);
           if (c.paidHours > 0 && c.earningsCode) {
-            paychexRows.push([paychexId, a.date, c.earningsCode, c.paidHours.toFixed(2), dept]);
+            paychexRows.push(_row(paychexId, c.earningsCode, c.paidHours.toFixed(2), a.date, null));
           }
         });
       }
     } catch(err) { console.warn('Absence export failed:', err.message); }
 
-    // Emit APPROVED (not yet paid) commissions/bonuses/referrals/spiffs earned this period
-    // Paychex earnings codes: COM=Commission, BON=Bonus (used for bonus/referral/spiff)
+    // Emit APPROVED (not yet paid) commissions/bonuses earned this period.
+    // Flat dollar amounts go in column 12 (Amount), Hours stays blank.
     try {
       var periodsForComm = getPayPeriods(ST.payPeriod.type, ST.payPeriod.start, 80);
       var commPeriod = periodsForComm.find(function(p){ return p.label === periodLabel; });
       if (commPeriod) {
         var periodCommissions = (ST.commissions || []).filter(function(c) {
           if (c.employee_name !== nm) return false;
-          if (c.status !== 'approved') return false;  // only approved-but-unpaid
-          var d = new Date(c.earned_date + 'T00:00:00');
-          return d >= commPeriod.start && d <= commPeriod.end;
+          if (c.status !== 'approved') return false;
+          var d2 = new Date(c.earned_date + 'T00:00:00');
+          return d2 >= commPeriod.start && d2 <= commPeriod.end;
         });
         periodCommissions.forEach(function(c) {
-          var earningsCode = c.type === 'commission' ? 'COM' : 'BON';
-          // For commissions/bonuses, Paychex wants dollar amount in "hours" column typically handled as flat dollar
-          // Format: [paychexId, date, code, amount-as-dollars, dept]
-          paychexRows.push([paychexId, c.earned_date, earningsCode, parseFloat(c.amount||0).toFixed(2), dept]);
+          // c.type 'commission' → Commission earning; everything else → Bonus
+          var code = (c.type === 'commission' || c.commission_type === 'commission') ? 'COM' : 'BON';
+          var amt = parseFloat(c.amount || 0).toFixed(2);
+          // null hours, dollar in Amount column
+          paychexRows.push(_row(paychexId, code, null, c.earned_date, amt));
         });
       }
     } catch(err) { console.warn('Commission export failed:', err.message); }
@@ -9567,6 +9634,10 @@ async function saveEmployee() {
     birthday:         (document.getElementById('emp-birthday')   ||{}).value || null,
     start_date:       (document.getElementById('emp-start-date') ||{}).value || null,
     termination_date: (document.getElementById('emp-term-date')  ||{}).value || null,
+    // IMPORTANT: market MUST go through normalizeMarket() before write.
+    // Removing this re-introduces the dispatch routing bug from 2026-04-29
+    // where capitalized 'Appleton'/'Stevens Point' values silently broke
+    // Stevens Point lane assignments. Dispatch board expects lowercase.
     market: normalizeMarket(document.getElementById('emp-market').value),
     hourly_rate: parseFloat(document.getElementById('emp-rate').value) || 0,
     active: document.getElementById('emp-active').checked,
