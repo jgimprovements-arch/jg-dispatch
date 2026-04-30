@@ -405,6 +405,7 @@ body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);min
       <button onclick="setBoardDateToday()" id="board-date-today-btn" title="Jump to today" style="background:rgba(245,166,35,.15);border:1px solid rgba(245,166,35,.4);color:var(--gold);cursor:pointer;font-size:9px;font-weight:600;padding:2px 6px;border-radius:3px;margin-left:2px;display:none;">TODAY</button>
     </div>
     <button class="btn btn-ghost" onclick="refreshAll()">↻ Refresh</button>
+    <button class="btn btn-ghost" style="font-size:10px;" onclick="openSnapshots()">📸 Snapshots</button>
     <button class="btn btn-ghost" style="font-size:10px;" onclick="showInfo()">ℹ Help</button>
     <span id="sync-badge" style="font-size:10px;color:var(--muted);padding:4px 8px;"></span>
     <button class="btn btn-ghost" style="font-size:10px;color:var(--danger);" onclick="clearBoardState()">🗑 Reset Board</button>
@@ -540,6 +541,23 @@ body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);min
     <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px;">
       <button onclick="closeOutModal()" style="padding:6px 14px;border-radius:6px;border:1.5px solid var(--border-mid);background:transparent;color:var(--text);cursor:pointer;font-size:12px;">Cancel</button>
       <button onclick="confirmOut()" style="padding:6px 14px;border-radius:6px;border:none;background:var(--danger);color:#fff;cursor:pointer;font-size:12px;font-weight:600;">Mark Out</button>
+    </div>
+  </div>
+</div>
+
+<div id="snapshots-modal" onclick="if(event.target===this)closeSnapshots()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:1000;align-items:flex-start;justify-content:center;overflow-y:auto;padding:20px 0;">
+  <div style="background:#0d2d5e;border-radius:14px;padding:24px 28px;max-width:640px;width:95%;margin:auto;box-shadow:0 8px 40px rgba(0,0,0,.6);border:2px solid #1a4a8a;color:#fff;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+      <div style="font-size:17px;font-weight:800;">📸 Dispatch Snapshots</div>
+      <button onclick="closeSnapshots()" style="background:transparent;border:none;color:#a0b4cc;font-size:20px;cursor:pointer;padding:0 4px;">✕</button>
+    </div>
+    <div style="font-size:11px;color:#7a9ab8;margin-bottom:14px;line-height:1.5;">Daily backups of dispatch_assignments_v2. Restore replaces current state — destructive but recoverable from a newer snapshot.</div>
+    <div id="snapshots-list" style="display:grid;gap:8px;max-height:400px;overflow-y:auto;padding-right:4px;">
+      <div style="padding:24px;text-align:center;color:#7a9ab8;font-size:13px;">Loading...</div>
+    </div>
+    <div style="text-align:right;margin-top:14px;display:flex;gap:8px;justify-content:flex-end;">
+      <button onclick="forceTakeSnapshot()" style="padding:7px 14px;border-radius:7px;border:1.5px solid #1a4a8a;background:transparent;color:#fff;cursor:pointer;font-size:12px;font-weight:600;">📷 Take Snapshot Now</button>
+      <button onclick="closeSnapshots()" style="padding:7px 18px;border-radius:7px;border:none;background:#e85d04;color:#fff;cursor:pointer;font-size:12px;font-weight:600;">Close</button>
     </div>
   </div>
 </div>
@@ -811,6 +829,8 @@ async function boot(){
     // Wait for board state to fully restore before refreshing Albi
     // so snapshot captures the actual manual assignments
     setTimeout(silentAlbiRefresh, 5000);
+    // Daily snapshot — fires once per calendar day, runs in background
+    setTimeout(_maybeWriteDailySnapshot, 8000);
     return;
   }
   stepDone('cache', '○ No cache — fetching fresh data');
@@ -833,6 +853,8 @@ async function boot(){
   await loadJobAuditMaps();
   render();
   hideLoader();
+  // Daily snapshot — fires once per calendar day, runs in background
+  setTimeout(_maybeWriteDailySnapshot, 8000);
 }
 
 function _initBoardDatePicker(){
@@ -3532,6 +3554,213 @@ function showInfo(){
 }
 function closeInfo(){
   document.getElementById('info-modal').style.display='none';
+}
+
+// ── DISPATCH SNAPSHOTS ─────────────────────────────────────────────────────
+// Daily JSONB backups of dispatch_assignments_v2 + dispatch_unassigned_v2 in
+// dispatch_snapshots table. Triggered on first board load each calendar day.
+// UI: 📸 Snapshots button → modal with last 60 days, click date to restore.
+
+async function _maybeWriteDailySnapshot(){
+  // Take a snapshot if today doesn't have one yet.
+  // Runs silently in background after page load — never blocks UI.
+  try {
+    const todayStr = _getDispatchToday();
+    // Check if already snapshotted today
+    const checkRes = await sbFetch('/rest/v1/dispatch_snapshots?snapshot_date=eq.' + todayStr + '&select=snapshot_date');
+    if (!checkRes.ok) return;
+    const existing = await checkRes.json();
+    if (existing && existing.length > 0) {
+      return; // already snapshotted today
+    }
+    // Pull current full state
+    const [aRes, uRes] = await Promise.all([
+      sbFetch('/rest/v1/dispatch_assignments_v2?select=*'),
+      sbFetch('/rest/v1/dispatch_unassigned_v2?select=*')
+    ]);
+    if (!aRes.ok || !uRes.ok) {
+      console.warn('[snapshot] fetch failed', aRes.status, uRes.status);
+      return;
+    }
+    const assignments = await aRes.json();
+    const unassigned = await uRes.json();
+    // Write snapshot
+    const writeRes = await sbFetch('/rest/v1/dispatch_snapshots', {
+      method: 'POST',
+      prefer: 'resolution=merge-duplicates',
+      body: JSON.stringify({
+        snapshot_date: todayStr,
+        created_by: _v2Actor(),
+        row_count: assignments.length,
+        un_count: unassigned.length,
+        assignments: assignments,
+        unassigned: unassigned
+      })
+    });
+    if (writeRes.ok) {
+      console.log('[snapshot] wrote ' + todayStr + ' — ' + assignments.length + ' assigns, ' + unassigned.length + ' unassigned');
+      // Auto-prune older than 60 days (best-effort, fire-and-forget)
+      const cutoff = new Date(Date.now() - 60*86400000).toISOString().split('T')[0];
+      sbFetch('/rest/v1/dispatch_snapshots?snapshot_date=lt.' + cutoff, { method: 'DELETE' }).catch(()=>{});
+    } else {
+      console.warn('[snapshot] write failed', writeRes.status);
+    }
+  } catch(e) {
+    console.warn('[snapshot] error', e);
+  }
+}
+
+async function forceTakeSnapshot(){
+  try {
+    const [aRes, uRes] = await Promise.all([
+      sbFetch('/rest/v1/dispatch_assignments_v2?select=*'),
+      sbFetch('/rest/v1/dispatch_unassigned_v2?select=*')
+    ]);
+    if (!aRes.ok || !uRes.ok) { showToast('⚠ Snapshot failed — fetch error'); return; }
+    const assignments = await aRes.json();
+    const unassigned = await uRes.json();
+    const todayStr = _getDispatchToday();
+    const writeRes = await sbFetch('/rest/v1/dispatch_snapshots', {
+      method: 'POST',
+      prefer: 'resolution=merge-duplicates',
+      body: JSON.stringify({
+        snapshot_date: todayStr,
+        created_by: _v2Actor(),
+        row_count: assignments.length,
+        un_count: unassigned.length,
+        assignments: assignments,
+        unassigned: unassigned
+      })
+    });
+    if (writeRes.ok) {
+      showToast('✓ Snapshot saved · ' + assignments.length + ' rows');
+      _renderSnapshotsList();
+    } else {
+      showToast('⚠ Snapshot failed');
+    }
+  } catch(e) {
+    console.warn('[snapshot] error', e);
+    showToast('⚠ Snapshot error');
+  }
+}
+
+async function openSnapshots(){
+  document.getElementById('snapshots-modal').style.display = 'flex';
+  await _renderSnapshotsList();
+}
+
+function closeSnapshots(){
+  document.getElementById('snapshots-modal').style.display = 'none';
+}
+
+async function _renderSnapshotsList(){
+  const el = document.getElementById('snapshots-list');
+  el.innerHTML = '<div style="padding:24px;text-align:center;color:#7a9ab8;font-size:13px;">Loading...</div>';
+  try {
+    const r = await sbFetch('/rest/v1/dispatch_snapshots?select=snapshot_date,created_at,created_by,row_count,un_count&order=snapshot_date.desc&limit=60');
+    if (!r.ok) {
+      el.innerHTML = '<div style="padding:24px;text-align:center;color:#ff8a80;font-size:13px;">Failed to load snapshots</div>';
+      return;
+    }
+    const rows = await r.json();
+    if (!rows.length) {
+      el.innerHTML = '<div style="padding:24px;text-align:center;color:#7a9ab8;font-size:13px;">No snapshots yet. Take one now using the button below.</div>';
+      return;
+    }
+    const today = _getDispatchToday();
+    el.innerHTML = rows.map(function(s){
+      const isToday = s.snapshot_date === today;
+      const dt = new Date(s.snapshot_date + 'T12:00:00');
+      const label = dt.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
+      const created = new Date(s.created_at);
+      const createdStr = created.toLocaleString('en-US', { hour: 'numeric', minute: '2-digit' });
+      return '<div style="background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);border-radius:8px;padding:12px 14px;display:flex;justify-content:space-between;align-items:center;gap:10px;">' +
+        '<div style="flex:1;min-width:0;">' +
+          '<div style="font-size:13px;font-weight:700;color:#fff;">' + label + (isToday ? ' <span style="font-size:10px;background:rgba(245,166,35,.2);color:#f5a623;padding:1px 6px;border-radius:8px;font-weight:600;margin-left:4px;">TODAY</span>' : '') + '</div>' +
+          '<div style="font-size:10px;color:#7a9ab8;margin-top:2px;">' + s.row_count + ' assigns · ' + s.un_count + ' unassigned · saved ' + createdStr + ' by ' + (s.created_by || 'system') + '</div>' +
+        '</div>' +
+        '<button onclick="restoreSnapshot(\'' + s.snapshot_date + '\')" style="padding:6px 12px;border-radius:6px;border:1.5px solid #f5a623;background:transparent;color:#f5a623;cursor:pointer;font-size:11px;font-weight:700;flex-shrink:0;">Restore</button>' +
+      '</div>';
+    }).join('');
+  } catch(e) {
+    el.innerHTML = '<div style="padding:24px;text-align:center;color:#ff8a80;font-size:13px;">Error: ' + (e.message || 'unknown') + '</div>';
+  }
+}
+
+async function restoreSnapshot(snapshotDate){
+  if (!confirm('Restore snapshot from ' + snapshotDate + '?\n\nThis REPLACES the current dispatch state. Current assignments will be deleted and the snapshot rows inserted. Take a fresh snapshot first if you want to preserve current state.\n\nProceed?')) {
+    return;
+  }
+  try {
+    showToast('Restoring snapshot...');
+    // Fetch the snapshot data
+    const sr = await sbFetch('/rest/v1/dispatch_snapshots?snapshot_date=eq.' + snapshotDate + '&select=assignments,unassigned');
+    if (!sr.ok) { showToast('⚠ Snapshot fetch failed'); return; }
+    const snaps = await sr.json();
+    if (!snaps.length) { showToast('⚠ Snapshot not found'); return; }
+    const snap = snaps[0];
+
+    // Wipe current state
+    const wipeOps = await Promise.all([
+      sbFetch('/rest/v1/dispatch_assignments_v2?id=neq.00000000-0000-0000-0000-000000000000', { method: 'DELETE' }),
+      sbFetch('/rest/v1/dispatch_unassigned_v2?id=neq.00000000-0000-0000-0000-000000000000', { method: 'DELETE' })
+    ]);
+    if (!wipeOps[0].ok || !wipeOps[1].ok) {
+      showToast('⚠ Wipe failed — restore aborted');
+      return;
+    }
+
+    // Insert snapshot rows. Strip auto-managed fields so PostgREST regenerates them.
+    const stripFields = function(rows, omit) {
+      return (rows || []).map(function(r){
+        const out = {};
+        for (const k in r) {
+          if (omit.indexOf(k) === -1) out[k] = r[k];
+        }
+        return out;
+      });
+    };
+    const assignsToInsert = stripFields(snap.assignments, ['created_at', 'updated_at']);
+    const unToInsert = stripFields(snap.unassigned, ['created_at', 'updated_at']);
+
+    let insertOps = [];
+    if (assignsToInsert.length) {
+      insertOps.push(sbFetch('/rest/v1/dispatch_assignments_v2', {
+        method: 'POST',
+        body: JSON.stringify(assignsToInsert)
+      }));
+    }
+    if (unToInsert.length) {
+      insertOps.push(sbFetch('/rest/v1/dispatch_unassigned_v2', {
+        method: 'POST',
+        body: JSON.stringify(unToInsert)
+      }));
+    }
+    const results = await Promise.all(insertOps.map(function(p){ return p.catch(function(e){ return { ok: false, _err: e }; }); }));
+    let failCount = 0;
+    for (const r of results) {
+      if (!r || !r.ok) {
+        failCount++;
+        if (r && typeof r.text === 'function') {
+          try { console.error('[restore] op failed', r.status, await r.text()); } catch(e){}
+        }
+      }
+    }
+    if (failCount > 0) {
+      showToast('⚠ Partial restore — ' + failCount + ' op(s) failed (check console)');
+    } else {
+      showToast('✓ Restored ' + assignsToInsert.length + ' assigns, ' + unToInsert.length + ' unassigned');
+    }
+    closeSnapshots();
+    // Reload board state
+    if (typeof loadFromV2 === 'function') {
+      await loadFromV2();
+      if (typeof render === 'function') render();
+    }
+  } catch(e) {
+    console.error('[restore] error', e);
+    showToast('⚠ Restore failed: ' + (e.message || 'unknown'));
+  }
 }
 
 // ── CROSS-LOCATION TECHS ─────────────────
