@@ -1317,6 +1317,14 @@ setInterval(loadClockedInJobs, 30000);
 // DATE-SCOPED: only operates on rows for currentBoardDate. Other dates' data
 // is untouched. Today uses NULL date (legacy + simpler queries); future dates
 // use explicit DATE values.
+// Session ownership tracking — prevents one browser's stale state from
+// silently deleting another browser's recent work. Only rows we've inserted
+// or explicitly removed in this session are eligible for deletion.
+let _sessionOwnedKeys = new Set();      // assignment keys this browser has touched
+let _sessionOwnedUnKeys = new Set();    // unassigned keys this browser has touched
+let _explicitlyRemovedKeys = new Set(); // assignment keys user explicitly removed (drag-out)
+let _explicitlyRemovedUnKeys = new Set(); // unassigned keys user explicitly removed
+
 async function syncToV2(){
   if (!V2_ENABLED) return;
   try {
@@ -1396,7 +1404,17 @@ async function syncToV2(){
     const desiredAssignKeys = new Set(desiredAssigns.map(assignKey));
 
     const assignsToInsert = desiredAssigns.filter(a => !dbAssignMap.has(assignKey(a)));
-    const assignsToDelete = dbAssigns.filter(r => !desiredAssignKeys.has(assignKey(r)));
+    // SAFETY: only delete rows this session has touched. Prevents the destructive
+    // "Brandon and Josh fight" loop where one browser's stale techQ overwrites
+    // another browser's recent inserts. _sessionOwnedKeys tracks every row this
+    // browser has inserted or seen via realtime since page load. Any row in DB
+    // that we haven't touched this session is treated as "someone else's work"
+    // and left alone, even if our techQ thinks it shouldn't exist.
+    const assignsToDelete = dbAssigns.filter(r => {
+      if (desiredAssignKeys.has(assignKey(r))) return false;
+      // Only delete if we created it OR a user explicitly removed it via drag-out
+      return _sessionOwnedKeys.has(assignKey(r)) || _explicitlyRemovedKeys.has(assignKey(r));
+    });
     const assignsToUpdate = desiredAssigns.filter(a => {
       const existing = dbAssignMap.get(assignKey(a));
       return existing && existing.position !== a.position;
@@ -1408,11 +1426,22 @@ async function syncToV2(){
     const desiredUnKeys = new Set(desiredUnassigned.map(unKey));
 
     const unToInsert = desiredUnassigned.filter(u => !dbUnMap.has(unKey(u)));
-    const unToDelete = _isViewingToday() ? dbUnassigned.filter(r => !desiredUnKeys.has(unKey(r))) : [];
+    // SAFETY: same protection on the unassigned pool — only delete rows we own.
+    const unToDelete = _isViewingToday()
+      ? dbUnassigned.filter(r => {
+          if (desiredUnKeys.has(unKey(r))) return false;
+          return _sessionOwnedUnKeys.has(unKey(r)) || _explicitlyRemovedUnKeys.has(unKey(r));
+        })
+      : [];
     const unToUpdate = desiredUnassigned.filter(u => {
       const existing = dbUnMap.get(unKey(u));
       return existing && existing.position !== u.position;
     });
+
+    // Track every row we're inserting/keeping as "session-owned" so future syncs
+    // know we're responsible for it
+    desiredAssigns.forEach(a => _sessionOwnedKeys.add(assignKey(a)));
+    desiredUnassigned.forEach(u => _sessionOwnedUnKeys.add(unKey(u)));
 
     const actor = _v2Actor();
 
@@ -1461,24 +1490,6 @@ async function syncToV2(){
       console.log('[v2-sync] no changes');
       return;
     }
-    // TEMPORARY DEBUG: dump what we're about to do, broken down by market
-    try {
-      const insByMkt = {}; assignsToInsert.forEach(a => insByMkt[a.market]=(insByMkt[a.market]||0)+1);
-      const delByMkt = {}; assignsToDelete.forEach(r => delByMkt[r.market]=(delByMkt[r.market]||0)+1);
-      const desByMkt = {}; desiredAssigns.forEach(a => desByMkt[a.market]=(desByMkt[a.market]||0)+1);
-      console.log('[v2-sync DEBUG] desired by market:', desByMkt, 'inserts by market:', insByMkt, 'deletes by market:', delByMkt);
-      // If we're about to DELETE Stevens Point rows, show exactly what
-      const spDeletes = assignsToDelete.filter(r => r.market === 'stevens_point');
-      if (spDeletes.length) {
-        console.warn('[v2-sync DEBUG] about to DELETE Stevens Point rows:', spDeletes.map(r => ({tech_id: r.tech_id, job_id: r.job_id, scheduled_date: r.scheduled_date})));
-        // Also log what techQ.stevens looks like at this moment
-        const spState = {};
-        for (const [nm, t] of Object.entries(techQ.stevens || {})) {
-          spState[nm] = { id: t.id, jobs: [...(t.jobs || [])] };
-        }
-        console.warn('[v2-sync DEBUG] techQ.stevens at delete time:', spState);
-      }
-    } catch(e) { /* ignore */ }
     const opResults = await Promise.all(ops.map(p => p.catch(e => ({ ok: false, _err: e }))));
     let okCount = 0, failCount = 0;
     for (const r of opResults) {
@@ -1499,6 +1510,10 @@ async function syncToV2(){
     if (failCount > 0) {
       showToast('⚠ ' + failCount + ' write(s) failed — check console');
     }
+    // Clear the explicit-removal sets — they were one-shot deletion authorizations
+    // and have now been processed (whether they succeeded in deleting or not).
+    _explicitlyRemovedKeys.clear();
+    _explicitlyRemovedUnKeys.clear();
   } catch(e) {
     console.warn('[v2-sync] error:', e);
   }
@@ -1538,12 +1553,6 @@ async function loadFromV2(){
     }
     const dbAssigns = await aRes.json();
     const dbUnassigned = await uRes.json();
-    // DEBUG: market breakdown of what came back from DB
-    try {
-      const dbByMkt = {};
-      dbAssigns.forEach(r => { dbByMkt[r.market] = (dbByMkt[r.market]||0)+1; });
-      console.log('[v2-read DEBUG] dbAssigns by market:', dbByMkt, 'total rows:', dbAssigns.length, 'sample tech_ids:', [...new Set(dbAssigns.map(r=>r.tech_id))].slice(0,5));
-    } catch(e){}
     let futureCount = 0;
     if (fRes && fRes.ok) {
       try { futureCount = (await fRes.json()).length; } catch(e){}
@@ -1575,25 +1584,14 @@ async function loadFromV2(){
     }
 
     let restored = 0;
-    let _stevensSkipped = 0, _appletonSkipped = 0, _stevensRouted = 0, _appletonRouted = 0;
     for (const [uuid, jids] of Object.entries(techAssigns)) {
       const t = uuidToTech[uuid];
-      if (!t) {
-        // tech not on board (terminated, hidden, etc.)
-        // Log which market the orphaned assignments belong to via dbAssigns
-        const sampleRow = dbAssigns.find(r => r.tech_id === uuid);
-        if (sampleRow && sampleRow.market === 'stevens_point') _stevensSkipped += jids.length;
-        else if (sampleRow && sampleRow.market === 'appleton') _appletonSkipped += jids.length;
-        continue;
-      }
+      if (!t) continue; // tech not on board (terminated, hidden, etc.)
       if (techQ[t.loc] && techQ[t.loc][t.name]) {
         techQ[t.loc][t.name].jobs = jids;
         restored += jids.length;
-        if (t.loc === 'stevens') _stevensRouted += jids.length;
-        else _appletonRouted += jids.length;
       }
     }
-    console.log('[v2-read DEBUG] routed: appleton=' + _appletonRouted + ', stevens=' + _stevensRouted + ' | skipped (no tech): appleton=' + _appletonSkipped + ', stevens=' + _stevensSkipped + ' | techQ.stevens techs:', Object.keys(techQ.stevens||{}).length, 'techQ.appleton techs:', Object.keys(techQ.appleton||{}).length);
 
     // Unassigned pool — only when viewing today.
     // For non-today dates, the pool shows what's currently unassigned today
@@ -2523,6 +2521,15 @@ function renderPool(){
     if(dragSrc&&techQ[loc][dragSrc]){
       markLaneChanged(loc, dragSrc);
       markLaneChanged(loc, null); // pool was also changed
+      // Mark the assignment as explicitly removed so sync is allowed to delete
+      // the DB row even if this session didn't originally own it.
+      const tech = techQ[loc][dragSrc];
+      if (tech && tech.id) {
+        const mkt = _v2Market(loc);
+        const dateForWrite = _isViewingToday() ? null : currentBoardDate;
+        const dateKey = collapseDate(dateForWrite);
+        _explicitlyRemovedKeys.add(tech.id + '|' + dragJob + '|' + mkt + '|' + dateKey);
+      }
       techQ[loc][dragSrc].jobs=techQ[loc][dragSrc].jobs.filter(j=>j!==dragJob);
       const still=Object.values(techQ[loc]).some(t=>t.jobs.includes(dragJob));
       if(!still&&!unassigned[loc].includes(dragJob))unassigned[loc].push(dragJob);
@@ -2589,7 +2596,17 @@ function onDD(e){
   const isReorder=dragSrc===tT;
   // Mark destination lane as locally-edited (and source lane too if different)
   markLaneChanged(loc, tT);
-  if(dragSrc && dragSrc !== tT) markLaneChanged(loc, dragSrc);
+  if(dragSrc && dragSrc !== tT) {
+    markLaneChanged(loc, dragSrc);
+    // Source tech is losing this job — mark the OLD assignment as explicitly removed
+    const srcTech = techQ[loc][dragSrc];
+    if (srcTech && srcTech.id) {
+      const mkt = _v2Market(loc);
+      const dateForWrite = _isViewingToday() ? null : currentBoardDate;
+      const dateKey = collapseDate(dateForWrite);
+      _explicitlyRemovedKeys.add(srcTech.id + '|' + dragJob + '|' + mkt + '|' + dateKey);
+    }
+  }
   if(dragPool) markLaneChanged(loc, null);
   if(isReorder)techQ[loc][tT].jobs=techQ[loc][tT].jobs.filter(j=>j!==dragJob);
   else if(dragPool)unassigned[loc]=unassigned[loc].filter(j=>j!==dragJob);
@@ -3570,6 +3587,14 @@ function onDDCross(e, nm, otherLoc){
   if(dragPool) markLaneChanged(loc, null);
   // Remove from source
   if(dragSrc && techQ[loc]?.[dragSrc]){
+    // Mark the old assignment as explicitly removed so sync can delete it
+    const srcTech = techQ[loc][dragSrc];
+    if (srcTech && srcTech.id) {
+      const mkt = _v2Market(loc);
+      const dateForWrite = _isViewingToday() ? null : currentBoardDate;
+      const dateKey = collapseDate(dateForWrite);
+      _explicitlyRemovedKeys.add(srcTech.id + '|' + dragJob + '|' + mkt + '|' + dateKey);
+    }
     techQ[loc][dragSrc].jobs = techQ[loc][dragSrc].jobs.filter(j=>j!==dragJob);
   } else if(dragPool){
     unassigned[loc] = (unassigned[loc]||[]).filter(j=>j!==dragJob);
