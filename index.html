@@ -1382,195 +1382,257 @@ function _collapseDateKey(d){
 
 async function syncToV2(){
   if (!V2_ENABLED) return;
+  // CUTOVER 2026-05-01 — DEPRECATED. The diff-based sync is replaced by
+  // event-sourced operations (opAddAssignment, opRemoveAssignment, etc).
+  // saveBoardState() no longer calls this. Kept temporarily as no-op to
+  // avoid breaking any caller we haven't updated. Safe to remove next pass.
+  return;
+}
+
+// ============================================================================
+// EVENT-SOURCED DISPATCH OPERATIONS
+// ============================================================================
+// Each drag fires ONE specific named operation. Each operation:
+//   1. Mutates techQ/unassigned locally for instant UI
+//   2. Sends ONE explicit DB op (no diffing)
+//   3. Realtime broadcasts the specific event to other clients
+// Other clients apply the event payload directly — no full board reload.
+// This replaces the diff-based syncToV2 entirely. Multi-user safe by design.
+// ============================================================================
+
+function _opMarket(loc) { return _v2Market(loc); }
+function _opDateForWrite() { return _isViewingToday() ? null : currentBoardDate; }
+function _opActor() { return _v2Actor(); }
+
+// Add a job to a tech's lane.
+async function opAddAssignment(loc, techName, jobId, position) {
+  const tech = (techQ[loc] || {})[techName];
+  if (!tech || !tech.id) return false;
+  // Local mutation first (UI responsiveness)
+  if (!techQ[loc][techName].jobs.includes(jobId)) {
+    if (typeof position === 'number' && position >= 0 && position < techQ[loc][techName].jobs.length) {
+      techQ[loc][techName].jobs.splice(position, 0, jobId);
+    } else {
+      techQ[loc][techName].jobs.push(jobId);
+    }
+  }
+  markLaneChanged(loc, techName);
+  lastLocalChange = Date.now();
+  updateSyncBadge(Date.now());
+  // Compute position from current state
+  const pos = techQ[loc][techName].jobs.indexOf(jobId);
+  // DB write
+  const row = {
+    tech_id: tech.id,
+    job_id: jobId,
+    market: _opMarket(loc),
+    position: pos >= 0 ? pos : 0,
+    scheduled_date: _opDateForWrite(),
+    created_by: _opActor(),
+    updated_by: _opActor()
+  };
   try {
-    // Today writes NULL for scheduled_date (day-of dispatching = NULL date).
-    // Future/past dates write explicit DATE values.
-    // Today's view shows BOTH NULL-dated rows AND today-dated rows
-    // (so pre-scheduled work auto-appears when its date arrives).
-    const dateForWrite = _isViewingToday() ? null : currentBoardDate;
-    const todayStr = _getDispatchToday();
-    const dateFilter = _isViewingToday()
-      ? '&or=(scheduled_date.is.null,scheduled_date.eq.' + todayStr + ')'
-      : '&scheduled_date=eq.' + currentBoardDate;
-
-    // 1) Build desired state from memory
-    const desiredAssigns = []; // {tech_id, job_id, market, position, scheduled_date}
-    const desiredUnassigned = []; // {job_id, market, position}
-
-    for (const loc of ['appleton','stevens']) {
-      const v2mkt = _v2Market(loc);
-      // Assignments
-      const techNames = Object.keys(techQ[loc] || {});
-      for (const nm of techNames) {
-        const tech = techQ[loc][nm];
-        if (!tech || !tech.id) continue; // skip techs without UUIDs (shouldn't happen)
-        (tech.jobs || []).forEach((jid, idx) => {
-          desiredAssigns.push({
-            tech_id: tech.id,
-            job_id: String(jid),
-            market: v2mkt,
-            position: idx,
-            scheduled_date: dateForWrite
-          });
-        });
-      }
-      // Unassigned pool — only sync when viewing today.
-      // For other dates, unassigned represents "available to schedule" not actual rows in DB.
-      if (_isViewingToday()) {
-        (unassigned[loc] || []).forEach((jid, idx) => {
-          if (!jobs[jid]) return; // skip stale IDs
-          desiredUnassigned.push({
-            job_id: String(jid),
-            market: v2mkt,
-            position: idx
-          });
-        });
-      }
-    }
-
-    // 2) Pull current DB state for THIS DATE only (other dates untouched)
-    const fetches = [
-      sbFetch('/rest/v1/dispatch_assignments_v2?select=id,tech_id,job_id,market,position,scheduled_date' + dateFilter)
-    ];
-    if (_isViewingToday()) {
-      fetches.push(sbFetch('/rest/v1/dispatch_unassigned_v2?select=id,job_id,market,position'));
-    }
-    const results = await Promise.all(fetches);
-    if (!results[0].ok || (results[1] && !results[1].ok)) {
-      console.warn('[v2-sync] fetch failed', results[0].status, results[1]?.status);
-      return;
-    }
-    const dbAssigns = await results[0].json();
-    const dbUnassigned = results[1] ? await results[1].json() : [];
-
-    // 3) Compute diffs
-    // Assignments: identity = (tech_id, job_id, market, scheduled_date_or_today_collapse).
-    // On today's view, NULL-dated and today-dated rows are treated as the same
-    // identity (so a pre-scheduled row that arrived today doesn't get rewritten as NULL).
-    // Position can update.
-    const todayCollapse = _isViewingToday() ? todayStr : null;
-    const collapseDate = (d) => {
-      // On today's view, both NULL and today's date map to the same key
-      if (todayCollapse && (d === null || d === undefined || d === todayCollapse)) return '_today';
-      return d || '';
-    };
-    const assignKey = (a) => a.tech_id + '|' + a.job_id + '|' + a.market + '|' + collapseDate(a.scheduled_date);
-    const dbAssignMap = new Map(dbAssigns.map(r => [assignKey(r), r]));
-    const desiredAssignKeys = new Set(desiredAssigns.map(assignKey));
-
-    const assignsToInsert = desiredAssigns.filter(a => !dbAssignMap.has(assignKey(a)));
-    // SAFETY: only delete rows this session has touched. Prevents the destructive
-    // "Brandon and Josh fight" loop where one browser's stale techQ overwrites
-    // another browser's recent inserts. _sessionOwnedKeys tracks every row this
-    // browser has inserted or seen via realtime since page load. Any row in DB
-    // that we haven't touched this session is treated as "someone else's work"
-    // and left alone, even if our techQ thinks it shouldn't exist.
-    const assignsToDelete = dbAssigns.filter(r => {
-      if (desiredAssignKeys.has(assignKey(r))) return false;
-      // Only delete if we created it OR a user explicitly removed it via drag-out
-      return _sessionOwnedKeys.has(assignKey(r)) || _explicitlyRemovedKeys.has(assignKey(r));
+    const r = await sbFetch('/rest/v1/dispatch_assignments_v2', {
+      method: 'POST',
+      body: JSON.stringify(row)
     });
-    const assignsToUpdate = desiredAssigns.filter(a => {
-      const existing = dbAssignMap.get(assignKey(a));
-      return existing && existing.position !== a.position;
-    });
-
-    // Unassigned: identity = (job_id, market). Position can update.
-    const unKey = (u) => u.job_id + '|' + u.market;
-    const dbUnMap = new Map(dbUnassigned.map(r => [unKey(r), r]));
-    const desiredUnKeys = new Set(desiredUnassigned.map(unKey));
-
-    const unToInsert = desiredUnassigned.filter(u => !dbUnMap.has(unKey(u)));
-    // SAFETY: same protection on the unassigned pool — only delete rows we own.
-    const unToDelete = _isViewingToday()
-      ? dbUnassigned.filter(r => {
-          if (desiredUnKeys.has(unKey(r))) return false;
-          return _sessionOwnedUnKeys.has(unKey(r)) || _explicitlyRemovedUnKeys.has(unKey(r));
-        })
-      : [];
-    const unToUpdate = desiredUnassigned.filter(u => {
-      const existing = dbUnMap.get(unKey(u));
-      return existing && existing.position !== u.position;
-    });
-
-    // Track every row we're inserting/keeping as "session-owned" so future syncs
-    // know we're responsible for it
-    desiredAssigns.forEach(a => _sessionOwnedKeys.add(assignKey(a)));
-    desiredUnassigned.forEach(u => _sessionOwnedUnKeys.add(unKey(u)));
-
-    const actor = _v2Actor();
-
-    // 4) Apply diffs (deletes first to free unique constraints, then inserts/updates)
-    const ops = [];
-
-    if (assignsToDelete.length) {
-      const ids = assignsToDelete.map(r => r.id);
-      ops.push(sbFetch('/rest/v1/dispatch_assignments_v2?id=in.(' + ids.join(',') + ')', { method: 'DELETE' }));
-    }
-    if (unToDelete.length) {
-      const ids = unToDelete.map(r => r.id);
-      ops.push(sbFetch('/rest/v1/dispatch_unassigned_v2?id=in.(' + ids.join(',') + ')', { method: 'DELETE' }));
-    }
-    if (assignsToInsert.length) {
-      const rows = assignsToInsert.map(a => ({...a, created_by: actor, updated_by: actor}));
-      ops.push(sbFetch('/rest/v1/dispatch_assignments_v2', {
-        method: 'POST',
-        body: JSON.stringify(rows)
-      }));
-    }
-    if (unToInsert.length) {
-      const rows = unToInsert.map(u => ({...u, added_by: actor}));
-      ops.push(sbFetch('/rest/v1/dispatch_unassigned_v2', {
-        method: 'POST',
-        body: JSON.stringify(rows)
-      }));
-    }
-    // Updates: PATCH each row by identity
-    for (const a of assignsToUpdate) {
-      const existing = dbAssignMap.get(assignKey(a));
-      ops.push(sbFetch('/rest/v1/dispatch_assignments_v2?id=eq.' + existing.id, {
-        method: 'PATCH',
-        body: JSON.stringify({ position: a.position, updated_by: actor })
-      }));
-    }
-    for (const u of unToUpdate) {
-      const existing = dbUnMap.get(unKey(u));
-      ops.push(sbFetch('/rest/v1/dispatch_unassigned_v2?id=eq.' + existing.id, {
-        method: 'PATCH',
-        body: JSON.stringify({ position: u.position })
-      }));
-    }
-
-    if (ops.length === 0) {
-      console.log('[v2-sync] no changes');
-      return;
-    }
-    const opResults = await Promise.all(ops.map(p => p.catch(e => ({ ok: false, _err: e }))));
-    let okCount = 0, failCount = 0;
-    for (const r of opResults) {
-      if (r && r.ok) okCount++;
-      else {
-        failCount++;
-        if (r && typeof r.text === 'function') {
-          try {
-            const errText = await r.text();
-            console.error('[v2-sync] op failed', r.status, errText);
-          } catch(e) { console.error('[v2-sync] op failed', r && r.status); }
-        } else {
-          console.error('[v2-sync] op error', r);
-        }
+    if (!r.ok) {
+      // 409 conflict (already exists) is fine — somebody else inserted same row
+      if (r.status === 409) {
+        console.log('[op] add: conflict (already exists), proceeding');
+        return true;
       }
+      console.error('[op] add failed', r.status);
+      showToast('⚠ Add failed — please refresh');
+      return false;
     }
-    console.log('[v2-sync] +' + assignsToInsert.length + ' assigns, -' + assignsToDelete.length + ' assigns, ~' + assignsToUpdate.length + ' assigns; +' + unToInsert.length + '/-' + unToDelete.length + '/~' + unToUpdate.length + ' unassigned (ops: ' + okCount + ' ok, ' + failCount + ' failed)');
-    if (failCount > 0) {
-      showToast('⚠ ' + failCount + ' write(s) failed — check console');
-    }
-    // Clear the explicit-removal sets — they were one-shot deletion authorizations
-    // and have now been processed (whether they succeeded in deleting or not).
-    _explicitlyRemovedKeys.clear();
-    _explicitlyRemovedUnKeys.clear();
+    return true;
   } catch(e) {
-    console.warn('[v2-sync] error:', e);
+    console.error('[op] add error', e);
+    return false;
+  }
+}
+
+// Remove a job from a tech's lane.
+async function opRemoveAssignment(loc, techName, jobId) {
+  const tech = (techQ[loc] || {})[techName];
+  if (!tech || !tech.id) return false;
+  // Local mutation
+  techQ[loc][techName].jobs = (techQ[loc][techName].jobs || []).filter(j => j !== jobId);
+  markLaneChanged(loc, techName);
+  lastLocalChange = Date.now();
+  updateSyncBadge(Date.now());
+  // DB write — explicit DELETE on tech_id+job_id+market(+date if not today)
+  const market = _opMarket(loc);
+  const dateForWrite = _opDateForWrite();
+  let url = '/rest/v1/dispatch_assignments_v2?tech_id=eq.' + tech.id +
+            '&job_id=eq.' + encodeURIComponent(jobId) +
+            '&market=eq.' + market;
+  if (dateForWrite === null) {
+    // Today's view: match either NULL or today's date
+    url += '&or=(scheduled_date.is.null,scheduled_date.eq.' + _getDispatchToday() + ')';
+  } else {
+    url += '&scheduled_date=eq.' + dateForWrite;
+  }
+  try {
+    const r = await sbFetch(url, { method: 'DELETE' });
+    if (!r.ok) {
+      console.error('[op] remove failed', r.status);
+      showToast('⚠ Remove failed — please refresh');
+      return false;
+    }
+    return true;
+  } catch(e) {
+    console.error('[op] remove error', e);
+    return false;
+  }
+}
+
+// Add a job to the unassigned pool for a market.
+async function opAddToPool(loc, jobId, position) {
+  if (!unassigned[loc].includes(jobId)) {
+    if (typeof position === 'number' && position >= 0 && position < unassigned[loc].length) {
+      unassigned[loc].splice(position, 0, jobId);
+    } else {
+      unassigned[loc].push(jobId);
+    }
+  }
+  markLaneChanged(loc, null);
+  lastLocalChange = Date.now();
+  updateSyncBadge(Date.now());
+  if (!_isViewingToday()) return true;  // pool only persists for today
+  const pos = unassigned[loc].indexOf(jobId);
+  const row = {
+    job_id: jobId,
+    market: _opMarket(loc),
+    position: pos >= 0 ? pos : 0,
+    added_by: _opActor()
+  };
+  try {
+    const r = await sbFetch('/rest/v1/dispatch_unassigned_v2', {
+      method: 'POST',
+      body: JSON.stringify(row)
+    });
+    if (!r.ok && r.status !== 409) {
+      console.error('[op] addToPool failed', r.status);
+      return false;
+    }
+    return true;
+  } catch(e) {
+    console.error('[op] addToPool error', e);
+    return false;
+  }
+}
+
+// Remove a job from the unassigned pool.
+async function opRemoveFromPool(loc, jobId) {
+  unassigned[loc] = (unassigned[loc] || []).filter(j => j !== jobId);
+  markLaneChanged(loc, null);
+  lastLocalChange = Date.now();
+  updateSyncBadge(Date.now());
+  if (!_isViewingToday()) return true;
+  const url = '/rest/v1/dispatch_unassigned_v2?job_id=eq.' + encodeURIComponent(jobId) +
+              '&market=eq.' + _opMarket(loc);
+  try {
+    const r = await sbFetch(url, { method: 'DELETE' });
+    if (!r.ok) {
+      console.error('[op] removeFromPool failed', r.status);
+      return false;
+    }
+    return true;
+  } catch(e) {
+    console.error('[op] removeFromPool error', e);
+    return false;
+  }
+}
+
+// Update positions for all jobs in a tech's lane (after a reorder).
+async function opReorderLane(loc, techName) {
+  const tech = (techQ[loc] || {})[techName];
+  if (!tech || !tech.id) return false;
+  markLaneChanged(loc, techName);
+  lastLocalChange = Date.now();
+  updateSyncBadge(Date.now());
+  const market = _opMarket(loc);
+  const dateForWrite = _opDateForWrite();
+  // PATCH each job's position. Fire all in parallel.
+  const jobs = techQ[loc][techName].jobs || [];
+  const ops = jobs.map(function(jobId, i){
+    let url = '/rest/v1/dispatch_assignments_v2?tech_id=eq.' + tech.id +
+              '&job_id=eq.' + encodeURIComponent(jobId) +
+              '&market=eq.' + market;
+    if (dateForWrite === null) {
+      url += '&or=(scheduled_date.is.null,scheduled_date.eq.' + _getDispatchToday() + ')';
+    } else {
+      url += '&scheduled_date=eq.' + dateForWrite;
+    }
+    return sbFetch(url, {
+      method: 'PATCH',
+      body: JSON.stringify({ position: i, updated_by: _opActor() })
+    });
+  });
+  const results = await Promise.all(ops.map(function(p){ return p.catch(function(e){ return { ok: false, _err: e }; }); }));
+  let failCount = 0;
+  for (const r of results) if (!r || !r.ok) failCount++;
+  if (failCount > 0) {
+    console.warn('[op] reorderLane: ' + failCount + ' position updates failed');
+  }
+  return failCount === 0;
+}
+
+// Reorder unassigned pool positions.
+async function opReorderPool(loc) {
+  markLaneChanged(loc, null);
+  lastLocalChange = Date.now();
+  updateSyncBadge(Date.now());
+  if (!_isViewingToday()) return true;
+  const market = _opMarket(loc);
+  const jobs = unassigned[loc] || [];
+  const ops = jobs.map(function(jobId, i){
+    return sbFetch('/rest/v1/dispatch_unassigned_v2?job_id=eq.' + encodeURIComponent(jobId) +
+                    '&market=eq.' + market, {
+      method: 'PATCH',
+      body: JSON.stringify({ position: i })
+    });
+  });
+  const results = await Promise.all(ops.map(function(p){ return p.catch(function(e){ return { ok: false, _err: e }; }); }));
+  let failCount = 0;
+  for (const r of results) if (!r || !r.ok) failCount++;
+  if (failCount > 0) {
+    console.warn('[op] reorderPool: ' + failCount + ' position updates failed');
+  }
+  return failCount === 0;
+}
+
+// Update arbitrary fields on an assignment (start_time, end_time, hours, status, notes).
+async function opUpdateAssignment(loc, techName, jobId, fields) {
+  const tech = (techQ[loc] || {})[techName];
+  if (!tech || !tech.id) return false;
+  lastLocalChange = Date.now();
+  updateSyncBadge(Date.now());
+  const market = _opMarket(loc);
+  const dateForWrite = _opDateForWrite();
+  let url = '/rest/v1/dispatch_assignments_v2?tech_id=eq.' + tech.id +
+            '&job_id=eq.' + encodeURIComponent(jobId) +
+            '&market=eq.' + market;
+  if (dateForWrite === null) {
+    url += '&or=(scheduled_date.is.null,scheduled_date.eq.' + _getDispatchToday() + ')';
+  } else {
+    url += '&scheduled_date=eq.' + dateForWrite;
+  }
+  try {
+    const r = await sbFetch(url, {
+      method: 'PATCH',
+      body: JSON.stringify(Object.assign({}, fields, { updated_by: _opActor() }))
+    });
+    if (!r.ok) {
+      console.error('[op] updateAssignment failed', r.status);
+      return false;
+    }
+    return true;
+  } catch(e) {
+    console.error('[op] updateAssignment error', e);
+    return false;
   }
 }
 
@@ -2263,7 +2325,9 @@ function render(){
   renderBoard();
   renderPool();
   updateStats();
-  saveBoardState();
+  // CUTOVER 2026-05-01: render() no longer triggers saveBoardState. Writes happen
+  // explicitly via opAddAssignment / opRemoveAssignment / opReorderLane / etc.
+  // Render is now purely a UI update.
   // Apply clocked-in pulse indicators (only meaningful for today)
   if (typeof _applyClockedInToCards === 'function') {
     setTimeout(_applyClockedInToCards, 0); // run after DOM is fully laid out
@@ -2574,23 +2638,18 @@ function renderPool(){
     e.preventDefault();pool.classList.remove('drag-over');
     if(!dragJob||dragPool)return;
     if(dragSrc&&techQ[loc][dragSrc]){
-      markLaneChanged(loc, dragSrc);
-      markLaneChanged(loc, null); // pool was also changed
-      // Mark the assignment as explicitly removed so sync is allowed to delete
-      // the DB row even if this session didn't originally own it.
-      const tech = techQ[loc][dragSrc];
-      if (tech && tech.id) {
-        const mkt = _v2Market(loc);
-        const dateForWrite = _isViewingToday() ? null : currentBoardDate;
-        const dateKey = _collapseDateKey(dateForWrite);
-        _explicitlyRemovedKeys.add(tech.id + '|' + dragJob + '|' + mkt + '|' + dateKey);
+      const draggedJob = dragJob;
+      const draggedFrom = dragSrc;
+      // Remove from source tech via op
+      opRemoveAssignment(loc, draggedFrom, draggedJob);
+      // If no other tech has it, add to pool via op
+      const stillElsewhere = Object.values(techQ[loc]).some(t => t.jobs.includes(draggedJob));
+      if (!stillElsewhere) {
+        opAddToPool(loc, draggedJob);
       }
-      techQ[loc][dragSrc].jobs=techQ[loc][dragSrc].jobs.filter(j=>j!==dragJob);
-      const still=Object.values(techQ[loc]).some(t=>t.jobs.includes(dragJob));
-      if(!still&&!unassigned[loc].includes(dragJob))unassigned[loc].push(dragJob);
+      showToast('Removed from ' + draggedFrom.split(' ')[0]);
+      render();
     }
-    showToast('Removed from '+dragSrc?.split(' ')[0]);render();
-    saveBoardState();
   });
   // Sort newest first — prefer Albi createdAt; fall back to job number if missing
   const sortFn=(a,b)=>{
@@ -2649,34 +2708,76 @@ function onDD(e){
   const tT=body.dataset.tech;if(!dragJob||!tT)return;
   if(sick.has(tT)){showToast(tT.split(' ')[0]+' is out');return;}
   const isReorder=dragSrc===tT;
-  // Mark destination lane as locally-edited (and source lane too if different)
-  markLaneChanged(loc, tT);
-  if(dragSrc && dragSrc !== tT) {
-    markLaneChanged(loc, dragSrc);
-    // Source tech is losing this job — mark the OLD assignment as explicitly removed
-    const srcTech = techQ[loc][dragSrc];
-    if (srcTech && srcTech.id) {
-      const mkt = _v2Market(loc);
-      const dateForWrite = _isViewingToday() ? null : currentBoardDate;
-      const dateKey = _collapseDateKey(dateForWrite);
-      _explicitlyRemovedKeys.add(srcTech.id + '|' + dragJob + '|' + mkt + '|' + dateKey);
+  const wasFromPool = dragPool;
+  const wasFromOtherTech = !!dragSrc && dragSrc !== tT;
+  const j = jobs[dragJob];
+
+  // ── Reorder within same lane ──────────────────────
+  if (isReorder) {
+    // Compute drop position from cards in DOM
+    const curJobs = techQ[loc][tT].jobs.filter(j => j !== dragJob);
+    const cards = [...body.querySelectorAll('.job-card:not(.dragging):not(.drag-placeholder)')];
+    let idx = curJobs.length;
+    for (let i = 0; i < cards.length; i++) {
+      const r = cards[i].getBoundingClientRect();
+      if (e.clientY < r.top + r.height/2) { idx = i; break; }
     }
+    curJobs.splice(idx, 0, dragJob);
+    techQ[loc][tT].jobs = curJobs;
+    if (ph && ph.parentNode) ph.parentNode.removeChild(ph);
+    ph = null;
+    showToast('Reordered · mileage updated');
+    render();
+    opReorderLane(loc, tT);
+    return;
   }
-  if(dragPool) markLaneChanged(loc, null);
-  if(isReorder)techQ[loc][tT].jobs=techQ[loc][tT].jobs.filter(j=>j!==dragJob);
-  else if(dragPool)unassigned[loc]=unassigned[loc].filter(j=>j!==dragJob);
-  const curJobs=techQ[loc][tT].jobs.filter(j=>j!==dragJob);
-  const cards=[...body.querySelectorAll('.job-card:not(.dragging):not(.drag-placeholder)')];
-  let idx=curJobs.length;
-  for(let i=0;i<cards.length;i++){const r=cards[i].getBoundingClientRect();if(e.clientY<r.top+r.height/2){const fi=curJobs.indexOf(cards[i].dataset.jobId);idx=fi===-1?i:fi;break;}}
-  curJobs.splice(idx,0,dragJob);techQ[loc][tT].jobs=curJobs;
-  if(ph&&ph.parentNode)ph.parentNode.removeChild(ph);ph=null;
-  const j=jobs[dragJob];
-  if(isReorder)showToast('Reordered · mileage updated');
-  else if(dragPool)showToast((j?.name||dragJob)+' → '+tT.split(' ')[0]);
-  else showToast((j?.name||dragJob)+' also on '+tT.split(' ')[0]+' (team job)');
+
+  // ── From pool to tech ─────────────────────────────
+  if (wasFromPool) {
+    // Compute drop position
+    const curJobs = techQ[loc][tT].jobs.slice();
+    const cards = [...body.querySelectorAll('.job-card:not(.dragging):not(.drag-placeholder)')];
+    let idx = curJobs.length;
+    for (let i = 0; i < cards.length; i++) {
+      const r = cards[i].getBoundingClientRect();
+      if (e.clientY < r.top + r.height/2) { idx = i; break; }
+    }
+    if (ph && ph.parentNode) ph.parentNode.removeChild(ph);
+    ph = null;
+    showToast((j?.name || dragJob) + ' → ' + tT.split(' ')[0]);
+    // Fire pool→tech as TWO separate ops
+    opRemoveFromPool(loc, dragJob);
+    opAddAssignment(loc, tT, dragJob, idx);
+    render();
+    return;
+  }
+
+  // ── From other tech (team job — same tab) ─────────
+  if (wasFromOtherTech) {
+    // This is "also on" semantics — the dragged job is added to tT, but
+    // STAYS on dragSrc as well. (Per existing UX: "team job", not move.)
+    // To make it a move instead of a team job, the user explicitly drags
+    // out via drag-back-to-pool then to new tech.
+    const curJobs = techQ[loc][tT].jobs.slice();
+    const cards = [...body.querySelectorAll('.job-card:not(.dragging):not(.drag-placeholder)')];
+    let idx = curJobs.length;
+    for (let i = 0; i < cards.length; i++) {
+      const r = cards[i].getBoundingClientRect();
+      if (e.clientY < r.top + r.height/2) { idx = i; break; }
+    }
+    if (ph && ph.parentNode) ph.parentNode.removeChild(ph);
+    ph = null;
+    showToast((j?.name || dragJob) + ' also on ' + tT.split(' ')[0] + ' (team job)');
+    opAddAssignment(loc, tT, dragJob, idx);
+    render();
+    return;
+  }
+
+  // Fallback: dragging from somewhere unrecognized — treat as add
+  if (ph && ph.parentNode) ph.parentNode.removeChild(ph);
+  ph = null;
+  opAddAssignment(loc, tT, dragJob);
   render();
-  saveBoardState();
 }
 
 // ── HELPERS ───────────────────────────────
@@ -3844,28 +3945,20 @@ function onDDCross(e, nm, otherLoc){
   if(!dragJob) return;
   const tech = techQ[otherLoc]?.[nm];
   if(!tech) return;
-  // Mark both source and destination lanes as locally edited
-  markLaneChanged(otherLoc, nm);
-  if(dragSrc) markLaneChanged(loc, dragSrc);
-  if(dragPool) markLaneChanged(loc, null);
-  // Remove from source
-  if(dragSrc && techQ[loc]?.[dragSrc]){
-    // Mark the old assignment as explicitly removed so sync can delete it
-    const srcTech = techQ[loc][dragSrc];
-    if (srcTech && srcTech.id) {
-      const mkt = _v2Market(loc);
-      const dateForWrite = _isViewingToday() ? null : currentBoardDate;
-      const dateKey = _collapseDateKey(dateForWrite);
-      _explicitlyRemovedKeys.add(srcTech.id + '|' + dragJob + '|' + mkt + '|' + dateKey);
-    }
-    techQ[loc][dragSrc].jobs = techQ[loc][dragSrc].jobs.filter(j=>j!==dragJob);
-  } else if(dragPool){
-    unassigned[loc] = (unassigned[loc]||[]).filter(j=>j!==dragJob);
+  const draggedJob = dragJob;
+  const draggedSrc = dragSrc;
+  const fromPool = dragPool;
+  const fromLoc = loc;
+  // Remove from source via op
+  if (draggedSrc && techQ[fromLoc]?.[draggedSrc]) {
+    opRemoveAssignment(fromLoc, draggedSrc, draggedJob);
+  } else if (fromPool) {
+    opRemoveFromPool(fromLoc, draggedJob);
   }
-  if(!tech.jobs.includes(dragJob)) tech.jobs.push(dragJob);
-  showToast(jobs[dragJob]?.name+' → '+nm.split(' ')[0]);
+  // Add to destination tech (in OTHER market) via op
+  opAddAssignment(otherLoc, nm, draggedJob);
+  showToast(jobs[draggedJob]?.name + ' → ' + nm.split(' ')[0]);
   render();
-  saveBoardState();
 }
 
 // ── TIME OVERRIDES ───────────────────────
@@ -4101,41 +4194,121 @@ function initRealtime() {
       }
     }
 
-    // CUTOVER 2026-04-26: subscribe to _v2 tables instead of board_state.
-    // On any change to dispatch_assignments_v2 or dispatch_unassigned_v2, reload from _v2 and re-render.
-    // Debounced to avoid thrashing during rapid bulk changes.
-    var _v2RtDebounce = null;
-    function _v2RtRefresh() {
-      clearTimeout(_v2RtDebounce);
-      _v2RtDebounce = setTimeout(async function() {
-        try {
-          // Don't clobber local state if user just made a change (within 2s)
-          if (lastLocalChange > 0 && (Date.now() - lastLocalChange) < 2000) return;
-          // Don't run during a date switch
-          if (_dateSwitchInProgress) return;
-          if (_lastDateSwitchAt && (Date.now() - _lastDateSwitchAt) < 1500) return;
-          // Snapshot existing assignments before reload
-          const before = JSON.stringify(getBoardStatePayload().assignments);
-          // Clear and reload from _v2
-          for (const l of ['appleton','stevens']) {
-            for (const nm in (techQ[l]||{})) {
-              if (techQ[l][nm]) techQ[l][nm].jobs = [];
-            }
-            unassigned[l] = [];
-          }
-          await loadFromV2();
-          // Refresh audit maps too — dispatchers in other sessions may have moved jobs
-          await loadJobAuditMaps();
-          const after = JSON.stringify(getBoardStatePayload().assignments);
-          if (before !== after) {
-            render();
-            showToast('🔄 Board updated');
-          }
-        } catch(e) {
-          console.warn('[v2-realtime] refresh error:', e);
+    // CUTOVER 2026-05-01: realtime now applies events directly to techQ
+    // instead of doing a full board reload. No more debounced clobbering.
+    function _applyAssignmentEvent(payload) {
+      try {
+        if (_dateSwitchInProgress) return;
+        // Don't apply our own events back to ourselves (we already mutated locally)
+        // Best-effort: events generated within the last 1 second by us are skipped
+        // by checking the row's actor against our own.
+        const myActor = _v2Actor();
+        const eventType = payload.eventType || payload.type;
+        const row = payload.new || payload.record || payload.old;
+        if (!row) return;
+
+        // The event might be for a different date than what we're viewing — skip if so
+        const viewingToday = _isViewingToday();
+        const dispatchToday = _getDispatchToday();
+        const rowDate = row.scheduled_date;
+        if (viewingToday) {
+          // Today's view shows NULL-dated rows AND today-dated rows
+          if (rowDate !== null && rowDate !== dispatchToday) return;
+        } else {
+          // Future/past date view shows that exact date
+          if (rowDate !== currentBoardDate) return;
         }
-      }, 300);
+
+        // Find which tech this row belongs to
+        let foundTech = null;
+        let foundLoc = null;
+        for (const l of ['appleton','stevens']) {
+          for (const nm in (techQ[l] || {})) {
+            if (techQ[l][nm] && techQ[l][nm].id === row.tech_id) {
+              foundTech = nm;
+              foundLoc = l;
+              break;
+            }
+          }
+          if (foundTech) break;
+        }
+        if (!foundTech || !foundLoc) return; // tech not on board (terminated, etc)
+
+        const lane = techQ[foundLoc][foundTech];
+        let changed = false;
+        if (eventType === 'INSERT') {
+          if (!lane.jobs.includes(row.job_id)) {
+            // Insert at the row's position if specified, else append
+            if (typeof row.position === 'number' && row.position >= 0 && row.position < lane.jobs.length) {
+              lane.jobs.splice(row.position, 0, row.job_id);
+            } else {
+              lane.jobs.push(row.job_id);
+            }
+            changed = true;
+          }
+        } else if (eventType === 'DELETE') {
+          const oldRow = payload.old || payload.record;
+          if (oldRow) {
+            // Find which tech had this row (use oldRow.tech_id)
+            for (const l of ['appleton','stevens']) {
+              for (const nm in (techQ[l] || {})) {
+                if (techQ[l][nm] && techQ[l][nm].id === oldRow.tech_id) {
+                  const t = techQ[l][nm];
+                  if (t.jobs.includes(oldRow.job_id)) {
+                    t.jobs = t.jobs.filter(function(j){ return j !== oldRow.job_id; });
+                    changed = true;
+                  }
+                }
+              }
+            }
+          }
+        } else if (eventType === 'UPDATE') {
+          // Position changes — re-sort. Other field changes — just rerender.
+          changed = true;
+        }
+        if (changed) {
+          render();
+        }
+      } catch(e) {
+        console.warn('[v2-realtime] apply error:', e);
+      }
     }
+
+    function _applyUnassignedEvent(payload) {
+      try {
+        if (_dateSwitchInProgress) return;
+        if (!_isViewingToday()) return; // pool only relevant for today's view
+        const eventType = payload.eventType || payload.type;
+        const row = payload.new || payload.record || payload.old;
+        if (!row) return;
+        const loc = (row.market === 'stevens_point') ? 'stevens' : 'appleton';
+        let changed = false;
+        if (eventType === 'INSERT') {
+          if (!unassigned[loc].includes(row.job_id)) {
+            unassigned[loc].push(row.job_id);
+            changed = true;
+          }
+        } else if (eventType === 'DELETE') {
+          const oldRow = payload.old || payload.record;
+          if (oldRow) {
+            const oldLoc = (oldRow.market === 'stevens_point') ? 'stevens' : 'appleton';
+            if (unassigned[oldLoc].includes(oldRow.job_id)) {
+              unassigned[oldLoc] = unassigned[oldLoc].filter(function(j){ return j !== oldRow.job_id; });
+              changed = true;
+            }
+          }
+        }
+        if (changed) {
+          render();
+        }
+      } catch(e) {
+        console.warn('[v2-realtime] unassigned apply error:', e);
+      }
+    }
+
+    // Legacy reference — kept for backward compat with any code that still calls this.
+    // Now a no-op since events apply directly.
+    function _v2RtRefresh() { /* no-op */ }
 
     _realtimeChannel = _sbClient
       .channel('dispatch_v2_changes')
@@ -4144,14 +4317,14 @@ function initRealtime() {
         schema: 'public',
         table: 'dispatch_assignments_v2'
       }, function(payload) {
-        _v2RtRefresh();
+        _applyAssignmentEvent(payload);
       })
       .on('postgres_changes', {
         event: '*',
         schema: 'public',
         table: 'dispatch_unassigned_v2'
       }, function(payload) {
-        _v2RtRefresh();
+        _applyUnassignedEvent(payload);
       })
       .on('postgres_changes', {
         event: '*',
@@ -4326,10 +4499,9 @@ function onCardDrop(e, nm, jid){
   if(fromIdx === -1 || toIdx === -1) return;
   jobs.splice(fromIdx, 1);
   jobs.splice(toIdx, 0, reorderSrc);
-  markLaneChanged(techLoc, nm);
   reorderSrc = null; reorderTech = null;
-  saveBoardState();
   render();
+  opReorderLane(techLoc, nm);
 }
 
 // ── TIMELINE MODE ────────────────────────
