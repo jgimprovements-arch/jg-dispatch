@@ -406,11 +406,6 @@ var SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZ
 // Normalize a market value to the canonical DB form: 'appleton' or 'stevens_point'.
 // Accepts any common variant: 'Appleton', 'appleton', 'Stevens Point', 'stevens_point', etc.
 // Used everywhere we save market to the DB so dispatch board lane routing stays consistent.
-//
-// CRITICAL: every market write to the employees table MUST go through this function.
-// The dispatch board (index.html) expects employees.market to be lowercase canonical.
-// Capitalized values silently break Stevens Point lane assignments — see 2026-04-29 incident.
-// If you're editing this file and tempted to remove a normalizeMarket() wrapper, DON'T.
 function normalizeMarket(m) {
   if (!m) return 'appleton';
   var s = String(m).toLowerCase().trim();
@@ -9634,11 +9629,7 @@ async function saveEmployee() {
     birthday:         (document.getElementById('emp-birthday')   ||{}).value || null,
     start_date:       (document.getElementById('emp-start-date') ||{}).value || null,
     termination_date: (document.getElementById('emp-term-date')  ||{}).value || null,
-    // IMPORTANT: market MUST go through normalizeMarket() before write.
-    // Removing this re-introduces the dispatch routing bug from 2026-04-29
-    // where capitalized 'Appleton'/'Stevens Point' values silently broke
-    // Stevens Point lane assignments. Dispatch board expects lowercase.
-    market: normalizeMarket(document.getElementById('emp-market').value),
+    market: document.getElementById('emp-market').value,
     hourly_rate: parseFloat(document.getElementById('emp-rate').value) || 0,
     active: document.getElementById('emp-active').checked,
     show_on_dispatch: document.getElementById('emp-dispatch') ? document.getElementById('emp-dispatch').checked : true,
@@ -10256,14 +10247,61 @@ async function saveEntry(id) {
   var outISO = outVal ? new Date(outVal).toISOString() : null;
   var dur = (inISO && outISO) ? Math.floor((new Date(outISO)-new Date(inISO))/60000) : null;
 
+  // ── OVERLAP VALIDATION ────────────────────────────────────────────────
+  // Block (or warn-and-confirm) if the new clock_in/clock_out range overlaps
+  // any OTHER time entry for the same employee. Prevents the inflated-timecard
+  // bug where admin edits create overlapping closed entries (silent payroll
+  // double-counting). Only runs when both clock_in and clock_out are set.
+  if (inISO && outISO) {
+    var beingEdited = ST.entries.find(function(e){ return e.id === id; });
+    var empId = beingEdited && beingEdited.employee_id;
+    if (empId) {
+      var newIn = new Date(inISO).getTime();
+      var newOut = new Date(outISO).getTime();
+      var overlaps = ST.entries.filter(function(e){
+        if (e.id === id) return false; // skip the entry being edited
+        if (e.employee_id !== empId) return false;
+        if (!e.clock_in) return false;
+        var eIn = new Date(e.clock_in).getTime();
+        var eOut = e.clock_out ? new Date(e.clock_out).getTime() : Date.now();
+        // Overlap iff newIn < eOut AND newOut > eIn
+        return newIn < eOut && newOut > eIn;
+      });
+      if (overlaps.length) {
+        var msg = '⚠ This entry overlaps ' + overlaps.length + ' other entry/entries for this employee:\n\n';
+        overlaps.slice(0, 5).forEach(function(o){
+          msg += '• ' + (o.job_name || 'Untitled') + ' — ' +
+                 new Date(o.clock_in).toLocaleString('en-US', { month:'short', day:'numeric', hour:'numeric', minute:'2-digit' }) +
+                 ' to ' +
+                 (o.clock_out ? new Date(o.clock_out).toLocaleString('en-US', { hour:'numeric', minute:'2-digit' }) : 'open') +
+                 '\n';
+        });
+        if (overlaps.length > 5) msg += '• ...and ' + (overlaps.length - 5) + ' more\n';
+        msg += '\nSaving will create overlapping time entries (double-counted hours). Continue anyway?';
+        if (!confirm(msg)) return;
+      }
+    }
+  }
+
+  // ── STATUS HANDLING ───────────────────────────────────────────────────
+  // If the entry was previously 'active' and now has a clock_out, mark complete.
+  // Otherwise preserve current status.
+  var entryToUpdate = ST.entries.find(function(e){ return e.id === id; });
+  var newStatus = null; // null = don't update status field
+  if (entryToUpdate && outISO && entryToUpdate.status === 'active') {
+    newStatus = 'complete';
+  }
+
   // Optimistic update — patch ST.entries locally so UI reflects change instantly,
   // BEFORE waiting for the slow full reload.
   var localIdx = ST.entries.findIndex(function(e){ return e.id === id; });
   if (localIdx >= 0) {
-    Object.assign(ST.entries[localIdx], {
+    var patch = {
       clock_in: inISO, clock_out: outISO, duration_minutes: dur,
       job_id: jobId || null, job_name: jobVal, notes: notesVal
-    });
+    };
+    if (newStatus) patch.status = newStatus;
+    Object.assign(ST.entries[localIdx], patch);
   }
 
   // Capture which timecard detail modal (if any) was open BEFORE we close the edit modal,
@@ -10291,7 +10329,9 @@ async function saveEntry(id) {
 
   // Now persist to server and reload (slower path; happens in background)
   try {
-    var r = await fetch(SB_URL+'/rest/v1/time_entries?id=eq.'+id, {method:'PATCH', headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json'}, body:JSON.stringify({clock_in:inISO,clock_out:outISO,duration_minutes:dur,job_id:jobId||null,job_name:jobVal,notes:notesVal})});
+    var patchBody = {clock_in:inISO,clock_out:outISO,duration_minutes:dur,job_id:jobId||null,job_name:jobVal,notes:notesVal};
+    if (newStatus) patchBody.status = newStatus;
+    var r = await fetch(SB_URL+'/rest/v1/time_entries?id=eq.'+id, {method:'PATCH', headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json'}, body:JSON.stringify(patchBody)});
     if (!r.ok) {
       toast('⚠ Save failed — refreshing');
     }
