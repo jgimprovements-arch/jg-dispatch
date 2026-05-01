@@ -474,25 +474,14 @@ body {
   <img src="https://jgimprovements-arch.github.io/jg-dispatch/logo.png" alt="JG Restoration" style="width:200px;height:200px;object-fit:contain;border-radius:32px;margin-bottom:16px;filter:drop-shadow(0 4px 20px rgba(0,0,0,.3));">
   <div class="login-title">JG Time Clock</div>
 
-  <!-- Email/password form (default) -->
-  <div id="login-email-form" style="width:100%;max-width:280px;">
-    <input id="login-email-input" type="email" placeholder="Your email address"
-      style="width:100%;padding:13px 16px;border-radius:12px;border:1.5px solid rgba(255,255,255,.2);background:rgba(255,255,255,.1);color:#fff;font-size:15px;font-family:'DM Sans',sans-serif;outline:none;margin-bottom:10px;box-sizing:border-box;"
-      oninput="document.getElementById('login-err').textContent=''">
-    <input id="login-pass-input" type="password" placeholder="Password"
-      style="width:100%;padding:13px 16px;border-radius:12px;border:1.5px solid rgba(255,255,255,.2);background:rgba(255,255,255,.1);color:#fff;font-size:15px;font-family:'DM Sans',sans-serif;outline:none;margin-bottom:14px;box-sizing:border-box;"
-      onkeydown="if(event.key==='Enter')emailSignIn()">
-    <button onclick="emailSignIn()"
-      style="width:100%;padding:14px;border-radius:12px;border:none;background:var(--orange);color:#fff;font-size:15px;font-weight:700;cursor:pointer;font-family:'DM Sans',sans-serif;margin-bottom:14px;">
-      Sign In
-    </button>
-    <div style="text-align:center;font-size:12px;color:rgba(255,255,255,.5);margin-bottom:12px;">— or —</div>
+  <!-- Google sign-in only -->
+  <div style="width:100%;max-width:280px;display:flex;flex-direction:column;align-items:center;">
     <div id="g_id_onload" data-client_id="209231675110-6id8vr3ehcocg4df7tvpc89jsmrvhogk.apps.googleusercontent.com" data-ux_mode="popup" data-callback="tcGoogleCb" data-auto_prompt="false"></div>
     <div class="g_id_signin" data-type="standard" data-size="large" data-theme="outline" data-text="sign_in_with" data-shape="pill" data-logo_alignment="left" data-width="280"></div>
   </div>
 
   <div class="login-err" id="login-err"></div>
-  <div class="login-note">Sign in with your invite email or Google account</div>
+  <div class="login-note">Sign in with your @jg-restoration.com Google account</div>
 </div>
 
 <!-- APP -->
@@ -949,54 +938,9 @@ var TC = {
 };
 
 // AUTH -
-// Email + password sign-in via Supabase Auth
-async function emailSignIn() {
-  var email = (document.getElementById('login-email-input') || {}).value || '';
-  var pass  = (document.getElementById('login-pass-input')  || {}).value || '';
-  var errEl = document.getElementById('login-err');
-  if (!email || !pass) { if(errEl) errEl.textContent = 'Enter your email and password.'; return; }
-
-  var btn = document.querySelector('#login-email-form button');
-  if (btn) { btn.textContent = 'Signing in...'; btn.disabled = true; }
-
-  try {
-    var r = await fetch('https://nuykvchgecpiuikoerze.supabase.co/auth/v1/token?grant_type=password', {
-      method: 'POST',
-      headers: { 'apikey': 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im51eWt2Y2hnZWNwaXVpa29lcnplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYyNjM3ODYsImV4cCI6MjA5MTgzOTc4Nn0.39hZ8DdjT_0iFJXPeAL2FXUSLw8FZBirDVzxZTO1W9s', 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email: email.trim().toLowerCase(), password: pass })
-    });
-    var data = await r.json();
-    if (!r.ok || !data.user) throw new Error(data.error_description || data.msg || 'Invalid email or password');
-
-    // Gate on employees table — Supabase Auth pass alone isn't enough
-    // Check either `email` or `personal_email` column
-    var emailLow = email.trim().toLowerCase();
-    var e = encodeURIComponent(emailLow);
-    var filter = 'or=(email.eq.' + e + ',personal_email.eq.' + e + ')';
-    var empR = await fetch(SB_URL + '/rest/v1/employees?' + filter + '&select=active,pending_approval,name,email,personal_email', {
-      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
-    });
-    var empRows = await empR.json();
-    var emp = empRows && empRows[0] ? empRows[0] : null;
-    if (!emp) throw new Error('Your account is not in the employee roster. Contact the office.');
-    if (emp.active === false && !emp.pending_approval) throw new Error('Your account has been disabled. Contact the office.');
-
-    var u = {
-      name: data.user.user_metadata?.name || emp.name || email.split('@')[0],
-      email: emailLow,
-      picture: '',
-      access_token: data.access_token,
-      auth_method: 'email'
-    };
-    localStorage.setItem(TC_KEY, JSON.stringify(u));
-    localStorage.setItem(TC_EXP, String(Date.now() + 43200000));
-    initApp(u);
-  } catch(e) {
-    if (errEl) errEl.textContent = e.message;
-  }
-
-  if (btn) { btn.textContent = 'Sign In'; btn.disabled = false; }
-}
+// Email + password sign-in removed 2026-05-01. Google sign-in is the only path now.
+// All employees use @jg-restoration.com OR have a Google account matched to their
+// personal_email field on the employees row.
 
 window.tcGoogleCb = async function(r) {
   try {
@@ -1204,7 +1148,7 @@ async function initApp(u) {
         var createR = await fetch(SB_URL + '/rest/v1/employees', {
           method: 'POST',
           headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=representation' },
-          body: JSON.stringify({ name: u.name, email: u.email, role: 'Technician', market: 'Appleton', active: true })
+          body: JSON.stringify({ name: u.name, email: u.email, role: 'Technician', market: 'appleton', active: true })
         });
         if (createR.ok) {
           var created = await createR.json();
@@ -1266,6 +1210,19 @@ async function salaryBackfill() {
     var today = new Date(); today.setHours(0,0,0,0);
     if (end > today) end = today;
 
+    // Helper: normalize any timestamp to its Central-time YYYY-MM-DD.
+    // Earlier the code used .toISOString().split('T')[0] which silently
+    // converts UTC midnight crossings to the wrong day. Now uses
+    // Intl.DateTimeFormat with explicit America/Chicago timezone.
+    var _ctDateFmt = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/Chicago',
+      year: 'numeric', month: '2-digit', day: '2-digit'
+    });
+    function _ctDateKey(d) {
+      var dt = (d instanceof Date) ? d : new Date(d);
+      return _ctDateFmt.format(dt); // en-CA returns YYYY-MM-DD
+    }
+
     var existingR = await fetch(SB_URL + '/rest/v1/time_entries?employee_id=eq.' + TC.employee.id +
       '&clock_in=gte.' + start.toISOString() + '&clock_in=lte.' + end.toISOString() + '&select=clock_in', {
       headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
@@ -1274,11 +1231,11 @@ async function salaryBackfill() {
     var existing = await existingR.json();
     var coveredDates = {};
     (existing || []).forEach(function(e) {
-      coveredDates[new Date(e.clock_in).toISOString().split('T')[0]] = true;
+      coveredDates[_ctDateKey(e.clock_in)] = true;
     });
 
     var absR = await fetch(SB_URL + '/rest/v1/absence_records?employee_name=eq.' + encodeURIComponent(TC.employee.name) +
-      '&date=gte.' + start.toISOString().split('T')[0] + '&date=lte.' + end.toISOString().split('T')[0] + '&select=date', {
+      '&date=gte.' + _ctDateKey(start) + '&date=lte.' + _ctDateKey(end) + '&select=date', {
       headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
     });
     if (absR.ok) {
@@ -1290,7 +1247,7 @@ async function salaryBackfill() {
     var cursor = new Date(start);
     while (cursor <= end) {
       var dow = cursor.getDay();
-      var dateStr = cursor.toISOString().split('T')[0];
+      var dateStr = _ctDateKey(cursor);
       if (dow !== 0 && dow !== 6 && !coveredDates[dateStr]) {
         missing.push(dateStr);
       }
@@ -1304,7 +1261,7 @@ async function salaryBackfill() {
         employee_name: TC.employee.name,
         employee_email: TC.employee.email || null,
         job_id: null, job_name: 'Salary',
-        market: TC.employee.market || 'Appleton',
+        market: TC.employee.market || 'appleton',
         clock_in: dateStr + 'T08:00:00-06:00',
         clock_out: dateStr + 'T16:00:00-06:00',
         duration_minutes: 480,
@@ -1313,9 +1270,17 @@ async function salaryBackfill() {
       };
     });
 
+    // DB constraint uq_salary_auto_per_day prevents duplicates regardless of
+    // what we send. ignore-duplicates suppresses 409 noise when our existing
+    // check is racing against another tab's insert.
     await fetch(SB_URL + '/rest/v1/time_entries', {
       method: 'POST',
-      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
+      headers: {
+        'apikey': SB_KEY,
+        'Authorization': 'Bearer ' + SB_KEY,
+        'Content-Type': 'application/json',
+        'Prefer': 'return=minimal,resolution=ignore-duplicates'
+      },
       body: JSON.stringify(entries)
     });
     await loadAll();
@@ -2124,7 +2089,7 @@ async function clockIn() {
     employee_email: TC.user.email,
     job_id: TC.selectedJobId || null,
     job_name: isOfficeHours ? 'Office Hours' : (TC.selectedJobName || null),
-    market: TC.employee.market || 'Appleton',
+    market: TC.employee.market || 'appleton',
     clock_in: now,
     clock_in_lat: loc ? loc.lat : null,
     clock_in_lng: loc ? loc.lng : null,
@@ -2402,7 +2367,7 @@ async function loadOCApp() {
   var myName = TC.employee ? TC.employee.name : '';
   // Initialize market toggle to user's home market on first call
   if (_ocAppMarket === null) {
-    _ocAppMarket = TC.employee ? (TC.employee.market || 'Appleton') : 'Appleton';
+    _ocAppMarket = TC.employee ? (TC.employee.market || 'appleton') : 'appleton';
   }
   _paintOCMarketToggle();
   var market = _ocAppMarket;
@@ -2529,7 +2494,7 @@ async function openSwapRequest() {
     withEl.innerHTML = '<option value="">— Select team member —</option>';
     try {
       var myName = TC.employee ? TC.employee.name : '';
-      var market = TC.employee ? (TC.employee.market || 'Appleton') : 'Appleton';
+      var market = TC.employee ? (TC.employee.market || 'appleton') : 'appleton';
       var r = await fetch(SB_URL + '/rest/v1/employees?active=eq.true&order=name.asc&select=name,market', {
         headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
       });
@@ -2582,7 +2547,7 @@ async function submitSwapRequest() {
       body: JSON.stringify({
         requester_name: TC.employee.name,
         requester_email: TC.user ? TC.user.email : '',
-        market: TC.employee.market || 'Appleton',
+        market: TC.employee.market || 'appleton',
         my_date: myDate,
         my_end_date: myEnd || null,
         my_role: myRole,
@@ -2846,7 +2811,7 @@ async function checkOnCallToday() {
 
   var today = new Date().toISOString().split('T')[0];
   var myName = TC.employee.name;
-  var market = TC.employee.market || 'Appleton';
+  var market = TC.employee.market || 'appleton';
   var locKey = market.toLowerCase().includes('point') ? 'stevens' : 'appleton';
   var mKey = today.slice(0, 7); // YYYY-MM
 
@@ -2915,7 +2880,7 @@ async function openSwitchJob() {
 
   try {
     var techName = TC.employee ? TC.employee.name : '';
-    var market   = TC.employee ? (TC.employee.market || 'Appleton') : 'Appleton';
+    var market   = TC.employee ? (TC.employee.market || 'appleton') : 'appleton';
     var locId    = market.toLowerCase().includes('point') ? 1477 : 222;
 
     // Pull today's dispatch board state to get assigned jobs
@@ -3078,7 +3043,7 @@ async function submitSwitchJob() {
     clock_in_lat:  loc ? loc.lat : null,
     clock_in_lng:  loc ? loc.lng : null,
     status:        'active',
-    market:        TC.employee ? (TC.employee.market || 'Appleton') : 'Appleton',
+    market:        TC.employee ? (TC.employee.market || 'appleton') : 'appleton',
     notes:         'Switched from ' + (TC.selectedJobName || TC.selectedJobId)
   };
 
