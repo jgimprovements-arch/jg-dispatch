@@ -4113,8 +4113,24 @@ async function pollSharedState(){
 }
 
 async function clearBoardState(){
-  if(!confirm('Reset the entire board for all users? This cannot be undone.')) return;
+  // Two-stage destructive confirmation: typed phrase + snapshot before wipe.
+  var typed = prompt(
+    '⚠ DESTRUCTIVE — Reset Board\n\n' +
+    'This deletes ALL assignments and pool jobs for ALL users, on ALL dates.\n' +
+    'A snapshot will be taken before reset so you can restore via 📸 Snapshots.\n\n' +
+    'Type RESET to confirm:'
+  );
+  if (typed === null) return; // user cancelled
+  if (typed.trim() !== 'RESET') {
+    showToast('Reset cancelled — must type RESET exactly');
+    return;
+  }
   try{
+    // Take a fresh snapshot RIGHT NOW so this destructive op is recoverable.
+    showToast('Taking pre-reset snapshot...');
+    if (typeof forceTakeSnapshot === 'function') {
+      try { await forceTakeSnapshot(); } catch(e) { console.warn('[reset] pre-snapshot failed', e); }
+    }
     // CUTOVER 2026-04-26: clear _v2 tables instead of PATCHing board_state.
     // Truncate dispatch_assignments_v2 (history trigger fires on each delete, audit trail preserved)
     // Truncate dispatch_unassigned_v2
@@ -4134,8 +4150,8 @@ async function clearBoardState(){
     sick.clear();
     Object.keys(jobOverrides).forEach(k=>delete jobOverrides[k]);
     render();
-    if(typeof logActivity === 'function') logActivity('Board Reset', 'Dispatch board reset for all users', 'dispatch');
-    showToast('✓ Board reset for all users');
+    if(typeof logActivity === 'function') logActivity('Board Reset', 'Dispatch board reset for all users (snapshot taken first)', 'dispatch');
+    showToast('✓ Board reset · pre-reset snapshot saved');
   }catch(e){ showToast('Reset failed'); }
 }
 
