@@ -991,11 +991,35 @@ function _fromV2Market(m){
 // future/past dates via the date picker in the header).
 
 function _getDispatchToday(){
-  // Today's dispatch day in YYYY-MM-DD (Central time, 5am rollover)
+  // Today's dispatch day in YYYY-MM-DD (Central time, 5am rollover).
+  // Uses Intl.DateTimeFormat to get the date components in Central without
+  // any UTC conversion. The previous implementation called toISOString()
+  // which silently converted back to UTC, causing the board to flip to
+  // "tomorrow" at 7pm Central (when UTC midnight has already happened).
   const now = new Date();
-  const central = new Date(now.toLocaleString('en-US', { timeZone: 'America/Chicago' }));
-  if (central.getHours() < 5) central.setDate(central.getDate() - 1);
-  return central.toISOString().split('T')[0];
+  const fmt = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Chicago',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    hour12: false
+  });
+  const parts = fmt.formatToParts(now).reduce(function(acc, p){ acc[p.type] = p.value; return acc; }, {});
+  // Parse Central-time components
+  let y = parseInt(parts.year, 10);
+  let m = parseInt(parts.month, 10);
+  let d = parseInt(parts.day, 10);
+  const h = parseInt(parts.hour, 10);
+  // Roll back one day if it's before 5am Central — that's still "yesterday's dispatch day"
+  if (h < 5) {
+    const prev = new Date(Date.UTC(y, m - 1, d));
+    prev.setUTCDate(prev.getUTCDate() - 1);
+    y = prev.getUTCFullYear();
+    m = prev.getUTCMonth() + 1;
+    d = prev.getUTCDate();
+  }
+  return y + '-' + String(m).padStart(2, '0') + '-' + String(d).padStart(2, '0');
 }
 
 let currentBoardDate = _getDispatchToday();
