@@ -1778,7 +1778,8 @@ function _bgSignature() {
     // Inspector panel toggle
     ST._showInspector ? 1 : 0,
     ST._inspectResult || '',
-    ST.referralYear || 'all'
+    ST.referralYear || 'all',
+    ST.referralRep || 'all'
   ].join('|');
 }
 
@@ -2356,12 +2357,29 @@ function _renderNow() {
     // Year selector default: 'all' = no filter. Dropdown lets user pick a
     // specific year to drill into.
     if (!ST.referralYear) ST.referralYear = 'all';
+    if (!ST.referralRep)  ST.referralRep  = 'all';
 
-    // Apply the year filter to get the working set for the leaderboard
+    // Build a partner_id → assigned_to lookup so we can attribute each
+    // referral to the rep who owns the referring partner. Albi has no
+    // sales-rep field on projects; the rep relationship lives on the
+    // PARTNER record (sales_partners.assigned_to). So a referral made BY
+    // Mr. Rooter Plumbing gets attributed to whichever rep owns Mr. Rooter
+    // in our partner database.
+    var partnerToRep = {};
+    ST.partners.forEach(function(p){ partnerToRep[p.id] = p.assigned_to || null; });
+
+    // Apply year + rep filters to get the working set for the leaderboard
     var marketRefs = marketRefs_all;
     if (ST.referralYear !== 'all') {
       marketRefs = marketRefs.filter(function(r){
         return (r.project_created_date || '').slice(0, 4) === ST.referralYear;
+      });
+    }
+    if (ST.referralRep !== 'all') {
+      marketRefs = marketRefs.filter(function(r){
+        var rep = r.referrer_partner_id ? partnerToRep[r.referrer_partner_id] : null;
+        if (ST.referralRep === 'unassigned') return !rep;
+        return rep === ST.referralRep;
       });
     }
 
@@ -2504,6 +2522,69 @@ function _renderNow() {
       });
       h += '</div>';
       h += '</div>';
+    }
+
+    // ── By Rep rollup ──
+    // Aggregate referrals by the rep who owns the referring partner.
+    // Click a rep card to scope the entire view to that rep's referrals.
+    // Useful for: "what did Kristina drive?" or "Brent's referral pipeline."
+    // Honest about data limits: only counts referrals where the partner
+    // record has assigned_to populated. Unassigned partners get bucketed
+    // separately so they're visible (signal to fill in assignment).
+    var byRep = {};
+    var unassignedRep = { count: 0, invoiced: 0, paid: 0, partners: {} };
+    marketRefs.forEach(function(r){
+      var inv = parseFloat(r.project_value || 0) || 0;
+      var pd  = parseFloat(r.project_paid  || 0) || 0;
+      var rep = r.referrer_partner_id ? partnerToRep[r.referrer_partner_id] : null;
+      if (rep) {
+        if (!byRep[rep]) byRep[rep] = { rep: rep, count: 0, invoiced: 0, paid: 0, partners: {} };
+        byRep[rep].count++;
+        byRep[rep].invoiced += inv;
+        byRep[rep].paid     += pd;
+        if (r.referrer_partner_id) byRep[rep].partners[r.referrer_partner_id] = true;
+      } else {
+        unassignedRep.count++;
+        unassignedRep.invoiced += inv;
+        unassignedRep.paid     += pd;
+        if (r.referrer_partner_id) unassignedRep.partners[r.referrer_partner_id] = true;
+      }
+    });
+    var repList = Object.values(byRep).sort(function(a,b){ return b.invoiced - a.invoiced; });
+    if (repList.length > 0 || unassignedRep.count > 0) {
+      h += '<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px 16px;margin-bottom:16px;">';
+      h += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">';
+      h += '<div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;">👥 By Sales Rep</div>';
+      h += '<div style="font-size:11px;color:var(--muted);">';
+      if (ST.referralRep !== 'all') {
+        h += 'Filtered to: <strong style="color:var(--orange);">' + _ve(ST.referralRep) + '</strong> · ';
+      }
+      h += '<a href="#" onclick="event.preventDefault();ST.referralRep=\'all\';render();" style="color:var(--orange);font-weight:700;text-decoration:none;">' + (ST.referralRep === 'all' ? 'Showing all reps' : 'Show all reps →') + '</a>';
+      h += '</div></div>';
+
+      h += '<div style="display:flex;flex-wrap:wrap;gap:10px;">';
+      repList.forEach(function(rr){
+        var isActive = ST.referralRep === rr.rep;
+        var bg = isActive ? 'rgba(232,93,4,.08)' : 'rgba(13,45,94,.04)';
+        var border = isActive ? '1.5px solid var(--orange)' : '1px solid var(--border)';
+        h += '<div onclick="ST.referralRep=\'' + _ve(rr.rep).replace(/\'/g, '\\\'') + '\';render();" style="cursor:pointer;flex:1;min-width:140px;background:' + bg + ';border:' + border + ';border-radius:8px;padding:10px 14px;">';
+        h += '<div style="font-size:13px;font-weight:800;color:var(--navy);">👤 ' + _ve(rr.rep) + '</div>';
+        h += '<div style="font-size:13px;font-weight:700;color:var(--ok);margin-top:4px;">$' + Math.round(rr.invoiced).toLocaleString() + '</div>';
+        h += '<div style="font-size:10px;color:var(--muted);margin-top:1px;">' + rr.count + ' referrals · ' + Object.keys(rr.partners).length + ' partners</div>';
+        h += '</div>';
+      });
+      // Unassigned card — important visibility into data hygiene
+      if (unassignedRep.count > 0) {
+        var isActiveUn = ST.referralRep === 'unassigned';
+        var ubg = isActiveUn ? 'rgba(232,93,4,.08)' : 'rgba(192,32,32,.04)';
+        var uborder = isActiveUn ? '1.5px solid var(--orange)' : '1px dashed rgba(192,32,32,.4)';
+        h += '<div onclick="ST.referralRep=\'unassigned\';render();" style="cursor:pointer;flex:1;min-width:140px;background:' + ubg + ';border:' + uborder + ';border-radius:8px;padding:10px 14px;">';
+        h += '<div style="font-size:13px;font-weight:800;color:var(--danger);">⚠ Unassigned</div>';
+        h += '<div style="font-size:13px;font-weight:700;color:var(--ok);margin-top:4px;">$' + Math.round(unassignedRep.invoiced).toLocaleString() + '</div>';
+        h += '<div style="font-size:10px;color:var(--muted);margin-top:1px;">' + unassignedRep.count + ' referrals · ' + Object.keys(unassignedRep.partners).length + ' partners need assignment</div>';
+        h += '</div>';
+      }
+      h += '</div></div>';
     }
 
     // ── Source category breakdown ──
