@@ -1790,8 +1790,26 @@ async function selectProject(id) {
   state.activeProject = state.projects.find(p => p.id === id);
   renderProjects();
   if (!state.activeProject) return;
+  updateUrlHash();
   await Promise.all([loadPhases(), loadSelections(), loadMessages(), loadHistory()]);
   renderDetail();
+}
+
+// Persist active project + tab in URL hash so refresh restores the same view
+function updateUrlHash() {
+  const parts = [];
+  if (state.activeProjectId) parts.push('p=' + state.activeProjectId);
+  if (state.tab && state.tab !== 'phases') parts.push('t=' + state.tab);
+  const hash = parts.length ? '#' + parts.join('&') : '';
+  if (window.location.hash !== hash) {
+    history.replaceState(null, '', window.location.pathname + window.location.search + hash);
+  }
+}
+
+function restoreFromUrlHash() {
+  if (!window.location.hash) return null;
+  const params = new URLSearchParams(window.location.hash.slice(1));
+  return { p: params.get('p'), t: params.get('t') };
 }
 
 async function loadPhases() {
@@ -1946,6 +1964,7 @@ function renderDetail() {
   // Wire tab buttons
   $$('#tabs button').forEach(b => b.addEventListener('click', () => {
     state.tab = b.dataset.tab;
+    updateUrlHash();
     renderDetail();
   }));
   $('#btnSyncAlbi').addEventListener('click', async () => {
@@ -3671,23 +3690,18 @@ async function reorderPhase(draggedId, targetId, above) {
   }
   renderDetail();
 
-  // Persist — sequence column has UNIQUE (project_id, sequence) so we need to bump
-  // through a temp range to avoid collisions. Easiest: shift all to negative first, then to final.
+  // Persist — single RPC call resequences atomically (2N writes inside one DB call instead of 2N separate round-trips)
   if (sb) {
     try {
-      // Step 1: shift everyone to negative space (avoids unique-constraint collision)
-      for (let i = 0; i < updates.length; i++) {
-        const u = updates[i];
-        await sb.from('rebuild_phases').update({ sequence: -(i + 1) }).eq('id', u.id);
-      }
-      // Step 2: settle to final sequences
-      for (const u of updates) {
-        await sb.from('rebuild_phases').update({ sequence: u.sequence }).eq('id', u.id);
-      }
+      const orderedIds = updates.map(u => u.id);
+      const { error } = await sb.rpc('rebuild_resequence_phases', {
+        p_project_id: state.activeProjectId,
+        p_ordered_ids: orderedIds,
+      });
+      if (error) throw error;
       logToAlbi('phase_reordered', `Phase "${dragged.phase_name}" reordered`);
-      toast('Reordered');
-      await loadPhases(); await loadHistory();
-      renderDetail();
+      // Don't reload — local state is already optimistically updated. Just log.
+      loadHistory();
     } catch (e) {
       toast('Reorder failed: ' + e.message);
       console.error(e);
@@ -4309,6 +4323,13 @@ function wireNotifBell() {
   setupRealtime();
   wireNotifBell();
   loadNotifications();
+
+  // Restore project + tab from URL hash if set (e.g. after refresh)
+  const restored = restoreFromUrlHash();
+  if (restored?.p) {
+    if (restored.t) state.tab = restored.t;
+    selectProject(restored.p);
+  }
 
   // Auto-sync from Albi in background (doesn't block the UI)
   runAlbiSync({ silent: true });
