@@ -1255,14 +1255,16 @@ async function syncReferralsFromAlbi() {
     return bestPartner;
   }
 
-  var projectsScanned    = 0;
-  var projectsWithRef    = 0;
-  var referralsInserted  = 0;
-  var referralsUpdated   = 0;
-  var matchedByPhone     = 0;
-  var matchedByName      = 0;
-  var referralsUnmatched = 0;
-  var errorMessage       = null;
+  var projectsScanned       = 0;
+  var projectsWithRef       = 0;
+  var referralsInserted     = 0;
+  var referralsUpdated      = 0;
+  var matchedByPhone        = 0;
+  var matchedByName         = 0;
+  var referralsUnmatched    = 0;
+  var skippedNoSalesPerson  = 0;
+  var skippedInternalSource = 0;
+  var errorMessage          = null;
 
   try {
     // 3. Paginate through Albi projects via existing GET proxy
@@ -1308,8 +1310,24 @@ async function syncReferralsFromAlbi() {
         var projStatus  = proj.status || null;
         var lossType    = proj.projectType || proj.propertyType || null;
         var refSource   = proj.referralSource || null;  // "Realtor", "Plumber", etc.
+        var salesPersonName = (proj.salesPerson || '').trim();
         var createdDate = formatAlbiDate(proj.createdAt || proj.statusDate);
         var closedDate  = formatAlbiDate(proj.closed);
+
+        // Filter 1: skip projects with no salesPerson assigned. These
+        // are typically auto-imported records or unworked leads; they
+        // shouldn't count as referral-driven business.
+        if (!salesPersonName) { skippedNoSalesPerson++; continue; }
+
+        // Filter 2: skip internal source categories that aren't real
+        // partner referrals. "Program Work" is JG's internal marketing,
+        // not an external relationship. Add other internal categories
+        // here as we identify them.
+        var INTERNAL_SOURCES = ['program work'];
+        if (refSource && INTERNAL_SOURCES.indexOf(refSource.toLowerCase()) !== -1) {
+          skippedInternalSource++;
+          continue;
+        }
 
         // Two possible referrer "shapes" on the project: an individual
         // referrer OR an organization referrer. They can both be set, in
@@ -1402,6 +1420,7 @@ async function syncReferralsFromAlbi() {
                 project_loss_type:         lossType,
                 referral_source:           refSource,
                 match_method:              matchMethod,
+                sales_person:              salesPersonName,
                 // Use the project's actual location field, NOT ST.market.
                 // Each project knows its own market; ST.market was just the
                 // tab the user happened to be on when they clicked Sync.
@@ -1451,7 +1470,8 @@ async function syncReferralsFromAlbi() {
     }
 
     ST._referralSyncProgress = '✓ Sync complete · ' + projectsScanned + ' projects scanned · ' +
-      projectsWithRef + ' had referrers · ' +
+      'skipped: ' + skippedNoSalesPerson + ' no-rep, ' + skippedInternalSource + ' internal · ' +
+      projectsWithRef + ' kept · ' +
       referralsInserted + ' new + ' + referralsUpdated + ' updated · ' +
       'matched: ' + matchedByPhone + ' by phone, ' + matchedByName + ' by name · ' +
       referralsUnmatched + ' unmatched';
@@ -1772,6 +1792,7 @@ function _bgSignature() {
     ST.partnerPageSize || 200,
     // Touch history toggle on partner detail
     ST.touchHistoryExpanded ? 1 : 0,
+    ST.refHistoryExpanded ? 1 : 0,
     // Referral sync state — drives the spinner / progress UI
     ST._referralSyncing ? 1 : 0,
     ST._referralSyncProgress || '',
@@ -3155,6 +3176,14 @@ function _buildModalHtml() {
       var p = ST.partners.find(function(x){ return x.id === ST.selected; });
       if (p) {
         var ptouches = ST.touches.filter(function(t){ return t.partner_id === p.id; });
+        // Pull this partner's referrals from the albi_referrals table — the
+        // source of truth synced from Albi. Replaces the older manual
+        // referral_count/referral_revenue columns which never got
+        // populated automatically.
+        var prefs = (ST.albiReferrals || []).filter(function(r){ return r.referrer_partner_id === p.id; });
+        var prefCount    = prefs.length;
+        var prefRevenue  = prefs.reduce(function(s,r){ return s + (parseFloat(r.project_value||0)||0); }, 0);
+        var prefPaid     = prefs.reduce(function(s,r){ return s + (parseFloat(r.project_paid ||0)||0); }, 0);
         mh += '<div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;">';
         mh += '<div class="partner-avatar" style="background:' + tierColor(p.tier||'C') + ';width:52px;height:52px;font-size:20px;">' + partnerInitials(p.name) + '</div>';
         mh += '<div><div style="font-size:18px;font-weight:700;color:var(--navy);">' + p.name + '</div>';
@@ -3168,8 +3197,8 @@ function _buildModalHtml() {
         mh += '</div>';
         mh += '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:14px;">';
         mh += '<div style="background:rgba(13,45,94,.06);border-radius:6px;padding:8px;text-align:center;"><div style="font-size:20px;font-weight:700;color:var(--navy);">' + (p.touch_count||0) + '</div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;">Touches</div></div>';
-        mh += '<div style="background:rgba(232,93,4,.06);border-radius:6px;padding:8px;text-align:center;"><div style="font-size:20px;font-weight:700;color:var(--orange);">' + (p.referral_count||0) + '</div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;">Referrals</div></div>';
-        mh += '<div style="background:rgba(46,125,50,.06);border-radius:6px;padding:8px;text-align:center;"><div style="font-size:16px;font-weight:700;color:var(--ok);">$' + (p.referral_revenue?Math.round(p.referral_revenue).toLocaleString():0) + '</div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;">Rev</div></div>';
+        mh += '<div style="background:rgba(232,93,4,.06);border-radius:6px;padding:8px;text-align:center;"><div style="font-size:20px;font-weight:700;color:var(--orange);">' + prefCount + '</div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;">Referrals</div></div>';
+        mh += '<div style="background:rgba(46,125,50,.06);border-radius:6px;padding:8px;text-align:center;"><div style="font-size:16px;font-weight:700;color:var(--ok);">$' + Math.round(prefRevenue).toLocaleString() + '</div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;">Rev</div></div>';
         mh += '</div>';
         if (p.notes) mh += '<div style="background:rgba(245,166,35,.06);border-radius:8px;padding:10px 12px;margin-bottom:12px;font-size:12px;">' + p.notes + '</div>';
         // Touch history — 5-row preview by default with a Show all toggle.
@@ -3212,6 +3241,47 @@ function _buildModalHtml() {
           mh += '</div>';
         }
 
+        // Referred Jobs — list of actual projects this partner referred to
+        // JG. Sourced from albi_referrals (Albi sync). Sorted newest first.
+        // Same Show all pattern as touch history.
+        if (prefCount > 0) {
+          var prefsSorted = prefs.slice().sort(function(a,b){
+            return (b.project_created_date||'').localeCompare(a.project_created_date||'');
+          });
+          var showAllRefs = ST.refHistoryExpanded;
+          var visibleRefs = showAllRefs ? prefsSorted : prefsSorted.slice(0, 5);
+
+          mh += '<div style="display:flex;align-items:baseline;justify-content:space-between;margin:14px 0 8px;">';
+          mh += '<span style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;">⭐ Referred Jobs (' + prefCount + ' · $' + Math.round(prefRevenue).toLocaleString() + ' invoiced)</span>';
+          if (prefCount > 5) {
+            var refToggleLabel = showAllRefs ? 'Show recent only' : 'Show all ' + prefCount;
+            mh += '<button onclick="ST.refHistoryExpanded=' + (!showAllRefs) + ';render()" style="font-size:11px;color:var(--orange);background:transparent;border:none;cursor:pointer;font-weight:700;padding:0;font-family:DM Sans,sans-serif;">' + refToggleLabel + ' →</button>';
+          }
+          mh += '</div>';
+
+          var refScrollStyle = showAllRefs && prefCount > 8
+            ? 'max-height:260px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;padding:0 10px;'
+            : '';
+          mh += '<div style="' + refScrollStyle + '">';
+          visibleRefs.forEach(function(r){
+            var pv  = parseFloat(r.project_value||0)||0;
+            var pp  = parseFloat(r.project_paid ||0)||0;
+            mh += '<div style="padding:8px 0;border-bottom:1px solid var(--border);">';
+            mh += '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">';
+            mh += '<span style="font-size:11px;font-weight:700;padding:1px 7px;border-radius:4px;background:rgba(13,45,94,.08);color:var(--navy);">' + _ve(r.albi_project_code||r.albi_project_id||'—') + '</span>';
+            if (r.referral_source) mh += '<span style="font-size:10px;color:var(--muted);font-weight:600;">' + _ve(r.referral_source) + '</span>';
+            if (r.project_status)  mh += '<span style="font-size:10px;color:var(--muted);">· ' + _ve(r.project_status) + '</span>';
+            mh += '<span style="font-size:10px;color:var(--muted);margin-left:auto;">' + (r.project_created_date ? fmtDate(r.project_created_date) : '—') + '</span>';
+            mh += '</div>';
+            mh += '<div style="display:flex;gap:14px;margin-top:3px;font-size:11px;">';
+            mh += '<span style="color:var(--ok);font-weight:700;">$' + Math.round(pv).toLocaleString() + ' invoiced</span>';
+            mh += '<span style="color:var(--muted);">$' + Math.round(pp).toLocaleString() + ' paid</span>';
+            mh += '</div>';
+            mh += '</div>';
+          });
+          mh += '</div>';
+        }
+
         // Footer buttons — primary action full-width on top, secondary
         // actions in a 2x2 grid below. Grid (instead of flex-wrap) means
         // buttons can NEVER overflow to a clipped row no matter the modal
@@ -3224,7 +3294,7 @@ function _buildModalHtml() {
         // Delete — solid red, distinct from outlined Merge. Merge preserves
         // data (touches re-pointed), Delete throws data away.
         mh += '<button style="padding:9px 12px;border-radius:6px;border:none;background:var(--danger);color:#fff;font-size:12px;font-weight:600;cursor:pointer;font-family:DM Sans,sans-serif;" onclick="deletePartner(\'' + p.id + '\')">🗑 Delete</button>';
-        mh += '<button style="padding:9px 12px;border-radius:6px;border:1.5px solid var(--border);background:transparent;font-size:12px;cursor:pointer;font-family:DM Sans,sans-serif;" onclick="ST.modal=null;ST.selected=null;ST.touchHistoryExpanded=false;render()">Close</button>';
+        mh += '<button style="padding:9px 12px;border-radius:6px;border:1.5px solid var(--border);background:transparent;font-size:12px;cursor:pointer;font-family:DM Sans,sans-serif;" onclick="ST.modal=null;ST.selected=null;ST.touchHistoryExpanded=false;ST.refHistoryExpanded=false;render()">Close</button>';
         mh += '</div>';
         mh += '</div>';
       }
