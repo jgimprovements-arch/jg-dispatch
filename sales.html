@@ -2595,7 +2595,9 @@ function _renderNow() {
 
     // Year selector default: 'all' = no filter. Dropdown lets user pick a
     // specific year to drill into.
-    if (!ST.referralYear) ST.referralYear = 'all';
+    // Default to the current calendar year on first load. User can click
+    // "Show all years →" to expand the view, or pick a specific past year.
+    if (!ST.referralYear) ST.referralYear = String(new Date().getFullYear());
     if (!ST.referralRep)  ST.referralRep  = 'all';
 
     // Permission gate: non-admins see only their own referrals.
@@ -2743,10 +2745,58 @@ function _renderNow() {
     var totalRevenue = marketRefs.reduce(function(s,r){ return s + (parseFloat(r.project_value||0)||0); }, 0);
     var matchedCount = marketRefs.filter(function(r){ return r.referrer_partner_id; }).length;
 
+    // Year-over-year deltas — only when a specific year is selected. The
+    // "prior" year is the one numerically before the selected year. Note
+    // we compare to that prior year's TOTALS even if today is mid-year —
+    // the user can interpret "$1.2M YTD vs $4.5M last year" themselves.
+    // We don't try to be clever and pro-rate, because that hides truth.
+    var priorReferrals = null;
+    var priorRevenue   = null;
+    var priorReferrerCount = null;
+    if (ST.referralYear !== 'all') {
+      var priorYearStr = String(parseInt(ST.referralYear, 10) - 1);
+      var priorRefs = marketRefs_all.filter(function(r){
+        return (r.project_created_date || '').slice(0, 4) === priorYearStr;
+      });
+      // Apply the same rep filter to prior year for an apples-to-apples comparison
+      if (ST.referralRep !== 'all') {
+        priorRefs = priorRefs.filter(function(r){
+          var rep = r.referrer_partner_id ? partnerToRep[r.referrer_partner_id] : null;
+          if (ST.referralRep === 'unassigned') return !rep;
+          return rep === ST.referralRep;
+        });
+      }
+      priorReferrals = priorRefs.length;
+      priorRevenue   = priorRefs.reduce(function(s,r){ return s + (parseFloat(r.project_value||0)||0); }, 0);
+      // Distinct referrers in prior year
+      var priorPartnerSet = {};
+      priorRefs.forEach(function(r){ if (r.referrer_partner_id) priorPartnerSet[r.referrer_partner_id] = true; });
+      priorReferrerCount = Object.keys(priorPartnerSet).length;
+    }
+
+    // Helper: render a delta line below a stat value. Shows ↑ or ↓ with a
+    // percent change vs prior. Returns empty string when comparison isn't
+    // meaningful (no prior data, or 'all years' selected).
+    function _yoyDelta(current, prior) {
+      if (prior === null || prior === undefined) return '';
+      // Edge case: prior was zero. Showing "Infinity %" is meaningless;
+      // show "new" if there's anything in current year, blank otherwise.
+      if (!prior) {
+        if (!current) return '';
+        return '<div style="font-size:10px;color:var(--ok);font-weight:700;margin-top:2px;">↑ new</div>';
+      }
+      var pct = ((current - prior) / prior) * 100;
+      var arrow = pct >= 0 ? '↑' : '↓';
+      var color = pct >= 0 ? 'var(--ok)' : 'var(--danger)';
+      var sign  = pct >= 0 ? '+' : '';
+      return '<div style="font-size:10px;color:' + color + ';font-weight:700;margin-top:2px;">' +
+        arrow + ' ' + sign + Math.round(pct) + '% vs ' + (parseInt(ST.referralYear,10) - 1) + '</div>';
+    }
+
     h += '<div class="sales-stat-row" style="margin-bottom:16px;">';
-    h += '<div class="sales-stat"><div class="sales-stat-val">' + totalReferrals + '</div><div class="sales-stat-lbl">Total Referrals</div></div>';
-    h += '<div class="sales-stat"><div class="sales-stat-val" style="color:var(--ok);">$' + Math.round(totalRevenue).toLocaleString() + '</div><div class="sales-stat-lbl">Total Revenue</div></div>';
-    h += '<div class="sales-stat"><div class="sales-stat-val">' + sorted.length + '</div><div class="sales-stat-lbl">Distinct Referrers</div></div>';
+    h += '<div class="sales-stat"><div class="sales-stat-val">' + totalReferrals + '</div><div class="sales-stat-lbl">Total Referrals</div>' + _yoyDelta(totalReferrals, priorReferrals) + '</div>';
+    h += '<div class="sales-stat"><div class="sales-stat-val" style="color:var(--ok);">$' + Math.round(totalRevenue).toLocaleString() + '</div><div class="sales-stat-lbl">Total Revenue</div>' + _yoyDelta(totalRevenue, priorRevenue) + '</div>';
+    h += '<div class="sales-stat"><div class="sales-stat-val">' + sorted.length + '</div><div class="sales-stat-lbl">Distinct Referrers</div>' + _yoyDelta(sorted.length, priorReferrerCount) + '</div>';
     h += '<div class="sales-stat"><div class="sales-stat-val" style="color:var(--orange);">' + (totalReferrals - matchedCount) + '</div><div class="sales-stat-lbl">Unmatched</div></div>';
     h += '</div>';
 
