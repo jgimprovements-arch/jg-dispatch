@@ -1168,10 +1168,16 @@ async function inspectProject() {
 // table means re-running merges via upsert.
 // ─────────────────────────────────────────────────────────────────────────
 
-async function syncReferralsFromAlbi() {
+async function syncReferralsFromAlbi(quickMode) {
   if (ST._referralSyncing) return;
   ST._referralSyncing = true;
-  ST._referralSyncProgress = '⏳ Starting sync...';
+  // Quick mode: only scan projects from the last 30 days. Used for fast
+  // spot-checks during the day when full sync (~3000 projects) would be
+  // overkill. Full sync remains the authoritative refresh — quick mode
+  // never deletes anything, just upserts recent rows.
+  var quickCutoff = quickMode ? new Date(Date.now() - 30 * 86400000) : null;
+  var modeLabel   = quickMode ? '⚡ Quick (30d)' : '🔄 Full sync';
+  ST._referralSyncProgress = '⏳ Starting ' + modeLabel + '...';
   render();
 
   var startedAt = new Date();
@@ -1185,7 +1191,7 @@ async function syncReferralsFromAlbi() {
       headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=representation' },
       body: JSON.stringify({
         started_at:    startedAt.toISOString(),
-        trigger:       'manual',
+        trigger:       quickMode ? 'manual-quick' : 'manual-full',
         triggered_by:  (window.JG_SHARED && window.JG_SHARED.auth && window.JG_SHARED.auth.currentEmail()) || 'unknown',
         market:        'Both',
         status:        'running'
@@ -1274,7 +1280,7 @@ async function syncReferralsFromAlbi() {
     var done     = false;
 
     while (!done && page <= maxPages) {
-      ST._referralSyncProgress = '⏳ Pulling page ' + page + ' (both markets)... ' +
+      ST._referralSyncProgress = '⏳ ' + modeLabel + ' · page ' + page + '... ' +
         projectsScanned + ' scanned, ' + projectsWithRef + ' had referrers, ' +
         (referralsInserted + referralsUpdated) + ' referrals saved';
       render();
@@ -1289,6 +1295,16 @@ async function syncReferralsFromAlbi() {
 
       if (!projects.length) { done = true; break; }
 
+      // Quick mode early-termination check. Albi sorts newest first, so if
+      // the first project on this page is already older than our cutoff,
+      // we know every project from here on is older too — stop paginating.
+      if (quickCutoff && projects.length > 0) {
+        var firstProjDate = projects[0].createdAt ? new Date(projects[0].createdAt) : null;
+        if (firstProjDate && !isNaN(firstProjDate.getTime()) && firstProjDate < quickCutoff) {
+          done = true; break;
+        }
+      }
+
       // Process EVERY project regardless of which tab the user clicked
       // Sync from. Each project's `location` field tells us which market
       // it belongs to — we tag rows accordingly. Net effect: one Sync
@@ -1299,6 +1315,13 @@ async function syncReferralsFromAlbi() {
       // 4. Process each project — extract flat referrer fields
       for (var i = 0; i < projects.length; i++) {
         var proj = projects[i];
+        // Quick mode: skip individual projects older than cutoff. They might
+        // appear in a later page even if this page mostly has recent ones,
+        // so we still check per-project.
+        if (quickCutoff) {
+          var pd = proj.createdAt ? new Date(proj.createdAt) : null;
+          if (pd && !isNaN(pd.getTime()) && pd < quickCutoff) continue;
+        }
         var projectId   = String(proj.id || proj.Id || '');
         var projectCode = proj.identifier || proj.name || null;
         if (!projectId) continue;
@@ -1469,7 +1492,7 @@ async function syncReferralsFromAlbi() {
       }).catch(function(e){ console.error('sync log close failed', e); });
     }
 
-    ST._referralSyncProgress = '✓ Sync complete · ' + projectsScanned + ' projects scanned · ' +
+    ST._referralSyncProgress = '✓ ' + modeLabel + ' complete · ' + projectsScanned + ' projects scanned · ' +
       'skipped: ' + skippedNoSalesPerson + ' no-rep, ' + skippedInternalSource + ' internal · ' +
       projectsWithRef + ' kept · ' +
       referralsInserted + ' new + ' + referralsUpdated + ' updated · ' +
@@ -2422,7 +2445,12 @@ function _renderNow() {
     h += '<div style="display:flex;gap:8px;align-items:center;">';
     if (_viewerIsAdmin) {
       h += '<button onclick="ST._showInspector=!ST._showInspector;render()" style="padding:8px 14px;border-radius:8px;border:1.5px solid var(--border);background:var(--surface);color:var(--navy);font-size:12px;font-weight:600;cursor:pointer;font-family:DM Sans,sans-serif;">🔬 Inspect a Project</button>';
-      h += '<button class="btn btn-gold" onclick="syncReferralsFromAlbi()"' + (syncing?' disabled':'') + '>' + (syncing?'⏳ Syncing...':'🔄 Sync from Albi') + '</button>';
+      // Quick refresh: scans only the last 30 days. ~30 sec vs 2-3 min for
+      // full sync. Use this for routine same-day spot-checks. Full sync is
+      // the authoritative refresh — needed when you want fresh older data
+      // (e.g., a paid amount changed on a 6-month-old project).
+      h += '<button onclick="syncReferralsFromAlbi(true)"' + (syncing?' disabled':'') + ' style="padding:8px 14px;border-radius:8px;border:1.5px solid var(--orange);background:var(--surface);color:var(--orange);font-size:12px;font-weight:700;cursor:pointer;font-family:DM Sans,sans-serif;">' + (syncing?'⏳ Syncing...':'⚡ Quick (30d)') + '</button>';
+      h += '<button class="btn btn-gold" onclick="syncReferralsFromAlbi(false)"' + (syncing?' disabled':'') + '>' + (syncing?'⏳ Syncing...':'🔄 Full sync') + '</button>';
     }
     h += '</div>';
     h += '</div>';
