@@ -645,6 +645,8 @@ if ('serviceWorker' in navigator) {
     <div class="stats-row" id="home-stats">
       <div class="stat-card" onclick="APP.filterMyPartners=true;renderTypePills();showScreen('partners')" style="cursor:pointer;border:1.5px solid rgba(232,93,4,.2);position:relative;"><div class="stat-val" id="stat-partners">—</div><div class="stat-lbl">My Partners</div><div style="position:absolute;bottom:8px;right:10px;font-size:9px;color:var(--orange);font-weight:700;">View →</div></div>
       <div class="stat-card" onclick="showScreen('touches')" style="cursor:pointer;border:1.5px solid rgba(232,93,4,.2);position:relative;"><div class="stat-val" id="stat-touches">—</div><div class="stat-lbl">Touches This Week</div><div style="position:absolute;bottom:8px;right:10px;font-size:9px;color:var(--orange);font-weight:700;">View →</div></div>
+      <div class="stat-card" onclick="showMyReferrals()" style="cursor:pointer;border:1.5px solid rgba(232,93,4,.2);position:relative;"><div class="stat-val" id="stat-referrals" style="color:var(--orange);">—</div><div class="stat-lbl">My Referrals YTD</div><div style="position:absolute;bottom:8px;right:10px;font-size:9px;color:var(--orange);font-weight:700;">View →</div></div>
+      <div class="stat-card" onclick="showMyReferrals()" style="cursor:pointer;border:1.5px solid rgba(232,93,4,.2);position:relative;"><div class="stat-val" id="stat-referral-rev" style="color:var(--ok);font-size:18px;">—</div><div class="stat-lbl">Referral $ YTD</div><div style="position:absolute;bottom:8px;right:10px;font-size:9px;color:var(--orange);font-weight:700;">View →</div></div>
     </div>
 
     <div class="section-title">Overdue Follow-ups</div>
@@ -913,6 +915,14 @@ if ('serviceWorker' in navigator) {
   </div>
 </div>
 
+<!-- MY REFERRALS SHEET -->
+<div class="sheet-overlay" id="my-referrals-overlay" onclick="if(event.target===this)closeMyReferrals()">
+  <div class="sheet" id="my-referrals-content" onclick="event.stopPropagation()">
+    <div class="sheet-handle"></div>
+    <div id="my-referrals-body"></div>
+  </div>
+</div>
+
 <!-- TOAST -->
 <div class="toast" id="toast"></div>
 
@@ -1148,6 +1158,26 @@ function renderHome() {
     return t.logged_by === APP.repName && t.touch_date && t.touch_date >= weekAgoStr;
   });
   document.getElementById('stat-touches').textContent = myWeekTouches.length;
+
+  // My Referrals YTD + Revenue YTD — based on partners assigned to me, not
+  // on which rep is named on each individual project. The relationship is
+  // owned at the partner level (sales_partners.assigned_to), so a referral
+  // from Roto-Rooter (assigned to me) counts to me regardless of who's
+  // listed as salesPerson on the actual job in Albi.
+  var currentYear = String(new Date().getFullYear());
+  var myPartnerIds = {};
+  myPartners.forEach(function(p){ myPartnerIds[p.id] = true; });
+  var myYtdRefs = (APP.albiReferrals||[]).filter(function(r){
+    if (!r.referrer_partner_id) return false;
+    if (!myPartnerIds[r.referrer_partner_id]) return false;
+    return (r.project_created_date || '').slice(0, 4) === currentYear;
+  });
+  var myYtdRevenue = myYtdRefs.reduce(function(s,r){ return s + (parseFloat(r.project_value||0)||0); }, 0);
+  document.getElementById('stat-referrals').textContent = myYtdRefs.length;
+  // Compact revenue formatting — "$xxk" for thousands, full number otherwise
+  document.getElementById('stat-referral-rev').textContent = myYtdRevenue >= 1000
+    ? '$' + Math.round(myYtdRevenue/1000) + 'k'
+    : '$' + Math.round(myYtdRevenue);
 
   // Today's route
   var todayRoute = APP.routes.find(function(r){ return r.route_date === today; });
@@ -2689,6 +2719,142 @@ async function deletePayoutMobile(payoutId) {
     console.error('deletePayoutMobile error:', err);
     toast('Delete failed — try again');
   }
+}
+
+// ── MY REFERRALS SHEET (MOBILE) ───────────────────────────────────────────
+// Tapped from Home stat cards. Shows the rep's referrals scoped to a year
+// (defaults to current). Year is switchable. Each referral is tappable
+// to dive into that partner.
+
+function showMyReferrals() {
+  if (!APP._myRefYear) APP._myRefYear = String(new Date().getFullYear());
+  renderMyReferrals();
+  document.getElementById('my-referrals-overlay').classList.add('open');
+}
+
+function renderMyReferrals() {
+  var year = APP._myRefYear;
+
+  // My partners — rep-owned. Build an id set for fast lookups.
+  var myPartnerIds = {};
+  var myPartnerById = {};
+  APP.partners.forEach(function(p){
+    if (p.assigned_to === APP.repName) {
+      myPartnerIds[p.id] = true;
+      myPartnerById[p.id] = p;
+    }
+  });
+
+  // All my referrals (any year) — for building the year selector
+  var myAllRefs = (APP.albiReferrals||[]).filter(function(r){
+    return r.referrer_partner_id && myPartnerIds[r.referrer_partner_id];
+  });
+  var yearTotals = {};
+  myAllRefs.forEach(function(r){
+    var y = (r.project_created_date||'').slice(0, 4);
+    if (!y) return;
+    if (!yearTotals[y]) yearTotals[y] = { count: 0, revenue: 0 };
+    yearTotals[y].count++;
+    yearTotals[y].revenue += parseFloat(r.project_value||0)||0;
+  });
+  var years = Object.keys(yearTotals).sort().reverse();
+
+  // Apply year filter
+  var refs = year === 'all'
+    ? myAllRefs
+    : myAllRefs.filter(function(r){ return (r.project_created_date||'').slice(0,4) === year; });
+  refs.sort(function(a,b){ return (b.project_created_date||'').localeCompare(a.project_created_date||''); });
+
+  var totalCount   = refs.length;
+  var totalRevenue = refs.reduce(function(s,r){ return s + (parseFloat(r.project_value||0)||0); }, 0);
+  var totalPaid    = refs.reduce(function(s,r){ return s + (parseFloat(r.project_paid ||0)||0); }, 0);
+
+  // Source category breakdown — useful for "what kinds of partners send me work"
+  var bySource = {};
+  refs.forEach(function(r){
+    var s = r.referral_source || '(unspecified)';
+    if (!bySource[s]) bySource[s] = { count: 0, revenue: 0 };
+    bySource[s].count++;
+    bySource[s].revenue += parseFloat(r.project_value||0)||0;
+  });
+  var sourceList = Object.keys(bySource)
+    .map(function(s){ return { source: s, count: bySource[s].count, revenue: bySource[s].revenue }; })
+    .sort(function(a,b){ return b.revenue - a.revenue; });
+
+  var html = '';
+  html += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">';
+  html += '<div style="font-size:16px;font-weight:700;color:var(--navy);">⭐ My Referrals</div>';
+  html += '<button onclick="closeMyReferrals()" style="border:none;background:transparent;font-size:22px;cursor:pointer;color:var(--muted);padding:0;width:32px;height:32px;">✕</button>';
+  html += '</div>';
+
+  // Year selector pills
+  if (years.length > 0) {
+    html += '<div style="display:flex;gap:6px;overflow-x:auto;margin-bottom:12px;padding-bottom:4px;-webkit-overflow-scrolling:touch;">';
+    var yearOpts = years.slice(0, 6).concat(['all']);
+    yearOpts.forEach(function(y){
+      var isActive = year === y;
+      var label = y === 'all' ? 'All' : y;
+      var bg = isActive ? 'var(--orange)' : 'rgba(13,45,94,.06)';
+      var color = isActive ? '#fff' : 'var(--navy)';
+      html += '<button onclick="APP._myRefYear=\'' + y + '\';renderMyReferrals()" style="padding:8px 16px;border-radius:20px;border:none;background:' + bg + ';color:' + color + ';font-size:13px;font-weight:700;cursor:pointer;font-family:inherit;flex-shrink:0;">' + label + '</button>';
+    });
+    html += '</div>';
+  }
+
+  // Big numbers
+  html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:14px;">';
+  html += '<div style="background:rgba(232,93,4,.06);border-radius:10px;padding:12px;text-align:center;">';
+  html += '<div style="font-size:22px;font-weight:800;color:var(--orange);">' + totalCount + '</div>';
+  html += '<div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;font-weight:600;">Referrals</div></div>';
+  html += '<div style="background:rgba(46,125,50,.06);border-radius:10px;padding:12px;text-align:center;">';
+  html += '<div style="font-size:18px;font-weight:800;color:var(--ok);">$' + Math.round(totalRevenue).toLocaleString() + '</div>';
+  html += '<div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;font-weight:600;">Invoiced</div></div>';
+  html += '</div>';
+  // Paid-too summary line
+  if (totalPaid > 0) {
+    html += '<div style="font-size:11px;color:var(--muted);text-align:center;margin-bottom:14px;">$' + Math.round(totalPaid).toLocaleString() + ' collected so far</div>';
+  }
+
+  // Source breakdown
+  if (sourceList.length > 0) {
+    html += '<div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px;">📊 By Source</div>';
+    html += '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px;">';
+    sourceList.forEach(function(s){
+      html += '<div style="background:rgba(13,45,94,.04);border:1px solid var(--border);border-radius:8px;padding:6px 10px;">';
+      html += '<div style="font-size:11px;font-weight:700;color:var(--navy);">' + s.source + '</div>';
+      html += '<div style="font-size:10px;color:var(--muted);">' + s.count + ' · $' + Math.round(s.revenue).toLocaleString() + '</div>';
+      html += '</div>';
+    });
+    html += '</div>';
+  }
+
+  // Referral list
+  html += '<div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px;">All Referrals (' + refs.length + ')</div>';
+  if (refs.length === 0) {
+    html += '<div style="font-size:13px;color:var(--muted);text-align:center;padding:24px 0;font-style:italic;">No referrals in this period.</div>';
+  } else {
+    refs.forEach(function(r){
+      var partner = myPartnerById[r.referrer_partner_id];
+      var pv = parseFloat(r.project_value||0)||0;
+      html += '<div onclick="closeMyReferrals();openPartnerDetail(\'' + r.referrer_partner_id + '\')" style="padding:10px 0;border-bottom:1px solid var(--border);cursor:pointer;">';
+      html += '<div style="display:flex;align-items:center;gap:8px;">';
+      html += '<span style="font-size:11px;font-weight:700;padding:2px 7px;border-radius:4px;background:rgba(13,45,94,.08);color:var(--navy);">' + (r.albi_project_code||r.albi_project_id||'—') + '</span>';
+      if (r.referral_source) html += '<span style="font-size:10px;color:var(--muted);font-weight:600;">' + r.referral_source + '</span>';
+      html += '<span style="font-size:10px;color:var(--muted);margin-left:auto;">' + (r.project_created_date ? r.project_created_date.slice(5).replace('-','/') : '—') + '</span>';
+      html += '</div>';
+      html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-top:3px;">';
+      html += '<span style="font-size:13px;font-weight:600;color:var(--navy);">' + (partner ? partner.name : (r.albi_referrer_name||'')) + '</span>';
+      html += '<span style="font-size:13px;font-weight:700;color:var(--ok);">$' + Math.round(pv).toLocaleString() + '</span>';
+      html += '</div>';
+      html += '</div>';
+    });
+  }
+
+  document.getElementById('my-referrals-body').innerHTML = html;
+}
+
+function closeMyReferrals() {
+  document.getElementById('my-referrals-overlay').classList.remove('open');
 }
 
 // ── ROUTES ────────────────────────────────────────────────────────────────
