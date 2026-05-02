@@ -1146,7 +1146,45 @@ async function savePayout(albiReferralId) {
     });
     if (!resp.ok) throw new Error('Save failed: ' + (await resp.text()));
 
-    if (typeof showOk === 'function') showOk(editingId ? '✓ Payout updated' : '✓ Payout logged');
+    // Fire the Albi-note webhook ONLY on new payouts (not edits). Edits
+    // are typically corrections — adding "updated to $75" notes in Albi
+    // creates clutter. Initial payment is the meaningful event for PMs.
+    if (!editingId) {
+      var paidDateFmt = new Date(dateEl.value + 'T00:00:00').toLocaleDateString('en-US');
+      var partnerObj = ST.partners.find(function(x){ return x.id === ref.referrer_partner_id; });
+      var partnerLabel = partnerObj ? partnerObj.name : (ref.albi_referrer_name || 'Unknown referrer');
+      var methodSuffix = body.payment_method ? ' (' + body.payment_method + ')' : '';
+      var noteText = 'Referral payout: $' + amount.toFixed(2) +
+                     ' to ' + partnerLabel +
+                     ' on ' + paidDateFmt +
+                     methodSuffix +
+                     ' — logged by ' + paidByName;
+
+      var webhookPayload = {
+        albi_project_id:   ref.albi_project_id,
+        albi_project_code: ref.albi_project_code,
+        partner_name:      partnerLabel,
+        amount:            amount,
+        paid_date:         dateEl.value,
+        payment_method:    body.payment_method || '',
+        notes:             body.notes || '',
+        logged_by:         paidByName,
+        note_text:         noteText
+      };
+
+      // Fire and forget — don't block the UI on Zapier latency. If the
+      // webhook fails we log it but the payout itself was already saved
+      // to Supabase. User can always re-trigger via a sync if needed.
+      fetch('https://hooks.zapier.com/hooks/catch/12653197/uvlvwzy/', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(webhookPayload)
+      }).catch(function(err) {
+        console.error('Albi note webhook failed:', err);
+      });
+    }
+
+    if (typeof showOk === 'function') showOk(editingId ? '✓ Payout updated' : '✓ Payout logged · Albi note queued');
     ST._payoutSheetEditingId = null;
     ST._payoutSheetSaving = false;
     await loadAll();
