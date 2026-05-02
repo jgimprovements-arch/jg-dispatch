@@ -1187,7 +1187,7 @@ async function syncReferralsFromAlbi() {
         started_at:    startedAt.toISOString(),
         trigger:       'manual',
         triggered_by:  (window.JG_SHARED && window.JG_SHARED.auth && window.JG_SHARED.auth.currentEmail()) || 'unknown',
-        market:        ST.market,
+        market:        'Both',
         status:        'running'
       })
     });
@@ -1272,19 +1272,26 @@ async function syncReferralsFromAlbi() {
     var done     = false;
 
     while (!done && page <= maxPages) {
-      ST._referralSyncProgress = '⏳ Pulling page ' + page + ' (' + ST.market + ')... ' +
+      ST._referralSyncProgress = '⏳ Pulling page ' + page + ' (both markets)... ' +
         projectsScanned + ' scanned, ' + projectsWithRef + ' had referrers, ' +
         (referralsInserted + referralsUpdated) + ' referrals saved';
       render();
 
-      var url = 'https://jg-proxy-v2.vercel.app/api/albi?location=' +
-                encodeURIComponent(ST.market) + '&pageSize=' + pageSize + '&page=' + page;
+      // No location parameter — Albi ignores it (returns all projects regardless).
+      // We filter client-side using each project's own location field.
+      var url = 'https://jg-proxy-v2.vercel.app/api/albi?pageSize=' + pageSize + '&page=' + page;
       var r = await fetch(url);
       if (!r.ok) throw new Error('Albi proxy returned ' + r.status + ' on page ' + page);
       var data = await r.json();
       var projects = data.Items || data.items || data.projects || data.data || (Array.isArray(data) ? data : []);
 
       if (!projects.length) { done = true; break; }
+
+      // Process EVERY project regardless of which tab the user clicked
+      // Sync from. Each project's `location` field tells us which market
+      // it belongs to — we tag rows accordingly. Net effect: one Sync
+      // populates both Appleton and Stevens Point at once. Saves the user
+      // from having to switch tabs and click Sync twice.
       projectsScanned += projects.length;
 
       // 4. Process each project — extract flat referrer fields
@@ -1395,7 +1402,10 @@ async function syncReferralsFromAlbi() {
                 project_loss_type:         lossType,
                 referral_source:           refSource,
                 match_method:              matchMethod,
-                market:                    ST.market,
+                // Use the project's actual location field, NOT ST.market.
+                // Each project knows its own market; ST.market was just the
+                // tab the user happened to be on when they clicked Sync.
+                market:                    proj.location || ST.market,
                 project_created_date:      createdDate,
                 project_closed_date:       closedDate,
                 last_synced_at:            new Date().toISOString(),
