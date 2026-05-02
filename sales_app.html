@@ -23,6 +23,9 @@
     --gold: #f5a623;
     --green: #2e7d32;
     --red: #c62828;
+    --danger: #c62828;
+    --ok: #2e7d32;
+    --txt: #0d1f3c;
     --bg: #f5f6fa;
     --surface: #ffffff;
     --border: rgba(13,45,94,.1);
@@ -1099,6 +1102,18 @@ async function loadAll() {
   // Route templates (recurring)
   var tmpl = await sb('/rest/v1/sales_route_templates?active=eq.true&order=name.asc&limit=100');
   APP.routeTemplates = tmpl || [];
+
+  // Albi referrals — synced from Albi via the desktop platform's Sync button.
+  // Mobile is read-only on this data; we use it to show partner referral
+  // history when reps tap into a partner card. 5000-row cap covers all
+  // historical referrals.
+  var ar = await sb('/rest/v1/albi_referrals?order=project_created_date.desc&limit=5000');
+  APP.albiReferrals = ar || [];
+
+  // Referral payouts — money JG paid out to partners. Reps can both view
+  // and log payouts from the field.
+  var rp = await sb('/rest/v1/referral_payouts?order=paid_date.desc&limit=5000');
+  APP.referralPayouts = rp || [];
 
   renderHome();
   renderPartners();
@@ -2265,6 +2280,13 @@ function openPartnerDetail(pid) {
   var days = p.last_touch_date ? Math.floor((Date.now()-new Date(p.last_touch_date).getTime())/86400000) : null;
   var color = TYPE_COLORS[p.type] || '#546e7a';
   var initials = (p.name||'?').split(' ').map(function(w){ return w[0]; }).slice(0,2).join('');
+
+  // Live referral data computed from albi_referrals (synced from Albi).
+  // Replaces the stale p.referral_count column. Same approach as desktop.
+  var prefs = (APP.albiReferrals||[]).filter(function(r){ return r.referrer_partner_id === p.id; });
+  var prefCount   = prefs.length;
+  var prefRevenue = prefs.reduce(function(s,r){ return s + (parseFloat(r.project_value||0)||0); }, 0);
+
   var html = '';
 
   // Header
@@ -2298,8 +2320,9 @@ function openPartnerDetail(pid) {
   }
   html += '<div class="detail-stat-row">';
   html += '<div class="detail-stat"><div class="detail-stat-val">' + (p.touch_count||0) + '</div><div class="detail-stat-lbl">Touches</div></div>';
-  html += '<div class="detail-stat"><div class="detail-stat-val">' + (p.referral_count||0) + '</div><div class="detail-stat-lbl">Referrals</div></div>';
-  html += '<div class="detail-stat"><div class="detail-stat-val" style="font-size:14px;">' + (days===null?'Never':days+'d ago') + '</div><div class="detail-stat-lbl">Last Touch</div></div>';
+  html += '<div class="detail-stat"><div class="detail-stat-val" style="color:var(--orange);">' + prefCount + '</div><div class="detail-stat-lbl">Referrals</div></div>';
+  html += '<div class="detail-stat"><div class="detail-stat-val" style="color:var(--ok);font-size:14px;">$' + (prefRevenue >= 1000 ? Math.round(prefRevenue/1000) + 'k' : Math.round(prefRevenue)) + '</div><div class="detail-stat-lbl">Rev</div></div>';
+  html += '<div class="detail-stat"><div class="detail-stat-val" style="font-size:14px;">' + (days===null?'Never':days+'d') + '</div><div class="detail-stat-lbl">Last Touch</div></div>';
   html += '</div>';
 
   // Intel
@@ -2307,6 +2330,52 @@ function openPartnerDetail(pid) {
   if (p.family_members)  html += '<div class="intel-chip"><b>Family:</b> ' + p.family_members + '</div>';
   if (p.last_convo_note) html += '<div class="intel-chip"><b>Last convo:</b> ' + p.last_convo_note + '</div>';
   if (p.notes)           html += '<div class="intel-chip" style="color:var(--muted);">' + p.notes + '</div>';
+
+  // ⭐ Referred Jobs — same data as desktop, condensed for mobile.
+  // Each row is tappable to open the payout sheet for that referral.
+  if (prefCount > 0) {
+    var prefsSorted = prefs.slice().sort(function(a,b){
+      return (b.project_created_date||'').localeCompare(a.project_created_date||'');
+    });
+    var showAllRefs = APP._refExpanded;
+    var visibleRefs = showAllRefs ? prefsSorted : prefsSorted.slice(0, 3);
+
+    html += '<div style="margin-top:14px;">';
+    html += '<div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:6px;">';
+    html += '<span style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;">⭐ Referred Jobs (' + prefCount + ' · $' + Math.round(prefRevenue).toLocaleString() + ')</span>';
+    if (prefCount > 3) {
+      var refToggleLabel = showAllRefs ? 'Show recent' : 'Show all ' + prefCount;
+      html += '<button onclick="toggleRefExpanded(\'' + p.id + '\')" style="font-size:11px;color:var(--orange);background:transparent;border:none;cursor:pointer;font-weight:700;padding:0;font-family:inherit;">' + refToggleLabel + ' →</button>';
+    }
+    html += '</div>';
+
+    var refScrollStyle = showAllRefs && prefCount > 5
+      ? 'max-height:260px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:0 10px;'
+      : '';
+    html += '<div style="' + refScrollStyle + '">';
+    visibleRefs.forEach(function(r){
+      var pv  = parseFloat(r.project_value||0)||0;
+      var pp  = parseFloat(r.project_paid ||0)||0;
+      var rowPayouts = (APP.referralPayouts||[]).filter(function(po){ return po.albi_referral_id === r.id; });
+      var paidOutTotal = rowPayouts.reduce(function(s,po){ return s + (parseFloat(po.amount||0)||0); }, 0);
+      html += '<div onclick="openPayoutSheetMobile(\'' + r.id + '\')" style="padding:10px 0;border-bottom:1px solid var(--border);cursor:pointer;">';
+      html += '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">';
+      html += '<span style="font-size:11px;font-weight:700;padding:2px 8px;border-radius:4px;background:rgba(13,45,94,.08);color:var(--navy);">' + (r.albi_project_code||r.albi_project_id||'—') + '</span>';
+      if (r.referral_source) html += '<span style="font-size:10px;color:var(--muted);font-weight:600;">' + r.referral_source + '</span>';
+      html += '<span style="font-size:10px;color:var(--muted);margin-left:auto;">' + (r.project_created_date ? r.project_created_date.slice(5).replace('-','/') : '—') + '</span>';
+      html += '</div>';
+      html += '<div style="display:flex;gap:10px;margin-top:3px;font-size:11px;align-items:center;flex-wrap:wrap;">';
+      html += '<span style="color:var(--ok);font-weight:700;">$' + Math.round(pv).toLocaleString() + ' inv</span>';
+      html += '<span style="color:var(--muted);">$' + Math.round(pp).toLocaleString() + ' paid</span>';
+      if (paidOutTotal > 0) {
+        html += '<span style="background:rgba(232,93,4,.12);color:var(--orange);font-weight:700;padding:1px 7px;border-radius:4px;font-size:10px;">💰 $' + Math.round(paidOutTotal).toLocaleString() + ' out</span>';
+      } else {
+        html += '<span style="color:var(--muted);font-size:10px;font-style:italic;">tap to log payout</span>';
+      }
+      html += '</div></div>';
+    });
+    html += '</div></div>';
+  }
 
   // Action buttons — log touch always available, edit/delete gated by permissions
   html += '<div style="display:flex;gap:8px;margin-top:16px;">';
@@ -2391,6 +2460,235 @@ async function deletePartnerApp(pid, pname) {
 
 function closePartnerDetail() {
   document.getElementById('partner-detail-overlay').classList.remove('open');
+  // Reset the referred-jobs expand state so next partner card opens collapsed
+  APP._refExpanded = false;
+}
+
+// ── REFERRED JOBS / PAYOUT SHEET (MOBILE) ─────────────────────────────────
+// Tapping a referred job row on the partner detail opens this sheet.
+// Shows existing payouts + lets the rep log a new one. Reuses the same
+// referral_payouts table as desktop — data flows both ways.
+
+function toggleRefExpanded(pid) {
+  APP._refExpanded = !APP._refExpanded;
+  // Re-render the partner detail in place so the toggle takes effect
+  // without losing scroll position elsewhere on the page.
+  openPartnerDetail(pid);
+}
+
+function openPayoutSheetMobile(albiReferralId) {
+  APP._payoutRefId = albiReferralId;
+  APP._payoutEditingId = null;
+  renderPayoutSheetMobile();
+}
+
+function renderPayoutSheetMobile() {
+  var refId = APP._payoutRefId;
+  var ref = (APP.albiReferrals||[]).find(function(r){ return r.id === refId; });
+  if (!ref) return;
+  var partner = APP.partners.find(function(x){ return x.id === ref.referrer_partner_id; });
+  var existing = (APP.referralPayouts||[]).filter(function(po){ return po.albi_referral_id === refId; });
+  existing.sort(function(a,b){ return (b.paid_date||'').localeCompare(a.paid_date||''); });
+  var paidTotal = existing.reduce(function(s,p){ return s + (parseFloat(p.amount||0)||0); }, 0);
+  var jobInvoiced = parseFloat(ref.project_value||0)||0;
+  var editingId = APP._payoutEditingId;
+  var editingRow = editingId ? existing.find(function(po){ return po.id === editingId; }) : null;
+
+  var html = '';
+  html += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">';
+  html += '<div style="font-size:16px;font-weight:700;color:var(--navy);">💰 Referral Payouts</div>';
+  html += '<button onclick="closePayoutSheetMobile()" style="border:none;background:transparent;font-size:22px;cursor:pointer;color:var(--muted);padding:0;width:32px;height:32px;">✕</button>';
+  html += '</div>';
+
+  // Context header
+  html += '<div style="background:rgba(13,45,94,.06);border-radius:10px;padding:12px 14px;margin-bottom:14px;">';
+  html += '<div style="font-size:13px;font-weight:700;color:var(--navy);">' + (ref.albi_project_code||ref.albi_project_id||'—') + '</div>';
+  if (partner) html += '<div style="font-size:12px;color:var(--muted);margin-top:2px;">Referred by <strong>' + (partner.name||'') + '</strong></div>';
+  html += '<div style="display:flex;gap:14px;margin-top:6px;font-size:11px;flex-wrap:wrap;">';
+  html += '<span style="color:var(--ok);">Invoiced: <strong>$' + Math.round(jobInvoiced).toLocaleString() + '</strong></span>';
+  html += '<span style="color:var(--orange);">Paid out: <strong>$' + Math.round(paidTotal).toLocaleString() + '</strong></span>';
+  html += '</div></div>';
+
+  // Existing payouts
+  html += '<div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;margin-bottom:6px;">Payout History (' + existing.length + ')</div>';
+  if (existing.length === 0) {
+    html += '<div style="font-size:12px;color:var(--muted);padding:6px 0 10px;font-style:italic;">No payouts logged yet.</div>';
+  } else {
+    existing.forEach(function(po){
+      var isEd = APP._payoutEditingId === po.id;
+      var bg = isEd ? 'rgba(232,93,4,.08)' : 'rgba(46,125,50,.04)';
+      var border = isEd ? '1.5px solid var(--orange)' : '1px solid var(--border)';
+      html += '<div style="background:' + bg + ';border:' + border + ';border-radius:8px;padding:10px 12px;margin-bottom:6px;">';
+      html += '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">';
+      html += '<span style="font-size:15px;font-weight:800;color:var(--ok);">$' + Math.round(po.amount).toLocaleString() + '</span>';
+      html += '<span style="font-size:11px;color:var(--muted);">' + (po.paid_date ? po.paid_date.replace(/-/g,'/') : '—') + '</span>';
+      if (po.payment_method) html += '<span style="font-size:10px;background:rgba(13,45,94,.08);color:var(--navy);padding:2px 7px;border-radius:4px;font-weight:600;">' + po.payment_method + '</span>';
+      html += '<span style="margin-left:auto;display:flex;gap:5px;">';
+      html += '<button onclick="editPayoutMobile(\'' + po.id + '\')" style="padding:3px 9px;border-radius:4px;border:1px solid var(--border);background:#fff;font-size:11px;color:var(--navy);cursor:pointer;font-family:inherit;">Edit</button>';
+      html += '<button onclick="deletePayoutMobile(\'' + po.id + '\')" style="padding:3px 9px;border-radius:4px;border:1px solid rgba(192,32,32,.4);background:#fff;font-size:11px;color:var(--danger);cursor:pointer;font-family:inherit;">Delete</button>';
+      html += '</span></div>';
+      if (po.notes) html += '<div style="font-size:11px;color:var(--txt);margin-top:4px;line-height:1.4;">' + po.notes + '</div>';
+      if (po.paid_by_name) html += '<div style="font-size:10px;color:var(--muted);margin-top:3px;">Logged by ' + po.paid_by_name + '</div>';
+      html += '</div>';
+    });
+  }
+
+  // Form
+  html += '<div style="margin-top:14px;border-top:1.5px solid var(--border);padding-top:14px;">';
+  html += '<div style="font-size:12px;font-weight:700;color:var(--navy);margin-bottom:8px;">' + (editingId ? '✏️ Edit Payout' : '+ Log a Payout') + '</div>';
+  html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px;">';
+  html += '<div><label style="font-size:10px;color:var(--muted);font-weight:600;display:block;margin-bottom:3px;">AMOUNT *</label>';
+  html += '<input id="po-amt-m" type="number" step="0.01" min="0" placeholder="50.00" value="' + (editingRow ? editingRow.amount : '') + '" style="width:100%;padding:10px;border:1.5px solid var(--border);border-radius:8px;font-size:14px;font-family:inherit;"></div>';
+  html += '<div><label style="font-size:10px;color:var(--muted);font-weight:600;display:block;margin-bottom:3px;">PAID ON *</label>';
+  html += '<input id="po-date-m" type="date" value="' + (editingRow ? editingRow.paid_date : new Date().toISOString().slice(0,10)) + '" style="width:100%;padding:10px;border:1.5px solid var(--border);border-radius:8px;font-size:14px;font-family:inherit;"></div>';
+  html += '</div>';
+  html += '<div style="margin-bottom:10px;"><label style="font-size:10px;color:var(--muted);font-weight:600;display:block;margin-bottom:3px;">METHOD</label>';
+  html += '<input id="po-method-m" placeholder="Check #, Cash, Venmo, etc." value="' + (editingRow ? (editingRow.payment_method||'') : '') + '" style="width:100%;padding:10px;border:1.5px solid var(--border);border-radius:8px;font-size:14px;font-family:inherit;"></div>';
+  html += '<div style="margin-bottom:12px;"><label style="font-size:10px;color:var(--muted);font-weight:600;display:block;margin-bottom:3px;">NOTES</label>';
+  html += '<textarea id="po-notes-m" rows="2" placeholder="Optional context" style="width:100%;padding:10px;border:1.5px solid var(--border);border-radius:8px;font-size:14px;font-family:inherit;resize:vertical;">' + (editingRow ? (editingRow.notes||'') : '') + '</textarea></div>';
+  html += '<div style="display:flex;gap:8px;">';
+  if (editingId) {
+    html += '<button onclick="cancelPayoutEditMobile()" style="padding:12px 14px;border-radius:10px;border:1.5px solid var(--border);background:transparent;font-size:13px;cursor:pointer;font-family:inherit;">Cancel Edit</button>';
+  }
+  html += '<button onclick="savePayoutMobile()" style="flex:1;padding:14px;border-radius:10px;border:none;background:var(--orange);color:#fff;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit;">' + (editingId ? 'Save Changes' : '💰 Log Payout') + '</button>';
+  html += '</div></div>';
+
+  // Render into the partner detail body so the sheet replaces card content
+  document.getElementById('partner-detail-body').innerHTML = html;
+}
+
+function closePayoutSheetMobile() {
+  // Re-open the partner card to return user to where they were
+  var refId = APP._payoutRefId;
+  var ref = (APP.albiReferrals||[]).find(function(r){ return r.id === refId; });
+  APP._payoutRefId = null;
+  APP._payoutEditingId = null;
+  if (ref && ref.referrer_partner_id) {
+    openPartnerDetail(ref.referrer_partner_id);
+  } else {
+    closePartnerDetail();
+  }
+}
+
+function editPayoutMobile(payoutId) {
+  APP._payoutEditingId = payoutId;
+  renderPayoutSheetMobile();
+}
+
+function cancelPayoutEditMobile() {
+  APP._payoutEditingId = null;
+  renderPayoutSheetMobile();
+}
+
+async function savePayoutMobile() {
+  var amtEl   = document.getElementById('po-amt-m');
+  var dateEl  = document.getElementById('po-date-m');
+  var methEl  = document.getElementById('po-method-m');
+  var notesEl = document.getElementById('po-notes-m');
+  if (!amtEl || !dateEl) return;
+  var amount = parseFloat(amtEl.value);
+  if (!amount || amount <= 0 || isNaN(amount)) { toast('Enter a valid amount'); return; }
+  if (!dateEl.value) { toast('Pick a paid-on date'); return; }
+
+  var refId = APP._payoutRefId;
+  var ref = (APP.albiReferrals||[]).find(function(r){ return r.id === refId; });
+  if (!ref) { toast('Referral not found'); return; }
+
+  var body = {
+    albi_referral_id: refId,
+    partner_id:       ref.referrer_partner_id || null,
+    amount:           amount,
+    paid_date:        dateEl.value,
+    payment_method:   methEl ? methEl.value : null,
+    notes:            notesEl ? notesEl.value : null,
+    paid_by:          (APP.user && APP.user.email) || 'unknown',
+    paid_by_name:     APP.repName || 'unknown'
+  };
+
+  var editingId = APP._payoutEditingId;
+  try {
+    var url, method;
+    if (editingId) {
+      url = SB_URL + '/rest/v1/referral_payouts?id=eq.' + editingId;
+      method = 'PATCH';
+    } else {
+      url = SB_URL + '/rest/v1/referral_payouts';
+      method = 'POST';
+    }
+    var resp = await fetch(url, {
+      method: method,
+      headers: {
+        'apikey': SB_KEY,
+        'Authorization': 'Bearer ' + SB_KEY,
+        'Content-Type': 'application/json',
+        'Prefer': 'return=representation'
+      },
+      body: JSON.stringify(body)
+    });
+    if (!resp.ok) throw new Error(await resp.text());
+
+    // Fire Albi-note webhook ONLY on new payouts (not edits) — same rule
+    // as desktop. Edits are corrections, not new events worth Albi note.
+    if (!editingId) {
+      var paidDateFmt = new Date(dateEl.value + 'T00:00:00').toLocaleDateString('en-US');
+      var partnerObj = APP.partners.find(function(x){ return x.id === ref.referrer_partner_id; });
+      var partnerLabel = partnerObj ? partnerObj.name : (ref.albi_referrer_name || 'Unknown');
+      var methodSuffix = body.payment_method ? ' (' + body.payment_method + ')' : '';
+      var noteText = 'Referral payout: $' + amount.toFixed(2) +
+                     ' to ' + partnerLabel +
+                     ' on ' + paidDateFmt +
+                     methodSuffix +
+                     ' — logged by ' + body.paid_by_name;
+
+      var webhookPayload = {
+        albi_project_id:   ref.albi_project_id || '',
+        albi_project_code: ref.albi_project_code || '',
+        partner_name:      partnerLabel,
+        amount:            amount,
+        paid_date:         dateEl.value,
+        payment_method:    body.payment_method || '',
+        notes:             body.notes || '',
+        logged_by:         body.paid_by_name,
+        note_text:         noteText
+      };
+      var formBody = Object.keys(webhookPayload)
+        .map(function(k){ return encodeURIComponent(k) + '=' + encodeURIComponent(webhookPayload[k] == null ? '' : webhookPayload[k]); })
+        .join('&');
+      fetch('https://hooks.zapier.com/hooks/catch/12653197/uvlvwzy/', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: formBody
+      }).catch(function(err){ console.error('Albi webhook failed:', err); });
+    }
+
+    toast(editingId ? '✓ Payout updated' : '✓ Payout logged');
+    APP._payoutEditingId = null;
+    // Reload payouts so the new row shows up immediately
+    var refresh = await sb('/rest/v1/referral_payouts?order=paid_date.desc&limit=5000');
+    APP.referralPayouts = refresh || [];
+    renderPayoutSheetMobile();
+  } catch(err) {
+    console.error('savePayoutMobile error:', err);
+    toast('Save failed — try again');
+  }
+}
+
+async function deletePayoutMobile(payoutId) {
+  if (!confirm('Delete this payout? This cannot be undone.')) return;
+  try {
+    var resp = await fetch(SB_URL + '/rest/v1/referral_payouts?id=eq.' + payoutId, {
+      method: 'DELETE',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+    });
+    if (!resp.ok) throw new Error(await resp.text());
+    toast('✓ Payout deleted');
+    var refresh = await sb('/rest/v1/referral_payouts?order=paid_date.desc&limit=5000');
+    APP.referralPayouts = refresh || [];
+    renderPayoutSheetMobile();
+  } catch(err) {
+    console.error('deletePayoutMobile error:', err);
+    toast('Delete failed — try again');
+  }
 }
 
 // ── ROUTES ────────────────────────────────────────────────────────────────
