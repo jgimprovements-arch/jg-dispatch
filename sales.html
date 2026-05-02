@@ -687,7 +687,9 @@ async function loadAll() {
     // referred a Stevens Point job).
     sbSafe('/rest/v1/albi_referrals?order=project_created_date.desc&limit=5000'),
     // Latest sync log entry for the "last synced X minutes ago" status display
-    sbSafe('/rest/v1/albi_referral_sync_log?order=started_at.desc&limit=1')
+    sbSafe('/rest/v1/albi_referral_sync_log?order=started_at.desc&limit=1'),
+    // Referral payouts (money JG paid to partners for their referrals)
+    sbSafe('/rest/v1/referral_payouts?order=paid_date.desc&limit=5000')
   ]);
 
   ST.partners       = results[0].status === 'fulfilled' ? (results[0].value || []) : [];
@@ -696,6 +698,7 @@ async function loadAll() {
   ST.routes         = results[3].status === 'fulfilled' ? (results[3].value || []) : [];
   ST.albiReferrals  = results[4].status === 'fulfilled' ? (results[4].value || []) : [];
   ST.lastSyncLog    = (results[5].status === 'fulfilled' && results[5].value && results[5].value.length) ? results[5].value[0] : null;
+  ST.referralPayouts = results[6].status === 'fulfilled' ? (results[6].value || []) : [];
 
   // Log any partial failures rather than swallowing them
   results.forEach(function(r, i){
@@ -1056,6 +1059,147 @@ function importAlbi(){ST.modal=null;importFromAlbi();}
 // on the matching project. Used to figure out which field actually contains
 // the billed/invoiced amount (vs the estimate). Once we know, we update the
 // sync to use the right field.
+// ─────────────────────────────────────────────────────────────────────────
+// REFERRAL PAYOUT TRACKING
+// ─────────────────────────────────────────────────────────────────────────
+// Each click on a referred-job row opens this sheet. Shows existing payouts
+// (with edit/delete) and a form to add a new one. Anyone can log a payout
+// — admin and reps. Each payout is denormalized with partner_id so we can
+// quickly sum payouts per partner without a join.
+// ─────────────────────────────────────────────────────────────────────────
+
+function openReferralPayouts(albiReferralId) {
+  ST._payoutSheetReferralId = albiReferralId;
+  ST._payoutSheetEditingId  = null;       // null = add mode; set = edit existing
+  ST._payoutSheetSaving     = false;
+  ST.modal = 'referral-payouts';
+  render();
+}
+
+async function savePayout(albiReferralId) {
+  if (ST._payoutSheetSaving) return;
+
+  // Read form fields
+  var amtEl    = document.getElementById('po-amount');
+  var dateEl   = document.getElementById('po-date');
+  var methodEl = document.getElementById('po-method');
+  var notesEl  = document.getElementById('po-notes');
+  if (!amtEl || !dateEl) return;
+
+  var amount = parseFloat(amtEl.value);
+  if (!amount || amount <= 0 || isNaN(amount)) {
+    alert('Enter a valid payout amount.');
+    return;
+  }
+  if (!dateEl.value) {
+    alert('Pick a paid-on date.');
+    return;
+  }
+
+  ST._payoutSheetSaving = true;
+  render();
+
+  // Look up referral so we can denormalize partner_id
+  var ref = (ST.albiReferrals || []).find(function(r){ return r.id === albiReferralId; });
+  if (!ref) {
+    alert('Referral not found — try refreshing the page.');
+    ST._payoutSheetSaving = false;
+    render();
+    return;
+  }
+
+  var auth = (window.JG_SHARED && window.JG_SHARED.auth) || {};
+  var paidByEmail = (auth.currentEmail && auth.currentEmail()) || 'unknown';
+  var paidByName  = (typeof currentRepName === 'function' ? currentRepName() : null) || paidByEmail;
+
+  var body = {
+    albi_referral_id: albiReferralId,
+    partner_id:       ref.referrer_partner_id || null,
+    amount:           amount,
+    paid_date:        dateEl.value,
+    payment_method:   methodEl ? methodEl.value : null,
+    notes:            notesEl ? notesEl.value : null,
+    paid_by:          paidByEmail,
+    paid_by_name:     paidByName
+  };
+
+  var editingId = ST._payoutSheetEditingId;
+  try {
+    var url, method;
+    if (editingId) {
+      url = SB_URL + '/rest/v1/referral_payouts?id=eq.' + editingId;
+      method = 'PATCH';
+    } else {
+      url = SB_URL + '/rest/v1/referral_payouts';
+      method = 'POST';
+    }
+    var resp = await fetch(url, {
+      method: method,
+      headers: {
+        'apikey': SB_KEY,
+        'Authorization': 'Bearer ' + SB_KEY,
+        'Content-Type': 'application/json',
+        'Prefer': 'return=representation'
+      },
+      body: JSON.stringify(body)
+    });
+    if (!resp.ok) throw new Error('Save failed: ' + (await resp.text()));
+
+    if (typeof showOk === 'function') showOk(editingId ? '✓ Payout updated' : '✓ Payout logged');
+    ST._payoutSheetEditingId = null;
+    ST._payoutSheetSaving = false;
+    await loadAll();
+    // Stay on the payout sheet so the user sees the new row appear
+    ST.modal = 'referral-payouts';
+    render();
+  } catch(err) {
+    console.error('savePayout error', err);
+    alert('Save failed: ' + (err.message || err));
+    ST._payoutSheetSaving = false;
+    render();
+  }
+}
+
+async function deletePayout(payoutId) {
+  if (!confirm('Delete this payout record? This cannot be undone.')) return;
+  try {
+    var resp = await fetch(SB_URL + '/rest/v1/referral_payouts?id=eq.' + payoutId, {
+      method: 'DELETE',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+    });
+    if (!resp.ok) throw new Error('Delete failed: ' + (await resp.text()));
+    if (typeof showOk === 'function') showOk('✓ Payout deleted');
+    await loadAll();
+    render();
+  } catch(err) {
+    console.error('deletePayout error', err);
+    alert('Delete failed: ' + (err.message || err));
+  }
+}
+
+function editPayout(payoutId) {
+  ST._payoutSheetEditingId = payoutId;
+  render();
+  // Pre-fill form values after render
+  setTimeout(function(){
+    var po = (ST.referralPayouts||[]).find(function(p){ return p.id === payoutId; });
+    if (!po) return;
+    var amt = document.getElementById('po-amount');
+    var dt  = document.getElementById('po-date');
+    var mth = document.getElementById('po-method');
+    var nts = document.getElementById('po-notes');
+    if (amt) amt.value = po.amount || '';
+    if (dt)  dt.value  = po.paid_date || '';
+    if (mth) mth.value = po.payment_method || '';
+    if (nts) nts.value = po.notes || '';
+  }, 50);
+}
+
+function cancelPayoutEdit() {
+  ST._payoutSheetEditingId = null;
+  render();
+}
+
 async function inspectProject() {
   var inp = document.getElementById('inspectInput');
   var q = inp ? inp.value.trim() : '';
@@ -1323,7 +1467,10 @@ async function syncReferralsFromAlbi(quickMode) {
           if (pd && !isNaN(pd.getTime()) && pd < quickCutoff) continue;
         }
         var projectId   = String(proj.id || proj.Id || '');
-        var projectCode = proj.identifier || proj.name || null;
+        // The human-readable project code (e.g. "Gray-2943-WTR") lives in
+        // the `name` field on Albi projects. `identifier` is sometimes the
+        // numeric ID, which is unreadable on the dashboard. Try name first.
+        var projectCode = proj.name || proj.identifier || null;
         if (!projectId) continue;
 
         // Revenue: per Josh — "total invoiced" maps to actualRevenue.
@@ -1391,7 +1538,14 @@ async function syncReferralsFromAlbi(quickMode) {
         if (!referrers.length) continue;
         projectsWithRef++;
 
-        // 5. Match each referrer using the hybrid strategy
+        // 5. Match each referrer using the hybrid strategy.
+        // Dedupe within the project: if both individual and organization
+        // referrer fields point to the same partner record, count it once.
+        // Prevents the double-counting we saw with single-rep partners
+        // whose name appears as both Individual and Organization in Albi.
+        var projectMatchedIds = {};
+        var projectUnmatchedKeys = {};
+
         for (var j = 0; j < referrers.length; j++) {
           var ref = referrers[j];
 
@@ -1404,7 +1558,6 @@ async function syncReferralsFromAlbi(quickMode) {
             if (refDigits && byPhone[refDigits]) {
               matchedPartner = byPhone[refDigits];
               matchMethod    = 'phone';
-              matchedByPhone++;
             }
           }
 
@@ -1413,11 +1566,24 @@ async function syncReferralsFromAlbi(quickMode) {
             matchedPartner = matchByName(ref.name);
             if (matchedPartner) {
               matchMethod = 'name';
-              matchedByName++;
             }
           }
 
-          if (!matchedPartner) referralsUnmatched++;
+          // Dedupe check — if matched, see if we've already inserted this
+          // partner for this project. If unmatched, dedupe by syntheticId.
+          if (matchedPartner) {
+            if (projectMatchedIds[matchedPartner.id]) continue;
+            projectMatchedIds[matchedPartner.id] = true;
+          } else {
+            if (projectUnmatchedKeys[ref.syntheticId]) continue;
+            projectUnmatchedKeys[ref.syntheticId] = true;
+          }
+
+          // Counter increments AFTER dedupe so they reflect actual writes
+          if (matchMethod === 'phone')      matchedByPhone++;
+          else if (matchMethod === 'name')  matchedByName++;
+          if (!matchedPartner)              referralsUnmatched++;
+
           var partnerId = matchedPartner ? matchedPartner.id : null;
 
           // 6. Upsert
@@ -1681,6 +1847,16 @@ function renderPartnerList() {
   if (!listEl) { render(); return; }
   var fp = filteredPartners();
 
+  // Build referral count lookup from albi_referrals (source of truth).
+  // Same pattern as the partners-tab render — kept local here so this
+  // partial render path stays consistent without a global state coupling.
+  var _refsByPartner = {};
+  (ST.albiReferrals || []).forEach(function(r){
+    if (!r.referrer_partner_id) return;
+    if (!_refsByPartner[r.referrer_partner_id]) _refsByPartner[r.referrer_partner_id] = 0;
+    _refsByPartner[r.referrer_partner_id]++;
+  });
+
   // Update the hint line above the list. Kept in sync with the logic in
   // render() so typing into search doesn't make the hint disappear.
   var hintEl = document.getElementById('partner-hint');
@@ -1756,7 +1932,7 @@ function renderPartnerList() {
     h += '</div>';
     h += '<div style="text-align:right;flex-shrink:0;">';
     h += '<div style="font-size:11px;font-weight:600;color:'+(stale?'var(--danger)':'var(--muted)')+';">'+lastTouch+'</div>';
-    h += '<div style="font-size:10px;color:var(--muted);">'+(p.touch_count||0)+' touches · '+(p.referral_count||0)+' refs</div>';
+    h += '<div style="font-size:10px;color:var(--muted);">'+(p.touch_count||0)+' touches · '+(_refsByPartner[pid]||0)+' refs</div>';
     h += '</div>';
     if (!ST.selectionMode) {
       h += '<button style="padding:5px 12px;border-radius:6px;border:none;background:var(--orange);color:#fff;font-size:11px;font-weight:600;cursor:pointer;" onclick="event.stopPropagation();ST.modal=\'log-touch\';ST.selected=\''+pid+'\';render()">Log Touch</button>';
@@ -1816,6 +1992,11 @@ function _bgSignature() {
     // Touch history toggle on partner detail
     ST.touchHistoryExpanded ? 1 : 0,
     ST.refHistoryExpanded ? 1 : 0,
+    // Payout sheet state
+    ST._payoutSheetReferralId || '',
+    ST._payoutSheetEditingId || '',
+    ST._payoutSheetSaving ? 1 : 0,
+    (ST.referralPayouts || []).length,
     // Referral sync state — drives the spinner / progress UI
     ST._referralSyncing ? 1 : 0,
     ST._referralSyncProgress || '',
@@ -1894,13 +2075,27 @@ function _renderNow() {
     // records (one-off restoration jobs) are still in the database and still
     // searchable — they just don't clutter the default browse view or the stat
     // totals. A customer count could be added as a separate stat if useful.
+    // Build live referral counts from albi_referrals — the source of truth
+    // synced from Albi. The old referral_count column on sales_partners is
+    // legacy and never auto-updates. We compute on the fly so the partner
+    // list reflects what Albi actually shows.
+    var refsByPartner = {};
+    (ST.albiReferrals || []).forEach(function(r){
+      if (!r.referrer_partner_id) return;
+      if (!refsByPartner[r.referrer_partner_id]) refsByPartner[r.referrer_partner_id] = { count: 0, revenue: 0 };
+      refsByPartner[r.referrer_partner_id].count++;
+      refsByPartner[r.referrer_partner_id].revenue += parseFloat(r.project_value||0)||0;
+    });
+    function partnerRefCount(pid)   { return refsByPartner[pid] ? refsByPartner[pid].count   : 0; }
+    function partnerRefRevenue(pid) { return refsByPartner[pid] ? refsByPartner[pid].revenue : 0; }
+
     var nonCust = ST.partners.filter(function(p){ return p.type !== 'Customer'; });
     var refPartnerCount = nonCust.length;
     var totalPartnerCount = ST.partners.length;
     var tierA = nonCust.filter(function(p){ return p.tier === 'A'; }).length;
     var tierB = nonCust.filter(function(p){ return p.tier === 'B'; }).length;
     var tierC = nonCust.filter(function(p){ return p.tier === 'C'; }).length;
-    var totalRefs = nonCust.reduce(function(s,p){ return s + (p.referral_count||0); }, 0);
+    var totalRefs = nonCust.reduce(function(s,p){ return s + partnerRefCount(p.id); }, 0);
 
     h += '<div class="sales-stat-row">';
     // Combined Referral / Total Partners card. Two numbers in one card makes
@@ -2015,7 +2210,7 @@ function _renderNow() {
       h += '</div>';
       h += '<div style="text-align:right;flex-shrink:0;">';
       h += '<div style="font-size:11px;font-weight:600;color:' + (stale ? 'var(--danger)' : 'var(--muted)') + ';">' + lastTouch + '</div>';
-      h += '<div style="font-size:10px;color:var(--muted);">' + (p.touch_count||0) + ' touches · ' + (p.referral_count||0) + ' refs</div>';
+      h += '<div style="font-size:10px;color:var(--muted);">' + (p.touch_count||0) + ' touches · ' + partnerRefCount(pid) + ' refs</div>';
       h += '</div>';
       if (!ST.selectionMode) {
         h += '<button style="padding:5px 12px;border-radius:6px;border:none;background:var(--orange);color:#fff;font-size:11px;font-weight:600;cursor:pointer;" onclick="event.stopPropagation();ST.modal=\'log-touch\';ST.selected=\'' + pid + '\';render()">Log Touch</button>';
@@ -3063,6 +3258,92 @@ function _buildModalHtml() {
       mh += '</div>';
     }
 
+    // Referral payout sheet — opened by clicking a row in Referred Jobs
+    // on a partner card. Shows existing payouts (edit/delete) + an
+    // Add/Edit form. Anyone can log a payout.
+    if (ST.modal === 'referral-payouts') {
+      var refId = ST._payoutSheetReferralId;
+      var ref = (ST.albiReferrals || []).find(function(r){ return r.id === refId; });
+      if (!ref) {
+        mh += '<div style="padding:20px;color:var(--danger);">Referral not found. Refresh and try again.</div>';
+        mh += '<div style="display:flex;justify-content:flex-end;margin-top:14px;">';
+        mh += '<button style="padding:8px 20px;border-radius:6px;border:1.5px solid var(--border);background:transparent;font-size:12px;cursor:pointer;font-family:DM Sans,sans-serif;" onclick="ST.modal=null;ST._payoutSheetReferralId=null;render()">Close</button>';
+        mh += '</div>';
+      } else {
+        var partner = ST.partners.find(function(x){ return x.id === ref.referrer_partner_id; });
+        var existing = (ST.referralPayouts || []).filter(function(po){ return po.albi_referral_id === refId; });
+        existing.sort(function(a,b){ return (b.paid_date||'').localeCompare(a.paid_date||''); });
+        var paidTotal = existing.reduce(function(s,p){ return s + (parseFloat(p.amount||0)||0); }, 0);
+        var jobInvoiced = parseFloat(ref.project_value||0)||0;
+
+        mh += '<div class="modal-title">💰 Referral Payouts</div>';
+
+        // Header with referral context
+        mh += '<div style="background:rgba(13,45,94,.06);border-radius:8px;padding:12px 14px;margin-bottom:14px;">';
+        mh += '<div style="font-size:13px;font-weight:700;color:var(--navy);">' + _ve(ref.albi_project_code || ref.albi_project_id || '—') + '</div>';
+        if (partner) mh += '<div style="font-size:12px;color:var(--muted);margin-top:2px;">Referred by <strong>' + _ve(partner.name) + '</strong>' + (partner.company ? ' (' + _ve(partner.company) + ')' : '') + '</div>';
+        mh += '<div style="display:flex;gap:14px;margin-top:6px;font-size:11px;">';
+        mh += '<span style="color:var(--ok);">Job invoiced: <strong>$' + Math.round(jobInvoiced).toLocaleString() + '</strong></span>';
+        mh += '<span style="color:var(--orange);">Total paid out: <strong>$' + Math.round(paidTotal).toLocaleString() + '</strong></span>';
+        mh += '</div>';
+        mh += '</div>';
+
+        // Existing payouts list
+        mh += '<div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;margin-bottom:6px;">Payout History (' + existing.length + ')</div>';
+        if (existing.length === 0) {
+          mh += '<div style="font-size:12px;color:var(--muted);padding:10px 0;font-style:italic;">No payouts logged yet for this referral.</div>';
+        } else {
+          existing.forEach(function(po){
+            var isEditing = ST._payoutSheetEditingId === po.id;
+            var bg = isEditing ? 'rgba(232,93,4,.06)' : 'rgba(46,125,50,.04)';
+            var border = isEditing ? '1.5px solid var(--orange)' : '1px solid var(--border)';
+            mh += '<div style="background:' + bg + ';border:' + border + ';border-radius:6px;padding:10px 12px;margin-bottom:6px;">';
+            mh += '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">';
+            mh += '<span style="font-size:14px;font-weight:800;color:var(--ok);">$' + Math.round(po.amount).toLocaleString() + '</span>';
+            mh += '<span style="font-size:11px;color:var(--muted);">' + (po.paid_date ? fmtDate(po.paid_date) : '—') + '</span>';
+            if (po.payment_method) mh += '<span style="font-size:11px;background:rgba(13,45,94,.08);color:var(--navy);padding:1px 7px;border-radius:4px;">' + _ve(po.payment_method) + '</span>';
+            mh += '<span style="margin-left:auto;display:flex;gap:6px;">';
+            mh += '<button onclick="editPayout(\'' + po.id + '\')" style="padding:3px 10px;border-radius:4px;border:1px solid var(--border);background:var(--surface);font-size:10px;color:var(--navy);cursor:pointer;font-family:DM Sans,sans-serif;">Edit</button>';
+            mh += '<button onclick="deletePayout(\'' + po.id + '\')" style="padding:3px 10px;border-radius:4px;border:1px solid rgba(192,32,32,.4);background:var(--surface);font-size:10px;color:var(--danger);cursor:pointer;font-family:DM Sans,sans-serif;">Delete</button>';
+            mh += '</span>';
+            mh += '</div>';
+            if (po.notes) mh += '<div style="font-size:11px;color:var(--txt);margin-top:4px;line-height:1.45;">' + _ve(po.notes) + '</div>';
+            if (po.paid_by_name) mh += '<div style="font-size:10px;color:var(--muted);margin-top:3px;">Logged by ' + _ve(po.paid_by_name) + '</div>';
+            mh += '</div>';
+          });
+        }
+
+        // Add / Edit form
+        var isEditing = !!ST._payoutSheetEditingId;
+        var formTitle = isEditing ? '✏️ Edit Payout' : '+ Log a Payout';
+        mh += '<div style="margin-top:14px;border-top:1.5px solid var(--border);padding-top:14px;">';
+        mh += '<div style="font-size:12px;font-weight:700;color:var(--navy);margin-bottom:8px;">' + formTitle + '</div>';
+        mh += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px;">';
+        mh += '<div><label style="font-size:10px;color:var(--muted);font-weight:600;display:block;margin-bottom:3px;">AMOUNT *</label>';
+        mh += '<input id="po-amount" type="number" step="0.01" min="0" placeholder="50.00" style="width:100%;padding:8px 10px;border:1.5px solid var(--border);border-radius:6px;font-size:13px;font-family:DM Sans,sans-serif;"></div>';
+        mh += '<div><label style="font-size:10px;color:var(--muted);font-weight:600;display:block;margin-bottom:3px;">PAID ON *</label>';
+        mh += '<input id="po-date" type="date" value="' + new Date().toISOString().slice(0,10) + '" style="width:100%;padding:8px 10px;border:1.5px solid var(--border);border-radius:6px;font-size:13px;font-family:DM Sans,sans-serif;"></div>';
+        mh += '</div>';
+        mh += '<div style="margin-bottom:10px;"><label style="font-size:10px;color:var(--muted);font-weight:600;display:block;margin-bottom:3px;">METHOD</label>';
+        mh += '<input id="po-method" placeholder="Check #, Cash, Venmo, Gift card, etc." style="width:100%;padding:8px 10px;border:1.5px solid var(--border);border-radius:6px;font-size:13px;font-family:DM Sans,sans-serif;"></div>';
+        mh += '<div style="margin-bottom:10px;"><label style="font-size:10px;color:var(--muted);font-weight:600;display:block;margin-bottom:3px;">NOTES</label>';
+        mh += '<textarea id="po-notes" rows="2" placeholder="Optional context" style="width:100%;padding:8px 10px;border:1.5px solid var(--border);border-radius:6px;font-size:13px;font-family:DM Sans,sans-serif;resize:vertical;"></textarea></div>';
+
+        mh += '<div style="display:flex;gap:8px;">';
+        var saving = ST._payoutSheetSaving;
+        if (isEditing) {
+          mh += '<button onclick="cancelPayoutEdit()" style="padding:9px 16px;border-radius:6px;border:1.5px solid var(--border);background:transparent;font-size:12px;cursor:pointer;font-family:DM Sans,sans-serif;">Cancel Edit</button>';
+        }
+        mh += '<button onclick="savePayout(\'' + refId + '\')"' + (saving?' disabled':'') + ' style="flex:1;padding:9px 18px;border-radius:6px;border:none;background:var(--orange);color:#fff;font-size:13px;font-weight:700;cursor:pointer;font-family:DM Sans,sans-serif;">' + (saving ? '⏳ Saving...' : (isEditing ? 'Save Changes' : '💰 Log Payout')) + '</button>';
+        mh += '</div></div>';
+
+        // Close link
+        mh += '<div style="margin-top:14px;text-align:center;">';
+        mh += '<button style="padding:8px 20px;border-radius:6px;border:1.5px solid var(--border);background:transparent;font-size:12px;cursor:pointer;font-family:DM Sans,sans-serif;" onclick="ST.modal=\'partner-detail\';ST.selected=\'' + (ref.referrer_partner_id||'') + '\';ST._payoutSheetReferralId=null;ST._payoutSheetEditingId=null;render()">← Back to Partner</button>';
+        mh += '</div>';
+      }
+    }
+
     if (ST.modal === 'log-touch') {
       var selP = ST.selected ? ST.partners.find(function(p){ return p.id === ST.selected; }) : null;
       mh += '<div class="modal-title">📋 Log Touch</div>';
@@ -3294,16 +3575,25 @@ function _buildModalHtml() {
           visibleRefs.forEach(function(r){
             var pv  = parseFloat(r.project_value||0)||0;
             var pp  = parseFloat(r.project_paid ||0)||0;
-            mh += '<div style="padding:8px 0;border-bottom:1px solid var(--border);">';
+            // Sum payouts already logged for this referral
+            var rowPayouts = (ST.referralPayouts||[]).filter(function(po){ return po.albi_referral_id === r.id; });
+            var paidOutTotal = rowPayouts.reduce(function(s,po){ return s + (parseFloat(po.amount||0)||0); }, 0);
+            mh += '<div onclick="openReferralPayouts(\'' + r.id + '\')" style="padding:8px 10px;margin:0 -10px;border-bottom:1px solid var(--border);cursor:pointer;border-radius:4px;" onmouseover="this.style.background=\'rgba(232,93,4,.04)\'" onmouseout="this.style.background=\'transparent\'">';
             mh += '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">';
             mh += '<span style="font-size:11px;font-weight:700;padding:1px 7px;border-radius:4px;background:rgba(13,45,94,.08);color:var(--navy);">' + _ve(r.albi_project_code||r.albi_project_id||'—') + '</span>';
             if (r.referral_source) mh += '<span style="font-size:10px;color:var(--muted);font-weight:600;">' + _ve(r.referral_source) + '</span>';
             if (r.project_status)  mh += '<span style="font-size:10px;color:var(--muted);">· ' + _ve(r.project_status) + '</span>';
             mh += '<span style="font-size:10px;color:var(--muted);margin-left:auto;">' + (r.project_created_date ? fmtDate(r.project_created_date) : '—') + '</span>';
             mh += '</div>';
-            mh += '<div style="display:flex;gap:14px;margin-top:3px;font-size:11px;">';
+            mh += '<div style="display:flex;gap:14px;margin-top:3px;font-size:11px;align-items:center;">';
             mh += '<span style="color:var(--ok);font-weight:700;">$' + Math.round(pv).toLocaleString() + ' invoiced</span>';
             mh += '<span style="color:var(--muted);">$' + Math.round(pp).toLocaleString() + ' paid</span>';
+            // Payout badge — only shows when something has been paid out
+            if (paidOutTotal > 0) {
+              mh += '<span style="background:rgba(232,93,4,.1);color:var(--orange);font-weight:700;padding:2px 8px;border-radius:4px;">💰 $' + Math.round(paidOutTotal).toLocaleString() + ' paid out</span>';
+            } else {
+              mh += '<span style="color:var(--muted);font-size:10px;font-style:italic;">click to log payout</span>';
+            }
             mh += '</div>';
             mh += '</div>';
           });
