@@ -1052,6 +1052,102 @@ function findDuplicateGroups() {
 }
 function openModal(name){ST.modal=name;ST.selected=null;render();}
 function importAlbi(){ST.modal=null;importFromAlbi();}
+// Diagnostic: pulls projects from Albi and shows every numeric/revenue field
+// on the matching project. Used to figure out which field actually contains
+// the billed/invoiced amount (vs the estimate). Once we know, we update the
+// sync to use the right field.
+async function inspectProject() {
+  var inp = document.getElementById('inspectInput');
+  var q = inp ? inp.value.trim() : '';
+  if (!q) return;
+  ST._inspectQuery = q;
+  ST._inspectResult = '<div style="color:var(--muted);">⏳ Searching...</div>';
+  render();
+
+  try {
+    // We have to scan pages — the proxy doesn't let us query by ID directly.
+    // Look through up to 30 pages for a project where id, identifier, or
+    // name matches the query.
+    var found = null;
+    var qLower = q.toLowerCase();
+    for (var page = 1; page <= 30 && !found; page++) {
+      var url = 'https://jg-proxy-v2.vercel.app/api/albi?location=' +
+                encodeURIComponent(ST.market) + '&pageSize=100&page=' + page;
+      var r = await fetch(url);
+      if (!r.ok) throw new Error('Proxy returned ' + r.status);
+      var data = await r.json();
+      var projects = data.Items || data.items || data.projects || data.data || (Array.isArray(data) ? data : []);
+      if (!projects.length) break;
+      for (var i = 0; i < projects.length; i++) {
+        var p = projects[i];
+        if (String(p.id) === q ||
+            String(p.identifier || '').toLowerCase() === qLower ||
+            String(p.name || '').toLowerCase().indexOf(qLower) !== -1) {
+          found = p;
+          break;
+        }
+      }
+      if (projects.length < 100) break;
+    }
+
+    if (!found) {
+      ST._inspectResult = '<div style="color:var(--danger);">No project found matching "' + _ve(q) + '" in ' + ST.market + '. Try the other market or check the code.</div>';
+      render();
+      return;
+    }
+
+    // Render ALL fields, but highlight numeric/revenue-looking ones at the top.
+    var revenueKeys = [];
+    var otherKeys = [];
+    Object.keys(found).forEach(function(k){
+      var v = found[k];
+      // Numeric or revenue-named keys at the top
+      if (typeof v === 'number' ||
+          /revenue|amount|total|cost|expense|profit|margin|paid|billed|cogs|tax|deductible|gross/i.test(k)) {
+        revenueKeys.push(k);
+      } else {
+        otherKeys.push(k);
+      }
+    });
+
+    var html = '<div style="background:rgba(46,125,50,.06);border:1px solid rgba(46,125,50,.3);padding:8px 12px;border-radius:6px;margin-bottom:10px;font-size:11px;color:var(--ok);">';
+    html += '✓ Found project <strong>' + _ve(found.identifier || found.id) + '</strong> — ' + _ve(found.name || '(unnamed)') + '</div>';
+
+    html += '<div style="font-size:11px;font-weight:700;color:var(--navy);margin:8px 0 6px;text-transform:uppercase;">💰 Revenue / financial fields:</div>';
+    html += '<div style="background:#0d2d5e;color:#9fcfff;padding:10px 14px;border-radius:6px;font-family:monospace;font-size:11px;line-height:1.6;max-height:280px;overflow-y:auto;">';
+    revenueKeys.sort().forEach(function(k){
+      var v = found[k];
+      var disp = (v === null || v === undefined) ? 'null' : (typeof v === 'number' ? '$' + v.toLocaleString() : JSON.stringify(v));
+      html += '<div><span style="color:#ffb84d;">' + _ve(k) + '</span> = ' + _ve(disp) + '</div>';
+    });
+    html += '</div>';
+
+    html += '<div style="font-size:10px;color:var(--muted);margin-top:8px;line-height:1.5;">After you see this, tell me which field name represents the truly-billed amount. I\'ll update the sync to use that field.</div>';
+
+    // Hide the long list of other fields behind a toggle so the panel doesn't
+    // overwhelm the page. Most diagnoses won't need them.
+    if (otherKeys.length) {
+      html += '<details style="margin-top:8px;"><summary style="cursor:pointer;font-size:11px;color:var(--muted);">+ Show other ' + otherKeys.length + ' fields</summary>';
+      html += '<div style="background:#0d2d5e;color:#9fcfff;padding:10px 14px;border-radius:6px;font-family:monospace;font-size:11px;line-height:1.6;max-height:280px;overflow-y:auto;margin-top:6px;">';
+      otherKeys.sort().forEach(function(k){
+        var v = found[k];
+        var disp = (v === null || v === undefined) ? 'null' :
+                   (typeof v === 'object' ? JSON.stringify(v) :
+                    typeof v === 'string' && v.length > 100 ? v.slice(0, 100) + '…' :
+                    JSON.stringify(v));
+        html += '<div><span style="color:#9fcfff;">' + _ve(k) + '</span> = ' + _ve(disp) + '</div>';
+      });
+      html += '</div></details>';
+    }
+
+    ST._inspectResult = html;
+    render();
+  } catch(err) {
+    ST._inspectResult = '<div style="color:var(--danger);">Error: ' + _ve(err.message || err) + '</div>';
+    render();
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // REFERRAL SYNC FROM ALBI
 // ─────────────────────────────────────────────────────────────────────────
@@ -1668,7 +1764,11 @@ function _bgSignature() {
     ST.touchHistoryExpanded ? 1 : 0,
     // Referral sync state — drives the spinner / progress UI
     ST._referralSyncing ? 1 : 0,
-    ST._referralSyncProgress || ''
+    ST._referralSyncProgress || '',
+    // Inspector panel toggle
+    ST._showInspector ? 1 : 0,
+    ST._inspectResult || '',
+    ST.referralYear || 'all'
   ].join('|');
 }
 
@@ -2228,14 +2328,41 @@ function _renderNow() {
     var refs = ST.albiReferrals || [];
 
     // Filter to current market — referrals where the project is in this market.
-    // Doesn't use repMatchesMarket because referrals belong to projects, not reps.
-    var marketRefs = refs.filter(function(r){ return r.market === ST.market; });
+    var marketRefs_all = refs.filter(function(r){ return r.market === ST.market; });
+
+    // Build the set of years present in the data, plus year totals for
+    // the YoY comparison panel. Year is derived from project_created_date.
+    var yearTotals = {};  // year → { invoiced, paid, count }
+    marketRefs_all.forEach(function(r){
+      var y = (r.project_created_date || '').slice(0, 4);
+      if (!y) return;
+      if (!yearTotals[y]) yearTotals[y] = { invoiced: 0, paid: 0, count: 0 };
+      yearTotals[y].invoiced += parseFloat(r.project_value || 0) || 0;
+      yearTotals[y].paid     += parseFloat(r.project_paid  || 0) || 0;
+      yearTotals[y].count++;
+    });
+    var years = Object.keys(yearTotals).sort().reverse();  // newest first
+
+    // Year selector default: 'all' = no filter. Dropdown lets user pick a
+    // specific year to drill into.
+    if (!ST.referralYear) ST.referralYear = 'all';
+
+    // Apply the year filter to get the working set for the leaderboard
+    var marketRefs = marketRefs_all;
+    if (ST.referralYear !== 'all') {
+      marketRefs = marketRefs.filter(function(r){
+        return (r.project_created_date || '').slice(0, 4) === ST.referralYear;
+      });
+    }
 
     // ── Status panel ──
     h += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">';
     h += '<div style="font-size:13px;font-weight:700;color:var(--navy);">⭐ Referral Tracking — ' + ST.market + '</div>';
     var syncing = ST._referralSyncing ? true : false;
+    h += '<div style="display:flex;gap:8px;align-items:center;">';
+    h += '<button onclick="ST._showInspector=!ST._showInspector;render()" style="padding:8px 14px;border-radius:8px;border:1.5px solid var(--border);background:var(--surface);color:var(--navy);font-size:12px;font-weight:600;cursor:pointer;font-family:DM Sans,sans-serif;">🔬 Inspect a Project</button>';
     h += '<button class="btn btn-gold" onclick="syncReferralsFromAlbi()"' + (syncing?' disabled':'') + '>' + (syncing?'⏳ Syncing...':'🔄 Sync from Albi') + '</button>';
+    h += '</div>';
     h += '</div>';
 
     // Last sync info — pulled from albi_referral_sync_log
@@ -2254,6 +2381,23 @@ function _renderNow() {
       h += '</div>';
     } else {
       h += '<div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:16px;font-size:12px;color:var(--muted);text-align:center;">No sync runs yet. Click "🔄 Sync from Albi" to pull referral data for the first time.</div>';
+    }
+
+    // Project Inspector — diagnostic tool for figuring out which Albi field
+    // contains the right revenue number. Shows all numeric fields on a single
+    // project so we can identify the truly-billed amount vs estimate.
+    if (ST._showInspector) {
+      h += '<div style="background:var(--surface);border:1.5px solid var(--orange);border-radius:10px;padding:14px 18px;margin-bottom:16px;">';
+      h += '<div style="font-size:12px;font-weight:700;color:var(--navy);margin-bottom:10px;">🔬 Project Field Inspector</div>';
+      h += '<div style="font-size:11px;color:var(--muted);margin-bottom:10px;line-height:1.5;">Type a project code (like "Gray-2943-WTR") or numeric Albi ID and click Inspect. Shows every numeric/revenue field on that project so we can identify which one is the billed amount.</div>';
+      h += '<div style="display:flex;gap:8px;align-items:center;">';
+      h += '<input id="inspectInput" placeholder="Project code or ID (e.g. Gray-2943-WTR or 1654306)" style="flex:1;padding:8px 12px;border-radius:6px;border:1.5px solid var(--border);font-size:13px;font-family:DM Sans,sans-serif;" value="' + (ST._inspectQuery || '').replace(/"/g, '&quot;') + '">';
+      h += '<button onclick="inspectProject()" style="padding:8px 18px;border-radius:6px;border:none;background:var(--orange);color:#fff;font-size:12px;font-weight:700;cursor:pointer;font-family:DM Sans,sans-serif;">Inspect →</button>';
+      h += '</div>';
+      if (ST._inspectResult) {
+        h += '<div style="margin-top:14px;font-size:12px;">' + ST._inspectResult + '</div>';
+      }
+      h += '</div>';
     }
 
     // Live progress indicator while running
@@ -2320,6 +2464,37 @@ function _renderNow() {
     h += '<div class="sales-stat"><div class="sales-stat-val">' + sorted.length + '</div><div class="sales-stat-lbl">Distinct Referrers</div></div>';
     h += '<div class="sales-stat"><div class="sales-stat-val" style="color:var(--orange);">' + (totalReferrals - matchedCount) + '</div><div class="sales-stat-lbl">Unmatched</div></div>';
     h += '</div>';
+
+    // ── Year-over-year comparison ──
+    // Always shows the totals across years even when filtered. Click a year
+    // card to drill into that year. Click "All Years" to clear the filter.
+    if (years.length > 0) {
+      h += '<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px 16px;margin-bottom:16px;">';
+      h += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">';
+      h += '<div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;">📅 Year-over-Year</div>';
+      h += '<div style="font-size:11px;color:var(--muted);">';
+      if (ST.referralYear !== 'all') {
+        h += 'Filtered to: <strong style="color:var(--orange);">' + _ve(ST.referralYear) + '</strong> · ';
+      }
+      h += '<a href="#" onclick="event.preventDefault();ST.referralYear=\'all\';render();" style="color:var(--orange);font-weight:700;text-decoration:none;">' + (ST.referralYear === 'all' ? 'Showing all years' : 'Show all years →') + '</a>';
+      h += '</div>';
+      h += '</div>';
+      h += '<div style="display:flex;gap:10px;flex-wrap:wrap;">';
+      // Show up to last 5 years; click to drill in
+      years.slice(0, 5).forEach(function(y){
+        var yt = yearTotals[y];
+        var isActive = ST.referralYear === y;
+        var bg = isActive ? 'rgba(232,93,4,.08)' : 'rgba(13,45,94,.04)';
+        var border = isActive ? '1.5px solid var(--orange)' : '1px solid var(--border)';
+        h += '<div onclick="ST.referralYear=\'' + y + '\';render();" style="cursor:pointer;flex:1;min-width:140px;background:' + bg + ';border:' + border + ';border-radius:8px;padding:10px 14px;">';
+        h += '<div style="font-size:18px;font-weight:800;color:var(--navy);">' + y + '</div>';
+        h += '<div style="font-size:13px;font-weight:700;color:var(--ok);margin-top:2px;">$' + Math.round(yt.invoiced).toLocaleString() + '</div>';
+        h += '<div style="font-size:10px;color:var(--muted);margin-top:1px;">' + yt.count + ' referrals · $' + Math.round(yt.paid).toLocaleString() + ' paid</div>';
+        h += '</div>';
+      });
+      h += '</div>';
+      h += '</div>';
+    }
 
     // ── Source category breakdown ──
     // Useful at the top of the page to show what kinds of referrers drive
