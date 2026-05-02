@@ -2794,13 +2794,37 @@ function _renderNow() {
     // we compare to that prior year's TOTALS even if today is mid-year —
     // the user can interpret "$1.2M YTD vs $4.5M last year" themselves.
     // We don't try to be clever and pro-rate, because that hides truth.
+    // YoY comparison: compute the prior-year totals for the SAME slice of
+    // calendar so the deltas are apples-to-apples. If we're looking at the
+    // current year (partial — e.g., Jan 1 to May 2), compare to Jan 1–May 2
+    // of the prior year. If we're looking at a complete past year (e.g.,
+    // 2025), compare to all of the year before (2024). This avoids the
+    // misleading "down 77%" you see when comparing 4 months against 12.
     var priorReferrals = null;
     var priorRevenue   = null;
     var priorReferrerCount = null;
+    var ytdMode        = false;  // drives the label rendering ("vs 2025 YTD" not "vs 2025")
     if (ST.referralYear !== 'all') {
-      var priorYearStr = String(parseInt(ST.referralYear, 10) - 1);
+      var selectedYearNum = parseInt(ST.referralYear, 10);
+      var priorYearNum    = selectedYearNum - 1;
+      var priorYearStr    = String(priorYearNum);
+      var currentYearNum  = new Date().getFullYear();
+      // If selected year is the CURRENT calendar year, use a YTD cutoff
+      // matching today's month/day. Otherwise compare full year to full year.
+      var monthDayCutoff = null;
+      if (selectedYearNum === currentYearNum) {
+        ytdMode = true;
+        var t = new Date();
+        // 'MM-DD' string; comparing slice(5,10) of YYYY-MM-DD dates
+        var mm = String(t.getMonth() + 1).padStart(2, '0');
+        var dd = String(t.getDate()).padStart(2, '0');
+        monthDayCutoff = mm + '-' + dd;
+      }
       var priorRefs = marketRefs_all.filter(function(r){
-        return (r.project_created_date || '').slice(0, 4) === priorYearStr;
+        var d = r.project_created_date || '';
+        if (d.slice(0, 4) !== priorYearStr) return false;
+        if (monthDayCutoff && d.slice(5, 10) > monthDayCutoff) return false;
+        return true;
       });
       // Apply the same rep filter to prior year for an apples-to-apples comparison
       if (ST.referralRep !== 'all') {
@@ -2834,7 +2858,7 @@ function _renderNow() {
       var color = pct >= 0 ? 'var(--ok)' : 'var(--danger)';
       var sign  = pct >= 0 ? '+' : '';
       return '<div style="font-size:10px;color:' + color + ';font-weight:700;margin-top:2px;">' +
-        arrow + ' ' + sign + Math.round(pct) + '% vs ' + (parseInt(ST.referralYear,10) - 1) + '</div>';
+        arrow + ' ' + sign + Math.round(pct) + '% vs ' + (parseInt(ST.referralYear,10) - 1) + (ytdMode ? ' YTD' : '') + '</div>';
     }
 
     h += '<div class="sales-stat-row" style="margin-bottom:16px;">';
