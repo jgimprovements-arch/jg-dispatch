@@ -2359,6 +2359,14 @@ function _renderNow() {
     if (!ST.referralYear) ST.referralYear = 'all';
     if (!ST.referralRep)  ST.referralRep  = 'all';
 
+    // Permission gate: non-admins see only their own referrals.
+    // Force the filter to their own name on every render so they can't
+    // escape it via a stale URL or memory state. Admins keep full access.
+    var _viewerIsAdmin = isAdmin();
+    if (!_viewerIsAdmin) {
+      ST.referralRep = currentRepName() || 'unassigned';
+    }
+
     // Build a partner_id → assigned_to lookup so we can attribute each
     // referral to the rep who owns the referring partner. Albi has no
     // sales-rep field on projects; the rep relationship lives on the
@@ -2385,16 +2393,21 @@ function _renderNow() {
 
     // ── Status panel ──
     h += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">';
-    h += '<div style="font-size:13px;font-weight:700;color:var(--navy);">⭐ Referral Tracking — ' + ST.market + '</div>';
+    var headerLabel = _viewerIsAdmin
+      ? '⭐ Referral Tracking — ' + ST.market
+      : '⭐ My Referrals — ' + (currentRepName() || 'You');
+    h += '<div style="font-size:13px;font-weight:700;color:var(--navy);">' + headerLabel + '</div>';
     var syncing = ST._referralSyncing ? true : false;
     h += '<div style="display:flex;gap:8px;align-items:center;">';
-    h += '<button onclick="ST._showInspector=!ST._showInspector;render()" style="padding:8px 14px;border-radius:8px;border:1.5px solid var(--border);background:var(--surface);color:var(--navy);font-size:12px;font-weight:600;cursor:pointer;font-family:DM Sans,sans-serif;">🔬 Inspect a Project</button>';
-    h += '<button class="btn btn-gold" onclick="syncReferralsFromAlbi()"' + (syncing?' disabled':'') + '>' + (syncing?'⏳ Syncing...':'🔄 Sync from Albi') + '</button>';
+    if (_viewerIsAdmin) {
+      h += '<button onclick="ST._showInspector=!ST._showInspector;render()" style="padding:8px 14px;border-radius:8px;border:1.5px solid var(--border);background:var(--surface);color:var(--navy);font-size:12px;font-weight:600;cursor:pointer;font-family:DM Sans,sans-serif;">🔬 Inspect a Project</button>';
+      h += '<button class="btn btn-gold" onclick="syncReferralsFromAlbi()"' + (syncing?' disabled':'') + '>' + (syncing?'⏳ Syncing...':'🔄 Sync from Albi') + '</button>';
+    }
     h += '</div>';
     h += '</div>';
 
-    // Last sync info — pulled from albi_referral_sync_log
-    if (ST.lastSyncLog) {
+    // Last sync info — admin only. Reps don't need to see ops detail.
+    if (_viewerIsAdmin && ST.lastSyncLog) {
       var ls = ST.lastSyncLog;
       var when = ls.started_at ? new Date(ls.started_at) : null;
       var whenStr = when ? when.toLocaleString() : 'never';
@@ -2407,7 +2420,7 @@ function _renderNow() {
       if (ls.referrals_unmatched) h += ' · <span style="color:var(--orange);">' + ls.referrals_unmatched + ' unmatched</span>';
       if (ls.error_message) h += '<div style="margin-top:6px;color:var(--danger);font-family:monospace;">' + _ve(ls.error_message) + '</div>';
       h += '</div>';
-    } else {
+    } else if (_viewerIsAdmin) {
       h += '<div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:16px;font-size:12px;color:var(--muted);text-align:center;">No sync runs yet. Click "🔄 Sync from Albi" to pull referral data for the first time.</div>';
     }
 
@@ -2551,7 +2564,9 @@ function _renderNow() {
       }
     });
     var repList = Object.values(byRep).sort(function(a,b){ return b.invoiced - a.invoiced; });
-    if (repList.length > 0 || unassignedRep.count > 0) {
+    // The rep-selector panel is admin-only. Reps don't see siblings' totals
+    // or have any way to switch off their own view — they're auto-pinned.
+    if (_viewerIsAdmin && (repList.length > 0 || unassignedRep.count > 0)) {
       h += '<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px 16px;margin-bottom:16px;">';
       h += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">';
       h += '<div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;">👥 By Sales Rep</div>';
@@ -2653,7 +2668,7 @@ function _renderNow() {
     // Unmatched referrers section — these are partners in Albi who referred
     // jobs but don't yet exist in sales_partners. Surface them so reps can
     // add them. Often a quick win for the partner book.
-    if (unmatchedAgg.count > 0) {
+    if (_viewerIsAdmin && unmatchedAgg.count > 0) {
       var unmatchedList = Object.keys(unmatchedAgg.names)
         .map(function(n){ return { name: n, count: unmatchedAgg.names[n] }; })
         .sort(function(a,b){ return b.count - a.count; })
