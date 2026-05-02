@@ -946,29 +946,90 @@
   }
 
   /* ─── Documents tab ─── */
-  .doc-groups { display: flex; flex-direction: column; gap: 14px; padding: 4px 0; }
-  .doc-group { background: var(--card); border: 1px solid var(--line); border-radius: 8px; }
-  .doc-group-head {
-    display: flex; align-items: center; justify-content: space-between;
-    padding: 12px 16px; border-bottom: 1px solid var(--line);
+  .doc-recent {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 12px 16px;
+    margin-bottom: 16px;
   }
-  .doc-group-head h4 {
-    margin: 0; font-size: 13px; color: var(--navy);
-    text-transform: uppercase; letter-spacing: .4px; font-weight: 700;
-    display: flex; align-items: center; gap: 8px;
+  .doc-recent-head {
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: .4px;
+    margin-bottom: 10px;
   }
-  .doc-group-head .doc-count {
-    background: var(--bg); color: var(--muted); font-size: 11px;
-    padding: 2px 8px; border-radius: 10px; font-weight: 600;
+  .doc-recent-list {
+    display: flex;
+    gap: 10px;
+    overflow-x: auto;
+    padding-bottom: 4px;
   }
-  .doc-group-head .btn { font-size: 11px; padding: 5px 11px; }
+  .doc-recent-card {
+    flex: 0 0 130px;
+    text-decoration: none;
+    color: inherit;
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    overflow: hidden;
+    transition: transform .15s, border-color .15s;
+  }
+  .doc-recent-card:hover { transform: translateY(-2px); border-color: var(--orange); }
+  .doc-recent-card img { width: 100%; height: 80px; object-fit: cover; display: block; }
+  .doc-recent-icon { width: 100%; height: 80px; display: flex; align-items: center; justify-content: center; font-size: 32px; background: #fff; }
+  .doc-recent-name { padding: 6px 8px 0; font-size: 11px; font-weight: 600; color: var(--navy); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .doc-recent-cat { padding: 1px 8px 8px; font-size: 10px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .doc-folder-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 12px;
+  }
+  .doc-folder {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 22px 16px 18px;
+    text-align: center;
+    cursor: pointer;
+    transition: all .15s;
+  }
+  .doc-folder:hover {
+    border-color: var(--orange);
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(232,93,4,.1);
+  }
+  .doc-folder-icon { font-size: 42px; line-height: 1; margin-bottom: 10px; }
+  .doc-folder-name { font-size: 13px; font-weight: 700; color: var(--navy); margin-bottom: 4px; }
+  .doc-folder-count { font-size: 11px; color: var(--muted); }
+  .doc-list {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+  }
+  .doc-list .doc-row { border-bottom: 1px solid var(--line); }
+  .doc-list .doc-row:last-child { border-bottom: 0; }
+  .dpk-item:hover { background: var(--bg); }
   .doc-row {
     display: flex; align-items: center; gap: 12px;
     padding: 10px 16px; border-bottom: 1px solid var(--line);
   }
   .doc-row:last-child { border-bottom: 0; }
   .doc-row:hover { background: var(--bg); }
-  .doc-row .doc-icon { font-size: 22px; flex-shrink: 0; }
+  .doc-row .doc-icon { font-size: 22px; flex-shrink: 0; width: 56px; text-align: center; }
+  .doc-row .doc-thumb {
+    width: 56px;
+    height: 56px;
+    object-fit: cover;
+    border-radius: 5px;
+    border: 1px solid var(--line);
+    flex-shrink: 0;
+    cursor: pointer;
+    transition: transform .15s;
+  }
+  .doc-row .doc-thumb:hover { transform: scale(1.04); border-color: var(--orange); }
   .doc-row .doc-info { flex: 1; min-width: 0; }
   .doc-row .doc-name { color: var(--navy); font-weight: 600; font-size: 13px; text-decoration: none; word-break: break-word; }
   .doc-row .doc-name:hover { color: var(--orange); text-decoration: underline; }
@@ -1126,6 +1187,7 @@ const state = {
   filterStatus: 'all',
   filterPm: 'all',
   search: '',
+  docFolderOpen: null,
   pmEmail: (() => {
     try {
       const u = JSON.parse(localStorage.getItem('jg_platform_user') || 'null');
@@ -1856,31 +1918,65 @@ const DOC_CATEGORIES = [
 
 function renderDocumentsTab() {
   const docs = state.documents || [];
-  const grouped = {};
-  for (const cat of DOC_CATEGORIES) grouped[cat] = [];
-  for (const d of docs) {
-    if (grouped[d.category]) grouped[d.category].push(d);
-    else grouped[d.category] = [d]; // unknown legacy category
+  const recent = [...docs].sort((a,b) => new Date(b.uploaded_at) - new Date(a.uploaded_at)).slice(0, 5);
+
+  // Build counts per category
+  const counts = {};
+  for (const cat of DOC_CATEGORIES) counts[cat] = 0;
+  for (const d of docs) counts[d.category] = (counts[d.category] || 0) + 1;
+
+  const recentStrip = recent.length ? `
+    <div class="doc-recent">
+      <div class="doc-recent-head">Recent Uploads</div>
+      <div class="doc-recent-list">
+        ${recent.map(d => {
+          const isImage = /\.(jpg|jpeg|png|gif|webp|heic)$/i.test(d.filename);
+          const isPdf = /\.pdf$/i.test(d.filename);
+          const thumb = isImage
+            ? `<img src="${d.file_url}" loading="lazy" alt="">`
+            : `<div class="doc-recent-icon">${isPdf ? '📕' : '📄'}</div>`;
+          return `<a href="${d.file_url}" target="_blank" class="doc-recent-card" title="${d.filename}">
+            ${thumb}
+            <div class="doc-recent-name">${d.filename}</div>
+            <div class="doc-recent-cat">${d.category}</div>
+          </a>`;
+        }).join('')}
+      </div>
+    </div>` : '';
+
+  // Drill-in view
+  if (state.docFolderOpen) {
+    const cat = state.docFolderOpen;
+    const list = docs.filter(d => d.category === cat);
+    return `
+      <div class="section-head">
+        <h3><a href="#" id="docBack" style="color:var(--muted);text-decoration:none;">← Folders</a> &nbsp;/&nbsp; ${cat}</h3>
+        <button class="btn primary" data-upload-cat="${cat}">📎 Upload to ${cat}</button>
+      </div>
+      ${list.length ? `<div class="doc-list">${list.map(d => renderDocRow(d)).join('')}</div>`
+                    : '<div class="empty" style="padding:30px;color:var(--muted);">No files in this folder yet.</div>'}
+      <input type="file" id="docFileInput" multiple style="display:none;" accept="image/*,application/pdf,.doc,.docx,.xls,.xlsx,.heic">
+    `;
   }
 
-  const groupHtml = DOC_CATEGORIES.map(cat => {
-    const list = grouped[cat] || [];
-    return `
-      <div class="doc-group">
-        <div class="doc-group-head">
-          <h4>${cat} <span class="doc-count">${list.length}</span></h4>
-          <button class="btn" data-upload-cat="${cat}">📎 Upload</button>
-        </div>
-        ${list.length ? list.map(d => renderDocRow(d)).join('') : '<div class="doc-empty">No files</div>'}
-      </div>`;
-  }).join('');
-
+  // Grid view
   return `
     <div class="section-head">
       <h3>Project Documents</h3>
       <div style="font-size:11px;color:var(--muted);">Files auto-push to Albi project record</div>
     </div>
-    <div class="doc-groups">${groupHtml}</div>
+    ${recentStrip}
+    <div class="doc-folder-grid">
+      ${DOC_CATEGORIES.map(cat => {
+        const c = counts[cat] || 0;
+        return `
+          <div class="doc-folder" data-folder="${cat}">
+            <div class="doc-folder-icon">📁</div>
+            <div class="doc-folder-name">${cat}</div>
+            <div class="doc-folder-count">${c} file${c===1?'':'s'}</div>
+          </div>`;
+      }).join('')}
+    </div>
     <input type="file" id="docFileInput" multiple style="display:none;" accept="image/*,application/pdf,.doc,.docx,.xls,.xlsx,.heic">
   `;
 }
@@ -1888,6 +1984,7 @@ function renderDocumentsTab() {
 function renderDocRow(d) {
   const sizeKb = d.file_size_bytes ? (d.file_size_bytes / 1024).toFixed(0) + ' KB' : '';
   const isImage = /\.(jpg|jpeg|png|gif|webp|heic)$/i.test(d.filename);
+  const isPdf = /\.pdf$/i.test(d.filename);
   const albiBadge = d.push_status === 'sent'
     ? '<span class="albi-badge sent" title="Pushed to Albi">✓ Albi</span>'
     : d.push_status === 'failed'
@@ -1895,15 +1992,19 @@ function renderDocRow(d) {
     : d.push_status === 'skipped'
     ? '<span class="albi-badge skipped" title="Skipped">— Albi</span>'
     : '<span class="albi-badge pending" title="Pending Albi push">⏳ Albi</span>';
+  const thumb = isImage
+    ? `<a href="${d.file_url}" target="_blank"><img src="${d.file_url}" class="doc-thumb" loading="lazy" alt=""></a>`
+    : `<div class="doc-icon">${isPdf ? '📕' : '📄'}</div>`;
   return `
     <div class="doc-row" data-id="${d.id}">
-      <div class="doc-icon">${isImage ? '🖼️' : '📄'}</div>
+      ${thumb}
       <div class="doc-info">
         <a href="${d.file_url}" target="_blank" class="doc-name">${d.filename}</a>
         <div class="doc-meta">${sizeKb} · uploaded ${fmtRelative(d.uploaded_at)}${d.uploaded_by_email ? ' by ' + d.uploaded_by_email.split('@')[0] : ''}</div>
       </div>
       <div class="doc-actions">
         ${albiBadge}
+        <a class="btn" href="${d.file_url}" download="${d.filename}" title="Download">📥</a>
         ${d.push_status !== 'sent' ? `<button class="btn doc-retry" data-id="${d.id}" title="Retry Albi push">↻</button>` : ''}
         <button class="btn ghost-red doc-del" data-id="${d.id}" title="Delete">✕</button>
       </div>
@@ -1980,6 +2081,77 @@ async function pushDocumentToAlbi(doc) {
   }
   await loadDocuments();
   if (state.tab === 'documents') renderDetail();
+}
+
+function openDocPickerModal(onPick) {
+  const docs = state.documents || [];
+  let modal = document.getElementById('modalDocPicker');
+  if (!modal) {
+    modal = document.createElement('div');
+    modal.id = 'modalDocPicker';
+    modal.className = 'modal-back';
+    modal.innerHTML = `
+      <div class="modal" style="max-width:680px;">
+        <h3>Pick from Documents <button class="close" data-close>×</button></h3>
+        <div class="modal-body" id="dpkBody"></div>
+        <div class="modal-foot">
+          <span id="dpkSel" style="font-size:11px;color:var(--muted);flex:1;">0 selected</span>
+          <button class="btn" data-close>Cancel</button>
+          <button class="btn primary" id="dpkAttach">Attach Selected</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(modal);
+    modal.querySelectorAll('[data-close]').forEach(el => el.addEventListener('click', () => modal.classList.remove('on')));
+  }
+
+  const body = modal.querySelector('#dpkBody');
+  if (!docs.length) {
+    body.innerHTML = '<div class="empty" style="padding:30px;">No documents uploaded to this project yet.</div>';
+  } else {
+    // Group by category
+    const grouped = {};
+    for (const cat of DOC_CATEGORIES) grouped[cat] = [];
+    for (const d of docs) (grouped[d.category] = grouped[d.category] || []).push(d);
+    body.innerHTML = DOC_CATEGORIES.filter(c => grouped[c]?.length).map(cat => `
+      <div style="margin-bottom:14px;">
+        <div style="font-size:11px;font-weight:700;text-transform:uppercase;color:var(--muted);letter-spacing:.4px;margin-bottom:6px;">${cat}</div>
+        ${grouped[cat].map(d => {
+          const isImage = /\.(jpg|jpeg|png|gif|webp|heic)$/i.test(d.filename);
+          const isPdf = /\.pdf$/i.test(d.filename);
+          const thumb = isImage
+            ? `<img src="${d.file_url}" style="width:36px;height:36px;object-fit:cover;border-radius:4px;border:1px solid var(--line);">`
+            : `<div style="width:36px;height:36px;display:flex;align-items:center;justify-content:center;font-size:20px;background:#fff;border:1px solid var(--line);border-radius:4px;">${isPdf ? '📕' : '📄'}</div>`;
+          return `
+            <label class="dpk-item" data-id="${d.id}" style="display:flex;align-items:center;gap:10px;padding:8px;border-radius:5px;cursor:pointer;font-size:13px;">
+              <input type="checkbox" value="${d.id}" style="width:auto;margin:0;">
+              ${thumb}
+              <span style="flex:1;color:var(--navy);">${d.filename}</span>
+              <span style="font-size:11px;color:var(--muted);">${d.file_size_bytes ? (d.file_size_bytes/1024).toFixed(0) + ' KB' : ''}</span>
+            </label>`;
+        }).join('')}
+      </div>
+    `).join('');
+
+    const selCount = modal.querySelector('#dpkSel');
+    body.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.addEventListener('change', () => {
+      const n = body.querySelectorAll('input[type="checkbox"]:checked').length;
+      selCount.textContent = `${n} selected`;
+    }));
+  }
+
+  // Replace attach handler
+  const attachBtn = modal.querySelector('#dpkAttach');
+  const newBtn = attachBtn.cloneNode(true);
+  attachBtn.parentNode.replaceChild(newBtn, attachBtn);
+  newBtn.addEventListener('click', () => {
+    const ids = [...body.querySelectorAll('input:checked')].map(i => i.value);
+    const picked = docs.filter(d => ids.includes(d.id));
+    modal.classList.remove('on');
+    onPick(picked);
+  });
+
+  modal.classList.add('on');
 }
 
 async function deleteDocument(docId) {
@@ -2225,6 +2397,20 @@ function renderTabContent() {
   if (state.tab === 'documents') {
     let activeUploadCat = null;
     const fileInput = $('#docFileInput');
+
+    // Folder grid clicks → drill in
+    $$('.doc-folder').forEach(el => el.addEventListener('click', () => {
+      state.docFolderOpen = el.dataset.folder;
+      renderDetail();
+    }));
+    // Back link
+    const back = $('#docBack');
+    if (back) back.addEventListener('click', e => {
+      e.preventDefault();
+      state.docFolderOpen = null;
+      renderDetail();
+    });
+
     $$('[data-upload-cat]').forEach(btn => {
       btn.addEventListener('click', () => {
         activeUploadCat = btn.dataset.uploadCat;
@@ -2308,23 +2494,44 @@ function renderTabContent() {
     const bodyEl = $('#msg_body');
 
     state.stagedAttachments = [];
+    state.stagedDocAttachments = []; // existing docs from rebuild_documents to attach by URL
 
     const renderStaged = () => {
       if (!attachList) return;
-      if (!state.stagedAttachments.length) { attachList.innerHTML = ''; return; }
-      attachList.innerHTML = state.stagedAttachments.map((f, i) => `
+      const fileChips = state.stagedAttachments.map((f, i) => `
         <span class="msg-att-chip">
           📄 ${f.name} <span style="color:var(--muted);">(${(f.size/1024).toFixed(0)} KB)</span>
-          <span class="remove" data-i="${i}" title="Remove">✕</span>
+          <span class="remove" data-i="${i}" data-kind="file" title="Remove">✕</span>
         </span>
       `).join('');
+      const docChips = state.stagedDocAttachments.map((d, i) => `
+        <span class="msg-att-chip" style="background:#fff8ed;border:1px solid var(--gold);">
+          📁 ${d.filename} <span style="color:var(--muted);">(from Documents)</span>
+          <span class="remove" data-i="${i}" data-kind="doc" title="Remove">✕</span>
+        </span>
+      `).join('');
+      attachList.innerHTML = fileChips + docChips;
       attachList.querySelectorAll('.remove').forEach(el => {
         el.addEventListener('click', () => {
-          state.stagedAttachments.splice(parseInt(el.dataset.i), 1);
+          if (el.dataset.kind === 'doc') state.stagedDocAttachments.splice(parseInt(el.dataset.i), 1);
+          else state.stagedAttachments.splice(parseInt(el.dataset.i), 1);
           renderStaged();
         });
       });
     };
+
+    // Wire "From Documents" picker
+    const fromDocsBtn = $('#msg_from_docs_btn');
+    if (fromDocsBtn) fromDocsBtn.addEventListener('click', () => openDocPickerModal((picked) => {
+      // picked is array of doc objects {id, filename, file_url, ...}
+      for (const d of picked) {
+        if (!state.stagedDocAttachments.find(x => x.id === d.id)) {
+          state.stagedDocAttachments.push(d);
+        }
+      }
+      attachWrap.style.display = state.stagedAttachments.length || state.stagedDocAttachments.length ? 'block' : 'none';
+      renderStaged();
+    }));
 
     // Build greeting + signature based on current selection
     const buildTemplate = () => {
@@ -3616,6 +3823,7 @@ function renderMessagesTab() {
         <div class="msg-composer-foot">
           <div style="display:flex;align-items:center;gap:10px;">
             <button class="btn" id="msg_attach_btn" type="button" style="display:none;">📎 Attach files</button>
+            <button class="btn" id="msg_from_docs_btn" type="button">📁 From Documents</button>
             <span id="msg_send_info" style="font-size:11px;color:var(--muted);"></span>
           </div>
           <button class="btn primary" id="msg_send_btn">Send</button>
@@ -3771,6 +3979,22 @@ async function sendMessage() {
     }
   }
 
+  // Add docs picked from Documents tab (already public URLs, no re-upload)
+  const docAttachments = (!isInternal) ? (state.stagedDocAttachments || []) : [];
+  for (const d of docAttachments) {
+    if (inserted) {
+      await sb.from('rebuild_message_attachments').insert({
+        message_id: inserted.id,
+        file_name: d.filename,
+        file_size: d.file_size_bytes,
+        mime_type: d.mime_type,
+        storage_path: null,
+        public_url: d.file_url,
+      });
+    }
+    uploadedAttachments.push({ name: d.filename, url: d.file_url, size: d.file_size_bytes, type: d.mime_type });
+  }
+
   // Fire-and-forget to Zapier (skip for internal notes)
   if (!isInternal) {
     const payload = {
@@ -3826,6 +4050,7 @@ async function sendMessage() {
   $('#msg_body').value = '';
   if ($('#msg_subject')) $('#msg_subject').value = '';
   state.stagedAttachments = [];
+  state.stagedDocAttachments = [];
   await loadMessages();
   renderDetail();
 }
