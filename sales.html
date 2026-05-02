@@ -1055,18 +1055,21 @@ function importAlbi(){ST.modal=null;importFromAlbi();}
 // ─────────────────────────────────────────────────────────────────────────
 // REFERRAL SYNC FROM ALBI
 // ─────────────────────────────────────────────────────────────────────────
-// Pulls projects from Albi via the existing /api/albi proxy, extracts
-// "Referrer" relationships, upserts rows into albi_referrals. Runs entirely
-// from the browser — no Vercel function needed. The trade-off: this only
-// runs when a user clicks the button. For automatic nightly sync we'd need
-// the Vercel function deploy that we deferred.
+// Pulls projects from Albi via the existing /api/albi proxy. Runs from the
+// browser — no Vercel function needed.
 //
-// Idempotent: re-running is safe. The albi_referrals table has a UNIQUE
-// constraint on (albi_project_id, albi_referrer_contact_id) so dupes get
-// merged via Supabase upsert.
+// Field structure discovered via audit: Albi exposes referrer info as FLAT
+// fields on each project (not a relationships array). Two parallel sets:
+//   - referrerName / referrerPhoneNumber / referrerEmail            (individual)
+//   - referrerOrganizationName / referrerOrganizationPhoneNumber...  (company)
+// Plus a `referralSource` lookup like "Realtor", "Plumber" — categorical.
 //
-// Best-effort: per-project errors don't stop the whole sync. Counters
-// reflect what actually succeeded.
+// There's no referrerContactId field in the list response, so we match by
+// phone (deterministic) first, then by name token search (fuzzy fallback).
+// match_method column tracks how each row was linked, useful for QA.
+//
+// Idempotent — UNIQUE(albi_project_id, albi_referrer_contact_id) on the
+// table means re-running merges via upsert.
 // ─────────────────────────────────────────────────────────────────────────
 
 async function syncReferralsFromAlbi() {
@@ -1078,18 +1081,18 @@ async function syncReferralsFromAlbi() {
   var startedAt = new Date();
   var t0 = Date.now();
 
-  // 1. Open a sync log row immediately so the run is recorded even if it crashes
+  // 1. Open sync log row up front
   var logId = null;
   try {
     var logResp = await fetch(SB_URL + '/rest/v1/albi_referral_sync_log', {
       method: 'POST',
       headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=representation' },
       body: JSON.stringify({
-        started_at: startedAt.toISOString(),
-        trigger: 'manual',
-        triggered_by: (window.JG_SHARED && window.JG_SHARED.auth && window.JG_SHARED.auth.currentEmail()) || 'unknown',
-        market: ST.market,
-        status: 'running'
+        started_at:    startedAt.toISOString(),
+        trigger:       'manual',
+        triggered_by:  (window.JG_SHARED && window.JG_SHARED.auth && window.JG_SHARED.auth.currentEmail()) || 'unknown',
+        market:        ST.market,
+        status:        'running'
       })
     });
     if (logResp.ok) {
@@ -1098,40 +1101,89 @@ async function syncReferralsFromAlbi() {
     }
   } catch(e) { console.error('sync log open failed', e); }
 
-  // 2. Build partner index by albi_contact_id for O(1) lookup
-  var partnerIndex = {};
+  // 2. Build TWO partner indexes for hybrid matching:
+  //    - byPhone: digits-only phone → partner (deterministic match)
+  //    - byNameTokens: list of {tokens, partner} for fuzzy name matching
+  var byPhone = {};
+  var byNameTokens = [];
   ST.partners.forEach(function(p){
-    if (p.albi_contact_id) partnerIndex[String(p.albi_contact_id)] = p;
+    if (p.phone) {
+      var digits = String(p.phone).replace(/\D/g, '');
+      if (digits.length >= 7) byPhone[digits] = p;
+    }
+    // Build token sets from name AND company for matching against either
+    // referrerName or referrerOrganizationName
+    var names = [];
+    if (p.name)    names.push(p.name);
+    if (p.company) names.push(p.company);
+    names.forEach(function(n){
+      var toks = String(n).toLowerCase().split(/[\s\-_,&\.]+/).filter(function(t){ return t.length >= 3; });
+      if (toks.length) byNameTokens.push({ tokens: toks, partner: p });
+    });
   });
 
+  // Phone normalize helper
+  function normPhone(s) {
+    if (!s) return '';
+    var d = String(s).replace(/\D/g, '');
+    return d.length >= 7 ? d : '';
+  }
+
+  // Token match helper. Returns the best partner match or null. Best = the
+  // one whose tokens have highest overlap with the query tokens AND share
+  // the strongest distinctive token (the longest one).
+  function matchByName(refName) {
+    if (!refName) return null;
+    var qToks = String(refName).toLowerCase().split(/[\s\-_,&\.]+/).filter(function(t){ return t.length >= 3; });
+    if (!qToks.length) return null;
+
+    var bestPartner = null;
+    var bestScore   = 0;
+
+    byNameTokens.forEach(function(entry){
+      // Score: number of shared tokens, weighted by length (longer = more distinctive)
+      var score = 0;
+      entry.tokens.forEach(function(t){
+        if (qToks.indexOf(t) !== -1) score += t.length;
+      });
+      // Require at least 2 shared tokens OR one ≥6-char token to count as a match.
+      // Otherwise "Bob's Plumbing" matches "Bob Smith" on just "bob".
+      var sharedCount = entry.tokens.filter(function(t){ return qToks.indexOf(t) !== -1; }).length;
+      var hasLongShared = entry.tokens.some(function(t){ return qToks.indexOf(t) !== -1 && t.length >= 6; });
+      if (score > bestScore && (sharedCount >= 2 || hasLongShared)) {
+        bestScore = score;
+        bestPartner = entry.partner;
+      }
+    });
+
+    return bestPartner;
+  }
+
   var projectsScanned    = 0;
+  var projectsWithRef    = 0;
   var referralsInserted  = 0;
   var referralsUpdated   = 0;
+  var matchedByPhone     = 0;
+  var matchedByName      = 0;
   var referralsUnmatched = 0;
   var errorMessage       = null;
 
   try {
-    // 3. Paginate through Albi projects — proxy returns one page at a time
-    //    via /api/albi?location=X&pageSize=N&page=N. Existing proxy supports
-    //    GET only; relationships should come inline on each project record.
-    var page = 1;
+    // 3. Paginate through Albi projects via existing GET proxy
+    var page     = 1;
     var pageSize = 100;
-    var maxPages = 30;  // safety cap → 3000 projects max per sync
-    var done = false;
+    var maxPages = 30;
+    var done     = false;
 
     while (!done && page <= maxPages) {
-      ST._referralSyncProgress = '⏳ Pulling projects from Albi (page ' + page + ', ' + ST.market + ')... ' +
-        projectsScanned + ' scanned · ' + referralsInserted + ' new / ' + referralsUpdated + ' updated';
+      ST._referralSyncProgress = '⏳ Pulling page ' + page + ' (' + ST.market + ')... ' +
+        projectsScanned + ' scanned, ' + projectsWithRef + ' had referrers, ' +
+        (referralsInserted + referralsUpdated) + ' referrals saved';
       render();
 
       var url = 'https://jg-proxy-v2.vercel.app/api/albi?location=' +
                 encodeURIComponent(ST.market) + '&pageSize=' + pageSize + '&page=' + page;
-      var r;
-      try {
-        r = await fetch(url);
-      } catch(fetchErr) {
-        throw new Error('Albi proxy unreachable: ' + fetchErr.message);
-      }
+      var r = await fetch(url);
       if (!r.ok) throw new Error('Albi proxy returned ' + r.status + ' on page ' + page);
       var data = await r.json();
       var projects = data.Items || data.items || data.projects || data.data || (Array.isArray(data) ? data : []);
@@ -1139,41 +1191,92 @@ async function syncReferralsFromAlbi() {
       if (!projects.length) { done = true; break; }
       projectsScanned += projects.length;
 
-      // 4. Process each project
+      // 4. Process each project — extract flat referrer fields
       for (var i = 0; i < projects.length; i++) {
         var proj = projects[i];
-        var projectId   = String(proj.Id || proj.id || proj.ProjectId || '');
-        var projectCode = proj.JobNumber || proj.jobNumber || proj.ProjectCode || proj.projectCode || null;
-        var projectVal  = parseFloat(proj.TotalInvoiced || proj.totalInvoiced || proj.InvoiceTotal || proj.totalAmount || proj.Total || 0) || 0;
-        var projStatus  = proj.Status || proj.status || proj.ProjectStatus || null;
-        var lossType    = proj.LossType || proj.lossType || proj.Type || null;
-        var createdDate = formatAlbiDate(proj.DateCreated || proj.dateCreated || proj.CreatedDate || proj.created_at);
-        var closedDate  = formatAlbiDate(proj.DateClosed || proj.dateClosed || proj.ClosedDate || proj.closed_at);
-
+        var projectId   = String(proj.id || proj.Id || '');
+        var projectCode = proj.identifier || proj.name || null;
         if (!projectId) continue;
 
-        // 5. Extract relationships — try several field name candidates
-        var relationships = proj.Relationships || proj.relationships || proj.Contacts || proj.contacts || [];
-        if (!Array.isArray(relationships)) continue;
+        // Revenue: per Josh — "total invoiced" maps to actualRevenue.
+        // Also capture paidAmount for the collected-vs-invoiced story.
+        var actualRev   = parseFloat(proj.actualRevenue || proj.estimatedRevenue || 0) || 0;
+        var paidAmt     = parseFloat(proj.paidAmount || 0) || 0;
+        var projStatus  = proj.status || null;
+        var lossType    = proj.projectType || proj.propertyType || null;
+        var refSource   = proj.referralSource || null;  // "Realtor", "Plumber", etc.
+        var createdDate = formatAlbiDate(proj.createdAt || proj.statusDate);
+        var closedDate  = formatAlbiDate(proj.closed);
 
-        // 6. Filter to Referrer relationships only
-        for (var j = 0; j < relationships.length; j++) {
-          var rel = relationships[j];
-          var relType = String(rel.RelationshipType || rel.relationshipType || rel.Type || rel.type || rel.Role || rel.role || '').trim();
-          if (relType.toLowerCase() !== 'referrer') continue;
+        // Two possible referrer "shapes" on the project: an individual
+        // referrer OR an organization referrer. They can both be set, in
+        // which case we treat them as two distinct rows so each gets
+        // attributed independently.
+        var referrers = [];
 
-          var refContactId = String(rel.ContactId || rel.contactId || rel.OrganizationId || rel.organizationId || rel.Id || rel.id || '');
-          var refName      = rel.Name || rel.name || rel.ContactName || rel.OrganizationName || null;
-          var refPhone     = rel.Phone || rel.phone || rel.PhoneNumber || rel.phoneNumber || null;
+        // Individual referrer
+        var indName  = (proj.referrerName || proj.referrerContactName || '').trim();
+        var indPhone = (proj.referrerPhoneNumber || proj.referrerContactPhoneNumber || '').trim();
+        if (indName || indPhone) {
+          referrers.push({
+            kind:  'individual',
+            name:  indName || null,
+            phone: indPhone || null,
+            // Synthetic "contact ID" — since Albi doesn't expose one in the
+            // list response, build a stable key from the name+phone so the
+            // UNIQUE constraint can dedupe rows across sync runs. Format:
+            // "name:NormalizedName|phone:Digits" gives consistent identity.
+            syntheticId: 'ind:' + (indName||'').toLowerCase().replace(/\s+/g,'_') +
+                         (indPhone ? '|p:' + normPhone(indPhone) : '')
+          });
+        }
 
-          if (!refContactId) continue;
+        // Organization referrer
+        var orgName  = (proj.referrerOrganizationName || '').trim();
+        var orgPhone = (proj.referrerOrganizationPhoneNumber || '').trim();
+        if (orgName || orgPhone) {
+          referrers.push({
+            kind:  'organization',
+            name:  orgName || null,
+            phone: orgPhone || null,
+            syntheticId: 'org:' + (orgName||'').toLowerCase().replace(/\s+/g,'_') +
+                         (orgPhone ? '|p:' + normPhone(orgPhone) : '')
+          });
+        }
 
-          // 7. Match against sales_partners
-          var matchedPartner = partnerIndex[refContactId] || null;
-          var partnerId      = matchedPartner ? matchedPartner.id : null;
-          if (!partnerId) referralsUnmatched++;
+        if (!referrers.length) continue;
+        projectsWithRef++;
 
-          // 8. Upsert to albi_referrals
+        // 5. Match each referrer using the hybrid strategy
+        for (var j = 0; j < referrers.length; j++) {
+          var ref = referrers[j];
+
+          var matchedPartner = null;
+          var matchMethod    = 'unmatched';
+
+          // Phase 1: phone match (deterministic)
+          if (ref.phone) {
+            var refDigits = normPhone(ref.phone);
+            if (refDigits && byPhone[refDigits]) {
+              matchedPartner = byPhone[refDigits];
+              matchMethod    = 'phone';
+              matchedByPhone++;
+            }
+          }
+
+          // Phase 2: name token match (fuzzy fallback)
+          if (!matchedPartner && ref.name) {
+            matchedPartner = matchByName(ref.name);
+            if (matchedPartner) {
+              matchMethod = 'name';
+              matchedByName++;
+            }
+          }
+
+          if (!matchedPartner) referralsUnmatched++;
+          var partnerId = matchedPartner ? matchedPartner.id : null;
+
+          // 6. Upsert
           try {
             var upsertResp = await fetch(SB_URL + '/rest/v1/albi_referrals?on_conflict=albi_project_id,albi_referrer_contact_id', {
               method: 'POST',
@@ -1186,13 +1289,16 @@ async function syncReferralsFromAlbi() {
               body: JSON.stringify({
                 albi_project_id:           projectId,
                 albi_project_code:         projectCode,
-                albi_referrer_contact_id:  refContactId,
-                albi_referrer_name:        refName,
-                albi_referrer_phone:       refPhone,
+                albi_referrer_contact_id:  ref.syntheticId,
+                albi_referrer_name:        ref.name,
+                albi_referrer_phone:       ref.phone,
                 referrer_partner_id:       partnerId,
-                project_value:             projectVal,
+                project_value:             actualRev,
+                project_paid:              paidAmt,
                 project_status:            projStatus,
                 project_loss_type:         lossType,
+                referral_source:           refSource,
+                match_method:              matchMethod,
                 market:                    ST.market,
                 project_created_date:      createdDate,
                 project_closed_date:       closedDate,
@@ -1201,30 +1307,27 @@ async function syncReferralsFromAlbi() {
               })
             });
             if (upsertResp.ok) {
-              var upsertData = await upsertResp.json().catch(function(){ return []; });
-              if (Array.isArray(upsertData) && upsertData[0]) {
-                var created = new Date(upsertData[0].created_at).getTime();
-                var updated = new Date(upsertData[0].updated_at).getTime();
-                if (Math.abs(updated - created) < 5000) referralsInserted++;
+              var ud = await upsertResp.json().catch(function(){ return []; });
+              if (Array.isArray(ud) && ud[0]) {
+                var c = new Date(ud[0].created_at).getTime();
+                var u = new Date(ud[0].updated_at).getTime();
+                if (Math.abs(u - c) < 5000) referralsInserted++;
                 else referralsUpdated++;
-              } else {
-                referralsUpdated++;
-              }
+              } else referralsUpdated++;
             } else {
-              console.error('Upsert failed for project ' + projectId + ' / referrer ' + refContactId, await upsertResp.text());
+              console.error('Upsert failed:', await upsertResp.text());
             }
           } catch(upErr) {
-            console.error('Upsert error for project ' + projectId, upErr);
+            console.error('Upsert error project ' + projectId, upErr);
           }
         }
       }
 
-      // Stop paginating if we got fewer than pageSize back (last page)
       if (projects.length < pageSize) done = true;
       page++;
     }
 
-    // 9. Close the log row with success summary
+    // 7. Close the sync log
     if (logId) {
       await fetch(SB_URL + '/rest/v1/albi_referral_sync_log?id=eq.' + logId, {
         method: 'PATCH',
@@ -1241,8 +1344,10 @@ async function syncReferralsFromAlbi() {
       }).catch(function(e){ console.error('sync log close failed', e); });
     }
 
-    ST._referralSyncProgress = '✓ Sync complete · ' + projectsScanned + ' projects · ' +
-      referralsInserted + ' new · ' + referralsUpdated + ' updated · ' +
+    ST._referralSyncProgress = '✓ Sync complete · ' + projectsScanned + ' projects scanned · ' +
+      projectsWithRef + ' had referrers · ' +
+      referralsInserted + ' new + ' + referralsUpdated + ' updated · ' +
+      'matched: ' + matchedByPhone + ' by phone, ' + matchedByName + ' by name · ' +
       referralsUnmatched + ' unmatched';
 
     if (typeof showOk === 'function') showOk('✓ Referral sync complete');
@@ -1255,14 +1360,14 @@ async function syncReferralsFromAlbi() {
         method: 'PATCH',
         headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          finished_at:           new Date().toISOString(),
-          status:                'error',
-          error_message:         errorMessage,
-          projects_scanned:      projectsScanned,
-          referrals_inserted:    referralsInserted,
-          referrals_updated:     referralsUpdated,
-          referrals_unmatched:   referralsUnmatched,
-          duration_ms:           Date.now() - t0
+          finished_at:    new Date().toISOString(),
+          status:         'error',
+          error_message:  errorMessage,
+          projects_scanned:    projectsScanned,
+          referrals_inserted:  referralsInserted,
+          referrals_updated:   referralsUpdated,
+          referrals_unmatched: referralsUnmatched,
+          duration_ms:    Date.now() - t0
         })
       }).catch(function(e){ console.error('sync log error close failed', e); });
     }
@@ -1271,13 +1376,11 @@ async function syncReferralsFromAlbi() {
   }
 
   ST._referralSyncing = false;
-  // Reload data so the new rows show up in the leaderboard
   await loadAll();
   render();
 }
 
 // Tolerant date formatter — Albi sometimes returns ISO, sometimes "MM/DD/YYYY".
-// Returns YYYY-MM-DD or null.
 function formatAlbiDate(d) {
   if (!d) return null;
   try {
@@ -2161,20 +2264,31 @@ function _renderNow() {
     }
 
     // ── Top Referrers leaderboard ──
-    // Aggregate marketRefs by referrer_partner_id. Build a map of
-    // partner_id → { count, revenue, last_date }
+    // Aggregate marketRefs by referrer_partner_id. Track invoiced (project_value)
+    // AND paid (project_paid) so the diligence story can show both.
     var byPartner = {};
     var unmatchedAgg = { count: 0, revenue: 0, names: {} };
+    var bySource = {};  // referralSource → { count, revenue }
     marketRefs.forEach(function(r){
-      var rev = parseFloat(r.project_value || 0) || 0;
+      var rev  = parseFloat(r.project_value || 0) || 0;
+      var paid = parseFloat(r.project_paid  || 0) || 0;
+
+      // Source category breakdown ("Realtor", "Plumber", etc.)
+      var src = r.referral_source || '(unspecified)';
+      if (!bySource[src]) bySource[src] = { count: 0, revenue: 0 };
+      bySource[src].count++;
+      bySource[src].revenue += rev;
+
       if (r.referrer_partner_id) {
         var key = r.referrer_partner_id;
-        if (!byPartner[key]) byPartner[key] = { partner_id: key, count:0, revenue:0, last_date:null, name:null };
+        if (!byPartner[key]) byPartner[key] = { partner_id: key, count:0, revenue:0, paid:0, last_date:null, name:null, sources:{} };
         byPartner[key].count++;
         byPartner[key].revenue += rev;
+        byPartner[key].paid    += paid;
         if (!byPartner[key].last_date || r.project_created_date > byPartner[key].last_date) {
           byPartner[key].last_date = r.project_created_date;
         }
+        if (r.referral_source) byPartner[key].sources[r.referral_source] = (byPartner[key].sources[r.referral_source]||0) + 1;
       } else {
         // Track unmatched referrers separately (Albi has the name but we
         // don't have a partner record yet to link it to). Useful signal —
@@ -2207,6 +2321,26 @@ function _renderNow() {
     h += '<div class="sales-stat"><div class="sales-stat-val" style="color:var(--orange);">' + (totalReferrals - matchedCount) + '</div><div class="sales-stat-lbl">Unmatched</div></div>';
     h += '</div>';
 
+    // ── Source category breakdown ──
+    // Useful at the top of the page to show what kinds of referrers drive
+    // the business: realtors, plumbers, etc. Helps with strategic decisions
+    // about which categories to invest in.
+    var sourceList = Object.keys(bySource)
+      .map(function(s){ return { source: s, count: bySource[s].count, revenue: bySource[s].revenue }; })
+      .sort(function(a,b){ return b.revenue - a.revenue; });
+    if (sourceList.length > 0) {
+      h += '<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px 16px;margin-bottom:16px;">';
+      h += '<div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;">📊 By Source Category</div>';
+      h += '<div style="display:flex;flex-wrap:wrap;gap:8px;">';
+      sourceList.forEach(function(s){
+        h += '<div style="background:rgba(13,45,94,.04);border:1px solid var(--border);border-radius:8px;padding:8px 12px;">';
+        h += '<div style="font-size:11px;font-weight:700;color:var(--navy);">' + _ve(s.source) + '</div>';
+        h += '<div style="font-size:11px;color:var(--muted);">' + s.count + ' jobs · $' + Math.round(s.revenue).toLocaleString() + '</div>';
+        h += '</div>';
+      });
+      h += '</div></div>';
+    }
+
     // Leaderboard table
     if (sorted.length === 0) {
       h += '<div style="text-align:center;padding:40px;color:var(--muted);font-size:13px;">No referral data yet for ' + ST.market + '. Click "Sync from Albi" above to pull project referrer relationships.</div>';
@@ -2218,7 +2352,8 @@ function _renderNow() {
       h += '<th style="text-align:left;padding:10px 16px;font-weight:700;color:var(--muted);font-size:10px;text-transform:uppercase;background:rgba(13,45,94,.02);">#</th>';
       h += '<th style="text-align:left;padding:10px 16px;font-weight:700;color:var(--muted);font-size:10px;text-transform:uppercase;background:rgba(13,45,94,.02);">Referrer</th>';
       h += '<th style="text-align:right;padding:10px 16px;font-weight:700;color:var(--muted);font-size:10px;text-transform:uppercase;background:rgba(13,45,94,.02);">Jobs</th>';
-      h += '<th style="text-align:right;padding:10px 16px;font-weight:700;color:var(--muted);font-size:10px;text-transform:uppercase;background:rgba(13,45,94,.02);">Revenue</th>';
+      h += '<th style="text-align:right;padding:10px 16px;font-weight:700;color:var(--muted);font-size:10px;text-transform:uppercase;background:rgba(13,45,94,.02);">Invoiced</th>';
+      h += '<th style="text-align:right;padding:10px 16px;font-weight:700;color:var(--muted);font-size:10px;text-transform:uppercase;background:rgba(13,45,94,.02);">Paid</th>';
       h += '<th style="text-align:right;padding:10px 16px;font-weight:700;color:var(--muted);font-size:10px;text-transform:uppercase;background:rgba(13,45,94,.02);">Last Referral</th>';
       h += '</tr></thead><tbody>';
       sorted.slice(0, 50).forEach(function(row, idx){
@@ -2226,11 +2361,19 @@ function _renderNow() {
         var rankBg = rank <= 3 ? '#FFD700' : (rank <= 10 ? 'rgba(13,45,94,.1)' : 'transparent');
         var rankColor = rank <= 3 ? 'var(--navy)' : 'var(--muted)';
         var clickable = row.partner ? 'onclick="ST.selected=\'' + row.partner_id + '\';ST.modal=\'partner-detail\';render()" style="cursor:pointer;"' : '';
+        // Top source for this referrer
+        var topSrc = '';
+        var srcKeys = Object.keys(row.sources || {});
+        if (srcKeys.length) {
+          srcKeys.sort(function(a,b){ return row.sources[b] - row.sources[a]; });
+          topSrc = '<div style="font-size:10px;color:var(--muted);font-weight:600;margin-top:2px;">' + _ve(srcKeys[0]) + '</div>';
+        }
         h += '<tr ' + clickable + '>';
         h += '<td style="padding:10px 16px;border-bottom:1px solid var(--border);"><span style="display:inline-block;min-width:24px;padding:2px 6px;border-radius:4px;background:' + rankBg + ';color:' + rankColor + ';font-weight:700;font-size:11px;text-align:center;">' + rank + '</span></td>';
-        h += '<td style="padding:10px 16px;border-bottom:1px solid var(--border);font-weight:600;color:var(--navy);">' + _ve(row.name) + '</td>';
+        h += '<td style="padding:10px 16px;border-bottom:1px solid var(--border);font-weight:600;color:var(--navy);">' + _ve(row.name) + topSrc + '</td>';
         h += '<td style="padding:10px 16px;border-bottom:1px solid var(--border);text-align:right;">' + row.count + '</td>';
         h += '<td style="padding:10px 16px;border-bottom:1px solid var(--border);text-align:right;font-weight:700;color:var(--ok);">$' + Math.round(row.revenue).toLocaleString() + '</td>';
+        h += '<td style="padding:10px 16px;border-bottom:1px solid var(--border);text-align:right;color:var(--muted);">$' + Math.round(row.paid||0).toLocaleString() + '</td>';
         h += '<td style="padding:10px 16px;border-bottom:1px solid var(--border);text-align:right;color:var(--muted);">' + (row.last_date ? fmtDate(row.last_date) : '—') + '</td>';
         h += '</tr>';
       });
