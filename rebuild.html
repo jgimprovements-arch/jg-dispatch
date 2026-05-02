@@ -944,6 +944,46 @@
     text-transform: uppercase;
     letter-spacing: .4px;
   }
+
+  /* ─── Documents tab ─── */
+  .doc-groups { display: flex; flex-direction: column; gap: 14px; padding: 4px 0; }
+  .doc-group { background: var(--card); border: 1px solid var(--line); border-radius: 8px; }
+  .doc-group-head {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 16px; border-bottom: 1px solid var(--line);
+  }
+  .doc-group-head h4 {
+    margin: 0; font-size: 13px; color: var(--navy);
+    text-transform: uppercase; letter-spacing: .4px; font-weight: 700;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .doc-group-head .doc-count {
+    background: var(--bg); color: var(--muted); font-size: 11px;
+    padding: 2px 8px; border-radius: 10px; font-weight: 600;
+  }
+  .doc-group-head .btn { font-size: 11px; padding: 5px 11px; }
+  .doc-row {
+    display: flex; align-items: center; gap: 12px;
+    padding: 10px 16px; border-bottom: 1px solid var(--line);
+  }
+  .doc-row:last-child { border-bottom: 0; }
+  .doc-row:hover { background: var(--bg); }
+  .doc-row .doc-icon { font-size: 22px; flex-shrink: 0; }
+  .doc-row .doc-info { flex: 1; min-width: 0; }
+  .doc-row .doc-name { color: var(--navy); font-weight: 600; font-size: 13px; text-decoration: none; word-break: break-word; }
+  .doc-row .doc-name:hover { color: var(--orange); text-decoration: underline; }
+  .doc-row .doc-meta { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .doc-row .doc-actions { display: flex; gap: 6px; align-items: center; }
+  .doc-row .doc-actions .btn { font-size: 11px; padding: 4px 8px; }
+  .doc-empty { padding: 14px 16px; font-size: 12px; color: var(--muted); font-style: italic; }
+  .albi-badge {
+    font-size: 10px; padding: 3px 7px; border-radius: 8px; font-weight: 700;
+    text-transform: uppercase; letter-spacing: .3px; white-space: nowrap;
+  }
+  .albi-badge.sent { background: #eaf5ee; color: var(--green); border: 1px solid var(--green); }
+  .albi-badge.failed { background: #fdf6f6; color: var(--red); border: 1px solid var(--red); }
+  .albi-badge.pending { background: #fff8ed; color: var(--gold); border: 1px solid var(--gold); }
+  .albi-badge.skipped { background: var(--bg); color: var(--muted); border: 1px solid var(--line); }
 </style>
 </head>
 <body>
@@ -1080,6 +1120,7 @@ const state = {
   selections: [],
   messages: [],
   history: [],
+  documents: [],
   notifications: [],
   notifPanelOpen: false,
   filterStatus: 'all',
@@ -1267,6 +1308,8 @@ $('#searchInput').addEventListener('input', e => {
 const ALBI_PROXY_URL = 'https://jg-proxy-v2.vercel.app/api/albi';
 const ALBI_NOTE_HOOK = 'https://hooks.zapier.com/hooks/catch/12653197/uvugxag/';
 const MESSAGE_HOOK = 'https://hooks.zapier.com/hooks/catch/12653197/uvule41/';
+// Albi document push hook — set this AFTER you create the Zap. Leave the placeholder for now.
+const ALBI_DOC_HOOK = 'REPLACE_WITH_ZAPIER_DOC_HOOK_URL';
 const VALID_SUFFIXES = new Set(['BRD','REB','REM','RZE']);
 
 // Fire-and-forget post to Albi timeline note via Zapier.
@@ -1730,7 +1773,7 @@ async function selectProject(id) {
   renderProjects();
   if (!state.activeProject) return;
   updateUrlHash();
-  await Promise.all([loadPhases(), loadSelections(), loadMessages(), loadHistory()]);
+  await Promise.all([loadPhases(), loadSelections(), loadMessages(), loadHistory(), loadDocuments()]);
   renderDetail();
 }
 
@@ -1791,6 +1834,167 @@ async function loadHistory() {
     .select('*').eq('project_id', state.activeProjectId)
     .order('changed_at', { ascending: false }).limit(50);
   state.history = data || [];
+}
+
+async function loadDocuments() {
+  if (!sb) { state.documents = []; return; }
+  const { data } = await sb.from('rebuild_documents')
+    .select('*').eq('project_id', state.activeProjectId)
+    .order('uploaded_at', { ascending: false });
+  state.documents = data || [];
+}
+
+const DOC_CATEGORIES = [
+  'Estimate/Invoices',
+  'Insurance / COI',
+  'Permits',
+  'Photos',
+  'Customer Documents',
+  'Subcontractor Documents',
+  'Final Billing',
+];
+
+function renderDocumentsTab() {
+  const docs = state.documents || [];
+  const grouped = {};
+  for (const cat of DOC_CATEGORIES) grouped[cat] = [];
+  for (const d of docs) {
+    if (grouped[d.category]) grouped[d.category].push(d);
+    else grouped[d.category] = [d]; // unknown legacy category
+  }
+
+  const groupHtml = DOC_CATEGORIES.map(cat => {
+    const list = grouped[cat] || [];
+    return `
+      <div class="doc-group">
+        <div class="doc-group-head">
+          <h4>${cat} <span class="doc-count">${list.length}</span></h4>
+          <button class="btn" data-upload-cat="${cat}">📎 Upload</button>
+        </div>
+        ${list.length ? list.map(d => renderDocRow(d)).join('') : '<div class="doc-empty">No files</div>'}
+      </div>`;
+  }).join('');
+
+  return `
+    <div class="section-head">
+      <h3>Project Documents</h3>
+      <div style="font-size:11px;color:var(--muted);">Files auto-push to Albi project record</div>
+    </div>
+    <div class="doc-groups">${groupHtml}</div>
+    <input type="file" id="docFileInput" multiple style="display:none;" accept="image/*,application/pdf,.doc,.docx,.xls,.xlsx,.heic">
+  `;
+}
+
+function renderDocRow(d) {
+  const sizeKb = d.file_size_bytes ? (d.file_size_bytes / 1024).toFixed(0) + ' KB' : '';
+  const isImage = /\.(jpg|jpeg|png|gif|webp|heic)$/i.test(d.filename);
+  const albiBadge = d.push_status === 'sent'
+    ? '<span class="albi-badge sent" title="Pushed to Albi">✓ Albi</span>'
+    : d.push_status === 'failed'
+    ? '<span class="albi-badge failed" title="Albi push failed">✕ Albi</span>'
+    : d.push_status === 'skipped'
+    ? '<span class="albi-badge skipped" title="Skipped">— Albi</span>'
+    : '<span class="albi-badge pending" title="Pending Albi push">⏳ Albi</span>';
+  return `
+    <div class="doc-row" data-id="${d.id}">
+      <div class="doc-icon">${isImage ? '🖼️' : '📄'}</div>
+      <div class="doc-info">
+        <a href="${d.file_url}" target="_blank" class="doc-name">${d.filename}</a>
+        <div class="doc-meta">${sizeKb} · uploaded ${fmtRelative(d.uploaded_at)}${d.uploaded_by_email ? ' by ' + d.uploaded_by_email.split('@')[0] : ''}</div>
+      </div>
+      <div class="doc-actions">
+        ${albiBadge}
+        ${d.push_status !== 'sent' ? `<button class="btn doc-retry" data-id="${d.id}" title="Retry Albi push">↻</button>` : ''}
+        <button class="btn ghost-red doc-del" data-id="${d.id}" title="Delete">✕</button>
+      </div>
+    </div>`;
+}
+
+async function uploadDocument(file, category) {
+  if (!sb || !state.activeProjectId) return;
+  const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+  const path = `projects/${state.activeProjectId}/${Date.now()}-${safeName}`;
+  toast(`Uploading ${file.name}…`);
+
+  const { error: upErr } = await sb.storage.from('rebuild-documents').upload(path, file, {
+    contentType: file.type || 'application/octet-stream',
+    upsert: false,
+  });
+  if (upErr) { toast('Upload failed: ' + upErr.message); return; }
+
+  const { data: urlData } = sb.storage.from('rebuild-documents').getPublicUrl(path);
+  const fileUrl = urlData.publicUrl;
+
+  const { data: inserted, error: insErr } = await sb.from('rebuild_documents').insert({
+    project_id: state.activeProjectId,
+    category,
+    filename: file.name,
+    file_url: fileUrl,
+    file_size_bytes: file.size,
+    mime_type: file.type || null,
+    uploaded_by_email: state.pmEmail,
+    push_status: 'pending',
+  }).select();
+
+  if (insErr) { toast('Save failed: ' + insErr.message); return; }
+  toast(`${file.name} uploaded`);
+  await loadDocuments();
+  renderDetail();
+
+  // Push to Albi
+  pushDocumentToAlbi(inserted[0]);
+}
+
+async function pushDocumentToAlbi(doc) {
+  if (!doc) return;
+  if (!ALBI_DOC_HOOK || ALBI_DOC_HOOK.startsWith('REPLACE_')) {
+    // Hook not configured — mark as skipped silently
+    await sb.from('rebuild_documents').update({ push_status: 'skipped' }).eq('id', doc.id);
+    return;
+  }
+  const p = state.activeProject;
+  try {
+    await fetch(ALBI_DOC_HOOK, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        document_id: doc.id,
+        project_id: p.id,
+        albi_project_id: p.albi_project_id,
+        albi_job_number: p.albi_job_number,
+        category: doc.category,
+        filename: doc.filename,
+        file_url: doc.file_url,
+        mime_type: doc.mime_type,
+        notes: `JG Platform: uploaded under "${doc.category}"`,
+      }),
+      mode: 'no-cors',
+    });
+    await sb.from('rebuild_documents').update({
+      push_status: 'sent',
+      pushed_to_albi_at: new Date().toISOString(),
+    }).eq('id', doc.id);
+  } catch (e) {
+    console.error('Albi push failed:', e);
+    await sb.from('rebuild_documents').update({ push_status: 'failed' }).eq('id', doc.id);
+  }
+  await loadDocuments();
+  if (state.tab === 'documents') renderDetail();
+}
+
+async function deleteDocument(docId) {
+  const d = state.documents.find(x => x.id === docId);
+  if (!d) return;
+  if (!confirm(`Delete "${d.filename}"?`)) return;
+  // Try to remove from storage too (best-effort)
+  try {
+    const path = d.file_url.split('/rebuild-documents/')[1];
+    if (path) await sb.storage.from('rebuild-documents').remove([path]);
+  } catch (e) { console.warn('Storage cleanup failed:', e); }
+  await sb.from('rebuild_documents').delete().eq('id', docId);
+  toast('Deleted');
+  await loadDocuments();
+  renderDetail();
 }
 
 // ──── Render detail pane ────
@@ -1934,9 +2138,9 @@ function renderTabContent() {
   else if (state.tab === 'selections') c.innerHTML = renderSelectionsTab();
   else if (state.tab === 'messages') c.innerHTML = renderMessagesTab();
   else if (state.tab === 'audit')   c.innerHTML = renderAuditTab();
+  else if (state.tab === 'documents') c.innerHTML = renderDocumentsTab();
   else c.innerHTML = `<div class="empty" style="padding:40px 20px;">
-    <h2 style="font-size:15px;">Coming next session</h2>
-    <p>${state.tab.charAt(0).toUpperCase()+state.tab.slice(1)} module ships in session 2 (sub portal + customer portal) or session 3 (documents).</p>
+    <p>${state.tab} not implemented.</p>
   </div>`;
 
   // Wire phase actions if we just rendered phases
@@ -2015,6 +2219,40 @@ function renderTabContent() {
     const pdfBtn = $('#btnAuditPdf');
     if (csvBtn) csvBtn.addEventListener('click', () => exportAuditCsv());
     if (pdfBtn) pdfBtn.addEventListener('click', () => exportAuditPdf());
+  }
+
+  // Wire documents tab
+  if (state.tab === 'documents') {
+    let activeUploadCat = null;
+    const fileInput = $('#docFileInput');
+    $$('[data-upload-cat]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        activeUploadCat = btn.dataset.uploadCat;
+        fileInput.value = '';
+        fileInput.click();
+      });
+    });
+    if (fileInput) {
+      fileInput.addEventListener('change', async (e) => {
+        const files = [...e.target.files];
+        if (!files.length || !activeUploadCat) return;
+        for (const f of files) {
+          await uploadDocument(f, activeUploadCat);
+        }
+      });
+    }
+    $$('.doc-del').forEach(btn => btn.addEventListener('click', e => {
+      e.stopPropagation();
+      deleteDocument(btn.dataset.id);
+    }));
+    $$('.doc-retry').forEach(btn => btn.addEventListener('click', async e => {
+      e.stopPropagation();
+      const d = state.documents.find(x => x.id === btn.dataset.id);
+      if (d) {
+        await sb.from('rebuild_documents').update({ push_status: 'pending' }).eq('id', d.id);
+        await pushDocumentToAlbi(d);
+      }
+    }));
   }
 
   // Wire selections tab
