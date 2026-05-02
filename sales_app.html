@@ -1060,7 +1060,74 @@ function initApp(u) {
       // Install available via avatar dropdown
     }
   }, 2000);
+
+  // Wire up the back-button handler for the PWA. Without this, the system
+  // back button (Android) and browser back gesture exit the app instead of
+  // navigating within it.
+  initBackButtonHandler();
   } catch(e) { document.body.innerHTML = '<div style="padding:40px;font-family:sans-serif;color:#c62828;"><b>App error:</b> ' + e.message + '<br><br><a href="sales.html">Go to Sales Dashboard</a></div>'; }
+}
+
+// ── BACK-BUTTON HANDLER ───────────────────────────────────────────────────
+// Mobile expectation: back button closes the topmost overlay/sheet, OR
+// navigates to home screen if no overlay is open. Only exits the app if
+// already on home with nothing open.
+//
+// Strategy: maintain a stack of "navigation states" tracked alongside
+// browser history. Every sheet open pushes a history entry; popstate fires
+// on back, we close whatever's open and consume that entry.
+
+APP._navStack = [];  // entries: {type:'overlay', id:'xxx-overlay', closer:fn}
+                      //          {type:'screen',  name:'partners'}
+
+function initBackButtonHandler() {
+  // Push a sentinel state so the FIRST back press doesn't immediately exit
+  // (it'll just consume this sentinel — the second press handles real nav).
+  history.replaceState({ jgNav: 'root' }, '');
+  history.pushState({ jgNav: 'sentinel' }, '');
+
+  window.addEventListener('popstate', function(ev) {
+    // If we have an open overlay, close it. Otherwise navigate to home.
+    var top = APP._navStack[APP._navStack.length - 1];
+    if (top && top.closer) {
+      // Close the topmost overlay. The closer function is responsible for
+      // actually hiding the DOM element. We pop the stack here so the
+      // tracking stays in sync.
+      APP._navStack.pop();
+      try { top.closer(); } catch(e) { console.error('Back-button closer threw:', e); }
+      // Re-push sentinel so the NEXT back press still has something to land on
+      history.pushState({ jgNav: 'sentinel' }, '');
+      return;
+    }
+    // No overlay open — handle screen-level back
+    if (APP.screen && APP.screen !== 'home') {
+      showScreen('home');
+      history.pushState({ jgNav: 'sentinel' }, '');
+      return;
+    }
+    // We're on home with nothing open — let the next back press exit naturally
+    // by NOT pushing another sentinel. The user has to press back twice from
+    // a clean home state to actually leave the app.
+  });
+}
+
+// Helper: register an overlay with the back-button handler. Call this
+// AFTER the overlay opens. The closer will be invoked on back press.
+function _navPushOverlay(overlayId, closerFn) {
+  APP._navStack.push({ type: 'overlay', id: overlayId, closer: closerFn });
+  history.pushState({ jgNav: 'overlay', id: overlayId }, '');
+}
+
+// Helper: deregister when an overlay is closed via its X button (not via
+// back gesture). Removes the matching entry from the stack so the next
+// back press doesn't try to re-close something already gone.
+function _navPopOverlay(overlayId) {
+  for (var i = APP._navStack.length - 1; i >= 0; i--) {
+    if (APP._navStack[i].id === overlayId) {
+      APP._navStack.splice(i, 1);
+      break;
+    }
+  }
 }
 
 // ── DATA ──────────────────────────────────────────────────────────────────
@@ -1961,10 +2028,12 @@ function showNextRecurring() {
   }).join('');
   document.getElementById('rec-stops-preview').innerHTML = preview;
   document.getElementById('recurring-overlay').classList.add('open');
+  _navPushOverlay('recurring-overlay', closeRecurring);
 }
 
 function closeRecurring() {
   document.getElementById('recurring-overlay').classList.remove('open');
+  _navPopOverlay('recurring-overlay');
 }
 
 async function confirmRecurring() {
@@ -2067,10 +2136,12 @@ function openPlanRoute() {
   document.getElementById('pr-results').style.display = 'none';
   prRenderStops();
   document.getElementById('plan-route-overlay').classList.add('open');
+  _navPushOverlay('plan-route-overlay', closePlanRoute);
 }
 
 function closePlanRoute() {
   document.getElementById('plan-route-overlay').classList.remove('open');
+  _navPopOverlay('plan-route-overlay');
   _prStops = [];
 }
 
@@ -2256,10 +2327,12 @@ function openPartnerEdit(pid) {
   document.getElementById('partner-edit-body').innerHTML = html;
   document.getElementById('partner-edit-overlay').classList.add('open');
   closePartnerDetail();
+  _navPushOverlay('partner-edit-overlay', closePartnerEdit);
 }
 
 function closePartnerEdit() {
   document.getElementById('partner-edit-overlay').classList.remove('open');
+  _navPopOverlay('partner-edit-overlay');
   _editPid = null;
 }
 
@@ -2419,7 +2492,13 @@ function openPartnerDetail(pid) {
   html += '</div>';
 
   document.getElementById('partner-detail-body').innerHTML = html;
-  document.getElementById('partner-detail-overlay').classList.add('open');
+  var pdOverlay = document.getElementById('partner-detail-overlay');
+  var alreadyOpen = pdOverlay.classList.contains('open');
+  pdOverlay.classList.add('open');
+  // Only push to nav stack on FIRST open (not on re-render via toggleRefExpanded)
+  if (!alreadyOpen) {
+    _navPushOverlay('partner-detail-overlay', closePartnerDetail);
+  }
 }
 
 async function deletePartnerApp(pid, pname) {
@@ -2490,6 +2569,7 @@ async function deletePartnerApp(pid, pname) {
 
 function closePartnerDetail() {
   document.getElementById('partner-detail-overlay').classList.remove('open');
+  _navPopOverlay('partner-detail-overlay');
   // Reset the referred-jobs expand state so next partner card opens collapsed
   APP._refExpanded = false;
 }
@@ -2730,6 +2810,7 @@ function showMyReferrals() {
   if (!APP._myRefYear) APP._myRefYear = String(new Date().getFullYear());
   renderMyReferrals();
   document.getElementById('my-referrals-overlay').classList.add('open');
+  _navPushOverlay('my-referrals-overlay', closeMyReferrals);
 }
 
 function renderMyReferrals() {
@@ -2855,6 +2936,7 @@ function renderMyReferrals() {
 
 function closeMyReferrals() {
   document.getElementById('my-referrals-overlay').classList.remove('open');
+  _navPopOverlay('my-referrals-overlay');
 }
 
 // ── ROUTES ────────────────────────────────────────────────────────────────
@@ -3314,6 +3396,7 @@ function openLogTouch(partnerId) {
     if (p) selectLtPartner(p.id, p.name, p.type||'');
   }
   document.getElementById('log-touch-overlay').classList.add('open');
+  _navPushOverlay('log-touch-overlay', closeLogTouch);
   setTimeout(function(){ if (!partnerId) document.getElementById('lt-search').focus(); }, 300);
 }
 
@@ -3323,6 +3406,7 @@ function openLogTouchForStop(pid, pname) {
 
 function closeLogTouch() {
   document.getElementById('log-touch-overlay').classList.remove('open');
+  _navPopOverlay('log-touch-overlay');
 }
 
 function ltSearch() {
