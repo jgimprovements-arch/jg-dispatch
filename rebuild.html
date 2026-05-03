@@ -1231,6 +1231,18 @@
   .albi-badge.failed { background: #fdf6f6; color: var(--red); border: 1px solid var(--red); }
   .albi-badge.pending { background: #fff8ed; color: var(--gold); border: 1px solid var(--gold); }
   .albi-badge.skipped { background: var(--bg); color: var(--muted); border: 1px solid var(--line); }
+  .doc-stage-badge {
+    display: inline-block;
+    color: #fff;
+    font-size: 9px;
+    font-weight: 700;
+    padding: 2px 7px;
+    border-radius: 8px;
+    text-transform: uppercase;
+    letter-spacing: .3px;
+    margin-right: 4px;
+    vertical-align: middle;
+  }
 </style>
 </head>
 <body>
@@ -1368,7 +1380,6 @@ const state = {
   messages: [],
   history: [],
   documents: [],
-  fieldPhotos: [],
   notifications: [],
   notifPanelOpen: false,
   filterStatus: 'all',
@@ -1490,13 +1501,9 @@ JG.downloadFile = async function(url, filename) {
 JG.collectProjectImages = function() {
   const isImg = name => /\.(jpg|jpeg|png|gif|webp|heic)$/i.test(name || '');
   const out = [];
-  // Documents
+  // Documents (includes Photos category — replaces former separate field_photos)
   for (const d of (state.documents || [])) {
     if (isImg(d.filename)) out.push({ url: d.file_url, name: d.filename, category: d.category, _kind: 'doc' });
-  }
-  // Field photos
-  for (const p of (state.fieldPhotos || [])) {
-    if (isImg(p.filename)) out.push({ url: p.file_url, name: p.filename, category: 'Field Photo' + (p.stage ? ' · ' + p.stage : ''), _kind: 'photo', _id: p.id });
   }
   // Selection attachments (sketches/photos)
   for (const s of (state.selections || [])) {
@@ -2159,7 +2166,7 @@ async function selectProject(id) {
   renderProjects();
   if (!state.activeProject) return;
   updateUrlHash();
-  await Promise.all([loadPhases(), loadSelections(), loadMessages(), loadHistory(), loadDocuments(), loadFieldPhotos()]);
+  await Promise.all([loadPhases(), loadSelections(), loadMessages(), loadHistory(), loadDocuments()]);
   renderDetail();
 }
 
@@ -2230,15 +2237,7 @@ async function loadDocuments() {
   state.documents = data || [];
 }
 
-// ─────────── Field Photos (rebuild + future mitigation) ───────────
-async function loadFieldPhotos() {
-  if (!sb || !state.activeProjectId) { state.fieldPhotos = []; return; }
-  const { data } = await sb.from('rebuild_field_photos')
-    .select('*')
-    .eq('project_id', state.activeProjectId)
-    .order('taken_at', { ascending: false, nullsFirst: false });
-  state.fieldPhotos = data || [];
-}
+// ─────────── Photo helpers (used by Documents > Photos folder) ───────────
 
 const PHOTO_STAGES = [
   { id: 'before', label: 'Before', color: '#7884a0' },
@@ -2250,9 +2249,6 @@ const PHOTO_STAGES = [
 ];
 
 function defaultStageForProject() {
-  // If any phase is in_progress → during
-  // Else if all pending → before
-  // Else if any complete and none in_progress → after
   const phases = state.phases || [];
   if (phases.some(p => p.status === 'in_progress')) return 'during';
   if (phases.length && phases.every(p => p.status === 'pending')) return 'before';
@@ -2262,78 +2258,15 @@ function defaultStageForProject() {
 
 function defaultPhaseIdForProject() {
   const phases = state.phases || [];
-  // Prefer the first in_progress phase
   const inProg = phases.find(p => p.status === 'in_progress');
   if (inProg) return inProg.id;
-  // Else next pending after the last complete
   const lastCompleteIdx = phases.map(p => p.status).lastIndexOf('complete');
   if (lastCompleteIdx >= 0 && lastCompleteIdx + 1 < phases.length) return phases[lastCompleteIdx + 1].id;
   return phases[0]?.id || null;
 }
 
-function renderFieldPhotosTab() {
-  const photos = state.fieldPhotos || [];
-
-  return `
-    <div class="section-head">
-      <h3>Field Photos</h3>
-      <div style="display:flex;gap:8px;align-items:center;">
-        <span style="font-size:11px;color:var(--muted);">${photos.length} photo${photos.length === 1 ? '' : 's'}</span>
-        <button class="btn primary" id="photoCaptureBtn">📷 Take Photo</button>
-        <button class="btn" id="photoUploadBtn">📁 Upload</button>
-      </div>
-    </div>
-
-    <div class="photo-stage-filters">
-      <button class="photo-stage-pill on" data-stage="all">All</button>
-      ${PHOTO_STAGES.map(s => `<button class="photo-stage-pill" data-stage="${s.id}" style="--c:${s.color};">${s.label}</button>`).join('')}
-    </div>
-
-    ${photos.length === 0 ? `<div class="empty" style="padding:50px 20px;text-align:center;">
-      <div style="font-size:48px;margin-bottom:12px;">📷</div>
-      <p style="color:var(--muted);">No field photos yet.</p>
-      <p style="color:var(--muted);font-size:12px;">Tap <b>📷 Take Photo</b> on a phone or tablet to capture one with the camera. <b>📁 Upload</b> picks existing photos from gallery.</p>
-    </div>` : `<div class="photo-grid" id="photoGrid">
-      ${photos.map(p => renderPhotoCard(p)).join('')}
-    </div>`}
-
-    <input type="file" id="photoCaptureInput" accept="image/*" capture="environment" style="display:none;">
-    <input type="file" id="photoUploadInput" accept="image/*" multiple style="display:none;">
-  `;
-}
-
-function renderPhotoCard(p) {
-  const stage = PHOTO_STAGES.find(s => s.id === p.stage);
-  const stageColor = stage?.color || 'var(--muted)';
-  const stageLabel = stage?.label || (p.stage || '—');
-  const date = p.taken_at ? new Date(p.taken_at) : new Date(p.uploaded_at);
-  const dateStr = date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-  const timeStr = date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
-  const phaseLabel = p.phase_name ? `· ${p.phase_name}` : '';
-  return `
-    <div class="photo-card" data-id="${p.id}" data-stage="${p.stage || ''}">
-      <div class="photo-thumb-wrap">
-        <img src="${p.file_url}" loading="lazy" data-lightbox-photo="${p.id}" alt="">
-        <div class="photo-stage-badge" style="background:${stageColor};">${stageLabel}</div>
-        ${p.push_status === 'sent' ? '<div class="photo-albi-tick" title="Pushed to Albi">✓</div>' : ''}
-      </div>
-      <div class="photo-meta">
-        <div class="photo-caption">${p.caption || '<span style="color:var(--muted);font-style:italic;">No caption</span>'}</div>
-        <div class="photo-info">${dateStr} · ${timeStr} ${phaseLabel}</div>
-        ${p.latitude && p.longitude ? `<div class="photo-info" style="font-size:10px;">📍 ${Number(p.latitude).toFixed(4)}, ${Number(p.longitude).toFixed(4)}</div>` : ''}
-      </div>
-      <div class="photo-actions">
-        <button class="btn photo-edit-btn" data-id="${p.id}" title="Edit caption / stage">✎</button>
-        <button class="btn photo-dl-btn" data-id="${p.id}" title="Download">📥</button>
-        <button class="btn ghost-red photo-del-btn" data-id="${p.id}" title="Delete">✕</button>
-      </div>
-    </div>`;
-}
-
-// Async helper — pull EXIF GPS + timestamp from JPEG using exifr-style tag scan.
-// Lightweight inline implementation to avoid CDN dependency.
+// Pull EXIF DateTimeOriginal + GPS coords from a JPEG file (no external library)
 async function extractExifBasics(file) {
-  // Returns {takenAt, lat, lng, accuracy}
   const result = { takenAt: null, lat: null, lng: null, accuracy: null };
   if (!file.type.match(/jpeg|jpg/i)) return result;
   try {
@@ -2344,9 +2277,9 @@ async function extractExifBasics(file) {
     while (off < view.byteLength) {
       const marker = view.getUint16(off);
       off += 2;
-      if (marker === 0xFFE1) { // APP1 (EXIF)
+      if (marker === 0xFFE1) {
         const segLen = view.getUint16(off);
-        if (view.getUint32(off + 2) !== 0x45786966) { off += segLen; continue; } // "Exif"
+        if (view.getUint32(off + 2) !== 0x45786966) { off += segLen; continue; }
         const tiffStart = off + 8;
         const little = view.getUint16(tiffStart) === 0x4949;
         const get16 = (o) => little ? view.getUint16(o, true) : view.getUint16(o);
@@ -2360,7 +2293,6 @@ async function extractExifBasics(file) {
           if (tag === 0x8769) exifIfdOff = tiffStart + get32(tagOff + 8);
           if (tag === 0x8825) gpsIfdOff = tiffStart + get32(tagOff + 8);
         }
-        // EXIF IFD — find DateTimeOriginal (0x9003)
         if (exifIfdOff) {
           const en = get16(exifIfdOff);
           for (let i = 0; i < en; i++) {
@@ -2371,18 +2303,15 @@ async function extractExifBasics(file) {
               const valOff = tiffStart + get32(tagOff + 8);
               let s = '';
               for (let j = 0; j < Math.min(len, 19); j++) s += String.fromCharCode(view.getUint8(valOff + j));
-              // "YYYY:MM:DD HH:MM:SS"
               const m = s.match(/(\d{4}):(\d{2}):(\d{2}) (\d{2}):(\d{2}):(\d{2})/);
               if (m) result.takenAt = new Date(`${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}`).toISOString();
             }
           }
         }
-        // GPS IFD — lat/lng
         if (gpsIfdOff) {
           const gn = get16(gpsIfdOff);
           let latRef = 'N', lngRef = 'E', latRat = null, lngRat = null;
           const readRational3 = (o) => {
-            const len = get32(o + 4);
             const valOff = tiffStart + get32(o + 8);
             const r = [];
             for (let k = 0; k < 3; k++) {
@@ -2417,7 +2346,6 @@ async function extractExifBasics(file) {
   return result;
 }
 
-// Get current GPS via Geolocation API (fallback when EXIF GPS missing — common on web upload)
 function getCurrentLocation() {
   return new Promise((resolve) => {
     if (!navigator.geolocation) return resolve(null);
@@ -2429,123 +2357,9 @@ function getCurrentLocation() {
   });
 }
 
-async function uploadFieldPhoto(file, opts) {
-  if (!sb || !state.activeProjectId) return;
-  opts = opts || {};
-
-  // Extract EXIF first
-  const exif = await extractExifBasics(file);
-
-  // Fallback: live geolocation if no EXIF GPS (web uploads typically lack it)
-  let lat = exif.lat;
-  let lng = exif.lng;
-  let acc = exif.accuracy;
-  if ((lat == null || lng == null) && opts.useLiveGps !== false) {
-    const live = await getCurrentLocation();
-    if (live) { lat = live.lat; lng = live.lng; acc = live.accuracy; }
-  }
-
-  const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
-  const path = `projects/${state.activeProjectId}/${Date.now()}-${safeName}`;
-  toast(`Uploading ${file.name}…`);
-
-  const { error: upErr } = await sb.storage.from('rebuild-field-photos').upload(path, file, {
-    contentType: file.type || 'image/jpeg',
-    upsert: false,
-  });
-  if (upErr) { toast('Upload failed: ' + upErr.message); return; }
-
-  const { data: urlData } = sb.storage.from('rebuild-field-photos').getPublicUrl(path);
-  const fileUrl = urlData.publicUrl;
-
-  const phaseId = opts.phaseId !== undefined ? opts.phaseId : defaultPhaseIdForProject();
-  const phaseName = phaseId ? state.phases.find(p => p.id === phaseId)?.phase_name : null;
-  const stage = opts.stage || defaultStageForProject();
-  const p = state.activeProject;
-
-  const { data: inserted, error: insErr } = await sb.from('rebuild_field_photos').insert({
-    project_id: state.activeProjectId,
-    albi_project_id: p.albi_project_id,
-    albi_job_number: p.albi_job_number,
-    phase_id: phaseId,
-    phase_name: phaseName,
-    filename: file.name,
-    file_url: fileUrl,
-    file_size_bytes: file.size,
-    mime_type: file.type,
-    stage,
-    caption: opts.caption || null,
-    taken_at: exif.takenAt || new Date().toISOString(),
-    latitude: lat,
-    longitude: lng,
-    gps_accuracy_meters: acc,
-    device_label: navigator.userAgent.slice(0, 200),
-    taken_by_email: state.pmEmail,
-    push_status: 'pending',
-  }).select();
-
-  if (insErr) { toast('Save failed: ' + insErr.message); return; }
-  toast(`Photo saved`);
-  await loadFieldPhotos();
-  renderDetail();
-
-  // Push to Albi via existing doc Zap (same hook, same Gmail action)
-  pushFieldPhotoToAlbi(inserted[0]);
-}
-
-async function pushFieldPhotoToAlbi(photo) {
-  if (!photo) return;
-  if (!ALBI_DOC_HOOK || ALBI_DOC_HOOK.startsWith('REPLACE_')) {
-    await sb.from('rebuild_field_photos').update({ push_status: 'skipped' }).eq('id', photo.id);
-    return;
-  }
-  try {
-    const stageLabel = PHOTO_STAGES.find(s => s.id === photo.stage)?.label || photo.stage || '';
-    const subjectExtras = [photo.phase_name, stageLabel].filter(Boolean).join(' ');
-    await fetch(ALBI_DOC_HOOK, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        document_id: photo.id,
-        project_id: photo.project_id,
-        albi_project_id: photo.albi_project_id,
-        albi_job_number: photo.albi_job_number,
-        category: 'Photos',
-        filename: photo.filename,
-        file_url: photo.file_url,
-        mime_type: photo.mime_type,
-        notes: `JG Field Photo${subjectExtras ? ' — ' + subjectExtras : ''}${photo.caption ? ' — ' + photo.caption : ''}`,
-      }),
-      mode: 'no-cors',
-    });
-    await sb.from('rebuild_field_photos').update({
-      push_status: 'sent',
-      pushed_to_albi_at: new Date().toISOString(),
-    }).eq('id', photo.id);
-  } catch (e) {
-    console.error('Field photo push failed:', e);
-    await sb.from('rebuild_field_photos').update({ push_status: 'failed' }).eq('id', photo.id);
-  }
-  await loadFieldPhotos();
-  if (state.tab === 'photos') renderDetail();
-}
-
-async function deleteFieldPhoto(id) {
-  const p = state.fieldPhotos.find(x => x.id === id);
-  if (!p) return;
-  if (!confirm(`Delete photo "${p.filename}"?`)) return;
-  try {
-    const path = p.file_url.split('/rebuild-field-photos/')[1];
-    if (path) await sb.storage.from('rebuild-field-photos').remove([path]);
-  } catch (e) { console.warn(e); }
-  await sb.from('rebuild_field_photos').delete().eq('id', id);
-  toast('Photo deleted');
-  await loadFieldPhotos();
-  renderDetail();
-}
-
+// Edit photo (caption, stage, phase) — operates on rebuild_documents
 function openPhotoEditor(id) {
-  const ph = state.fieldPhotos.find(x => x.id === id);
+  const ph = state.documents.find(x => x.id === id);
   if (!ph) return;
 
   let modal = document.getElementById('modalPhotoEdit');
@@ -2575,6 +2389,7 @@ function openPhotoEditor(id) {
     </div>
     <label>Stage</label>
     <select id="peb_stage">
+      <option value="">— No stage —</option>
       ${PHOTO_STAGES.map(s => `<option value="${s.id}" ${s.id===ph.stage?'selected':''}>${s.label}</option>`).join('')}
     </select>
     <label>Phase</label>
@@ -2592,15 +2407,15 @@ function openPhotoEditor(id) {
   newBtn.addEventListener('click', async () => {
     const phaseId = modal.querySelector('#peb_phase').value || null;
     const phaseName = phaseId ? phases.find(p => p.id === phaseId)?.phase_name : null;
-    await sb.from('rebuild_field_photos').update({
-      stage: modal.querySelector('#peb_stage').value,
+    await sb.from('rebuild_documents').update({
+      stage: modal.querySelector('#peb_stage').value || null,
       phase_id: phaseId,
       phase_name: phaseName,
       caption: modal.querySelector('#peb_caption').value.trim() || null,
     }).eq('id', id);
     modal.classList.remove('on');
     toast('Updated');
-    await loadFieldPhotos();
+    await loadDocuments();
     renderDetail();
   });
   modal.classList.add('on');
@@ -2689,6 +2504,7 @@ function renderDocRow(d) {
   const sizeKb = d.file_size_bytes ? (d.file_size_bytes / 1024).toFixed(0) + ' KB' : '';
   const isImage = /\.(jpg|jpeg|png|gif|webp|heic)$/i.test(d.filename);
   const isPdf = /\.pdf$/i.test(d.filename);
+  const isPhoto = d.category === 'Photos' && isImage;
   const albiBadge = d.push_status === 'sent'
     ? '<span class="albi-badge sent" title="Pushed to Albi">✓ Albi</span>'
     : d.push_status === 'failed'
@@ -2699,6 +2515,21 @@ function renderDocRow(d) {
   const thumb = isImage
     ? `<img src="${d.file_url}" class="doc-thumb" loading="lazy" alt="" data-lightbox-doc="${d.id}">`
     : `<div class="doc-icon">${isPdf ? '📕' : '📄'}</div>`;
+
+  // Photo enrichment line — only shown for Photos category with image files
+  let photoLine = '';
+  if (isPhoto) {
+    const stage = PHOTO_STAGES.find(s => s.id === d.stage);
+    const stageBadge = stage ? `<span class="doc-stage-badge" style="background:${stage.color};">${stage.label}</span>` : '';
+    const phaseBit = d.phase_name ? ` · <b>${d.phase_name}</b>` : '';
+    const captionBit = d.caption ? ` · ${d.caption}` : '';
+    const gpsBit = (d.latitude && d.longitude)
+      ? ` · 📍 ${Number(d.latitude).toFixed(4)}, ${Number(d.longitude).toFixed(4)}` : '';
+    if (stage || d.phase_name || d.caption || gpsBit) {
+      photoLine = `<div class="doc-meta" style="margin-top:3px;">${stageBadge}${phaseBit}${captionBit}${gpsBit}</div>`;
+    }
+  }
+
   return `
     <div class="doc-row" data-id="${d.id}">
       ${thumb}
@@ -2707,9 +2538,11 @@ function renderDocRow(d) {
           ? `<a href="#" data-lightbox-doc="${d.id}" class="doc-name">${d.filename}</a>`
           : `<a href="${d.file_url}" target="_blank" class="doc-name">${d.filename}</a>`}
         <div class="doc-meta">${sizeKb} · uploaded ${fmtRelative(d.uploaded_at)}${d.uploaded_by_email ? ' by ' + d.uploaded_by_email.split('@')[0] : ''}</div>
+        ${photoLine}
       </div>
       <div class="doc-actions">
         ${albiBadge}
+        ${isPhoto ? `<button class="btn doc-photo-edit" data-id="${d.id}" title="Edit stage / phase / caption">✎</button>` : ''}
         <button class="btn doc-dl" data-id="${d.id}" title="Download">📥</button>
         ${d.push_status !== 'sent' ? `<button class="btn doc-retry" data-id="${d.id}" title="Retry Albi push">↻</button>` : ''}
         <button class="btn ghost-red doc-del" data-id="${d.id}" title="Delete">✕</button>
@@ -2732,6 +2565,29 @@ async function uploadDocument(file, category) {
   const { data: urlData } = sb.storage.from('rebuild-documents').getPublicUrl(path);
   const fileUrl = urlData.publicUrl;
 
+  // Photos category — enrich with EXIF / GPS / auto-stage / auto-phase
+  let photoFields = {};
+  if (category === 'Photos' && /^image\//i.test(file.type || '')) {
+    const exif = await extractExifBasics(file);
+    let lat = exif.lat, lng = exif.lng, acc = exif.accuracy;
+    if (lat == null || lng == null) {
+      const live = await getCurrentLocation();
+      if (live) { lat = live.lat; lng = live.lng; acc = live.accuracy; }
+    }
+    const phaseId = defaultPhaseIdForProject();
+    const phaseName = phaseId ? state.phases.find(p => p.id === phaseId)?.phase_name : null;
+    photoFields = {
+      stage: defaultStageForProject(),
+      phase_id: phaseId,
+      phase_name: phaseName,
+      taken_at: exif.takenAt || new Date().toISOString(),
+      latitude: lat,
+      longitude: lng,
+      gps_accuracy_meters: acc,
+      device_label: navigator.userAgent.slice(0, 200),
+    };
+  }
+
   const { data: inserted, error: insErr } = await sb.from('rebuild_documents').insert({
     project_id: state.activeProjectId,
     category,
@@ -2741,6 +2597,7 @@ async function uploadDocument(file, category) {
     mime_type: file.type || null,
     uploaded_by_email: state.pmEmail,
     push_status: 'pending',
+    ...photoFields,
   }).select();
 
   if (insErr) { toast('Save failed: ' + insErr.message); return; }
@@ -2976,7 +2833,6 @@ function renderDetail() {
       <button class="${state.tab==='selections'?'on':''}" data-tab="selections">Selections ${overdueSelections ? `<span class="badge">${overdueSelections}</span>` : ''}</button>
       <button class="${state.tab==='messages'?'on':''}" data-tab="messages">Messages</button>
       <button class="${state.tab==='documents'?'on':''}" data-tab="documents">Documents</button>
-      <button class="${state.tab==='photos'?'on':''}" data-tab="photos">📷 Field Photos<span class="count" id="photoCount" style="margin-left:6px;">${(state.fieldPhotos || []).length}</span></button>
       <button class="${state.tab==='audit'?'on':''}" data-tab="audit">Audit Trail</button>
     </div>
 
@@ -3018,7 +2874,6 @@ function renderTabContent() {
   else if (state.tab === 'messages') c.innerHTML = renderMessagesTab();
   else if (state.tab === 'audit')   c.innerHTML = renderAuditTab();
   else if (state.tab === 'documents') c.innerHTML = renderDocumentsTab();
-  else if (state.tab === 'photos') c.innerHTML = renderFieldPhotosTab();
   else c.innerHTML = `<div class="empty" style="padding:40px 20px;">
     <p>${state.tab} not implemented.</p>
   </div>`;
@@ -3101,65 +2956,6 @@ function renderTabContent() {
     if (pdfBtn) pdfBtn.addEventListener('click', () => exportAuditPdf());
   }
 
-  // Wire field photos tab
-  if (state.tab === 'photos') {
-    const captureBtn = $('#photoCaptureBtn');
-    const uploadBtn = $('#photoUploadBtn');
-    const captureInput = $('#photoCaptureInput');
-    const uploadInput = $('#photoUploadInput');
-
-    if (captureBtn) captureBtn.addEventListener('click', () => {
-      captureInput.value = '';
-      captureInput.click();
-    });
-    if (uploadBtn) uploadBtn.addEventListener('click', () => {
-      uploadInput.value = '';
-      uploadInput.click();
-    });
-    if (captureInput) captureInput.addEventListener('change', async (e) => {
-      const f = e.target.files[0];
-      if (f) await uploadFieldPhoto(f);
-    });
-    if (uploadInput) uploadInput.addEventListener('change', async (e) => {
-      const files = [...e.target.files];
-      for (const f of files) await uploadFieldPhoto(f);
-    });
-
-    // Stage filter pills
-    $$('.photo-stage-pill').forEach(b => b.addEventListener('click', () => {
-      $$('.photo-stage-pill').forEach(x => x.classList.remove('on'));
-      b.classList.add('on');
-      const stage = b.dataset.stage;
-      $$('.photo-card').forEach(c => {
-        c.style.display = (stage === 'all' || c.dataset.stage === stage) ? '' : 'none';
-      });
-    }));
-
-    // Lightbox triggers
-    $$('[data-lightbox-photo]').forEach(el => el.addEventListener('click', (e) => {
-      e.preventDefault();
-      const id = el.dataset.lightboxPhoto;
-      const all = JG.collectProjectImages();
-      const idx = all.findIndex(x => x._kind === 'photo' && x._id === id);
-      JG.openLightbox(all, idx >= 0 ? idx : 0);
-    }));
-
-    // Row buttons
-    $$('.photo-edit-btn').forEach(b => b.addEventListener('click', e => {
-      e.stopPropagation();
-      openPhotoEditor(b.dataset.id);
-    }));
-    $$('.photo-dl-btn').forEach(b => b.addEventListener('click', e => {
-      e.stopPropagation();
-      const p = state.fieldPhotos.find(x => x.id === b.dataset.id);
-      if (p) JG.downloadFile(p.file_url, p.filename);
-    }));
-    $$('.photo-del-btn').forEach(b => b.addEventListener('click', e => {
-      e.stopPropagation();
-      deleteFieldPhoto(b.dataset.id);
-    }));
-  }
-
   // Wire documents tab
   if (state.tab === 'documents') {
     let activeUploadCat = null;
@@ -3202,6 +2998,10 @@ function renderTabContent() {
       e.stopPropagation();
       const d = state.documents.find(x => x.id === btn.dataset.id);
       if (d) JG.downloadFile(d.file_url, d.filename);
+    }));
+    $$('.doc-photo-edit').forEach(btn => btn.addEventListener('click', e => {
+      e.stopPropagation();
+      openPhotoEditor(btn.dataset.id);
     }));
     // Lightbox triggers — image thumbs in folder list and recent strip
     $$('[data-lightbox-doc]').forEach(el => el.addEventListener('click', e => {
