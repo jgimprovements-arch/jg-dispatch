@@ -294,6 +294,53 @@
     box-shadow: 0 0 0 2px var(--orange), 0 4px 12px rgba(232,93,4,.25);
     z-index: 5; position: relative;
   }
+  .cal-event[draggable="true"] { cursor: grab; }
+  .cal-event[draggable="true"]:active { cursor: grabbing; }
+  .cal-day.drop-hover {
+    background: rgba(232,93,4,.10) !important;
+    box-shadow: inset 0 0 0 2px var(--orange);
+  }
+
+  /* Reschedule confirm modals */
+  .rs-modal-back {
+    display: none;
+    position: fixed; inset: 0;
+    background: rgba(13,45,94,.5);
+    z-index: 90000;
+    align-items: center; justify-content: center;
+  }
+  .rs-modal-back.on { display: flex; }
+  .rs-modal {
+    background: var(--card);
+    border-radius: 8px;
+    padding: 22px 24px;
+    width: 90%;
+    max-width: 480px;
+    box-shadow: 0 10px 40px rgba(13,45,94,.3);
+  }
+  .rs-modal h3 {
+    margin: 0 0 14px;
+    font-size: 16px; font-weight: 700; color: var(--navy);
+  }
+  .rs-modal-body { font-size: 13px; color: var(--text); line-height: 1.5; }
+  .rs-modal-body p { margin: 0 0 10px; }
+  .rs-modal-foot {
+    display: flex; gap: 8px; justify-content: flex-end;
+    margin-top: 18px;
+  }
+  .rs-modal-foot button {
+    padding: 8px 14px;
+    border-radius: 5px;
+    font-size: 12px; font-weight: 700;
+    cursor: pointer;
+    border: 1px solid;
+  }
+  .rs-modal-foot .btn-cancel { background: var(--card); color: var(--muted); border-color: var(--line); }
+  .rs-modal-foot .btn-cancel:hover { color: var(--navy); border-color: var(--navy); }
+  .rs-modal-foot .btn-secondary { background: var(--card); color: var(--navy); border-color: var(--navy); }
+  .rs-modal-foot .btn-secondary:hover { background: var(--navy); color: #fff; }
+  .rs-modal-foot .btn-primary { background: var(--orange); color: #fff; border-color: var(--orange); }
+  .rs-modal-foot .btn-primary:hover { background: #d05303; }
 </style>
 </head>
 <body>
@@ -761,7 +808,9 @@ function renderMonth(events) {
       const label = e.kind === 'install' ? `📦 ${e.projectLabel}: ${e.title.replace(/^Install: /, '')}`
                   : e.kind === 'walkthrough' ? `🏠 ${e.projectLabel}: ${e.title}`
                   : `${e.projectLabel}: ${e.title}`;
-      return `<a class="${cls}" style="--c:${e.color};" data-event-id="${e.id}" title="${e.projectLabel} — ${e.customerName}\n${e.title}\n${e.assignees.join(', ')}">${label}</a>`;
+      // Only the start cell is draggable to avoid duplicate handles for multi-day events
+      const dragAttrs = e.isStart ? `draggable="true" data-drag-event-id="${e.id}"` : '';
+      return `<a class="${cls}" style="--c:${e.color};" data-event-id="${e.id}" ${dragAttrs} title="${e.projectLabel} — ${e.customerName}\n${e.title}\n${e.assignees.join(', ')}\n\nDrag to reschedule">${label}</a>`;
     }).join('');
 
     const overflowHtml = overflow > 0
@@ -769,7 +818,7 @@ function renderMonth(events) {
       : '';
 
     return `
-      <div class="cal-day ${isToday ? 'today' : ''} ${isOther ? 'other-month' : ''}">
+      <div class="cal-day ${isToday ? 'today' : ''} ${isOther ? 'other-month' : ''}" data-day-key="${key}">
         <div class="cal-day-num">${d.getDate()}</div>
         ${eventHtml}
         ${overflowHtml}
@@ -854,6 +903,8 @@ function renderDayList(events, days) {
 function wireEventClicks() {
   document.querySelectorAll('[data-event-id]').forEach(el => {
     el.addEventListener('click', e => {
+      // Suppress click after drag (HTML5 drag fires a click sometimes)
+      if (el._justDragged) { el._justDragged = false; return; }
       e.preventDefault();
       const id = el.dataset.eventId;
       const ev = state.events.find(x => x.id === id);
@@ -874,6 +925,359 @@ function wireEventClicks() {
       render();
     });
   });
+
+  // ─── Drag and drop reschedule ───
+  let draggedId = null;
+  document.querySelectorAll('[data-drag-event-id]').forEach(el => {
+    el.addEventListener('dragstart', e => {
+      draggedId = el.dataset.dragEventId;
+      el.style.opacity = '0.5';
+      e.dataTransfer.effectAllowed = 'move';
+      try { e.dataTransfer.setData('text/plain', draggedId); } catch (_) {}
+    });
+    el.addEventListener('dragend', () => {
+      el.style.opacity = '';
+      el._justDragged = true; // suppress trailing click
+    });
+  });
+
+  document.querySelectorAll('[data-day-key]').forEach(cell => {
+    cell.addEventListener('dragover', e => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      cell.classList.add('drop-hover');
+    });
+    cell.addEventListener('dragleave', () => cell.classList.remove('drop-hover'));
+    cell.addEventListener('drop', async e => {
+      e.preventDefault();
+      cell.classList.remove('drop-hover');
+      const id = draggedId || e.dataTransfer.getData('text/plain');
+      if (!id) return;
+      const ev = state.events.find(x => x.id === id);
+      if (!ev) return;
+      const newDateStr = cell.dataset.dayKey;
+      const oldStartStr = ymd(ev.start);
+      if (newDateStr === oldStartStr) return; // no-op
+      await openRescheduleFlow(ev, newDateStr);
+      draggedId = null;
+    });
+  });
+}
+
+function ymd(d) {
+  // Local-time date string (no UTC drift)
+  const dt = new Date(d);
+  return `${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,'0')}-${String(dt.getDate()).padStart(2,'0')}`;
+}
+function dayDiff(aStr, bStr) {
+  const a = new Date(aStr + 'T00:00:00');
+  const b = new Date(bStr + 'T00:00:00');
+  return Math.round((a - b) / 86400000);
+}
+function addDays(dStr, days) {
+  const d = new Date(dStr + 'T00:00:00');
+  d.setDate(d.getDate() + days);
+  return ymd(d);
+}
+
+// ─────── Reschedule flow ───────
+async function openRescheduleFlow(ev, newStartStr) {
+  const oldStart = ymd(ev.start);
+  const oldEnd = ymd(ev.end);
+  const duration = dayDiff(oldEnd, oldStart); // 0 for single-day
+  const newEndStr = addDays(newStartStr, duration);
+  const offsetDays = dayDiff(newStartStr, oldStart);
+
+  // Step 1: cascade modal (only for phase events with subsequent phases)
+  let cascade = false;
+  if (ev.kind === 'phase' || ev.kind === 'walkthrough') {
+    const hasSubsequent = state.events.some(x =>
+      x._phaseId && x.projectId === ev.projectId && x._phaseId !== ev._phaseId
+      && new Date(x.start) > new Date(ev.start)
+    );
+    if (hasSubsequent) {
+      cascade = await new Promise(resolve => {
+        showCascadeModal({
+          eventTitle: ev.title,
+          oldDate: oldStart,
+          newDate: newStartStr,
+          offsetDays,
+          onChoice: choice => resolve(choice === 'cascade'),
+        });
+      });
+      if (cascade === null) return; // cancelled
+    }
+  }
+
+  // Step 2: notify modal
+  const notifyChoice = await new Promise(resolve => {
+    showNotifyModal({
+      ev, newStartStr, newEndStr, cascade, offsetDays,
+      onChoice: resolve,
+    });
+  });
+  if (!notifyChoice) return; // cancelled
+
+  // Step 3: persist + notify
+  await applyReschedule({ ev, newStartStr, newEndStr, cascade, offsetDays, notify: notifyChoice });
+}
+
+function showCascadeModal({ eventTitle, oldDate, newDate, offsetDays, onChoice }) {
+  let modal = document.getElementById('modalCascade');
+  if (!modal) {
+    modal = document.createElement('div');
+    modal.id = 'modalCascade';
+    modal.className = 'rs-modal-back';
+    modal.innerHTML = `
+      <div class="rs-modal" style="max-width:480px;">
+        <h3>Cascade Subsequent Phases?</h3>
+        <div class="rs-modal-body" id="rmcBody"></div>
+        <div class="rs-modal-foot">
+          <button class="btn-cancel" data-c="cancel">Cancel</button>
+          <button class="btn-secondary" data-c="single">Move Only This Phase</button>
+          <button class="btn-primary" data-c="cascade">Cascade All Subsequent</button>
+        </div>
+      </div>`;
+    document.body.appendChild(modal);
+  }
+  const sign = offsetDays > 0 ? '+' : '';
+  modal.querySelector('#rmcBody').innerHTML = `
+    <p>Moving <b>${escHtml(eventTitle)}</b> from <b>${oldDate}</b> to <b>${newDate}</b> (${sign}${offsetDays} days).</p>
+    <p>Should subsequent phases also shift by ${sign}${offsetDays} days?</p>
+  `;
+  modal.querySelectorAll('[data-c]').forEach(btn => {
+    const newBtn = btn.cloneNode(true);
+    btn.parentNode.replaceChild(newBtn, btn);
+    newBtn.addEventListener('click', () => {
+      modal.classList.remove('on');
+      const c = newBtn.dataset.c;
+      onChoice(c === 'cancel' ? null : c);
+    });
+  });
+  modal.classList.add('on');
+}
+
+function showNotifyModal({ ev, newStartStr, newEndStr, cascade, offsetDays, onChoice }) {
+  let modal = document.getElementById('modalNotify');
+  if (!modal) {
+    modal = document.createElement('div');
+    modal.id = 'modalNotify';
+    modal.className = 'rs-modal-back';
+    modal.innerHTML = `
+      <div class="rs-modal" style="max-width:480px;">
+        <h3>Notify of Schedule Change?</h3>
+        <div class="rs-modal-body" id="rmnBody"></div>
+        <div class="rs-modal-foot">
+          <button class="btn-cancel" data-c="cancel">Cancel</button>
+          <button class="btn-secondary" data-c="silent">Save Without Notifying</button>
+          <button class="btn-primary" data-c="notify">Save & Send Emails</button>
+        </div>
+      </div>`;
+    document.body.appendChild(modal);
+  }
+  const cascadeBit = cascade ? `<br><b>Plus ${offsetDays > 0 ? '+' : ''}${offsetDays} days on all subsequent phases.</b>` : '';
+  const assigneesBit = ev.assignees.length
+    ? `<b>${ev.assignees.join(', ')}</b>`
+    : '<i>no assignees</i>';
+  const customerBit = ev.customerName ? `<b>${ev.customerName}</b>` : '<i>no customer email</i>';
+  modal.querySelector('#rmnBody').innerHTML = `
+    <p><b>${escHtml(ev.projectLabel)}</b> — ${escHtml(ev.title)}<br>
+    Now scheduled <b>${newStartStr}</b>${newEndStr !== newStartStr ? ` → <b>${newEndStr}</b>` : ''}${cascadeBit}</p>
+    <div style="background:var(--bg);padding:10px 12px;border-radius:6px;font-size:12px;line-height:1.5;">
+      Will email:<br>
+      • Customer: ${customerBit}<br>
+      • Assigned: ${assigneesBit}
+    </div>
+    <p style="font-size:11px;color:var(--muted);margin-top:10px;">Albi timeline note will be added regardless.</p>
+  `;
+  modal.querySelectorAll('[data-c]').forEach(btn => {
+    const newBtn = btn.cloneNode(true);
+    btn.parentNode.replaceChild(newBtn, btn);
+    newBtn.addEventListener('click', () => {
+      modal.classList.remove('on');
+      const c = newBtn.dataset.c;
+      onChoice(c === 'cancel' ? null : c);
+    });
+  });
+  modal.classList.add('on');
+}
+
+const MESSAGE_HOOK = 'https://hooks.zapier.com/hooks/catch/12653197/uvule41/';
+const ALBI_NOTE_HOOK = 'https://hooks.zapier.com/hooks/catch/12653197/uvugxag/';
+
+async function applyReschedule({ ev, newStartStr, newEndStr, cascade, offsetDays, notify }) {
+  try {
+    if (ev.kind === 'install') {
+      // Material install — only updates approved_install_date on rebuild_selections
+      await sb.from('rebuild_selections').update({
+        approved_install_date: newStartStr,
+      }).eq('id', ev._selectionId);
+    } else {
+      // Phase or walkthrough
+      await sb.from('rebuild_phases').update({
+        scheduled_start: newStartStr,
+        scheduled_end: newEndStr,
+      }).eq('id', ev._phaseId);
+
+      if (cascade) {
+        // Shift all phases on this project that start after the old start date
+        const subsequent = state.events.filter(x =>
+          x._phaseId && x.projectId === ev.projectId && x._phaseId !== ev._phaseId
+          && new Date(x.start) > new Date(ev.start)
+        );
+        for (const s of subsequent) {
+          const newS = addDays(ymd(s.start), offsetDays);
+          const newE = s.end ? addDays(ymd(s.end), offsetDays) : null;
+          await sb.from('rebuild_phases').update({
+            scheduled_start: newS,
+            ...(newE ? { scheduled_end: newE } : {}),
+          }).eq('id', s._phaseId);
+        }
+      }
+    }
+
+    // Albi note — always
+    fireAlbiNote({
+      albi_job_number: ev.projectLabel,
+      project_id: ev.projectId,
+      event_type: 'phase_rescheduled',
+      note: `Schedule updated: "${ev.title}" moved to ${newStartStr}${newEndStr !== newStartStr ? ' → ' + newEndStr : ''}${cascade ? ` (cascade ${offsetDays > 0 ? '+' : ''}${offsetDays} days on subsequent phases)` : ''}.`,
+    });
+
+    // Email customer + assigned (only if notify chose)
+    if (notify === 'notify') {
+      await sendRescheduleNotifications({ ev, newStartStr, newEndStr, cascade, offsetDays });
+    }
+
+    showToast(notify === 'notify' ? 'Rescheduled and notified' : 'Rescheduled');
+    await loadAll();
+  } catch (err) {
+    console.error('Reschedule failed', err);
+    showToast('Reschedule failed: ' + err.message);
+  }
+}
+
+async function fireAlbiNote(payload) {
+  try {
+    await fetch(ALBI_NOTE_HOOK, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload), mode: 'no-cors',
+    });
+  } catch (e) { console.warn('Albi note fail', e); }
+}
+
+async function sendRescheduleNotifications({ ev, newStartStr, newEndStr, cascade, offsetDays }) {
+  const proj = state.projects.find(p => p.id === ev.projectId);
+  if (!proj) return;
+  const dateLabel = newEndStr !== newStartStr ? `${newStartStr} → ${newEndStr}` : newStartStr;
+  const cascadeBit = cascade ? `\n\nNote: Subsequent phases on this project also shifted by ${offsetDays > 0 ? '+' : ''}${offsetDays} days.` : '';
+
+  // Customer email
+  if (proj.customer_email) {
+    const body = `Hi ${(proj.customer_name || '').split(' ')[0] || 'there'},
+
+A quick update on your project:
+
+The "${ev.title}" phase has been rescheduled to ${dateLabel}.
+
+You can see the latest schedule on your customer portal anytime.${cascadeBit}
+
+Thanks,
+${proj.albi_pm_name || 'JG Restoration'}
+JG Restoration · (920) 428-4200`;
+    await fireMessage({
+      project_id: ev.projectId,
+      albi_project_id: null,
+      job_number: proj.albi_job_number,
+      channel: 'email',
+      to_email: proj.customer_email,
+      from_email: 'josh@jg-restoration.com',
+      from_name: proj.albi_pm_name || 'JG Restoration',
+      recipient_name: proj.customer_name,
+      recipient_type: 'customer',
+      subject: `Schedule Update — ${proj.albi_job_number}`,
+      body,
+    });
+  }
+
+  // Assigned subs/carpenters — fetch their emails
+  if (ev._phaseId && ev.assignees.length) {
+    const { data: aData } = await sb.from('rebuild_phase_assignees').select(`
+      sub:rebuild_subs(company_name, primary_contact, email),
+      employee:employees(name, email)
+    `).eq('phase_id', ev._phaseId);
+    for (const a of (aData || [])) {
+      const email = a.sub?.email || a.employee?.email;
+      const name = a.sub?.primary_contact || a.sub?.company_name || a.employee?.name;
+      if (!email) continue;
+      const body = `Hi ${(name || '').split(' ')[0] || 'there'},
+
+Heads up — schedule change on ${proj.albi_job_number}:
+
+"${ev.title}" is now scheduled ${dateLabel}.
+
+Customer: ${proj.customer_name || ''}
+Address: ${proj.property_address || ''}${cascadeBit}
+
+Reply if this doesn't work and we'll get it sorted.
+
+Thanks,
+${proj.albi_pm_name || 'JG Restoration'}
+JG Restoration · (920) 428-4200`;
+      await fireMessage({
+        project_id: ev.projectId,
+        job_number: proj.albi_job_number,
+        channel: 'email',
+        to_email: email,
+        from_email: 'josh@jg-restoration.com',
+        from_name: proj.albi_pm_name || 'JG Restoration',
+        recipient_name: name,
+        recipient_type: a.sub ? 'sub' : 'employee',
+        subject: `Schedule Change — ${proj.albi_job_number}`,
+        body,
+      });
+    }
+  }
+}
+
+async function fireMessage(payload) {
+  // Persist message row first so it's tracked in the rebuild_messages timeline
+  try {
+    await sb.from('rebuild_messages').insert({
+      project_id: payload.project_id,
+      recipient_type: payload.recipient_type,
+      recipient_name: payload.recipient_name,
+      recipient_email: payload.to_email,
+      channel: payload.channel,
+      direction: 'outbound',
+      subject: payload.subject,
+      body: payload.body,
+      sent_by_email: payload.from_email,
+      sent_by_name: payload.from_name,
+      status: 'queued',
+    });
+  } catch (e) { console.warn('msg insert', e); }
+  try {
+    await fetch(MESSAGE_HOOK, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...payload, attachment_count: 0, attachment_urls: '' }),
+      mode: 'no-cors',
+    });
+  } catch (e) { console.warn('msg hook', e); }
+}
+
+function showToast(msg) {
+  let t = document.getElementById('jgToast');
+  if (!t) {
+    t = document.createElement('div');
+    t.id = 'jgToast';
+    t.style.cssText = 'position:fixed;bottom:30px;left:50%;transform:translateX(-50%);background:var(--navy);color:#fff;padding:10px 20px;border-radius:20px;font-size:13px;font-weight:600;box-shadow:0 4px 16px rgba(0,0,0,.2);z-index:99999;opacity:0;transition:opacity .2s;';
+    document.body.appendChild(t);
+  }
+  t.textContent = msg;
+  t.style.opacity = '1';
+  clearTimeout(t._h);
+  t._h = setTimeout(() => { t.style.opacity = '0'; }, 2400);
 }
 
 // ─────── Toolbar wiring ───────
