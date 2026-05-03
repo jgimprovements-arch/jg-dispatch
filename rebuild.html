@@ -1048,26 +1048,115 @@
   .dpk-item:hover { background: var(--bg); }
 
   /* Report builder */
-  .rb-section {
-    display: flex;
+  .rb-row {
+    display: grid;
+    grid-template-columns: 18px 18px 1fr auto;
+    gap: 12px;
     align-items: center;
-    gap: 8px;
-    padding: 8px 12px;
+    padding: 10px 14px;
     border-bottom: 1px solid var(--line);
     background: var(--card);
-    cursor: move;
     user-select: none;
   }
-  .rb-section:last-child { border-bottom: 0; }
-  .rb-section:hover { background: var(--bg); }
-  .rb-section .rb-handle {
+  .rb-row:last-child { border-bottom: 0; }
+  .rb-row[draggable="true"] { cursor: grab; }
+  .rb-row[draggable="true"]:hover { background: var(--bg); }
+  .rb-row[draggable="true"]:active { cursor: grabbing; }
+  .rb-row .rb-handle {
     color: var(--muted);
     font-size: 14px;
     line-height: 1;
-    cursor: grab;
+    text-align: center;
   }
-  .rb-section[draggable="false"] { cursor: default; opacity: .85; }
-  .rb-section[draggable="false"] .rb-handle { visibility: hidden; }
+  .rb-row[draggable="false"] .rb-handle { visibility: hidden; }
+  .rb-row input[type="checkbox"] {
+    margin: 0;
+    width: 16px;
+    height: 16px;
+    cursor: pointer;
+  }
+  .rb-row .rb-row-label {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--navy);
+  }
+  .rb-row[draggable="false"] .rb-row-label { color: var(--muted); }
+  .rb-row .rb-tag {
+    font-size: 10px;
+    color: var(--muted);
+    background: var(--bg);
+    padding: 2px 8px;
+    border-radius: 8px;
+    text-transform: uppercase;
+    letter-spacing: .3px;
+    font-weight: 700;
+  }
+  /* Doc picker checkboxes */
+  .rb-cat-toggle, .rb-doc { width: 14px; height: 14px; cursor: pointer; }
+
+  /* Drag-to-folder for documents */
+  .doc-row { cursor: grab; }
+  .doc-row:active { cursor: grabbing; }
+  .doc-folder.drag-over {
+    border-color: var(--orange) !important;
+    background: rgba(232,93,4,.10) !important;
+    transform: scale(1.04);
+  }
+  .doc-move-zone {
+    position: fixed;
+    bottom: 24px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--card);
+    border: 2px solid var(--orange);
+    border-radius: 12px;
+    padding: 14px 18px;
+    box-shadow: 0 8px 32px rgba(13,45,94,.25);
+    z-index: 9999;
+    pointer-events: auto;
+  }
+  .doc-move-zone-title {
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: .4px;
+    margin-bottom: 10px;
+    text-align: center;
+  }
+  .doc-move-zone-folders {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+  .doc-move-zone-folder {
+    background: var(--bg);
+    border: 1.5px dashed var(--line);
+    border-radius: 8px;
+    padding: 10px 14px;
+    width: 110px;
+    text-align: center;
+    cursor: pointer;
+    transition: all .15s;
+  }
+  .doc-move-zone-folder.current {
+    opacity: .4;
+    pointer-events: none;
+  }
+  .doc-move-zone-folder.drag-over {
+    border-color: var(--orange);
+    border-style: solid;
+    background: rgba(232,93,4,.12);
+    transform: scale(1.05);
+  }
+  .doc-move-zone-icon { font-size: 24px; line-height: 1; margin-bottom: 4px; }
+  .doc-move-zone-name {
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--navy);
+    line-height: 1.2;
+  }
 
   /* ─── Field Photos ─── */
   .photo-stage-filters {
@@ -2591,7 +2680,7 @@ function renderDocRow(d) {
   }
 
   return `
-    <div class="doc-row" data-id="${d.id}">
+    <div class="doc-row" data-id="${d.id}" draggable="true">
       ${thumb}
       <div class="doc-info">
         ${isImage
@@ -2824,14 +2913,12 @@ function openReportBuilder() {
 
   // Build the section list with checkboxes + drag handles
   const sectionsHtml = REPORT_SECTIONS.map(s => {
-    const checked = s.alwaysOn ? 'checked disabled' : 'checked';
     return `
-      <div class="rb-section" data-section-id="${s.id}" draggable="${!s.alwaysOn}">
-        <span class="rb-handle">⋮⋮</span>
-        <label style="flex:1;display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:600;">
-          <input type="checkbox" data-section="${s.id}" ${checked}>
-          ${s.label} ${s.alwaysOn ? '<span style="font-size:10px;color:var(--muted);font-style:italic;">(always included)</span>' : ''}
-        </label>
+      <div class="rb-row" data-section-id="${s.id}" draggable="${!s.alwaysOn}">
+        <span class="rb-handle" title="Drag to reorder">⋮⋮</span>
+        <input type="checkbox" data-section="${s.id}" ${s.alwaysOn ? 'checked disabled' : 'checked'}>
+        <span class="rb-row-label">${s.label}</span>
+        ${s.alwaysOn ? '<span class="rb-tag">Always</span>' : ''}
       </div>`;
   }).join('');
 
@@ -2860,7 +2947,7 @@ function openReportBuilder() {
     </div>
 
     <label style="display:block;margin-bottom:6px;font-weight:700;font-size:13px;">Report Title</label>
-    <input type="text" id="rb_title" value="Final Closeout Package" style="margin-bottom:14px;">
+    <input type="text" id="rb_title" value="Project Report" style="margin-bottom:14px;">
 
     <label style="display:block;margin-bottom:6px;font-weight:700;font-size:13px;">Sections to Include <span style="font-size:11px;color:var(--muted);font-weight:400;">(drag to reorder)</span></label>
     <div id="rb_sections" style="border:1px solid var(--line);border-radius:6px;background:var(--card);margin-bottom:14px;">
@@ -2875,7 +2962,7 @@ function openReportBuilder() {
 
   // Drag-drop reorder for sections
   let dragSrc = null;
-  modal.querySelectorAll('.rb-section[draggable="true"]').forEach(el => {
+  modal.querySelectorAll('.rb-row[draggable="true"]').forEach(el => {
     el.addEventListener('dragstart', e => { dragSrc = el; el.style.opacity = '0.4'; });
     el.addEventListener('dragend', () => { el.style.opacity = ''; dragSrc = null; });
     el.addEventListener('dragover', e => { e.preventDefault(); });
@@ -2907,12 +2994,12 @@ function openReportBuilder() {
     newGen.disabled = true;
     newGen.textContent = '⏳ Generating…';
     try {
-      const orderedSections = [...modal.querySelectorAll('.rb-section')]
+      const orderedSections = [...modal.querySelectorAll('.rb-row')]
         .filter(el => modal.querySelector(`input[data-section="${el.dataset.sectionId}"]`).checked)
         .map(el => el.dataset.sectionId);
 
       const selectedDocIds = [...modal.querySelectorAll('.rb-doc:checked')].map(cb => cb.dataset.docId);
-      const reportTitle = modal.querySelector('#rb_title').value.trim() || 'Final Closeout Package';
+      const reportTitle = modal.querySelector('#rb_title').value.trim() || 'Project Report';
 
       await generateProjectReportPdf({
         sections: orderedSections,
@@ -3587,6 +3674,83 @@ function renderTabContent() {
       state.docFolderOpen = el.dataset.folder;
       renderDetail();
     }));
+
+    // Doc row drag → folder drop (move document to another category)
+    let draggedDocId = null;
+    let dropZone = null;
+
+    const showDropZone = (currentCategory) => {
+      if (dropZone) return;
+      dropZone = document.createElement('div');
+      dropZone.className = 'doc-move-zone';
+      dropZone.innerHTML = `
+        <div class="doc-move-zone-title">Drop on folder to move:</div>
+        <div class="doc-move-zone-folders">
+          ${DOC_CATEGORIES.map(cat =>
+            `<div class="doc-move-zone-folder ${cat === currentCategory ? 'current' : ''}" data-folder-target="${cat}">
+              <div class="doc-move-zone-icon">📁</div>
+              <div class="doc-move-zone-name">${cat}</div>
+            </div>`
+          ).join('')}
+        </div>
+      `;
+      document.body.appendChild(dropZone);
+      // Wire drop targets inside the zone
+      dropZone.querySelectorAll('[data-folder-target]').forEach(folder => {
+        folder.addEventListener('dragover', e => { e.preventDefault(); folder.classList.add('drag-over'); });
+        folder.addEventListener('dragleave', () => folder.classList.remove('drag-over'));
+        folder.addEventListener('drop', async e => {
+          e.preventDefault();
+          if (!draggedDocId) return;
+          const newCat = folder.dataset.folderTarget;
+          const doc = state.documents.find(d => d.id === draggedDocId);
+          if (!doc || doc.category === newCat) { hideDropZone(); return; }
+          await sb.from('rebuild_documents').update({ category: newCat }).eq('id', draggedDocId);
+          toast(`Moved to ${newCat}`);
+          await loadDocuments();
+          hideDropZone();
+          renderDetail();
+        });
+      });
+    };
+    const hideDropZone = () => {
+      if (dropZone) { dropZone.remove(); dropZone = null; }
+    };
+
+    $$('.doc-row').forEach(row => {
+      row.addEventListener('dragstart', e => {
+        draggedDocId = row.dataset.id;
+        const doc = state.documents.find(d => d.id === draggedDocId);
+        row.style.opacity = '0.4';
+        try { e.dataTransfer.setData('text/plain', draggedDocId); } catch (_) {}
+        showDropZone(doc?.category);
+      });
+      row.addEventListener('dragend', () => {
+        row.style.opacity = '';
+        draggedDocId = null;
+        hideDropZone();
+      });
+    });
+
+    // Also enable drop on the folder tiles in grid view
+    $$('.doc-folder[data-folder]').forEach(folder => {
+      folder.addEventListener('dragover', e => { e.preventDefault(); folder.classList.add('drag-over'); });
+      folder.addEventListener('dragleave', () => folder.classList.remove('drag-over'));
+      folder.addEventListener('drop', async e => {
+        e.preventDefault();
+        folder.classList.remove('drag-over');
+        const id = draggedDocId || e.dataTransfer.getData('text/plain');
+        if (!id) return;
+        const newCat = folder.dataset.folder;
+        const doc = state.documents.find(d => d.id === id);
+        if (!doc || doc.category === newCat) return;
+        await sb.from('rebuild_documents').update({ category: newCat }).eq('id', id);
+        toast(`Moved to ${newCat}`);
+        await loadDocuments();
+        hideDropZone();
+        renderDetail();
+      });
+    });
     // Build Report button
     const buildBtn = $('#btnBuildReport');
     if (buildBtn) buildBtn.addEventListener('click', openReportBuilder);
