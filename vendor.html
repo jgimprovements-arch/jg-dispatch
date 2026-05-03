@@ -57,6 +57,7 @@
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://jgimprovements-arch.github.io/jg-dispatch/jg-lightbox.js"></script>
 <script type="module">
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 const SB_URL = 'https://nuykvchgecpiuikoerze.supabase.co';
@@ -89,19 +90,29 @@ async function render() {
     : '';
 
   const attachments = Array.isArray(sel.attachment_urls) ? sel.attachment_urls : [];
+  const isImg = name => /\.(jpg|jpeg|png|gif|webp|heic)$/i.test(name);
+  const lightboxImages = attachments.filter(u => isImg(u.split('/').pop().split('?')[0])).map(u => ({
+    url: u, name: u.split('/').pop().split('?')[0], category: 'Reference'
+  }));
   const attachHtml = attachments.length ? `
     <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--line);">
       <div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;margin-bottom:8px;">Sketches / Reference Files</div>
       <div style="display:flex;flex-wrap:wrap;gap:12px;">
         ${attachments.map((url, i) => {
           const name = url.split('/').pop().split('?')[0];
-          const isImage = /\.(jpg|jpeg|png|gif|webp)$/i.test(name);
+          const isImage = isImg(name);
           return isImage
             ? `<div style="display:flex;flex-direction:column;align-items:flex-start;gap:6px;">
-                 <a href="${url}" target="_blank" style="display:block;"><img src="${url}" style="max-width:200px;max-height:200px;border:1px solid var(--line);border-radius:4px;"></a>
-                 <button class="btn dl-pdf-btn" data-url="${url}" data-name="${name}" data-idx="${i}" style="font-size:11px;padding:5px 10px;">📥 Download as PDF</button>
+                 <img src="${url}" data-lightbox-url="${url}" style="max-width:200px;max-height:200px;border:1px solid var(--line);border-radius:4px;cursor:pointer;">
+                 <div style="display:flex;gap:6px;">
+                   <button class="btn dl-img-btn" data-url="${url}" data-name="${name}" style="font-size:11px;padding:5px 10px;">📥 Download</button>
+                   <button class="btn dl-pdf-btn" data-url="${url}" data-name="${name}" data-idx="${i}" style="font-size:11px;padding:5px 10px;">📥 As PDF</button>
+                 </div>
                </div>`
-            : `<a href="${url}" target="_blank" style="display:inline-flex;align-items:center;gap:6px;padding:8px 12px;background:#eef0f7;border-radius:6px;text-decoration:none;color:var(--navy);font-weight:600;font-size:13px;">📎 ${name}</a>`;
+            : `<div style="display:flex;flex-direction:column;align-items:flex-start;gap:4px;">
+                 <a href="${url}" target="_blank" style="display:inline-flex;align-items:center;gap:6px;padding:8px 12px;background:#eef0f7;border-radius:6px;text-decoration:none;color:var(--navy);font-weight:600;font-size:13px;">📎 ${name}</a>
+                 <button class="btn dl-img-btn" data-url="${url}" data-name="${name}" style="font-size:11px;padding:4px 10px;">📥 Download</button>
+               </div>`;
         }).join('')}
       </div>
     </div>` : '';
@@ -224,6 +235,18 @@ async function render() {
   };
   document.getElementById('v_qty').addEventListener('input', recalc);
   document.getElementById('v_unit_cost').addEventListener('input', recalc);
+
+  // Wire lightbox for image clicks
+  document.querySelectorAll('[data-lightbox-url]').forEach(el => {
+    el.addEventListener('click', () => {
+      const idx = lightboxImages.findIndex(x => x.url === el.dataset.lightboxUrl);
+      JG.openLightbox(lightboxImages, idx >= 0 ? idx : 0);
+    });
+  });
+  // Wire plain download buttons
+  document.querySelectorAll('.dl-img-btn').forEach(btn => {
+    btn.addEventListener('click', () => JG.downloadFile(btn.dataset.url, btn.dataset.name));
+  });
 
   // Wire "Download as PDF" buttons for image attachments
   document.querySelectorAll('.dl-pdf-btn').forEach(btn => {

@@ -833,6 +833,17 @@
     font-weight: 700;
     margin-left: 2px;
   }
+  .msg-att-img { padding: 4px 8px 4px 4px; }
+  .msg-att-dl {
+    background: none;
+    border: 0;
+    cursor: pointer;
+    margin-left: 6px;
+    font-size: 13px;
+    padding: 2px 6px;
+    border-radius: 4px;
+  }
+  .msg-att-dl:hover { background: rgba(13,45,94,.08); }
   .msg-row .msg-att-list { margin-top: 8px; margin-bottom: 0; }
 
   /* ──── Modal ──── */
@@ -1012,6 +1023,69 @@
   .doc-list .doc-row { border-bottom: 1px solid var(--line); }
   .doc-list .doc-row:last-child { border-bottom: 0; }
   .dpk-item:hover { background: var(--bg); }
+
+  /* ─── Global Lightbox ─── */
+  .jg-lightbox {
+    display: none;
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,.92);
+    z-index: 100000;
+    align-items: center; justify-content: center;
+  }
+  .jg-lightbox.on { display: flex; }
+  .jg-lightbox .jg-lb-stage {
+    width: 100vw; height: 100vh;
+    display: flex; align-items: center; justify-content: center;
+    padding: 60px 80px;
+  }
+  .jg-lightbox .jg-lb-img {
+    max-width: 100%; max-height: 100%;
+    object-fit: contain;
+    border-radius: 4px;
+    user-select: none;
+    -webkit-user-drag: none;
+  }
+  .jg-lightbox button {
+    position: fixed;
+    background: rgba(255,255,255,.12);
+    color: #fff;
+    border: 0;
+    cursor: pointer;
+    font-size: 28px;
+    width: 56px; height: 56px;
+    border-radius: 50%;
+    transition: background .15s;
+    z-index: 100001;
+  }
+  .jg-lightbox button:hover { background: rgba(255,255,255,.25); }
+  .jg-lightbox .jg-lb-close { top: 20px; right: 20px; font-size: 22px; }
+  .jg-lightbox .jg-lb-prev { left: 20px; top: 50%; transform: translateY(-50%); }
+  .jg-lightbox .jg-lb-next { right: 20px; top: 50%; transform: translateY(-50%); }
+  .jg-lightbox .jg-lb-dl {
+    bottom: 20px; right: 20px;
+    width: auto; padding: 0 18px; height: 44px;
+    font-size: 14px; font-weight: 600;
+    border-radius: 22px;
+    background: var(--orange);
+  }
+  .jg-lightbox .jg-lb-dl:hover { background: #d05303; }
+  .jg-lightbox .jg-lb-caption {
+    position: fixed;
+    bottom: 30px; left: 30px;
+    color: #fff; font-size: 13px;
+    display: flex; flex-direction: column; gap: 4px;
+    max-width: calc(100% - 220px);
+  }
+  .jg-lightbox .jg-lb-name { font-weight: 600; }
+  .jg-lightbox .jg-lb-counter { font-size: 11px; color: rgba(255,255,255,.7); }
+  @media (max-width: 600px) {
+    .jg-lightbox .jg-lb-stage { padding: 40px 12px; }
+    .jg-lightbox button { width: 44px; height: 44px; font-size: 22px; }
+    .jg-lightbox .jg-lb-prev { left: 10px; }
+    .jg-lightbox .jg-lb-next { right: 10px; }
+    .jg-lightbox .jg-lb-dl { bottom: 10px; right: 10px; padding: 0 14px; height: 38px; font-size: 12px; }
+    .jg-lightbox .jg-lb-caption { left: 10px; bottom: 56px; max-width: calc(100% - 20px); }
+  }
   .doc-row {
     display: flex; align-items: center; gap: 12px;
     padding: 10px 16px; border-bottom: 1px solid var(--line);
@@ -1200,6 +1274,129 @@ const state = {
 // ──── Helpers ────
 const $ = sel => document.querySelector(sel);
 const $$ = sel => document.querySelectorAll(sel);
+
+// ─── Global lightbox + download helpers ───
+const JG = window.JG = window.JG || {};
+
+JG.openLightbox = function(images, startIdx) {
+  // images: [{url, name, category}], startIdx: 0..N-1
+  if (!images || !images.length) return;
+  let idx = startIdx || 0;
+
+  let lb = document.getElementById('jgLightbox');
+  if (!lb) {
+    lb = document.createElement('div');
+    lb.id = 'jgLightbox';
+    lb.className = 'jg-lightbox';
+    lb.innerHTML = `
+      <button class="jg-lb-close" aria-label="Close">✕</button>
+      <button class="jg-lb-prev" aria-label="Previous">‹</button>
+      <button class="jg-lb-next" aria-label="Next">›</button>
+      <button class="jg-lb-dl" aria-label="Download">📥 Download</button>
+      <div class="jg-lb-stage"><img class="jg-lb-img" alt=""></div>
+      <div class="jg-lb-caption">
+        <span class="jg-lb-name"></span>
+        <span class="jg-lb-counter"></span>
+      </div>
+    `;
+    document.body.appendChild(lb);
+  }
+
+  const imgEl = lb.querySelector('.jg-lb-img');
+  const nameEl = lb.querySelector('.jg-lb-name');
+  const counterEl = lb.querySelector('.jg-lb-counter');
+  const prev = lb.querySelector('.jg-lb-prev');
+  const next = lb.querySelector('.jg-lb-next');
+  const dl = lb.querySelector('.jg-lb-dl');
+
+  const show = () => {
+    const cur = images[idx];
+    imgEl.src = cur.url;
+    nameEl.textContent = cur.name + (cur.category ? ' · ' + cur.category : '');
+    counterEl.textContent = `${idx+1} / ${images.length}`;
+    prev.style.visibility = images.length > 1 ? 'visible' : 'hidden';
+    next.style.visibility = images.length > 1 ? 'visible' : 'hidden';
+  };
+  const close = () => { lb.classList.remove('on'); document.removeEventListener('keydown', onKey); };
+  const onKey = (e) => {
+    if (e.key === 'Escape') close();
+    else if (e.key === 'ArrowLeft') { idx = (idx - 1 + images.length) % images.length; show(); }
+    else if (e.key === 'ArrowRight') { idx = (idx + 1) % images.length; show(); }
+  };
+
+  // Replace handlers (clear stale)
+  const newPrev = prev.cloneNode(true); prev.parentNode.replaceChild(newPrev, prev);
+  const newNext = next.cloneNode(true); next.parentNode.replaceChild(newNext, next);
+  const newDl = dl.cloneNode(true); dl.parentNode.replaceChild(newDl, dl);
+  const newClose = lb.querySelector('.jg-lb-close').cloneNode(true);
+  lb.querySelector('.jg-lb-close').parentNode.replaceChild(newClose, lb.querySelector('.jg-lb-close'));
+
+  newPrev.addEventListener('click', () => { idx = (idx - 1 + images.length) % images.length; show(); });
+  newNext.addEventListener('click', () => { idx = (idx + 1) % images.length; show(); });
+  newClose.addEventListener('click', close);
+  newDl.addEventListener('click', () => JG.downloadFile(images[idx].url, images[idx].name));
+  // Click outside image closes
+  lb.addEventListener('click', e => { if (e.target === lb) close(); });
+
+  // Touch swipe
+  let touchStartX = 0;
+  imgEl.addEventListener('touchstart', e => { touchStartX = e.touches[0].clientX; }, { passive: true });
+  imgEl.addEventListener('touchend', e => {
+    const dx = e.changedTouches[0].clientX - touchStartX;
+    if (Math.abs(dx) > 50) {
+      if (dx < 0) { idx = (idx + 1) % images.length; show(); }
+      else { idx = (idx - 1 + images.length) % images.length; show(); }
+    }
+  }, { passive: true });
+
+  document.addEventListener('keydown', onKey);
+  show();
+  lb.classList.add('on');
+};
+
+JG.downloadFile = async function(url, filename) {
+  try {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error('fetch ' + res.status);
+    const blob = await res.blob();
+    const blobUrl = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = blobUrl;
+    a.download = filename || url.split('/').pop().split('?')[0] || 'download';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { URL.revokeObjectURL(blobUrl); a.remove(); }, 250);
+  } catch (e) {
+    console.error('download failed', e);
+    // Fallback: open in new tab
+    window.open(url, '_blank');
+  }
+};
+
+// Helper: collect all images from current project for lightbox navigation
+JG.collectProjectImages = function() {
+  const isImg = name => /\.(jpg|jpeg|png|gif|webp|heic)$/i.test(name || '');
+  const out = [];
+  // Documents
+  for (const d of (state.documents || [])) {
+    if (isImg(d.filename)) out.push({ url: d.file_url, name: d.filename, category: d.category, _kind: 'doc' });
+  }
+  // Selection attachments (sketches/photos)
+  for (const s of (state.selections || [])) {
+    const urls = Array.isArray(s.attachment_urls) ? s.attachment_urls : [];
+    for (const url of urls) {
+      const name = url.split('/').pop().split('?')[0];
+      if (isImg(name)) out.push({ url, name, category: 'Selection: ' + s.category, _kind: 'sel' });
+    }
+  }
+  // Message attachments
+  for (const m of (state.messages || [])) {
+    for (const a of (m.attachments || [])) {
+      if (isImg(a.file_name)) out.push({ url: a.public_url, name: a.file_name, category: 'Message attachment', _kind: 'msg' });
+    }
+  }
+  return out;
+};
 const fmtDate = d => d ? new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '—';
 const fmtDateTime = d => d ? new Date(d).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—';
 const titleCase = s => String(s||'').replace(/_/g,' ').replace(/\b\w/g, c => c.toUpperCase());
@@ -1935,11 +2132,15 @@ function renderDocumentsTab() {
           const thumb = isImage
             ? `<img src="${d.file_url}" loading="lazy" alt="">`
             : `<div class="doc-recent-icon">${isPdf ? '📕' : '📄'}</div>`;
-          return `<a href="${d.file_url}" target="_blank" class="doc-recent-card" title="${d.filename}">
+          const action = isImage
+            ? `data-lightbox-doc="${d.id}"`
+            : `href="${d.file_url}" target="_blank"`;
+          const tag = isImage ? 'div' : 'a';
+          return `<${tag} ${action} class="doc-recent-card" title="${d.filename}" style="cursor:pointer;">
             ${thumb}
             <div class="doc-recent-name">${d.filename}</div>
             <div class="doc-recent-cat">${d.category}</div>
-          </a>`;
+          </${tag}>`;
         }).join('')}
       </div>
     </div>` : '';
@@ -1993,7 +2194,7 @@ function renderDocRow(d) {
     ? '<span class="albi-badge skipped" title="Skipped">— Albi</span>'
     : '<span class="albi-badge pending" title="Pending Albi push">⏳ Albi</span>';
   const thumb = isImage
-    ? `<a href="${d.file_url}" target="_blank"><img src="${d.file_url}" class="doc-thumb" loading="lazy" alt=""></a>`
+    ? `<img src="${d.file_url}" class="doc-thumb" loading="lazy" alt="" data-lightbox-doc="${d.id}">`
     : `<div class="doc-icon">${isPdf ? '📕' : '📄'}</div>`;
   return `
     <div class="doc-row" data-id="${d.id}">
@@ -2004,7 +2205,7 @@ function renderDocRow(d) {
       </div>
       <div class="doc-actions">
         ${albiBadge}
-        <a class="btn" href="${d.file_url}" download="${d.filename}" title="Download">📥</a>
+        <button class="btn doc-dl" data-id="${d.id}" title="Download">📥</button>
         ${d.push_status !== 'sent' ? `<button class="btn doc-retry" data-id="${d.id}" title="Retry Albi push">↻</button>` : ''}
         <button class="btn ghost-red doc-del" data-id="${d.id}" title="Delete">✕</button>
       </div>
@@ -2431,6 +2632,20 @@ function renderTabContent() {
       e.stopPropagation();
       deleteDocument(btn.dataset.id);
     }));
+    $$('.doc-dl').forEach(btn => btn.addEventListener('click', e => {
+      e.stopPropagation();
+      const d = state.documents.find(x => x.id === btn.dataset.id);
+      if (d) JG.downloadFile(d.file_url, d.filename);
+    }));
+    // Lightbox triggers — image thumbs in folder list and recent strip
+    $$('[data-lightbox-doc]').forEach(el => el.addEventListener('click', e => {
+      e.preventDefault();
+      e.stopPropagation();
+      const id = el.dataset.lightboxDoc;
+      const all = JG.collectProjectImages();
+      const idx = all.findIndex(x => x._kind === 'doc' && x.url === state.documents.find(d => d.id === id)?.file_url);
+      JG.openLightbox(all, idx >= 0 ? idx : 0);
+    }));
     $$('.doc-retry').forEach(btn => btn.addEventListener('click', async e => {
       e.stopPropagation();
       const d = state.documents.find(x => x.id === btn.dataset.id);
@@ -2482,6 +2697,17 @@ function renderTabContent() {
 
   // Wire messages tab
   if (state.tab === 'messages') {
+    // Wire attachment image lightbox + downloads on message rows
+    $$('.msg-att-list [data-lightbox-url]').forEach(el => el.addEventListener('click', e => {
+      e.preventDefault();
+      const all = JG.collectProjectImages();
+      const idx = all.findIndex(x => x.url === el.dataset.lightboxUrl);
+      JG.openLightbox(all, idx >= 0 ? idx : 0);
+    }));
+    $$('.msg-att-dl').forEach(btn => btn.addEventListener('click', e => {
+      e.stopPropagation();
+      JG.downloadFile(btn.dataset.url, btn.dataset.name);
+    }));
     const sendBtn = $('#msg_send_btn');
     const channelEl = $('#msg_channel');
     const toEl = $('#msg_to');
@@ -2967,7 +3193,19 @@ async function openSelectionEditor(selectionId) {
     <div id="sel_existing_atts" class="msg-att-list">
       ${(s.attachment_urls || []).map((url, i) => {
         const name = url.split('/').pop().split('?')[0];
-        return `<span class="msg-att-chip">📎 <a href="${url}" target="_blank">${name}</a> <span class="remove" data-url="${url}" title="Remove">✕</span></span>`;
+        const isImg = /\.(jpg|jpeg|png|gif|webp|heic)$/i.test(name);
+        if (isImg) {
+          return `<span class="msg-att-chip msg-att-img">
+            <img src="${url}" data-lightbox-url="${url}" data-lightbox-name="${name}" loading="lazy" style="width:40px;height:40px;object-fit:cover;border-radius:4px;cursor:pointer;">
+            <span style="margin-left:6px;">${name}</span>
+            <button class="msg-att-dl" data-url="${url}" data-name="${name}" title="Download">📥</button>
+            <span class="remove" data-url="${url}" title="Remove">✕</span>
+          </span>`;
+        }
+        return `<span class="msg-att-chip">📎 <a href="${url}" target="_blank">${name}</a>
+          <button class="msg-att-dl" data-url="${url}" data-name="${name}" title="Download">📥</button>
+          <span class="remove" data-url="${url}" title="Remove">✕</span>
+        </span>`;
       }).join('')}
     </div>
     <div id="sel_new_atts" class="msg-att-list" style="margin-top:6px;"></div>
@@ -3004,6 +3242,20 @@ async function openSelectionEditor(selectionId) {
     el.addEventListener('click', () => {
       existingUrls = existingUrls.filter(u => u !== el.dataset.url);
       el.parentElement.remove();
+    });
+  });
+  // Lightbox + download for existing selection attachments
+  $('#sel_existing_atts').querySelectorAll('[data-lightbox-url]').forEach(el => {
+    el.addEventListener('click', () => {
+      const all = JG.collectProjectImages();
+      const idx = all.findIndex(x => x.url === el.dataset.lightboxUrl);
+      JG.openLightbox(all, idx >= 0 ? idx : 0);
+    });
+  });
+  $('#sel_existing_atts').querySelectorAll('.msg-att-dl').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      JG.downloadFile(btn.dataset.url, btn.dataset.name);
     });
   });
 
@@ -3854,12 +4106,21 @@ function renderMessageRow(m) {
   const attachments = m.attachments || [];
   const attachHtml = attachments.length ? `
     <div class="msg-att-list">
-      ${attachments.map(a => `
-        <span class="msg-att-chip">
-          📎 <a href="${a.public_url}" target="_blank" rel="noopener">${a.file_name}</a>
+      ${attachments.map(a => {
+        const isImg = /\.(jpg|jpeg|png|gif|webp|heic)$/i.test(a.file_name || '');
+        if (isImg) {
+          return `<span class="msg-att-chip msg-att-img">
+            <img src="${a.public_url}" data-lightbox-url="${a.public_url}" data-lightbox-name="${a.file_name}" loading="lazy" alt="${a.file_name}" style="width:48px;height:48px;object-fit:cover;border-radius:4px;cursor:pointer;">
+            <span style="margin-left:6px;">${a.file_name}</span>
+            <button class="msg-att-dl" data-url="${a.public_url}" data-name="${a.file_name}" title="Download">📥</button>
+          </span>`;
+        }
+        return `<span class="msg-att-chip">
+          📎 ${a.file_name}
           ${a.file_size ? `<span style="color:var(--muted);">(${(a.file_size/1024).toFixed(0)} KB)</span>` : ''}
-        </span>
-      `).join('')}
+          <button class="msg-att-dl" data-url="${a.public_url}" data-name="${a.file_name}" title="Download">📥</button>
+        </span>`;
+      }).join('')}
     </div>` : '';
   return `
     <div class="msg-row msg-${m.recipient_type} msg-dir-${m.direction}">
