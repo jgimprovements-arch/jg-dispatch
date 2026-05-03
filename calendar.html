@@ -25,6 +25,86 @@
   * { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; height: 100%; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background: var(--bg); color: var(--text); }
   .app { display: flex; height: 100vh; overflow: hidden; }
+  .filter-sidebar {
+    width: 260px;
+    flex-shrink: 0;
+    background: var(--card);
+    border-right: 1px solid var(--line);
+    overflow-y: auto;
+    padding: 12px;
+  }
+  .fs-section { margin-bottom: 16px; }
+  .fs-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 6px;
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: .4px;
+  }
+  .fs-toggle {
+    background: none;
+    border: 0;
+    color: var(--orange);
+    font-size: 10px;
+    font-weight: 700;
+    cursor: pointer;
+    text-transform: uppercase;
+    letter-spacing: .3px;
+  }
+  .fs-toggle:hover { color: var(--navy); }
+  .fs-search {
+    width: 100%;
+    padding: 5px 8px;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    font-size: 11px;
+    margin-bottom: 6px;
+    background: var(--bg);
+  }
+  .fs-search:focus { outline: none; border-color: var(--orange); }
+  .fs-list {
+    max-height: 180px;
+    overflow-y: auto;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: var(--bg);
+  }
+  .fs-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 8px;
+    font-size: 12px;
+    cursor: pointer;
+    border-bottom: 1px solid #eef0f7;
+  }
+  .fs-item:last-child { border-bottom: 0; }
+  .fs-item:hover { background: #fff; }
+  .fs-item input { margin: 0; }
+  .fs-item .fs-color {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .fs-item-label {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .fs-list-empty {
+    padding: 10px;
+    font-size: 11px;
+    color: var(--muted);
+    font-style: italic;
+    text-align: center;
+  }
   .main {
     flex: 1; overflow: hidden; display: flex; flex-direction: column;
   }
@@ -205,6 +285,45 @@
 
 <div class="app">
   <!-- sidebar.js renders nav -->
+  <aside class="filter-sidebar">
+    <div class="fs-section">
+      <div class="fs-head">
+        <span>Projects</span>
+        <button class="fs-toggle" data-group="projects">All</button>
+      </div>
+      <input type="text" class="fs-search" data-search="projects" placeholder="Search jobs…">
+      <div class="fs-list" id="fsProjects"></div>
+    </div>
+    <div class="fs-section">
+      <div class="fs-head">
+        <span>PMs</span>
+        <button class="fs-toggle" data-group="pms">All</button>
+      </div>
+      <div class="fs-list" id="fsPms"></div>
+    </div>
+    <div class="fs-section">
+      <div class="fs-head">
+        <span>Phases</span>
+        <button class="fs-toggle" data-group="phases">All</button>
+      </div>
+      <div class="fs-list" id="fsPhases"></div>
+    </div>
+    <div class="fs-section">
+      <div class="fs-head">
+        <span>Carpenters</span>
+        <button class="fs-toggle" data-group="carpenters">All</button>
+      </div>
+      <div class="fs-list" id="fsCarpenters"></div>
+    </div>
+    <div class="fs-section">
+      <div class="fs-head">
+        <span>Subcontractors</span>
+        <button class="fs-toggle" data-group="subs">All</button>
+      </div>
+      <input type="text" class="fs-search" data-search="subs" placeholder="Search subs…">
+      <div class="fs-list" id="fsSubs"></div>
+    </div>
+  </aside>
   <div class="main">
     <div class="toolbar">
       <h1>📅 Schedule</h1>
@@ -254,6 +373,15 @@ const state = {
   anchor: new Date(),     // current period reference
   search: '',
   filters: { phases: true, installs: true, walkthroughs: true },
+  // Multi-select sidebar filters: null = all included; Set = only those selected
+  multi: {
+    projects: null,
+    pms: null,
+    phases: null,        // phase names (Drywall, Framing, etc.)
+    carpenters: null,    // carpenter employee names
+    subs: null,          // subcontractor company names
+  },
+  multiSearch: { projects: '', subs: '' },
   highlightProjectId: null, // from URL ?project=
   events: [],
   projects: [],
@@ -310,9 +438,15 @@ async function loadAll() {
     const proj = byId[ph.project_id];
     if (!proj) continue;
     const isWalkthrough = /walkthrough/i.test(ph.phase_name || '');
-    const assigneeNames = (ph.assignees || []).map(a =>
-      a.sub?.company_name || a.employee?.name || ''
-    ).filter(Boolean);
+    const carpenterNames = (ph.assignees || [])
+      .filter(a => a.assignee_type === 'employee' || a.employee?.name)
+      .map(a => a.employee?.name)
+      .filter(Boolean);
+    const subNames = (ph.assignees || [])
+      .filter(a => a.assignee_type === 'sub' || a.sub?.company_name)
+      .map(a => a.sub?.company_name)
+      .filter(Boolean);
+    const assigneeNames = [...carpenterNames, ...subNames];
     events.push({
       id: 'ph_' + ph.id,
       kind: isWalkthrough ? 'walkthrough' : 'phase',
@@ -325,6 +459,8 @@ async function loadAll() {
       start: new Date(ph.scheduled_start),
       end: ph.scheduled_end ? new Date(ph.scheduled_end) : new Date(ph.scheduled_start),
       assignees: assigneeNames,
+      _carpenterNames: carpenterNames,
+      _subNames: subNames,
       status: ph.status,
       color: colorForProject(ph.project_id),
       _phaseId: ph.id,
@@ -335,6 +471,7 @@ async function loadAll() {
   for (const sel of (selections || [])) {
     const proj = byId[sel.project_id];
     if (!proj) continue;
+    const subName = sel.vendor_sub?.company_name;
     events.push({
       id: 'sel_' + sel.id,
       kind: 'install',
@@ -346,7 +483,9 @@ async function loadAll() {
       title: `Install: ${sel.item_name || sel.category}`,
       start: new Date(sel.approved_install_date),
       end: new Date(sel.approved_install_date),
-      assignees: sel.vendor_sub?.company_name ? [sel.vendor_sub.company_name] : [],
+      assignees: subName ? [subName] : [],
+      _carpenterNames: [],
+      _subNames: subName ? [subName] : [],
       status: 'scheduled',
       color: colorForProject(sel.project_id),
       _selectionId: sel.id,
@@ -354,15 +493,127 @@ async function loadAll() {
   }
 
   state.events = events;
+  buildSidebarOptions();
+  renderSidebar();
   render();
 }
 
+// ─────── Sidebar option pools ───────
+const sidebarOptions = {
+  projects: [], pms: [], phases: [], carpenters: [], subs: [],
+};
+
+function buildSidebarOptions() {
+  // Projects (id+label)
+  const seenProj = new Set();
+  sidebarOptions.projects = [];
+  for (const p of state.projects) {
+    if (seenProj.has(p.id)) continue;
+    seenProj.add(p.id);
+    sidebarOptions.projects.push({
+      id: p.id,
+      label: p.albi_job_number || 'Project',
+      color: colorForProject(p.id),
+      sub: p.customer_name || '',
+    });
+  }
+  sidebarOptions.projects.sort((a,b) => a.label.localeCompare(b.label));
+
+  // Distinct PMs / phases / carpenters / subs from events
+  const pms = new Set();
+  const phases = new Set();
+  const carps = new Set();
+  const subs = new Set();
+  for (const e of state.events) {
+    if (e.pmName) pms.add(e.pmName);
+    if (e.kind !== 'install' && e.title) phases.add(e.title);
+    for (const n of (e._carpenterNames || [])) carps.add(n);
+    for (const n of (e._subNames || [])) subs.add(n);
+  }
+  sidebarOptions.pms = [...pms].sort().map(name => ({ id: name, label: name }));
+  sidebarOptions.phases = [...phases].sort().map(name => ({ id: name, label: name }));
+  sidebarOptions.carpenters = [...carps].sort().map(name => ({ id: name, label: name }));
+  sidebarOptions.subs = [...subs].sort().map(name => ({ id: name, label: name }));
+}
+
+function renderSidebar() {
+  renderFilterList('fsProjects', sidebarOptions.projects, 'projects', state.multiSearch.projects);
+  renderFilterList('fsPms', sidebarOptions.pms, 'pms', '');
+  renderFilterList('fsPhases', sidebarOptions.phases, 'phases', '');
+  renderFilterList('fsCarpenters', sidebarOptions.carpenters, 'carpenters', '');
+  renderFilterList('fsSubs', sidebarOptions.subs, 'subs', state.multiSearch.subs);
+}
+
+function renderFilterList(elId, items, group, search) {
+  const el = document.getElementById(elId);
+  if (!el) return;
+  const q = (search || '').toLowerCase().trim();
+  const filtered = q ? items.filter(i => (i.label + ' ' + (i.sub||'')).toLowerCase().includes(q)) : items;
+  if (!filtered.length) {
+    el.innerHTML = '<div class="fs-list-empty">None</div>';
+    return;
+  }
+  const sel = state.multi[group]; // null = all included
+  el.innerHTML = filtered.map(i => {
+    const isOn = sel ? sel.has(i.id) : true;
+    const colorBit = i.color ? `<span class="fs-color" style="background:${i.color};"></span>` : '';
+    return `
+      <label class="fs-item">
+        <input type="checkbox" data-group="${group}" data-id="${escAttr(i.id)}" ${isOn ? 'checked' : ''}>
+        ${colorBit}
+        <span class="fs-item-label" title="${escAttr(i.label)}${i.sub ? ' — ' + escAttr(i.sub) : ''}">${escHtml(i.label)}${i.sub ? ' <span style="color:var(--muted);font-size:10px;">· '+escHtml(i.sub)+'</span>' : ''}</span>
+      </label>`;
+  }).join('');
+
+  el.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+    cb.addEventListener('change', () => {
+      const group = cb.dataset.group;
+      const id = cb.dataset.id;
+      // Initialize set with all items if currently null
+      if (state.multi[group] === null) {
+        state.multi[group] = new Set(sidebarOptions[group].map(o => o.id));
+      }
+      if (cb.checked) state.multi[group].add(id);
+      else state.multi[group].delete(id);
+      // If all items selected, clear filter (back to null)
+      if (state.multi[group].size === sidebarOptions[group].length) state.multi[group] = null;
+      render();
+    });
+  });
+}
+
+function escHtml(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c])); }
+function escAttr(s) { return escHtml(s); }
+
 // ─────── Filtering ───────
 function visibleEvents() {
+  const m = state.multi;
   let evs = state.events.filter(e => {
     if (e.kind === 'phase' && !state.filters.phases) return false;
     if (e.kind === 'walkthrough' && !state.filters.walkthroughs) return false;
     if (e.kind === 'install' && !state.filters.installs) return false;
+
+    // Multi-select sidebar filters (null means "include all")
+    if (m.projects && !m.projects.has(e.projectId)) return false;
+    if (m.pms && !m.pms.has(e.pmName || '—')) return false;
+    if (m.phases && e.kind !== 'install' && !m.phases.has(e.title)) return false;
+
+    // Carpenter / sub filter — match against assignees list (employees vs subs)
+    if (m.carpenters || m.subs) {
+      const carpHit = m.carpenters && e._carpenterNames?.some(n => m.carpenters.has(n));
+      const subHit = m.subs && e._subNames?.some(n => m.subs.has(n));
+      // If either filter is active, event must hit at least one
+      const carpActive = !!m.carpenters;
+      const subActive = !!m.subs;
+      if (carpActive && subActive) {
+        if (!carpHit && !subHit) return false;
+      } else if (carpActive) {
+        if (!carpHit) return false;
+      } else if (subActive) {
+        if (!subHit) return false;
+      }
+    }
+
     return true;
   });
   if (state.search.trim()) {
@@ -639,6 +890,27 @@ document.getElementById('searchInput').addEventListener('input', e => {
   state.search = e.target.value;
   render();
 });
+
+// Sidebar: All/None toggle per group
+document.querySelectorAll('.fs-toggle').forEach(b => b.addEventListener('click', () => {
+  const group = b.dataset.group;
+  if (state.multi[group] === null) {
+    // currently "all" → switch to "none"
+    state.multi[group] = new Set();
+    b.textContent = 'None';
+  } else {
+    state.multi[group] = null;
+    b.textContent = 'All';
+  }
+  renderSidebar();
+  render();
+}));
+
+// Sidebar searches
+document.querySelectorAll('.fs-search').forEach(inp => inp.addEventListener('input', e => {
+  state.multiSearch[inp.dataset.search] = e.target.value;
+  renderSidebar();
+}));
 
 // ─────── Init ───────
 loadAll();
