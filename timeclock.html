@@ -1539,37 +1539,73 @@ async function loadSchedule() {
       return;
     }
     var techId = TC.employee.id;
-
-    // Fetch today's assignments (or unscheduled "today" rows) for this tech
     var todayISO = new Date().toISOString().split('T')[0];
+
+    // 1. Existing dispatch assignments (mitigation jobs)
     var url = '/rest/v1/dispatch_assignments_v2'
             + '?tech_id=eq.' + techId
             + '&or=(scheduled_date.eq.' + todayISO + ',scheduled_date.is.null)'
             + '&select=id,job_id,market,position,scheduled_date'
             + '&order=position.asc';
-    var rows = await sb(url);
-    if (!rows || !rows.length) {
-      el.innerHTML = '<div class="empty" style="padding:16px 0;">No jobs assigned today</div>';
+    var dispatchRows = (await sb(url)) || [];
+
+    // 2. Rebuild phase assignments where this employee is on a phase scheduled today
+    var rebuildAssigns = [];
+    try {
+      var rebuildUrl = '/rest/v1/rebuild_phase_assignees'
+                     + '?employee_id=eq.' + techId
+                     + '&select=id,phase_id,phase:rebuild_phases(id,phase_name,scheduled_start,scheduled_end,status,project_id,project:rebuild_projects(albi_job_number,customer_name,property_address,market))';
+      var rebuildRows = (await sb(rebuildUrl)) || [];
+      rebuildAssigns = rebuildRows.filter(function(r) {
+        var ph = r.phase;
+        if (!ph || !ph.scheduled_start) return false;
+        var s = ph.scheduled_start;
+        var e = ph.scheduled_end || ph.scheduled_start;
+        return s <= todayISO && todayISO <= e && ph.status !== 'complete';
+      });
+    } catch (e) {
+      console.warn('Rebuild schedule fetch failed:', e);
+    }
+
+    if (!dispatchRows.length && !rebuildAssigns.length) {
+      el.innerHTML = '<div class="empty" style="padding:16px 0;">No jobs scheduled today</div>';
       if (marketEl) marketEl.textContent = '';
       return;
     }
 
-    // Resolve job names via existing TC.jobs cache (Albi data already loaded)
     var jobNameById = {};
     (TC.jobs || []).forEach(function(j){ jobNameById[String(j.id)] = j.name || j.id; });
 
-    var myJobs = rows.map(function(r){
-      return { id: String(r.job_id), name: jobNameById[String(r.job_id)] || r.job_id };
+    var dispatchJobs = dispatchRows.map(function(r){
+      return {
+        id: String(r.job_id),
+        name: jobNameById[String(r.job_id)] || r.job_id,
+        kind: 'dispatch',
+        sub: '',
+        market: r.market,
+      };
     });
 
-    // Show market label from first row (techs typically work one market)
-    var firstMarket = rows[0].market;
-    var myMarket = firstMarket === 'appleton' ? 'Appleton' : firstMarket === 'stevens_point' ? 'Stevens Point' : '';
+    var rebuildJobs = rebuildAssigns.map(function(r) {
+      var ph = r.phase;
+      var proj = ph.project || {};
+      return {
+        id: 'rebuild:' + (proj.albi_job_number || ph.project_id),
+        name: proj.albi_job_number || 'Rebuild',
+        kind: 'rebuild',
+        sub: '🔨 ' + ph.phase_name + (proj.customer_name ? ' · ' + proj.customer_name : ''),
+        market: proj.market,
+      };
+    });
 
+    var myJobs = dispatchJobs.concat(rebuildJobs);
+
+    var firstMarket = dispatchRows[0]?.market || rebuildJobs[0]?.market;
+    var myMarket = firstMarket === 'appleton' ? 'Appleton' : firstMarket === 'stevens_point' ? 'Stevens Point' : firstMarket || '';
     if (marketEl) marketEl.textContent = myMarket || '';
 
-    // Mark which job is currently active
     var activeJobId = TC.activeEntry ? TC.activeEntry.job_id : null;
+    var esc = function(s){ return String(s || '').replace(/'/g,"&#39;"); };
 
     el.innerHTML = myJobs.map(function(j) {
       var isActive = j.id === activeJobId;
@@ -1577,11 +1613,20 @@ async function loadSchedule() {
       var dotClass = isActive ? 'active' : '';
       var cardClass = isActive ? 'active-job' : '';
       var action = isActive ? '● Active' : (isCurrent ? '✓ Selected' : 'Tap to clock in');
-      var esc = function(s){ return s.replace(/'/g,"&#39;"); };
-      return '<div class="schedule-job ' + cardClass + '" onclick="selectJob(\'' + j.id + '\',\'' + esc(j.name) + '\',\'\')">' +
+      var subLine = j.sub ? '<div style="font-size:11px;color:var(--muted);margin-top:2px;">' + esc(j.sub) + '</div>' : '';
+      var clickHandler;
+      if (j.kind === 'rebuild') {
+        // Strip 'rebuild:' prefix to get the actual job number for clock-in
+        var albiJobNumber = j.id.replace(/^rebuild:/, '');
+        clickHandler = 'onclick="selectJob(\'' + esc(albiJobNumber) + '\',\'' + esc(j.name) + '\',\'\')"';
+      } else {
+        clickHandler = 'onclick="selectJob(\'' + esc(j.id) + '\',\'' + esc(j.name) + '\',\'\')"';
+      }
+      return '<div class="schedule-job ' + cardClass + '" ' + clickHandler + '>' +
         '<div class="schedule-job-dot ' + dotClass + '"></div>' +
         '<div class="schedule-job-info">' +
-          '<div class="schedule-job-name">' + j.name + '</div>' +
+          '<div class="schedule-job-name">' + esc(j.name) + '</div>' +
+          subLine +
         '</div>' +
         '<div class="schedule-job-action">' + action + '</div>' +
       '</div>';
