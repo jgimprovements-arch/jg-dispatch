@@ -3678,6 +3678,7 @@ function renderTabContent() {
     // Doc row drag → folder drop (move document to another category)
     let draggedDocId = null;
     let dropZone = null;
+    let justDragged = false;
 
     const showDropZone = (currentCategory) => {
       if (dropZone) return;
@@ -3695,18 +3696,26 @@ function renderTabContent() {
         </div>
       `;
       document.body.appendChild(dropZone);
-      // Wire drop targets inside the zone
       dropZone.querySelectorAll('[data-folder-target]').forEach(folder => {
-        folder.addEventListener('dragover', e => { e.preventDefault(); folder.classList.add('drag-over'); });
+        folder.addEventListener('dragenter', e => { e.preventDefault(); folder.classList.add('drag-over'); });
+        folder.addEventListener('dragover', e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; folder.classList.add('drag-over'); });
         folder.addEventListener('dragleave', () => folder.classList.remove('drag-over'));
         folder.addEventListener('drop', async e => {
           e.preventDefault();
-          if (!draggedDocId) return;
+          e.stopPropagation();
+          const id = draggedDocId || e.dataTransfer.getData('text/plain');
+          if (!id) { console.warn('[DOC MOVE] no doc id'); hideDropZone(); return; }
           const newCat = folder.dataset.folderTarget;
-          const doc = state.documents.find(d => d.id === draggedDocId);
-          if (!doc || doc.category === newCat) { hideDropZone(); return; }
-          await sb.from('rebuild_documents').update({ category: newCat }).eq('id', draggedDocId);
-          toast(`Moved to ${newCat}`);
+          const doc = state.documents.find(d => d.id === id);
+          if (!doc) { console.warn('[DOC MOVE] doc not found', id); hideDropZone(); return; }
+          if (doc.category === newCat) { hideDropZone(); return; }
+          const { error } = await sb.from('rebuild_documents').update({ category: newCat }).eq('id', id);
+          if (error) {
+            console.error('[DOC MOVE] update failed', error);
+            toast('Move failed: ' + error.message);
+          } else {
+            toast(`Moved to ${newCat}`);
+          }
           await loadDocuments();
           hideDropZone();
           renderDetail();
@@ -3720,8 +3729,10 @@ function renderTabContent() {
     $$('.doc-row').forEach(row => {
       row.addEventListener('dragstart', e => {
         draggedDocId = row.dataset.id;
+        justDragged = true;
         const doc = state.documents.find(d => d.id === draggedDocId);
         row.style.opacity = '0.4';
+        e.dataTransfer.effectAllowed = 'move';
         try { e.dataTransfer.setData('text/plain', draggedDocId); } catch (_) {}
         showDropZone(doc?.category);
       });
@@ -3729,23 +3740,32 @@ function renderTabContent() {
         row.style.opacity = '';
         draggedDocId = null;
         hideDropZone();
+        // Suppress next click that fires after drag
+        setTimeout(() => { justDragged = false; }, 100);
       });
     });
 
-    // Also enable drop on the folder tiles in grid view
+    // Folder tiles drop targets in grid view
     $$('.doc-folder[data-folder]').forEach(folder => {
-      folder.addEventListener('dragover', e => { e.preventDefault(); folder.classList.add('drag-over'); });
+      folder.addEventListener('dragenter', e => { e.preventDefault(); folder.classList.add('drag-over'); });
+      folder.addEventListener('dragover', e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; folder.classList.add('drag-over'); });
       folder.addEventListener('dragleave', () => folder.classList.remove('drag-over'));
       folder.addEventListener('drop', async e => {
         e.preventDefault();
+        e.stopPropagation();
         folder.classList.remove('drag-over');
         const id = draggedDocId || e.dataTransfer.getData('text/plain');
         if (!id) return;
         const newCat = folder.dataset.folder;
         const doc = state.documents.find(d => d.id === id);
-        if (!doc || doc.category === newCat) return;
-        await sb.from('rebuild_documents').update({ category: newCat }).eq('id', id);
-        toast(`Moved to ${newCat}`);
+        if (!doc || doc.category === newCat) { hideDropZone(); return; }
+        const { error } = await sb.from('rebuild_documents').update({ category: newCat }).eq('id', id);
+        if (error) {
+          console.error('[DOC MOVE] update failed', error);
+          toast('Move failed: ' + error.message);
+        } else {
+          toast(`Moved to ${newCat}`);
+        }
         await loadDocuments();
         hideDropZone();
         renderDetail();
