@@ -2662,7 +2662,7 @@ function renderDocRow(d) {
     ? '<span class="albi-badge skipped" title="Skipped">— Albi</span>'
     : '<span class="albi-badge pending" title="Pending Albi push">⏳ Albi</span>';
   const thumb = isImage
-    ? `<img src="${d.file_url}" class="doc-thumb" loading="lazy" alt="" data-lightbox-doc="${d.id}">`
+    ? `<img src="${d.file_url}" class="doc-thumb" loading="lazy" alt="" data-lightbox-doc="${d.id}" draggable="false">`
     : `<div class="doc-icon">${isPdf ? '📕' : '📄'}</div>`;
 
   // Photo enrichment line — only shown for Photos category with image files
@@ -3719,42 +3719,45 @@ function renderTabContent() {
 
     // GLOBAL drag handlers — capture phase so they always fire
     const onGlobalDragOver = (e) => {
-      if (!draggedDocId) return;
-      e.preventDefault();
-      e.dataTransfer.dropEffect = 'move';
-      // Highlight folder under cursor (in zone OR in grid)
-      const allFolders = document.querySelectorAll('.doc-move-zone-folder, .doc-folder[data-folder]');
-      let hitTarget = null;
-      allFolders.forEach(f => {
-        const r = f.getBoundingClientRect();
-        if (e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom) {
-          hitTarget = f;
-        }
-      });
-      allFolders.forEach(f => f.classList.toggle('drag-over', f === hitTarget));
+      // Always prevent default during a doc drag to stop browser file-drop behavior
+      if (draggedDocId) {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        // Highlight folder under cursor (in zone OR in grid)
+        const allFolders = document.querySelectorAll('.doc-move-zone-folder, .doc-folder[data-folder]');
+        let hitTarget = null;
+        allFolders.forEach(f => {
+          const r = f.getBoundingClientRect();
+          if (e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom) {
+            hitTarget = f;
+          }
+        });
+        allFolders.forEach(f => f.classList.toggle('drag-over', f === hitTarget));
+      }
     };
 
     const onGlobalDrop = async (e) => {
-      if (!draggedDocId) return;
-      e.preventDefault();
-      // Find folder under cursor
-      const allFolders = document.querySelectorAll('.doc-move-zone-folder, .doc-folder[data-folder]');
-      let hitTarget = null;
-      allFolders.forEach(f => {
-        const r = f.getBoundingClientRect();
-        if (e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom) {
-          hitTarget = f;
-        }
-      });
-      console.log('[DOC MOVE] drop hit', hitTarget);
-      const id = draggedDocId;
-      const newCat = hitTarget?.dataset?.folderTarget || hitTarget?.dataset?.folder;
-      // Cleanup BEFORE async work so UI is responsive
-      draggedDocId = null;
-      hideDropZone();
-      allFolders.forEach(f => f.classList.remove('drag-over'));
-      if (!newCat) { console.warn('[DOC MOVE] no folder hit'); return; }
-      await performMove(id, newCat);
+      // Always prevent default to stop browser opening dropped files
+      if (draggedDocId) {
+        e.preventDefault();
+        // Find folder under cursor
+        const allFolders = document.querySelectorAll('.doc-move-zone-folder, .doc-folder[data-folder]');
+        let hitTarget = null;
+        allFolders.forEach(f => {
+          const r = f.getBoundingClientRect();
+          if (e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom) {
+            hitTarget = f;
+          }
+        });
+        console.log('[DOC MOVE] drop hit', hitTarget);
+        const id = draggedDocId;
+        const newCat = hitTarget?.dataset?.folderTarget || hitTarget?.dataset?.folder;
+        draggedDocId = null;
+        hideDropZone();
+        allFolders.forEach(f => f.classList.remove('drag-over'));
+        if (!newCat) { console.warn('[DOC MOVE] no folder hit'); return; }
+        await performMove(id, newCat);
+      }
     };
 
     document.addEventListener('dragover', onGlobalDragOver);
