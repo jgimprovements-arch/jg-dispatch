@@ -1131,6 +1131,25 @@
     border: 1px solid var(--line);
     background: var(--bg);
   }
+  .rb-doc-pdf-thumb {
+    overflow: hidden;
+    background: linear-gradient(135deg, #e85d04, #c14a00);
+    color: #fff;
+    font-size: 11px;
+    font-weight: 800;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+  }
+  .rb-doc-pdf-thumb > img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+  .rb-doc-pdf-thumb.rendered { background: var(--bg); }
+  .rb-doc-pdf-thumb.rendered .rb-doc-pdf-fallback { display: none; }
   .rb-doc-icon {
     display: flex;
     align-items: center;
@@ -1452,6 +1471,76 @@
     height: 100%;
   }
   .doc-row .doc-thumb-pdf-rendered .doc-thumb-pdf-fallback { display: none; }
+
+  /* Report generation toast notifications */
+  .report-toast {
+    position: fixed;
+    bottom: 24px;
+    right: 24px;
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 14px 18px;
+    box-shadow: 0 8px 32px rgba(13,45,94,.18);
+    z-index: 99999;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    min-width: 320px;
+    max-width: 460px;
+    animation: reportToastIn .25s ease-out;
+  }
+  @keyframes reportToastIn {
+    from { transform: translateY(20px); opacity: 0; }
+    to { transform: translateY(0); opacity: 1; }
+  }
+  .report-toast-progress { border-left: 4px solid var(--orange); }
+  .report-toast-success { border-left: 4px solid var(--green); }
+  .report-toast-error { border-left: 4px solid var(--red); }
+  .report-toast-spinner {
+    width: 24px;
+    height: 24px;
+    border: 3px solid var(--line);
+    border-top-color: var(--orange);
+    border-radius: 50%;
+    animation: reportSpin 0.8s linear infinite;
+    flex-shrink: 0;
+  }
+  @keyframes reportSpin { to { transform: rotate(360deg); } }
+  .report-toast-icon {
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #fff;
+    font-weight: 800;
+    flex-shrink: 0;
+  }
+  .report-toast-success .report-toast-icon { background: var(--green); }
+  .report-toast-error .report-toast-icon { background: var(--red); }
+  .report-toast-body { flex: 1; }
+  .report-toast-title {
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--navy);
+    margin-bottom: 2px;
+  }
+  .report-toast-sub {
+    font-size: 11px;
+    color: var(--muted);
+  }
+  .report-toast-actions {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+  }
+  .report-toast-close {
+    padding: 4px 10px !important;
+    font-size: 14px;
+    line-height: 1;
+  }
   .doc-row .doc-thumb-pdf:hover { transform: scale(1.04); border-color: var(--orange); }
   .doc-row .doc-thumb-file {
     background: var(--bg);
@@ -2831,6 +2920,63 @@ function renderDocRow(d) {
     </div>`;
 }
 
+function showReportProgress(title) {
+  hideReportProgress();
+  const card = document.createElement('div');
+  card.id = 'reportProgressCard';
+  card.className = 'report-toast report-toast-progress';
+  card.innerHTML = `
+    <div class="report-toast-spinner"></div>
+    <div class="report-toast-body">
+      <div class="report-toast-title">Generating "${title}"…</div>
+      <div class="report-toast-sub">You can keep working — we'll notify you when it's done.</div>
+    </div>
+  `;
+  document.body.appendChild(card);
+}
+
+function hideReportProgress() {
+  const card = document.getElementById('reportProgressCard');
+  if (card) card.remove();
+}
+
+function showReportComplete(title, doc) {
+  hideReportProgress();
+  const card = document.createElement('div');
+  card.className = 'report-toast report-toast-success';
+  card.innerHTML = `
+    <div class="report-toast-icon">✓</div>
+    <div class="report-toast-body">
+      <div class="report-toast-title">Report ready</div>
+      <div class="report-toast-sub">"${title}" saved to Reports folder</div>
+    </div>
+    <div class="report-toast-actions">
+      ${doc?.file_url ? `<a href="${doc.file_url}" target="_blank" class="btn primary">View</a>` : ''}
+      <button class="btn report-toast-close">×</button>
+    </div>
+  `;
+  document.body.appendChild(card);
+  card.querySelector('.report-toast-close').addEventListener('click', () => card.remove());
+  setTimeout(() => { if (card.parentNode) card.remove(); }, 12000);
+}
+
+function showReportError(msg) {
+  hideReportProgress();
+  const card = document.createElement('div');
+  card.className = 'report-toast report-toast-error';
+  card.innerHTML = `
+    <div class="report-toast-icon">⚠</div>
+    <div class="report-toast-body">
+      <div class="report-toast-title">Report generation failed</div>
+      <div class="report-toast-sub">${msg}</div>
+    </div>
+    <button class="btn report-toast-close">×</button>
+  `;
+  document.body.appendChild(card);
+  card.querySelector('.report-toast-close').addEventListener('click', () => card.remove());
+  setTimeout(() => { if (card.parentNode) card.remove(); }, 10000);
+}
+
 async function renderPdfThumbnail(el) {
   if (!window.pdfjsLib || el.dataset.thumbRendered === '1') return;
   const url = el.dataset.pdfThumb;
@@ -2854,8 +3000,8 @@ async function renderPdfThumbnail(el) {
     const ctx = canvas.getContext('2d');
     await page.render({ canvasContext: ctx, viewport: scaled }).promise;
     const dataUrl = canvas.toDataURL('image/jpeg', 0.7);
-    el.innerHTML = `<img src="${dataUrl}" alt="PDF preview" style="width:100%;height:100%;object-fit:cover;border-radius:5px;">`;
-    el.classList.add('doc-thumb-pdf-rendered');
+    el.innerHTML = `<img src="${dataUrl}" alt="PDF preview">`;
+    el.classList.add('doc-thumb-pdf-rendered', 'doc-recent-pdf', 'rendered');
   } catch (e) {
     // Keep PDF fallback label on error
     el.dataset.thumbRendered = '0';
@@ -3046,11 +3192,11 @@ function openDocPickerModal(onPick) {
 const REPORT_SECTIONS = [
   { id: 'cover', label: 'Cover Sheet', alwaysOn: true },
   { id: 'summary', label: 'Project Summary' },
-  { id: 'phases', label: 'Phase Schedule' },
+  { id: 'phases', label: 'Phase Schedule', defaultOff: true },
   { id: 'selections', label: 'Material Selections' },
   { id: 'photos', label: 'Photos (by phase)' },
-  { id: 'documents', label: 'Documents (by category)' },
-  { id: 'audit', label: 'Audit Trail' },
+  { id: 'documents', label: 'Documents (by category)', defaultOff: true },
+  { id: 'audit', label: 'Audit Trail', defaultOff: true },
 ];
 
 function openReportBuilder() {
@@ -3088,10 +3234,11 @@ function openReportBuilder() {
 
   // Build the section list with checkboxes + drag handles
   const sectionsHtml = REPORT_SECTIONS.map(s => {
+    const checkAttrs = s.alwaysOn ? 'checked disabled' : (s.defaultOff ? '' : 'checked');
     return `
       <div class="rb-row" data-section-id="${s.id}" draggable="${!s.alwaysOn}">
         <span class="rb-handle" title="Drag to reorder">⋮⋮</span>
-        <input type="checkbox" data-section="${s.id}" ${s.alwaysOn ? 'checked disabled' : 'checked'}>
+        <input type="checkbox" data-section="${s.id}" ${checkAttrs}>
         <span class="rb-row-label">${s.label}</span>
         ${s.alwaysOn ? '<span class="rb-tag">Always</span>' : ''}
       </div>`;
@@ -3109,7 +3256,9 @@ function openReportBuilder() {
     ${docsByCategory[cat].map(d => {
       const thumb = isImageFile(d.filename)
         ? `<img src="${d.file_url}" class="rb-doc-thumb" loading="lazy" alt="" onerror="this.outerHTML='<div class=&quot;rb-doc-thumb rb-doc-icon&quot;>📄</div>'">`
-        : `<div class="rb-doc-thumb rb-doc-icon">${isPdfFile(d.filename) ? '📕' : '📄'}</div>`;
+        : isPdfFile(d.filename)
+          ? `<div class="rb-doc-thumb rb-doc-pdf-thumb" data-pdf-thumb="${d.file_url}" data-doc-id="${d.id}"><span class="rb-doc-pdf-fallback">📕</span></div>`
+          : `<div class="rb-doc-thumb rb-doc-icon">📄</div>`;
       return `
         <div class="rb-row rb-doc-row">
           <span class="rb-handle"></span>
@@ -3172,35 +3321,40 @@ function openReportBuilder() {
   const newGen = genBtn.cloneNode(true);
   genBtn.parentNode.replaceChild(newGen, genBtn);
   newGen.addEventListener('click', async () => {
-    newGen.disabled = true;
-    newGen.textContent = '⏳ Generating…';
+    const orderedSections = [...modal.querySelectorAll('#rb_sections .rb-row')]
+      .filter(el => {
+        const cb = modal.querySelector(`input[data-section="${el.dataset.sectionId}"]`);
+        return cb && cb.checked;
+      })
+      .map(el => el.dataset.sectionId);
+
+    const selectedDocIds = [...modal.querySelectorAll('.rb-doc:checked')].map(cb => cb.dataset.docId);
+    const reportTitle = modal.querySelector('#rb_title').value.trim() || 'Project Report';
+
+    // Close modal immediately so user can keep working
+    modal.classList.remove('on');
+
+    // Show floating progress card
+    showReportProgress(reportTitle);
+
     try {
-      const orderedSections = [...modal.querySelectorAll('#rb_sections .rb-row')]
-        .filter(el => {
-          const cb = modal.querySelector(`input[data-section="${el.dataset.sectionId}"]`);
-          return cb && cb.checked;
-        })
-        .map(el => el.dataset.sectionId);
-
-      const selectedDocIds = [...modal.querySelectorAll('.rb-doc:checked')].map(cb => cb.dataset.docId);
-      const reportTitle = modal.querySelector('#rb_title').value.trim() || 'Project Report';
-
-      await generateProjectReportPdf({
+      const reportDoc = await generateProjectReportPdf({
         sections: orderedSections,
         docIds: selectedDocIds,
         reportTitle,
       });
-      modal.classList.remove('on');
+      hideReportProgress();
+      showReportComplete(reportTitle, reportDoc);
     } catch (e) {
       console.error(e);
-      toast('PDF generation failed: ' + e.message);
-    } finally {
-      newGen.disabled = false;
-      newGen.textContent = 'Generate PDF';
+      hideReportProgress();
+      showReportError(e.message || 'Failed');
     }
   });
 
   modal.classList.add('on');
+  // Render PDF first-page thumbnails for files in the picker
+  modal.querySelectorAll('[data-pdf-thumb]').forEach(el => renderPdfThumbnail(el));
 }
 
 async function generateProjectReportPdf({ sections, docIds, reportTitle }) {
@@ -3661,11 +3815,12 @@ async function generateProjectReportPdf({ sections, docIds, reportTitle }) {
   const blob = new Blob([finalBytes], { type: 'application/pdf' });
   const file = new File([blob], filename, { type: 'application/pdf' });
 
-  toast('Saving report to Reports folder…');
   await uploadDocument(file, 'Reports');
   await loadDocuments();
   renderDetail();
-  toast('✓ Report saved to Reports folder');
+  // Return the freshly uploaded doc for the completion popup
+  const justUploaded = (state.documents || []).find(d => d.filename === filename && d.category === 'Reports');
+  return justUploaded || { filename };
 }
 
 async function fetchAsDataUrl(url) {
