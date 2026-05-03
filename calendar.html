@@ -231,6 +231,16 @@
   .cal-event.dimmed { opacity: .25; }
   .cal-event.past { opacity: .45; filter: grayscale(.5); }
   .cal-event.past.highlighted { opacity: .85; filter: none; }
+  /* Time off events — distinct striped pattern */
+  .cal-event[title*="Time Off"], .cal-week-event[title*="Time Off"] {
+    background-image: repeating-linear-gradient(
+      135deg,
+      rgba(255,255,255,.18) 0,
+      rgba(255,255,255,.18) 6px,
+      transparent 6px,
+      transparent 12px
+    ) !important;
+  }
   .cal-event.spans { border-radius: 0; margin-left: -7px; margin-right: -7px; padding-left: 8px; padding-right: 8px; }
   .cal-event.spans-start { border-top-left-radius: 3px; border-bottom-left-radius: 3px; margin-left: 0; padding-left: 6px; }
   .cal-event.spans-end { border-top-right-radius: 3px; border-bottom-right-radius: 3px; margin-right: 0; padding-right: 6px; }
@@ -485,6 +495,7 @@
       <button class="filter-pill on" data-filter="phases">Phase Schedules</button>
       <button class="filter-pill on" data-filter="installs">Material Installs</button>
       <button class="filter-pill on" data-filter="walkthroughs">Customer Walkthroughs</button>
+      <button class="filter-pill on" data-filter="timeoff">Time Off</button>
       <span style="margin-left:auto;font-size:11px;color:var(--muted);" id="eventCount">0 events</span>
     </div>
 
@@ -506,7 +517,7 @@ const state = {
   view: 'month',          // month | week | day
   anchor: new Date(),     // current period reference
   search: '',
-  filters: { phases: true, installs: true, walkthroughs: true },
+  filters: { phases: true, installs: true, walkthroughs: true, timeoff: true },
   // Multi-select sidebar filters: null = all included; Set = only those selected
   multi: {
     projects: null,
@@ -546,7 +557,7 @@ function colorForProject(projectId) {
 
 // ─────── Data load ───────
 async function loadAll() {
-  const [{ data: projects }, { data: phases }, selRes, { data: allSubs }] = await Promise.all([
+  const [{ data: projects }, { data: phases }, selRes, { data: allSubs }, vacRes] = await Promise.all([
     sb.from('rebuild_projects').select('id, albi_job_number, customer_name, customer_email, albi_pm_name, market').order('albi_job_number'),
     sb.from('rebuild_phases').select(`
       id, project_id, sequence, phase_name, status, scheduled_start, scheduled_end,
@@ -558,12 +569,14 @@ async function loadAll() {
     `).not('scheduled_start', 'is', null),
     sb.from('rebuild_selections').select('id, project_id, category, description, approved_install_date, vendor_sub_id').not('approved_install_date', 'is', null),
     sb.from('rebuild_subs').select('id, company_name'),
+    sb.from('vacation_requests').select('id, employee_name, employee_id, start_date, end_date, status, reason').eq('status', 'approved'),
   ]);
 
   if (selRes.error) {
     console.error('[CALENDAR] rebuild_selections query failed:', selRes.error);
   }
   const selections = selRes.data || [];
+  const vacations = (vacRes && vacRes.data) || [];
 
   const subsById = Object.fromEntries((allSubs || []).map(s => [s.id, s]));
 
@@ -628,6 +641,29 @@ async function loadAll() {
       status: 'scheduled',
       color: colorForProject(sel.project_id),
       _selectionId: sel.id,
+    });
+  }
+
+  // Time off (approved vacation requests)
+  for (const v of vacations) {
+    if (!v.start_date || !v.end_date) continue;
+    events.push({
+      id: 'vac_' + v.id,
+      kind: 'timeoff',
+      projectId: null,
+      projectLabel: '',
+      customerName: '',
+      pmName: '',
+      market: '',
+      title: `${v.employee_name} — Time Off${v.reason ? ' (' + v.reason + ')' : ''}`,
+      start: new Date(v.start_date),
+      end: new Date(v.end_date),
+      assignees: [v.employee_name],
+      _carpenterNames: [v.employee_name],
+      _subNames: [],
+      status: 'timeoff',
+      color: '#7884a0',
+      _employeeName: v.employee_name,
     });
   }
 
@@ -742,6 +778,7 @@ function visibleEvents() {
     if (e.kind === 'phase' && !state.filters.phases) return false;
     if (e.kind === 'walkthrough' && !state.filters.walkthroughs) return false;
     if (e.kind === 'install' && !state.filters.installs) return false;
+    if (e.kind === 'timeoff' && !state.filters.timeoff) return false;
 
     // Multi-select sidebar filters (null means "include all")
     if (m.projects && !m.projects.has(e.projectId)) return false;
@@ -889,11 +926,13 @@ function renderMonth(events) {
       ].filter(Boolean).join(' ');
       const label = e.kind === 'install' ? `📦 ${e.projectLabel}: ${e.title.replace(/^Install: /, '')}`
                   : e.kind === 'walkthrough' ? `🏠 ${e.projectLabel}: ${e.title}`
+                  : e.kind === 'timeoff' ? `🌴 ${e._employeeName}`
                   : `${e.projectLabel}: ${e.title}`;
-      // ALL cells of a multi-day event are draggable — store the day this cell represents (key)
-      // so we can compute the offset within the event when dragging
-      const dragAttrs = `draggable="true" data-drag-event-id="${e.id}" data-drag-day-key="${key}"`;
-      return `<a class="${cls}" style="--c:${e.color};" data-event-id="${e.id}" ${dragAttrs} title="${e.projectLabel} — ${e.customerName}\n${e.title}\n${e.assignees.join(', ')}\n\nDrag any day to reschedule">${label}</a>`;
+      // Phases, installs, walkthroughs are draggable; time-off is not
+      const dragAttrs = e.kind === 'timeoff'
+        ? ''
+        : `draggable="true" data-drag-event-id="${e.id}" data-drag-day-key="${key}"`;
+      return `<a class="${cls}" style="--c:${e.color};" data-event-id="${e.id}" ${dragAttrs} title="${e.projectLabel ? e.projectLabel + ' — ' : ''}${e.customerName || ''}\n${e.title}\n${e.assignees.join(', ')}${e.kind !== 'timeoff' ? '\n\nDrag any day to reschedule' : ''}">${label}</a>`;
     }).join('');
 
     const overflowHtml = overflow > 0
@@ -993,6 +1032,10 @@ function wireEventClicks() {
       const id = el.dataset.eventId;
       const ev = state.events.find(x => x.id === id);
       if (!ev) return;
+      if (ev.kind === 'timeoff') {
+        // No project to navigate to
+        return;
+      }
       // Open the project in rebuild.html, on Phases tab
       const tab = ev.kind === 'install' ? 'selections' : 'phases';
       window.location.href = `rebuild.html#p=${ev.projectId}&t=${tab}`;
