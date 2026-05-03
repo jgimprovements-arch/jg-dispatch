@@ -1173,6 +1173,11 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+  .drop-target-active {
+    outline: 3px dashed var(--orange);
+    outline-offset: -6px;
+    background: rgba(232,93,4,.04);
+  }
 
   /* ─── Field Photos ─── */
   .photo-stage-filters {
@@ -2715,6 +2720,17 @@ function renderDocRow(d) {
     </div>`;
 }
 
+async function uploadFilesToCategory(files, category) {
+  if (!files || !files.length) return;
+  toast(`Uploading ${files.length} file${files.length === 1 ? '' : 's'} to ${category}…`);
+  for (const f of files) {
+    await uploadDocument(f, category);
+  }
+  await loadDocuments();
+  renderDetail();
+  toast(`✓ ${files.length} file${files.length === 1 ? '' : 's'} uploaded to ${category}`);
+}
+
 async function uploadDocument(file, category) {
   if (!sb || !state.activeProjectId) return;
   const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
@@ -3691,140 +3707,70 @@ function renderTabContent() {
       renderDetail();
     }));
 
-    // Doc row drag → folder drop (custom mouse-based drag, no HTML5 DnD)
-    let draggedDocId = null;
-    let dropZone = null;
-    let dragGhost = null;
-    let dragStartX = 0, dragStartY = 0;
-    let isDragging = false;
-
-    const showDropZone = (currentCategory) => {
-      if (dropZone) return;
-      dropZone = document.createElement('div');
-      dropZone.className = 'doc-move-zone';
-      dropZone.innerHTML = `
-        <div class="doc-move-zone-title">Drop on folder to move:</div>
-        <div class="doc-move-zone-folders">
-          ${DOC_CATEGORIES.map(cat =>
-            `<div class="doc-move-zone-folder ${cat === currentCategory ? 'current' : ''}" data-folder-target="${cat}">
-              <div class="doc-move-zone-icon">📁</div>
-              <div class="doc-move-zone-name">${cat}</div>
-            </div>`
-          ).join('')}
-        </div>
-      `;
-      document.body.appendChild(dropZone);
-    };
-    const hideDropZone = () => {
-      if (dropZone) { dropZone.remove(); dropZone = null; }
-    };
-    const showGhost = (text, x, y) => {
-      if (dragGhost) return;
-      dragGhost = document.createElement('div');
-      dragGhost.className = 'doc-drag-ghost';
-      dragGhost.textContent = text;
-      dragGhost.style.left = (x + 12) + 'px';
-      dragGhost.style.top = (y + 12) + 'px';
-      document.body.appendChild(dragGhost);
-    };
-    const moveGhost = (x, y) => {
-      if (dragGhost) {
-        dragGhost.style.left = (x + 12) + 'px';
-        dragGhost.style.top = (y + 12) + 'px';
-      }
-    };
-    const removeGhost = () => {
-      if (dragGhost) { dragGhost.remove(); dragGhost = null; }
-    };
-
-    const performMove = async (docId, newCat) => {
-      const doc = state.documents.find(d => d.id === docId);
-      if (!doc) return;
-      if (doc.category === newCat) return;
-      const { error } = await sb.from('rebuild_documents').update({ category: newCat }).eq('id', docId);
-      if (error) {
-        console.error('[DOC MOVE] update failed', error);
-        toast('Move failed: ' + error.message);
-      } else {
-        toast(`Moved to ${newCat}`);
-      }
-      await loadDocuments();
-      renderDetail();
-    };
-
-    const onMouseMove = (e) => {
-      if (!draggedDocId) return;
-      const dx = e.clientX - dragStartX;
-      const dy = e.clientY - dragStartY;
-      // Only start drag after movement threshold (5px)
-      if (!isDragging && (Math.abs(dx) > 5 || Math.abs(dy) > 5)) {
-        isDragging = true;
-        const doc = state.documents.find(d => d.id === draggedDocId);
-        showDropZone(doc?.category);
-        showGhost(doc?.filename || 'Document', e.clientX, e.clientY);
-        document.body.style.userSelect = 'none';
-        document.body.style.cursor = 'grabbing';
-      }
-      if (!isDragging) return;
-      moveGhost(e.clientX, e.clientY);
-      // Highlight folder under cursor
-      const allFolders = document.querySelectorAll('.doc-move-zone-folder:not(.current), .doc-folder[data-folder]');
-      let hitTarget = null;
-      allFolders.forEach(f => {
-        const r = f.getBoundingClientRect();
-        if (e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom) {
-          hitTarget = f;
+    // Drag files FROM DESKTOP onto a folder tile to upload directly into that folder
+    $$('.doc-folder[data-folder]').forEach(folder => {
+      folder.addEventListener('dragenter', e => {
+        if (e.dataTransfer && [...(e.dataTransfer.types || [])].includes('Files')) {
+          e.preventDefault();
+          folder.classList.add('drag-over');
         }
       });
-      allFolders.forEach(f => f.classList.toggle('drag-over', f === hitTarget));
-    };
-
-    const onMouseUp = async (e) => {
-      if (!draggedDocId) return;
-      const wasDragging = isDragging;
-      const id = draggedDocId;
-      // Cleanup
-      draggedDocId = null;
-      isDragging = false;
-      document.body.style.userSelect = '';
-      document.body.style.cursor = '';
-      removeGhost();
-      document.removeEventListener('mousemove', onMouseMove);
-      document.removeEventListener('mouseup', onMouseUp);
-      if (!wasDragging) {
-        // Was just a click — let it through
-        hideDropZone();
-        return;
-      }
-      // Find folder under cursor
-      const allFolders = document.querySelectorAll('.doc-move-zone-folder:not(.current), .doc-folder[data-folder]');
-      let hitTarget = null;
-      allFolders.forEach(f => {
-        const r = f.getBoundingClientRect();
-        if (e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom) {
-          hitTarget = f;
+      folder.addEventListener('dragover', e => {
+        if (e.dataTransfer && [...(e.dataTransfer.types || [])].includes('Files')) {
+          e.preventDefault();
+          e.dataTransfer.dropEffect = 'copy';
+          folder.classList.add('drag-over');
         }
       });
-      const newCat = hitTarget?.dataset?.folderTarget || hitTarget?.dataset?.folder;
-      hideDropZone();
-      allFolders.forEach(f => f.classList.remove('drag-over'));
-      if (!newCat) return;
-      await performMove(id, newCat);
-    };
-
-    $$('.doc-row').forEach(row => {
-      row.addEventListener('mousedown', e => {
-        // Don't start drag from buttons (delete, push retry, etc.)
-        if (e.target.closest('button, a[href], [data-lightbox-doc]')) return;
-        if (e.button !== 0) return;
-        draggedDocId = row.dataset.id;
-        isDragging = false;
-        dragStartX = e.clientX;
-        dragStartY = e.clientY;
-        document.addEventListener('mousemove', onMouseMove);
-        document.addEventListener('mouseup', onMouseUp);
+      folder.addEventListener('dragleave', () => folder.classList.remove('drag-over'));
+      folder.addEventListener('drop', async e => {
+        if (!e.dataTransfer || !e.dataTransfer.files || !e.dataTransfer.files.length) return;
+        e.preventDefault();
+        e.stopPropagation();
+        folder.classList.remove('drag-over');
+        const files = [...e.dataTransfer.files];
+        const cat = folder.dataset.folder;
+        await uploadFilesToCategory(files, cat);
       });
     });
+
+    // Drag files FROM DESKTOP into the open folder view's empty area to upload
+    const folderViewArea = document.querySelector('.doc-row-list, .doc-folder-empty');
+    if (folderViewArea && state.docFolderOpen) {
+      const cat = state.docFolderOpen;
+      const handler = {
+        enter: e => {
+          if (e.dataTransfer && [...(e.dataTransfer.types || [])].includes('Files')) {
+            e.preventDefault();
+            folderViewArea.classList.add('drop-target-active');
+          }
+        },
+        over: e => {
+          if (e.dataTransfer && [...(e.dataTransfer.types || [])].includes('Files')) {
+            e.preventDefault();
+            e.dataTransfer.dropEffect = 'copy';
+            folderViewArea.classList.add('drop-target-active');
+          }
+        },
+        leave: e => {
+          if (!folderViewArea.contains(e.relatedTarget)) {
+            folderViewArea.classList.remove('drop-target-active');
+          }
+        },
+        drop: async e => {
+          if (!e.dataTransfer || !e.dataTransfer.files || !e.dataTransfer.files.length) return;
+          e.preventDefault();
+          e.stopPropagation();
+          folderViewArea.classList.remove('drop-target-active');
+          const files = [...e.dataTransfer.files];
+          await uploadFilesToCategory(files, cat);
+        },
+      };
+      folderViewArea.addEventListener('dragenter', handler.enter);
+      folderViewArea.addEventListener('dragover', handler.over);
+      folderViewArea.addEventListener('dragleave', handler.leave);
+      folderViewArea.addEventListener('drop', handler.drop);
+    }
     // Build Report button
     const buildBtn = $('#btnBuildReport');
     if (buildBtn) buildBtn.addEventListener('click', openReportBuilder);
