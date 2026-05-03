@@ -305,6 +305,28 @@
     background: rgba(232,93,4,.10) !important;
     box-shadow: inset 0 0 0 2px var(--orange);
   }
+  .cal-day.drop-preview {
+    background: rgba(45,156,95,.15) !important;
+    box-shadow: inset 0 0 0 2px var(--green);
+  }
+  .cal-day.drop-conflict {
+    background: rgba(214,69,69,.18) !important;
+    box-shadow: inset 0 0 0 2px var(--red);
+    position: relative;
+  }
+  .cal-day.drop-conflict::after {
+    content: '⚠ Conflict';
+    position: absolute;
+    top: 4px; right: 6px;
+    font-size: 10px;
+    font-weight: 700;
+    color: var(--red);
+    background: #fff;
+    padding: 2px 6px;
+    border-radius: 8px;
+    box-shadow: 0 1px 3px rgba(0,0,0,.15);
+    pointer-events: none;
+  }
 
   /* Reschedule confirm modals */
   .rs-modal-back {
@@ -817,9 +839,10 @@ function renderMonth(events) {
       const label = e.kind === 'install' ? `📦 ${e.projectLabel}: ${e.title.replace(/^Install: /, '')}`
                   : e.kind === 'walkthrough' ? `🏠 ${e.projectLabel}: ${e.title}`
                   : `${e.projectLabel}: ${e.title}`;
-      // Only the start cell is draggable to avoid duplicate handles for multi-day events
-      const dragAttrs = e.isStart ? `draggable="true" data-drag-event-id="${e.id}"` : '';
-      return `<a class="${cls}" style="--c:${e.color};" data-event-id="${e.id}" ${dragAttrs} title="${e.projectLabel} — ${e.customerName}\n${e.title}\n${e.assignees.join(', ')}\n\nDrag to reschedule">${label}</a>`;
+      // ALL cells of a multi-day event are draggable — store the day this cell represents (key)
+      // so we can compute the offset within the event when dragging
+      const dragAttrs = `draggable="true" data-drag-event-id="${e.id}" data-drag-day-key="${key}"`;
+      return `<a class="${cls}" style="--c:${e.color};" data-event-id="${e.id}" ${dragAttrs} title="${e.projectLabel} — ${e.customerName}\n${e.title}\n${e.assignees.join(', ')}\n\nDrag any day to reschedule">${label}</a>`;
     }).join('');
 
     const overflowHtml = overflow > 0
@@ -939,16 +962,28 @@ function wireEventClicks() {
 
   // ─── Drag and drop reschedule ───
   let draggedId = null;
+  let draggedDayOffset = 0;     // which day-of-event was grabbed (0 = start, 1 = day 2, etc.)
+  let draggedDuration = 0;      // total length in days minus 1
+  let draggedConflictNames = []; // assignee names for conflict checking
+
   document.querySelectorAll('[data-drag-event-id]').forEach(el => {
     el.addEventListener('dragstart', e => {
       draggedId = el.dataset.dragEventId;
+      const ev = state.events.find(x => x.id === draggedId);
+      if (!ev) return;
+      const grabbedKey = el.dataset.dragDayKey;
+      draggedDayOffset = dayDiff(grabbedKey, ymd(ev.start));
+      draggedDuration = dayDiff(ymd(ev.end), ymd(ev.start));
+      // For conflict detection — assignee names of this event
+      draggedConflictNames = [...(ev._carpenterNames || []), ...(ev._subNames || [])];
       el.style.opacity = '0.5';
       e.dataTransfer.effectAllowed = 'move';
       try { e.dataTransfer.setData('text/plain', draggedId); } catch (_) {}
     });
     el.addEventListener('dragend', () => {
       el.style.opacity = '';
-      el._justDragged = true; // suppress trailing click
+      el._justDragged = true;
+      clearGhostPreview();
     });
   });
 
@@ -956,23 +991,67 @@ function wireEventClicks() {
     cell.addEventListener('dragover', e => {
       e.preventDefault();
       e.dataTransfer.dropEffect = 'move';
-      cell.classList.add('drop-hover');
+      // Show ghost preview spanning all the days the event would occupy
+      showGhostPreview(cell.dataset.dayKey);
     });
-    cell.addEventListener('dragleave', () => cell.classList.remove('drop-hover'));
+    cell.addEventListener('dragleave', e => {
+      // Don't clear if we're moving to another day cell — only on actual exit
+      const related = e.relatedTarget;
+      if (!related || !related.closest || !related.closest('[data-day-key]')) {
+        // we'll re-show on the next dragover so just clear current cell hover
+      }
+    });
     cell.addEventListener('drop', async e => {
       e.preventDefault();
-      cell.classList.remove('drop-hover');
+      clearGhostPreview();
       const id = draggedId || e.dataTransfer.getData('text/plain');
       if (!id) return;
       const ev = state.events.find(x => x.id === id);
       if (!ev) return;
-      const newDateStr = cell.dataset.dayKey;
+      // The day the user dropped represents day `draggedDayOffset` of the event.
+      // So new start = drop day - offset.
+      const dropKey = cell.dataset.dayKey;
+      const newStartStr = addDays(dropKey, -draggedDayOffset);
       const oldStartStr = ymd(ev.start);
-      if (newDateStr === oldStartStr) return; // no-op
-      await openRescheduleFlow(ev, newDateStr);
+      if (newStartStr === oldStartStr) return;
+      await openRescheduleFlow(ev, newStartStr);
       draggedId = null;
+      draggedDayOffset = 0;
+      draggedConflictNames = [];
     });
   });
+
+  function showGhostPreview(dropDayKey) {
+    clearGhostPreview();
+    if (!draggedId) return;
+    // Compute date range the event would occupy if dropped here
+    const newStart = addDays(dropDayKey, -draggedDayOffset);
+    const cells = [];
+    for (let i = 0; i <= draggedDuration; i++) {
+      cells.push(addDays(newStart, i));
+    }
+
+    // Look up other events overlapping these days that share an assignee
+    for (const dKey of cells) {
+      const cellEl = document.querySelector(`[data-day-key="${dKey}"]`);
+      if (!cellEl) continue;
+      // Conflict check: any OTHER event on this day that shares an assignee
+      const conflicts = state.events.some(other => {
+        if (other.id === draggedId) return false;
+        const otherStart = ymd(other.start);
+        const otherEnd = ymd(other.end);
+        if (dKey < otherStart || dKey > otherEnd) return false;
+        const otherNames = [...(other._carpenterNames || []), ...(other._subNames || [])];
+        return draggedConflictNames.some(n => otherNames.includes(n));
+      });
+      cellEl.classList.add(conflicts ? 'drop-conflict' : 'drop-preview');
+    }
+  }
+  function clearGhostPreview() {
+    document.querySelectorAll('.drop-preview, .drop-conflict, .drop-hover').forEach(el => {
+      el.classList.remove('drop-preview', 'drop-conflict', 'drop-hover');
+    });
+  }
 }
 
 function ymd(d) {
