@@ -229,9 +229,9 @@
   }
   .cal-event:hover { opacity: .85; }
   .cal-event.dimmed { opacity: .25; }
-  .cal-event.past { opacity: .55; filter: grayscale(.4); }
-  .cal-event.past.dimmed { opacity: .15; }
-  .cal-event.past.highlighted { opacity: .85; filter: none; }
+  .cal-event.past { opacity: .75; }
+  .cal-event.past.dimmed { opacity: .2; }
+  .cal-event.past.highlighted { opacity: .95; }
   .cal-event.spans { border-radius: 0; margin-left: -7px; margin-right: -7px; padding-left: 8px; padding-right: 8px; }
   .cal-event.spans-start { border-top-left-radius: 3px; border-bottom-left-radius: 3px; margin-left: 0; padding-left: 6px; }
   .cal-event.spans-end { border-top-right-radius: 3px; border-bottom-right-radius: 3px; margin-right: 0; padding-right: 6px; }
@@ -271,8 +271,8 @@
   }
   .cal-week-event:hover { transform: translateX(2px); border-color: var(--c, var(--navy)); }
   .cal-week-event.dimmed { opacity: .35; }
-  .cal-week-event.past { opacity: .55; filter: grayscale(.3); }
-  .cal-week-event.past.highlighted { opacity: .9; filter: none; }
+  .cal-week-event.past { opacity: .75; }
+  .cal-week-event.past.highlighted { opacity: .95; }
   .cal-week-event-info {
     flex: 1; min-width: 0;
   }
@@ -802,8 +802,9 @@ function renderMonth(events) {
     const eventHtml = visible.map(e => {
       const isHighlighted = state.highlightProjectId && e.projectId === state.highlightProjectId;
       const isDimmed = state.highlightProjectId && e.projectId !== state.highlightProjectId;
-      // Past events (end date before today) fade out
-      const isPast = new Date(e.end) < today;
+      // Past events only — strictly before today's date. Today/future stay full color.
+      const endDay = new Date(e.end); endDay.setHours(0,0,0,0);
+      const isPast = endDay < today;
       const cls = [
         'cal-event',
         e.isStart && !e.isEnd ? 'spans spans-start' : '',
@@ -886,7 +887,8 @@ function renderDayList(events, days) {
           ${evs.map(e => {
             const isHighlighted = state.highlightProjectId && e.projectId === state.highlightProjectId;
             const isDimmed = state.highlightProjectId && e.projectId !== state.highlightProjectId;
-            const isPast = new Date(e.end) < today;
+            const endDay = new Date(e.end); endDay.setHours(0,0,0,0);
+            const isPast = endDay < today;
             const cls = ['cal-week-event', isHighlighted ? 'highlighted' : '', isDimmed ? 'dimmed' : '', isPast ? 'past' : ''].filter(Boolean).join(' ');
             const tagLabel = e.kind === 'install' ? '📦 Install' : e.kind === 'walkthrough' ? '🏠 Walkthrough' : 'Phase';
             return `
@@ -1117,19 +1119,18 @@ const ALBI_NOTE_HOOK = 'https://hooks.zapier.com/hooks/catch/12653197/uvugxag/';
 async function applyReschedule({ ev, newStartStr, newEndStr, cascade, offsetDays, notify }) {
   try {
     if (ev.kind === 'install') {
-      // Material install — only updates approved_install_date on rebuild_selections
-      await sb.from('rebuild_selections').update({
+      const { error } = await sb.from('rebuild_selections').update({
         approved_install_date: newStartStr,
       }).eq('id', ev._selectionId);
+      if (error) throw error;
     } else {
-      // Phase or walkthrough
-      await sb.from('rebuild_phases').update({
+      const { error } = await sb.from('rebuild_phases').update({
         scheduled_start: newStartStr,
         scheduled_end: newEndStr,
       }).eq('id', ev._phaseId);
+      if (error) throw error;
 
       if (cascade) {
-        // Shift all phases on this project that start after the old start date
         const subsequent = state.events.filter(x =>
           x._phaseId && x.projectId === ev.projectId && x._phaseId !== ev._phaseId
           && new Date(x.start) > new Date(ev.start)
@@ -1137,10 +1138,11 @@ async function applyReschedule({ ev, newStartStr, newEndStr, cascade, offsetDays
         for (const s of subsequent) {
           const newS = addDays(ymd(s.start), offsetDays);
           const newE = s.end ? addDays(ymd(s.end), offsetDays) : null;
-          await sb.from('rebuild_phases').update({
+          const { error: cErr } = await sb.from('rebuild_phases').update({
             scheduled_start: newS,
             ...(newE ? { scheduled_end: newE } : {}),
           }).eq('id', s._phaseId);
+          if (cErr) throw cErr;
         }
       }
     }
