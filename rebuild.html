@@ -1411,6 +1411,44 @@
   .doc-row:last-child { border-bottom: 0; }
   .doc-row:hover { background: var(--bg); }
   .doc-row .doc-icon { font-size: 22px; flex-shrink: 0; width: 56px; text-align: center; }
+  .doc-row .doc-thumb-pdf, .doc-row .doc-thumb-file {
+    width: 56px;
+    height: 56px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    border-radius: 6px;
+    border: 1px solid var(--line);
+    text-decoration: none;
+    transition: transform .15s, border-color .15s;
+  }
+  .doc-row .doc-thumb-pdf {
+    background: linear-gradient(135deg, #e85d04, #c14a00);
+    color: #fff;
+    font-size: 13px;
+    font-weight: 800;
+    letter-spacing: .5px;
+    cursor: pointer;
+    overflow: hidden;
+    padding: 0;
+    position: relative;
+  }
+  .doc-row .doc-thumb-pdf.doc-thumb-pdf-rendered { background: var(--bg); }
+  .doc-row .doc-thumb-pdf-fallback {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    height: 100%;
+  }
+  .doc-row .doc-thumb-pdf-rendered .doc-thumb-pdf-fallback { display: none; }
+  .doc-row .doc-thumb-pdf:hover { transform: scale(1.04); border-color: var(--orange); }
+  .doc-row .doc-thumb-file {
+    background: var(--bg);
+    color: var(--muted);
+    font-size: 24px;
+  }
   .doc-row .doc-thumb {
     width: 56px;
     height: 56px;
@@ -1567,6 +1605,13 @@
 <script src="sidebar.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.31/jspdf.plugin.autotable.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script>
+  if (window.pdfjsLib) {
+    window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+  }
+</script>
 <script src="jg-export.js"></script>
 <script>
 /* ============================================================================
@@ -2647,6 +2692,7 @@ const DOC_CATEGORIES = [
   'Customer Documents',
   'Subcontractor Documents',
   'Final Billing',
+  'Reports',
 ];
 
 function renderDocumentsTab() {
@@ -2735,7 +2781,9 @@ function renderDocRow(d) {
     : '<span class="albi-badge pending" title="Pending Albi push">⏳ Albi</span>';
   const thumb = isImage
     ? `<img src="${d.file_url}" class="doc-thumb" loading="lazy" alt="" data-lightbox-doc="${d.id}" draggable="false">`
-    : `<div class="doc-icon">${isPdf ? '📕' : '📄'}</div>`;
+    : isPdf
+      ? `<a href="${d.file_url}" target="_blank" class="doc-thumb doc-thumb-pdf" title="Open PDF" data-pdf-thumb="${d.file_url}" data-doc-id="${d.id}"><span class="doc-thumb-pdf-fallback">PDF</span></a>`
+      : `<div class="doc-thumb doc-thumb-file">📄</div>`;
 
   // Photo enrichment line — only shown for Photos category with image files
   let photoLine = '';
@@ -2764,11 +2812,39 @@ function renderDocRow(d) {
       <div class="doc-actions">
         ${albiBadge}
         ${isPhoto ? `<button class="btn doc-photo-edit" data-id="${d.id}" title="Edit stage / phase / caption">✎</button>` : ''}
+        <button class="btn doc-rename" data-id="${d.id}" title="Rename">✏️</button>
         <button class="btn doc-dl" data-id="${d.id}" title="Download">📥</button>
         ${d.push_status !== 'sent' ? `<button class="btn doc-retry" data-id="${d.id}" title="Retry Albi push">↻</button>` : ''}
         <button class="btn ghost-red doc-del" data-id="${d.id}" title="Delete">✕</button>
       </div>
     </div>`;
+}
+
+async function renderPdfThumbnail(el) {
+  if (!window.pdfjsLib || el.dataset.thumbRendered === '1') return;
+  const url = el.dataset.pdfThumb;
+  if (!url) return;
+  el.dataset.thumbRendered = '1';
+  try {
+    const pdf = await window.pdfjsLib.getDocument({ url, withCredentials: false }).promise;
+    const page = await pdf.getPage(1);
+    const viewport = page.getViewport({ scale: 1 });
+    const targetW = 120;
+    const scale = targetW / viewport.width;
+    const scaled = page.getViewport({ scale });
+    const canvas = document.createElement('canvas');
+    canvas.width = scaled.width;
+    canvas.height = scaled.height;
+    const ctx = canvas.getContext('2d');
+    await page.render({ canvasContext: ctx, viewport: scaled }).promise;
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.7);
+    el.innerHTML = `<img src="${dataUrl}" alt="PDF preview" style="width:100%;height:100%;object-fit:cover;border-radius:5px;">`;
+    el.classList.add('doc-thumb-pdf-rendered');
+  } catch (e) {
+    // Keep PDF fallback label on error
+    el.dataset.thumbRendered = '0';
+    console.warn('PDF thumb render failed', url, e);
+  }
 }
 
 async function uploadFilesToCategory(files, category) {
@@ -3392,16 +3468,16 @@ async function generateProjectReportPdf({ sections, docIds, reportTitle }) {
         doc.setLineWidth(0.4);
         doc.line(margin, y - 4, margin + 30, y - 4);
 
-        // 3 columns of thumbnails per row
+        // 2x2 grid (4 per page)
         const list = byPhase[phaseName];
-        const cols = 3;
-        const cellW = (pageW - margin * 2 - (cols - 1) * 4) / cols;
-        const cellH = cellW * 0.75;
+        const cols = 2;
+        const cellW = (pageW - margin * 2 - (cols - 1) * 6) / cols;
+        const cellH = cellW * 0.72;
 
         let col = 0;
         for (const ph of list) {
           if (col === 0) y = checkPageBreak(y, cellH + 14);
-          const x = margin + col * (cellW + 4);
+          const x = margin + col * (cellW + 6);
           try {
             const dataUrl = await fetchAsDataUrl(ph.file_url);
             if (dataUrl) {
@@ -3409,61 +3485,100 @@ async function generateProjectReportPdf({ sections, docIds, reportTitle }) {
             }
           } catch (_) {}
           // Caption
-          doc.setFontSize(7);
+          doc.setFontSize(8);
           doc.setTextColor(...MUTED);
           doc.setFont('helvetica', 'normal');
           const cap = (ph.stage || '').toUpperCase()
                    + (ph.caption ? ' · ' + ph.caption : '')
                    + (ph.taken_at ? ' · ' + new Date(ph.taken_at).toLocaleDateString() : '');
           const lines = doc.splitTextToSize(cap || ' ', cellW);
-          doc.text(lines.slice(0, 2), x, y + cellH + 3);
+          doc.text(lines.slice(0, 2), x, y + cellH + 4);
           col++;
-          if (col >= cols) { col = 0; y += cellH + 12; }
+          if (col >= cols) { col = 0; y += cellH + 14; }
         }
-        if (col !== 0) y += cellH + 12;
-        y += 4;
+        if (col !== 0) y += cellH + 14;
+        y += 6;
       }
     }
   }
 
   // ─── DOCUMENTS BY CATEGORY (selected files) ───
-  if (docIds.length) {
-    const selectedDocs = (state.documents || []).filter(d => docIds.includes(d.id));
-    if (selectedDocs.length) {
+  // Image files: embed full-page directly into the report
+  // PDF files: emit a divider page; pdf-lib merge below will insert their actual pages
+  // Other files (Word/Excel/etc): list by name only on a summary page
+  const selectedDocs = (state.documents || []).filter(d => docIds.includes(d.id));
+  const pdfDocsToMerge = []; // collected for pdf-lib merge
+
+  if (selectedDocs.length) {
+    const byCat = {};
+    for (const d of selectedDocs) (byCat[d.category] = byCat[d.category] || []).push(d);
+
+    for (const cat of DOC_CATEGORIES) {
+      const list = byCat[cat];
+      if (!list?.length) continue;
+      // Skip Photos here — they're handled in the photos section already
+      if (cat === 'Photos') continue;
+
+      // Category divider page
       doc.addPage(); pageNum++;
       drawFooter(pageNum);
       let y = drawHeader();
-      y = sectionTitle('Documents', y);
+      y = sectionTitle(cat, y);
 
-      const byCat = {};
-      for (const d of selectedDocs) {
-        (byCat[d.category] = byCat[d.category] || []).push(d);
+      doc.setFontSize(10);
+      doc.setTextColor(...TEXT);
+      doc.setFont('helvetica', 'normal');
+      for (const d of list) {
+        y = checkPageBreak(y, 6);
+        const ext = (d.filename.match(/\.[a-z0-9]+$/i) || [''])[0].toUpperCase().replace('.', '');
+        doc.text(`• ${d.filename}${ext ? '  [' + ext + ']' : ''}`, margin + 2, y);
+        y += 5;
       }
 
-      for (const cat of DOC_CATEGORIES) {
-        const list = byCat[cat];
-        if (!list?.length) continue;
-        y = checkPageBreak(y, 18);
-        doc.setFontSize(11);
+      // Inline images for this category
+      const imageFiles = list.filter(d => /\.(jpe?g|png|gif|webp)$/i.test(d.filename));
+      const otherFiles = list.filter(d => !/\.(jpe?g|png|gif|webp)$/i.test(d.filename));
+
+      for (const img of imageFiles) {
+        doc.addPage(); pageNum++;
+        drawFooter(pageNum);
+        const py = drawHeader();
+        // Filename caption at top
+        doc.setFontSize(10);
         doc.setTextColor(...NAVY);
         doc.setFont('helvetica', 'bold');
-        doc.text(cat, margin, y);
-        y += 5;
-        doc.setFontSize(9);
-        doc.setTextColor(...TEXT);
-        doc.setFont('helvetica', 'normal');
-        for (const d of list) {
-          y = checkPageBreak(y, 6);
-          doc.text(`• ${d.filename}`, margin + 2, y);
-          y += 5;
-        }
-        y += 3;
+        doc.text(img.filename, margin, py);
+        // Embed full-size image
+        try {
+          const dataUrl = await fetchAsDataUrl(img.file_url);
+          if (dataUrl) {
+            const maxW = pageW - margin * 2;
+            const maxH = pageH - py - 20;
+            // Compute aspect-fit dimensions
+            const tmpImg = await new Promise((res, rej) => {
+              const i = new Image();
+              i.onload = () => res(i);
+              i.onerror = rej;
+              i.src = dataUrl;
+            }).catch(() => null);
+            if (tmpImg) {
+              const ar = tmpImg.width / tmpImg.height;
+              let w = maxW, h = maxW / ar;
+              if (h > maxH) { h = maxH; w = maxH * ar; }
+              const x = margin + (maxW - w) / 2;
+              const yPos = py + 8;
+              doc.addImage(dataUrl, 'JPEG', x, yPos, w, h, undefined, 'FAST');
+            }
+          }
+        } catch (e) { console.warn('img embed failed', e); }
       }
 
-      doc.setFontSize(8);
-      doc.setTextColor(...MUTED);
-      doc.setFont('helvetica', 'italic');
-      doc.text('Linked files are stored in the project record. Customer copies attached separately.', margin, y + 4);
+      // Collect PDFs for merging at the end
+      for (const f of otherFiles) {
+        if (/\.pdf$/i.test(f.filename)) {
+          pdfDocsToMerge.push(f);
+        }
+      }
     }
   }
 
@@ -3495,13 +3610,46 @@ async function generateProjectReportPdf({ sections, docIds, reportTitle }) {
   // Add footer to first page if there's a cover
   if (sections.includes('cover')) {
     doc.setPage(1);
-    // No footer on cover for cleaner look — has its own contact strip
   }
 
-  // Save
-  const filename = `${p.albi_job_number || 'Project'}_${reportTitle.replace(/\s+/g, '_')}.pdf`;
-  doc.save(filename);
-  toast('Report generated');
+  // Get the jsPDF output as bytes
+  let finalBytes = doc.output('arraybuffer');
+
+  // ─── Merge external PDFs via pdf-lib ───
+  if (pdfDocsToMerge.length && window.PDFLib) {
+    toast(`Merging ${pdfDocsToMerge.length} attached PDF${pdfDocsToMerge.length === 1 ? '' : 's'}…`);
+    try {
+      const { PDFDocument } = window.PDFLib;
+      const mainPdf = await PDFDocument.load(finalBytes);
+
+      for (const pdfDoc of pdfDocsToMerge) {
+        try {
+          const res = await fetch(pdfDoc.file_url);
+          if (!res.ok) continue;
+          const pdfBytes = await res.arrayBuffer();
+          const externalPdf = await PDFDocument.load(pdfBytes, { ignoreEncryption: true });
+          const copiedPages = await mainPdf.copyPages(externalPdf, externalPdf.getPageIndices());
+          copiedPages.forEach(pg => mainPdf.addPage(pg));
+        } catch (e) {
+          console.warn('Could not merge PDF', pdfDoc.filename, e);
+        }
+      }
+      finalBytes = await mainPdf.save();
+    } catch (e) {
+      console.error('PDF merge failed', e);
+    }
+  }
+
+  // ─── Upload to Reports folder instead of downloading ───
+  const filename = `${p.albi_job_number || 'Project'}_${reportTitle.replace(/\s+/g, '_')}_${new Date().toISOString().split('T')[0]}.pdf`;
+  const blob = new Blob([finalBytes], { type: 'application/pdf' });
+  const file = new File([blob], filename, { type: 'application/pdf' });
+
+  toast('Saving report to Reports folder…');
+  await uploadDocument(file, 'Reports');
+  await loadDocuments();
+  renderDetail();
+  toast('✓ Report saved to Reports folder');
 }
 
 async function fetchAsDataUrl(url) {
@@ -3871,6 +4019,21 @@ function renderTabContent() {
       e.stopPropagation();
       openPhotoEditor(btn.dataset.id);
     }));
+    $$('.doc-rename').forEach(btn => btn.addEventListener('click', async e => {
+      e.stopPropagation();
+      const d = state.documents.find(x => x.id === btn.dataset.id);
+      if (!d) return;
+      const newName = prompt('Rename file:', d.filename);
+      if (!newName || newName.trim() === '' || newName === d.filename) return;
+      const trimmed = newName.trim();
+      const { error } = await sb.from('rebuild_documents').update({ filename: trimmed }).eq('id', d.id);
+      if (error) { toast('Rename failed: ' + error.message); return; }
+      toast('Renamed');
+      await loadDocuments();
+      renderDetail();
+    }));
+    // Render PDF thumbnails (first page) into PDF tiles
+    $$('[data-pdf-thumb]').forEach(el => renderPdfThumbnail(el));
     // Lightbox triggers — image thumbs in folder list and recent strip
     $$('[data-lightbox-doc]').forEach(el => el.addEventListener('click', e => {
       e.preventDefault();
