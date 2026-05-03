@@ -1,0 +1,650 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Schedule Calendar · JG Restoration</title>
+<link rel="icon" href="https://jgimprovements-arch.github.io/jg-dispatch/logo.png" type="image/png">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="auth.js"></script>
+<script src="sidebar.js"></script>
+<script src="https://jgimprovements-arch.github.io/jg-dispatch/jg-lightbox.js"></script>
+<style>
+  :root {
+    --navy: #0d2d5e;
+    --orange: #e85d04;
+    --gold: #f5a623;
+    --green: #2d9c5f;
+    --red: #d64545;
+    --bg: #f4f6fb;
+    --card: #ffffff;
+    --line: #e4e8ef;
+    --text: #1a2540;
+    --muted: #7884a0;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background: var(--bg); color: var(--text); }
+  .app { display: flex; height: 100vh; overflow: hidden; }
+  .main {
+    flex: 1; overflow: hidden; display: flex; flex-direction: column;
+  }
+  .toolbar {
+    background: var(--card); border-bottom: 1px solid var(--line);
+    padding: 12px 18px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
+    flex-shrink: 0;
+  }
+  .toolbar h1 {
+    margin: 0; font-size: 18px; color: var(--navy); font-weight: 800;
+  }
+  .toolbar .spacer { flex: 1; }
+  .toolbar .btn {
+    background: var(--card); border: 1px solid var(--line); color: var(--text);
+    padding: 7px 14px; border-radius: 6px; font-size: 12px; font-weight: 600;
+    cursor: pointer; transition: all .15s;
+  }
+  .toolbar .btn:hover { border-color: var(--navy); color: var(--navy); }
+  .toolbar .btn.on { background: var(--navy); color: #fff; border-color: var(--navy); }
+  .toolbar .btn.primary { background: var(--orange); color: #fff; border-color: var(--orange); }
+  .toolbar .btn.primary:hover { background: #d05303; border-color: #d05303; }
+  .toolbar .view-toggle, .toolbar .nav-group {
+    display: flex; gap: 0;
+  }
+  .toolbar .view-toggle .btn, .toolbar .nav-group .btn {
+    border-radius: 0; border-right: 0;
+  }
+  .toolbar .view-toggle .btn:first-child { border-top-left-radius: 6px; border-bottom-left-radius: 6px; }
+  .toolbar .view-toggle .btn:last-child { border-top-right-radius: 6px; border-bottom-right-radius: 6px; border-right: 1px solid var(--line); }
+  .toolbar .nav-group .btn:first-child { border-top-left-radius: 6px; border-bottom-left-radius: 6px; }
+  .toolbar .nav-group .btn:last-child { border-top-right-radius: 6px; border-bottom-right-radius: 6px; border-right: 1px solid var(--line); }
+  .toolbar input[type="text"] {
+    padding: 7px 12px; border: 1px solid var(--line); border-radius: 6px;
+    font-size: 12px; min-width: 220px; background: var(--card);
+  }
+  .toolbar input[type="text"]:focus { outline: none; border-color: var(--orange); }
+
+  .filter-row {
+    background: var(--card); border-bottom: 1px solid var(--line);
+    padding: 8px 18px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+    flex-shrink: 0;
+  }
+  .filter-pill {
+    background: var(--bg); border: 1px solid var(--line); color: var(--muted);
+    padding: 4px 10px; border-radius: 12px; font-size: 11px; font-weight: 600;
+    cursor: pointer; text-transform: uppercase; letter-spacing: .3px;
+    user-select: none;
+  }
+  .filter-pill.on {
+    background: var(--navy); color: #fff; border-color: var(--navy);
+  }
+  .filter-pill .dot {
+    display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+    margin-right: 5px; vertical-align: middle;
+  }
+
+  .cal-area {
+    flex: 1; overflow: auto; padding: 16px 18px;
+  }
+
+  /* Month grid */
+  .cal-month {
+    background: var(--card); border: 1px solid var(--line); border-radius: 8px;
+    overflow: hidden;
+  }
+  .cal-month-head {
+    display: grid; grid-template-columns: repeat(7, 1fr);
+    background: var(--bg); border-bottom: 1px solid var(--line);
+  }
+  .cal-month-head > div {
+    padding: 8px 10px; font-size: 11px; font-weight: 700;
+    color: var(--muted); text-transform: uppercase; letter-spacing: .4px;
+    border-right: 1px solid var(--line);
+  }
+  .cal-month-head > div:last-child { border-right: 0; }
+  .cal-month-grid {
+    display: grid; grid-template-columns: repeat(7, 1fr);
+    grid-auto-rows: minmax(120px, 1fr);
+  }
+  .cal-day {
+    border-right: 1px solid var(--line); border-bottom: 1px solid var(--line);
+    padding: 6px; min-height: 120px; position: relative;
+    overflow: hidden;
+    background: var(--card);
+  }
+  .cal-day:nth-child(7n) { border-right: 0; }
+  .cal-day.other-month { background: #fafbfd; }
+  .cal-day.today { background: #fff8ed; }
+  .cal-day-num {
+    font-size: 12px; font-weight: 700; color: var(--text);
+    margin-bottom: 4px; display: inline-block;
+  }
+  .cal-day.other-month .cal-day-num { color: var(--muted); font-weight: 500; }
+  .cal-day.today .cal-day-num {
+    background: var(--orange); color: #fff;
+    width: 22px; height: 22px; border-radius: 50%;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 11px;
+  }
+
+  .cal-event {
+    display: block; padding: 2px 6px; margin-bottom: 2px;
+    background: var(--c, var(--navy)); color: #fff;
+    border-radius: 3px; font-size: 11px; font-weight: 600;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    cursor: pointer; transition: opacity .15s;
+  }
+  .cal-event:hover { opacity: .85; }
+  .cal-event.dimmed { opacity: .25; }
+  .cal-event.spans { border-radius: 0; margin-left: -7px; margin-right: -7px; padding-left: 8px; padding-right: 8px; }
+  .cal-event.spans-start { border-top-left-radius: 3px; border-bottom-left-radius: 3px; margin-left: 0; padding-left: 6px; }
+  .cal-event.spans-end { border-top-right-radius: 3px; border-bottom-right-radius: 3px; margin-right: 0; padding-right: 6px; }
+  .cal-event-overflow {
+    font-size: 10px; color: var(--muted); margin-top: 2px;
+    cursor: pointer; padding: 2px 6px;
+  }
+  .cal-event-overflow:hover { color: var(--orange); }
+
+  /* Week / Day view */
+  .cal-week {
+    background: var(--card); border: 1px solid var(--line); border-radius: 8px;
+    padding: 12px;
+  }
+  .cal-week-day {
+    border-bottom: 1px solid var(--line);
+    padding: 12px 0;
+  }
+  .cal-week-day:last-child { border-bottom: 0; }
+  .cal-week-day-head {
+    font-size: 13px; font-weight: 700; color: var(--navy);
+    margin-bottom: 8px;
+    display: flex; align-items: baseline; gap: 8px;
+  }
+  .cal-week-day-head .day-of-week {
+    font-size: 11px; text-transform: uppercase; letter-spacing: .4px;
+    color: var(--muted); font-weight: 600;
+  }
+  .cal-week-day.today .cal-week-day-head { color: var(--orange); }
+  .cal-week-event-list { display: flex; flex-direction: column; gap: 6px; }
+  .cal-week-event {
+    display: flex; gap: 10px; align-items: center;
+    background: var(--bg); border: 1px solid var(--line); border-left: 4px solid var(--c, var(--navy));
+    padding: 8px 12px; border-radius: 5px;
+    cursor: pointer;
+    transition: all .15s;
+  }
+  .cal-week-event:hover { transform: translateX(2px); border-color: var(--c, var(--navy)); }
+  .cal-week-event.dimmed { opacity: .35; }
+  .cal-week-event-info {
+    flex: 1; min-width: 0;
+  }
+  .cal-week-event-title {
+    font-size: 13px; font-weight: 700; color: var(--navy);
+  }
+  .cal-week-event-meta {
+    font-size: 11px; color: var(--muted); margin-top: 2px;
+  }
+  .cal-week-event-tag {
+    font-size: 10px; color: #fff; background: var(--c, var(--navy));
+    padding: 3px 8px; border-radius: 10px; font-weight: 700;
+    text-transform: uppercase; letter-spacing: .3px; white-space: nowrap;
+  }
+
+  .empty-cal {
+    text-align: center; color: var(--muted); padding: 60px 20px;
+    font-size: 13px;
+  }
+  .empty-cal-icon { font-size: 42px; margin-bottom: 12px; }
+
+  /* Highlighted project (when arriving from a specific project) */
+  .cal-event.highlighted, .cal-week-event.highlighted {
+    box-shadow: 0 0 0 2px var(--orange), 0 4px 12px rgba(232,93,4,.25);
+    z-index: 5; position: relative;
+  }
+</style>
+</head>
+<body>
+
+<div class="app">
+  <!-- sidebar.js renders nav -->
+  <div class="main">
+    <div class="toolbar">
+      <h1>📅 Schedule</h1>
+
+      <div class="nav-group">
+        <button class="btn" id="navPrev" title="Previous">◀</button>
+        <button class="btn" id="navToday">Today</button>
+        <button class="btn" id="navNext" title="Next">▶</button>
+      </div>
+      <div id="periodLabel" style="font-size:14px;font-weight:700;color:var(--navy);margin-left:6px;"></div>
+
+      <div class="spacer"></div>
+
+      <input type="text" id="searchInput" placeholder="Search project, customer, tech, phase…">
+
+      <div class="view-toggle">
+        <button class="btn on" data-view="month">Month</button>
+        <button class="btn" data-view="week">Week</button>
+        <button class="btn" data-view="day">Day</button>
+      </div>
+    </div>
+
+    <div class="filter-row">
+      <span style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;">Show:</span>
+      <button class="filter-pill on" data-filter="phases">Phase Schedules</button>
+      <button class="filter-pill on" data-filter="installs">Material Installs</button>
+      <button class="filter-pill on" data-filter="walkthroughs">Customer Walkthroughs</button>
+      <span style="margin-left:auto;font-size:11px;color:var(--muted);" id="eventCount">0 events</span>
+    </div>
+
+    <div class="cal-area" id="calArea">
+      <div class="empty-cal">
+        <div class="empty-cal-icon">📅</div>
+        <div>Loading schedule…</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+const SUPABASE_URL = 'https://nuykvchgecpiuikoerze.supabase.co';
+const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im51eWt2Y2hnZWNwaXVpa29lcnplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDU0Njk4ODYsImV4cCI6MjA2MTA0NTg4Nn0.Vyq7g6vGpFKDdFRWWN52-8RScw3kZyhrUtABgIJBeYQ';
+const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+const state = {
+  view: 'month',          // month | week | day
+  anchor: new Date(),     // current period reference
+  search: '',
+  filters: { phases: true, installs: true, walkthroughs: true },
+  highlightProjectId: null, // from URL ?project=
+  events: [],
+  projects: [],
+  projectColors: {},
+};
+
+// ─────── URL params ───────
+const urlParams = new URLSearchParams(window.location.search);
+state.highlightProjectId = urlParams.get('project');
+
+// ─────── Color palette (per project) ───────
+const PALETTE = [
+  '#0d2d5e', '#e85d04', '#2d9c5f', '#9b59b6', '#16a085',
+  '#d64545', '#f5a623', '#3498db', '#e67e22', '#34495e',
+  '#1abc9c', '#c0392b', '#8e44ad', '#27ae60', '#2980b9',
+  '#d35400', '#7f8c8d', '#e91e63', '#00897b', '#5d4037',
+];
+
+function colorForProject(projectId) {
+  if (state.projectColors[projectId]) return state.projectColors[projectId];
+  // Hash-based stable assignment from project ID
+  let h = 0;
+  for (let i = 0; i < projectId.length; i++) h = ((h << 5) - h + projectId.charCodeAt(i)) | 0;
+  const c = PALETTE[Math.abs(h) % PALETTE.length];
+  state.projectColors[projectId] = c;
+  return c;
+}
+
+// ─────── Data load ───────
+async function loadAll() {
+  const [{ data: projects }, { data: phases }, { data: selections }] = await Promise.all([
+    sb.from('rebuild_projects').select('id, albi_job_number, customer_name, customer_email, albi_pm_name, market').order('albi_job_number'),
+    sb.from('rebuild_phases').select(`
+      id, project_id, sequence, phase_name, status, scheduled_start, scheduled_end,
+      assignees:rebuild_phase_assignees(
+        id, assignee_type,
+        sub:rebuild_subs(company_name),
+        employee:employees(name)
+      )
+    `).not('scheduled_start', 'is', null),
+    sb.from('rebuild_selections').select(`
+      id, project_id, category, item_name, approved_install_date,
+      vendor_sub:rebuild_subs(company_name)
+    `).not('approved_install_date', 'is', null),
+  ]);
+
+  state.projects = projects || [];
+  const byId = Object.fromEntries(state.projects.map(p => [p.id, p]));
+
+  const events = [];
+
+  // Phases
+  for (const ph of (phases || [])) {
+    const proj = byId[ph.project_id];
+    if (!proj) continue;
+    const isWalkthrough = /walkthrough/i.test(ph.phase_name || '');
+    const assigneeNames = (ph.assignees || []).map(a =>
+      a.sub?.company_name || a.employee?.name || ''
+    ).filter(Boolean);
+    events.push({
+      id: 'ph_' + ph.id,
+      kind: isWalkthrough ? 'walkthrough' : 'phase',
+      projectId: ph.project_id,
+      projectLabel: proj.albi_job_number || 'Project',
+      customerName: proj.customer_name || '',
+      pmName: proj.albi_pm_name || '',
+      market: proj.market || '',
+      title: ph.phase_name,
+      start: new Date(ph.scheduled_start),
+      end: ph.scheduled_end ? new Date(ph.scheduled_end) : new Date(ph.scheduled_start),
+      assignees: assigneeNames,
+      status: ph.status,
+      color: colorForProject(ph.project_id),
+      _phaseId: ph.id,
+    });
+  }
+
+  // Material installs
+  for (const sel of (selections || [])) {
+    const proj = byId[sel.project_id];
+    if (!proj) continue;
+    events.push({
+      id: 'sel_' + sel.id,
+      kind: 'install',
+      projectId: sel.project_id,
+      projectLabel: proj.albi_job_number || 'Project',
+      customerName: proj.customer_name || '',
+      pmName: proj.albi_pm_name || '',
+      market: proj.market || '',
+      title: `Install: ${sel.item_name || sel.category}`,
+      start: new Date(sel.approved_install_date),
+      end: new Date(sel.approved_install_date),
+      assignees: sel.vendor_sub?.company_name ? [sel.vendor_sub.company_name] : [],
+      status: 'scheduled',
+      color: colorForProject(sel.project_id),
+      _selectionId: sel.id,
+    });
+  }
+
+  state.events = events;
+  render();
+}
+
+// ─────── Filtering ───────
+function visibleEvents() {
+  let evs = state.events.filter(e => {
+    if (e.kind === 'phase' && !state.filters.phases) return false;
+    if (e.kind === 'walkthrough' && !state.filters.walkthroughs) return false;
+    if (e.kind === 'install' && !state.filters.installs) return false;
+    return true;
+  });
+  if (state.search.trim()) {
+    const q = state.search.trim().toLowerCase();
+    evs = evs.filter(e =>
+      e.projectLabel.toLowerCase().includes(q)
+      || e.customerName.toLowerCase().includes(q)
+      || e.title.toLowerCase().includes(q)
+      || e.assignees.some(a => a.toLowerCase().includes(q))
+      || (e.pmName || '').toLowerCase().includes(q)
+    );
+  }
+  return evs;
+}
+
+// ─────── Period range ───────
+function startOfMonth(d) {
+  return new Date(d.getFullYear(), d.getMonth(), 1);
+}
+function startOfWeek(d) {
+  const dt = new Date(d);
+  const day = dt.getDay(); // 0=Sun
+  dt.setDate(dt.getDate() - day);
+  dt.setHours(0, 0, 0, 0);
+  return dt;
+}
+function fmtMonthYear(d) {
+  return d.toLocaleString('en-US', { month: 'long', year: 'numeric' });
+}
+function sameDay(a, b) {
+  return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+}
+
+// ─────── Renderers ───────
+function render() {
+  const periodLabel = document.getElementById('periodLabel');
+  const calArea = document.getElementById('calArea');
+  const visEvs = visibleEvents();
+  document.getElementById('eventCount').textContent =
+    visEvs.length + ' event' + (visEvs.length === 1 ? '' : 's');
+
+  if (state.view === 'month') {
+    periodLabel.textContent = fmtMonthYear(state.anchor);
+    calArea.innerHTML = renderMonth(visEvs);
+  } else if (state.view === 'week') {
+    const start = startOfWeek(state.anchor);
+    const end = new Date(start); end.setDate(end.getDate() + 6);
+    periodLabel.textContent = fmtRange(start, end);
+    calArea.innerHTML = renderWeek(visEvs, start, end);
+  } else if (state.view === 'day') {
+    periodLabel.textContent = state.anchor.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
+    calArea.innerHTML = renderDay(visEvs, state.anchor);
+  }
+
+  wireEventClicks();
+}
+
+function fmtRange(s, e) {
+  const sameMonth = s.getMonth() === e.getMonth();
+  if (sameMonth) {
+    return `${s.toLocaleString('en-US', { month: 'long' })} ${s.getDate()}–${e.getDate()}, ${s.getFullYear()}`;
+  }
+  return `${s.toLocaleString('en-US', { month: 'short', day: 'numeric' })} – ${e.toLocaleString('en-US', { month: 'short', day: 'numeric' })}, ${e.getFullYear()}`;
+}
+
+function renderMonth(events) {
+  const first = startOfMonth(state.anchor);
+  const gridStart = new Date(first);
+  gridStart.setDate(gridStart.getDate() - first.getDay()); // back up to Sunday
+
+  // Build 6 weeks (42 days) for consistent grid height
+  const days = [];
+  for (let i = 0; i < 42; i++) {
+    const d = new Date(gridStart);
+    d.setDate(d.getDate() + i);
+    days.push(d);
+  }
+
+  // Group events by day-key (YYYY-MM-DD)
+  const eventsByDay = {};
+  for (const e of events) {
+    const cur = new Date(e.start);
+    cur.setHours(0,0,0,0);
+    const last = new Date(e.end);
+    last.setHours(0,0,0,0);
+    while (cur <= last) {
+      const key = cur.toISOString().slice(0, 10);
+      (eventsByDay[key] = eventsByDay[key] || []).push({
+        ...e,
+        isStart: sameDay(cur, e.start),
+        isEnd: sameDay(cur, e.end),
+      });
+      cur.setDate(cur.getDate() + 1);
+    }
+  }
+
+  const today = new Date(); today.setHours(0,0,0,0);
+  const month = first.getMonth();
+
+  const dayHeaders = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat']
+    .map(d => `<div>${d}</div>`).join('');
+
+  const cells = days.map(d => {
+    const key = d.toISOString().slice(0, 10);
+    const evs = eventsByDay[key] || [];
+    const isToday = sameDay(d, today);
+    const isOther = d.getMonth() !== month;
+    const visible = evs.slice(0, 4);
+    const overflow = evs.length - visible.length;
+
+    const eventHtml = visible.map(e => {
+      const isHighlighted = state.highlightProjectId && e.projectId === state.highlightProjectId;
+      const isDimmed = state.highlightProjectId && e.projectId !== state.highlightProjectId;
+      const cls = [
+        'cal-event',
+        e.isStart && !e.isEnd ? 'spans spans-start' : '',
+        !e.isStart && e.isEnd ? 'spans spans-end' : '',
+        !e.isStart && !e.isEnd ? 'spans' : '',
+        isHighlighted ? 'highlighted' : '',
+        isDimmed ? 'dimmed' : '',
+      ].filter(Boolean).join(' ');
+      const label = e.kind === 'install' ? `📦 ${e.projectLabel}: ${e.title.replace(/^Install: /, '')}`
+                  : e.kind === 'walkthrough' ? `🏠 ${e.projectLabel}: ${e.title}`
+                  : `${e.projectLabel}: ${e.title}`;
+      return `<a class="${cls}" style="--c:${e.color};" data-event-id="${e.id}" title="${e.projectLabel} — ${e.customerName}\n${e.title}\n${e.assignees.join(', ')}">${label}</a>`;
+    }).join('');
+
+    const overflowHtml = overflow > 0
+      ? `<div class="cal-event-overflow" data-day="${key}">+${overflow} more</div>`
+      : '';
+
+    return `
+      <div class="cal-day ${isToday ? 'today' : ''} ${isOther ? 'other-month' : ''}">
+        <div class="cal-day-num">${d.getDate()}</div>
+        ${eventHtml}
+        ${overflowHtml}
+      </div>`;
+  }).join('');
+
+  return `
+    <div class="cal-month">
+      <div class="cal-month-head">${dayHeaders}</div>
+      <div class="cal-month-grid">${cells}</div>
+    </div>`;
+}
+
+function renderWeek(events, start, end) {
+  const days = [];
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(start);
+    d.setDate(d.getDate() + i);
+    days.push(d);
+  }
+  return renderDayList(events, days);
+}
+
+function renderDay(events, d) {
+  return renderDayList(events, [d]);
+}
+
+function renderDayList(events, days) {
+  const today = new Date(); today.setHours(0,0,0,0);
+  const eventsByDay = {};
+  for (const e of events) {
+    const cur = new Date(e.start); cur.setHours(0,0,0,0);
+    const last = new Date(e.end); last.setHours(0,0,0,0);
+    while (cur <= last) {
+      const key = cur.toISOString().slice(0, 10);
+      (eventsByDay[key] = eventsByDay[key] || []).push(e);
+      cur.setDate(cur.getDate() + 1);
+    }
+  }
+
+  const dayBlocks = days.map(d => {
+    const key = d.toISOString().slice(0, 10);
+    const evs = eventsByDay[key] || [];
+    const isToday = sameDay(d, today);
+    const dow = d.toLocaleString('en-US', { weekday: 'short' });
+    const dateStr = d.toLocaleString('en-US', { month: 'long', day: 'numeric' });
+
+    return `
+      <div class="cal-week-day ${isToday ? 'today' : ''}">
+        <div class="cal-week-day-head">
+          <span class="day-of-week">${dow}</span>
+          <span>${dateStr}</span>
+          <span style="font-size:11px;color:var(--muted);font-weight:500;">${evs.length} event${evs.length===1?'':'s'}</span>
+        </div>
+        ${evs.length === 0 ? '<div style="font-size:12px;color:var(--muted);font-style:italic;">No scheduled work</div>' : ''}
+        <div class="cal-week-event-list">
+          ${evs.map(e => {
+            const isHighlighted = state.highlightProjectId && e.projectId === state.highlightProjectId;
+            const isDimmed = state.highlightProjectId && e.projectId !== state.highlightProjectId;
+            const cls = ['cal-week-event', isHighlighted ? 'highlighted' : '', isDimmed ? 'dimmed' : ''].filter(Boolean).join(' ');
+            const tagLabel = e.kind === 'install' ? '📦 Install' : e.kind === 'walkthrough' ? '🏠 Walkthrough' : 'Phase';
+            return `
+              <a class="${cls}" style="--c:${e.color};" data-event-id="${e.id}">
+                <div class="cal-week-event-info">
+                  <div class="cal-week-event-title">${e.projectLabel} — ${e.title}</div>
+                  <div class="cal-week-event-meta">
+                    ${e.customerName ? e.customerName + ' · ' : ''}${e.assignees.length ? e.assignees.join(', ') : '<span style="color:var(--red);">Unassigned</span>'}
+                    ${e.pmName ? ' · PM ' + e.pmName : ''}
+                  </div>
+                </div>
+                <span class="cal-week-event-tag">${tagLabel}</span>
+              </a>`;
+          }).join('')}
+        </div>
+      </div>`;
+  }).join('');
+
+  return `<div class="cal-week">${dayBlocks}</div>`;
+}
+
+// ─────── Click handler ───────
+function wireEventClicks() {
+  document.querySelectorAll('[data-event-id]').forEach(el => {
+    el.addEventListener('click', e => {
+      e.preventDefault();
+      const id = el.dataset.eventId;
+      const ev = state.events.find(x => x.id === id);
+      if (!ev) return;
+      // Open the project in rebuild.html, on Phases tab
+      const tab = ev.kind === 'install' ? 'selections' : 'phases';
+      window.location.href = `rebuild.html#p=${ev.projectId}&t=${tab}`;
+    });
+  });
+  // Overflow "+N more" — switch to day view for that day
+  document.querySelectorAll('[data-day]').forEach(el => {
+    el.addEventListener('click', () => {
+      state.anchor = new Date(el.dataset.day);
+      state.view = 'day';
+      document.querySelectorAll('[data-view]').forEach(b =>
+        b.classList.toggle('on', b.dataset.view === 'day')
+      );
+      render();
+    });
+  });
+}
+
+// ─────── Toolbar wiring ───────
+document.getElementById('navPrev').addEventListener('click', () => {
+  const a = state.anchor;
+  if (state.view === 'month') a.setMonth(a.getMonth() - 1);
+  else if (state.view === 'week') a.setDate(a.getDate() - 7);
+  else a.setDate(a.getDate() - 1);
+  state.anchor = new Date(a);
+  render();
+});
+document.getElementById('navNext').addEventListener('click', () => {
+  const a = state.anchor;
+  if (state.view === 'month') a.setMonth(a.getMonth() + 1);
+  else if (state.view === 'week') a.setDate(a.getDate() + 7);
+  else a.setDate(a.getDate() + 1);
+  state.anchor = new Date(a);
+  render();
+});
+document.getElementById('navToday').addEventListener('click', () => {
+  state.anchor = new Date();
+  render();
+});
+document.querySelectorAll('[data-view]').forEach(b => b.addEventListener('click', () => {
+  document.querySelectorAll('[data-view]').forEach(x => x.classList.remove('on'));
+  b.classList.add('on');
+  state.view = b.dataset.view;
+  render();
+}));
+document.querySelectorAll('[data-filter]').forEach(b => b.addEventListener('click', () => {
+  const k = b.dataset.filter;
+  state.filters[k] = !state.filters[k];
+  b.classList.toggle('on', state.filters[k]);
+  render();
+}));
+document.getElementById('searchInput').addEventListener('input', e => {
+  state.search = e.target.value;
+  render();
+});
+
+// ─────── Init ───────
+loadAll();
+
+// Periodic refresh (every 60s) so changes from rebuild.html propagate
+setInterval(loadAll, 60 * 1000);
+</script>
+</body>
+</html>
