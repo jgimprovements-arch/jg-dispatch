@@ -3696,35 +3696,69 @@ function renderTabContent() {
         </div>
       `;
       document.body.appendChild(dropZone);
-      dropZone.querySelectorAll('[data-folder-target]').forEach(folder => {
-        folder.addEventListener('dragenter', e => { e.preventDefault(); folder.classList.add('drag-over'); });
-        folder.addEventListener('dragover', e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; folder.classList.add('drag-over'); });
-        folder.addEventListener('dragleave', () => folder.classList.remove('drag-over'));
-        folder.addEventListener('drop', async e => {
-          e.preventDefault();
-          e.stopPropagation();
-          const id = draggedDocId || e.dataTransfer.getData('text/plain');
-          if (!id) { console.warn('[DOC MOVE] no doc id'); hideDropZone(); return; }
-          const newCat = folder.dataset.folderTarget;
-          const doc = state.documents.find(d => d.id === id);
-          if (!doc) { console.warn('[DOC MOVE] doc not found', id); hideDropZone(); return; }
-          if (doc.category === newCat) { hideDropZone(); return; }
-          const { error } = await sb.from('rebuild_documents').update({ category: newCat }).eq('id', id);
-          if (error) {
-            console.error('[DOC MOVE] update failed', error);
-            toast('Move failed: ' + error.message);
-          } else {
-            toast(`Moved to ${newCat}`);
-          }
-          await loadDocuments();
-          hideDropZone();
-          renderDetail();
-        });
-      });
     };
     const hideDropZone = () => {
       if (dropZone) { dropZone.remove(); dropZone = null; }
     };
+
+    const performMove = async (docId, newCat) => {
+      const doc = state.documents.find(d => d.id === docId);
+      if (!doc) { console.warn('[DOC MOVE] doc not found', docId); return; }
+      if (doc.category === newCat) { console.log('[DOC MOVE] same category, skipping'); return; }
+      console.log('[DOC MOVE] Updating', docId, '->', newCat);
+      const { error } = await sb.from('rebuild_documents').update({ category: newCat }).eq('id', docId);
+      if (error) {
+        console.error('[DOC MOVE] update failed', error);
+        toast('Move failed: ' + error.message);
+      } else {
+        toast(`Moved to ${newCat}`);
+      }
+      await loadDocuments();
+      renderDetail();
+    };
+
+    // GLOBAL drag handlers — capture phase so they always fire
+    const onGlobalDragOver = (e) => {
+      if (!draggedDocId) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      // Highlight folder under cursor (in zone OR in grid)
+      const allFolders = document.querySelectorAll('.doc-move-zone-folder, .doc-folder[data-folder]');
+      let hitTarget = null;
+      allFolders.forEach(f => {
+        const r = f.getBoundingClientRect();
+        if (e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom) {
+          hitTarget = f;
+        }
+      });
+      allFolders.forEach(f => f.classList.toggle('drag-over', f === hitTarget));
+    };
+
+    const onGlobalDrop = async (e) => {
+      if (!draggedDocId) return;
+      e.preventDefault();
+      // Find folder under cursor
+      const allFolders = document.querySelectorAll('.doc-move-zone-folder, .doc-folder[data-folder]');
+      let hitTarget = null;
+      allFolders.forEach(f => {
+        const r = f.getBoundingClientRect();
+        if (e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom) {
+          hitTarget = f;
+        }
+      });
+      console.log('[DOC MOVE] drop hit', hitTarget);
+      const id = draggedDocId;
+      const newCat = hitTarget?.dataset?.folderTarget || hitTarget?.dataset?.folder;
+      // Cleanup BEFORE async work so UI is responsive
+      draggedDocId = null;
+      hideDropZone();
+      allFolders.forEach(f => f.classList.remove('drag-over'));
+      if (!newCat) { console.warn('[DOC MOVE] no folder hit'); return; }
+      await performMove(id, newCat);
+    };
+
+    document.addEventListener('dragover', onGlobalDragOver);
+    document.addEventListener('drop', onGlobalDrop);
 
     $$('.doc-row').forEach(row => {
       row.addEventListener('dragstart', e => {
@@ -3735,40 +3769,14 @@ function renderTabContent() {
         e.dataTransfer.effectAllowed = 'move';
         try { e.dataTransfer.setData('text/plain', draggedDocId); } catch (_) {}
         showDropZone(doc?.category);
+        console.log('[DOC MOVE] dragstart', draggedDocId);
       });
       row.addEventListener('dragend', () => {
         row.style.opacity = '';
         draggedDocId = null;
         hideDropZone();
-        // Suppress next click that fires after drag
+        document.querySelectorAll('.drag-over').forEach(f => f.classList.remove('drag-over'));
         setTimeout(() => { justDragged = false; }, 100);
-      });
-    });
-
-    // Folder tiles drop targets in grid view
-    $$('.doc-folder[data-folder]').forEach(folder => {
-      folder.addEventListener('dragenter', e => { e.preventDefault(); folder.classList.add('drag-over'); });
-      folder.addEventListener('dragover', e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; folder.classList.add('drag-over'); });
-      folder.addEventListener('dragleave', () => folder.classList.remove('drag-over'));
-      folder.addEventListener('drop', async e => {
-        e.preventDefault();
-        e.stopPropagation();
-        folder.classList.remove('drag-over');
-        const id = draggedDocId || e.dataTransfer.getData('text/plain');
-        if (!id) return;
-        const newCat = folder.dataset.folder;
-        const doc = state.documents.find(d => d.id === id);
-        if (!doc || doc.category === newCat) { hideDropZone(); return; }
-        const { error } = await sb.from('rebuild_documents').update({ category: newCat }).eq('id', id);
-        if (error) {
-          console.error('[DOC MOVE] update failed', error);
-          toast('Move failed: ' + error.message);
-        } else {
-          toast(`Moved to ${newCat}`);
-        }
-        await loadDocuments();
-        hideDropZone();
-        renderDetail();
       });
     });
     // Build Report button
