@@ -1150,6 +1150,54 @@
   }
   .rb-doc-pdf-thumb.rendered { background: var(--bg); }
   .rb-doc-pdf-thumb.rendered .rb-doc-pdf-fallback { display: none; }
+
+  /* Cover photo picker */
+  .rb-cover-photo {
+    flex: 0 0 auto;
+    cursor: pointer;
+    width: 90px;
+    height: 90px;
+    border-radius: 8px;
+    border: 3px solid var(--line);
+    overflow: hidden;
+    position: relative;
+    transition: border-color .15s, transform .15s;
+    background: var(--bg);
+  }
+  .rb-cover-photo input[type="radio"] { display: none; }
+  .rb-cover-photo img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .rb-cover-photo:hover { border-color: var(--orange); }
+  .rb-cover-photo.selected {
+    border-color: var(--orange);
+    transform: scale(1.04);
+    box-shadow: 0 4px 12px rgba(232,93,4,.3);
+  }
+  .rb-cover-photo.selected::after {
+    content: '✓';
+    position: absolute;
+    top: 4px; right: 4px;
+    width: 20px; height: 20px;
+    background: var(--orange);
+    color: #fff;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    font-weight: 700;
+  }
+  .rb-cover-none {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 600;
+    text-align: center;
+    padding: 6px;
+  }
   .rb-doc-icon {
     display: flex;
     align-items: center;
@@ -3269,6 +3317,22 @@ function openReportBuilder() {
     }).join('')}
   `).join('');
 
+  // Cover photo picker - all images from Photos folder
+  const coverPhotos = (state.documents || []).filter(d =>
+    d.category === 'Photos' && /\.(jpe?g|png|gif|webp|heic)$/i.test(d.filename)
+  );
+  const coverPhotoPickerHtml = coverPhotos.length
+    ? coverPhotos.map((d, idx) => `
+        <label class="rb-cover-photo ${idx === 0 ? 'selected' : ''}" data-photo-url="${d.file_url}">
+          <input type="radio" name="rb_cover_photo" value="${d.file_url}" ${idx === 0 ? 'checked' : ''}>
+          <img src="${d.file_url}" loading="lazy" alt="">
+        </label>`).join('')
+    + `<label class="rb-cover-photo" data-photo-url="">
+         <input type="radio" name="rb_cover_photo" value="">
+         <div class="rb-cover-none">No photo</div>
+       </label>`
+    : '<div style="padding:14px;font-size:12px;color:var(--muted);font-style:italic;">No photos uploaded yet — cover will use a striped placeholder.</div>';
+
   modal.querySelector('#rbBody').innerHTML = `
     <div style="background:var(--bg);padding:12px 14px;border-radius:6px;margin-bottom:14px;">
       <div style="font-size:11px;font-weight:700;text-transform:uppercase;color:var(--muted);letter-spacing:.4px;margin-bottom:4px;">Project</div>
@@ -3278,6 +3342,11 @@ function openReportBuilder() {
 
     <label style="display:block;margin-bottom:6px;font-weight:700;font-size:13px;">Report Title</label>
     <input type="text" id="rb_title" value="Project Report" style="margin-bottom:14px;">
+
+    <label style="display:block;margin-bottom:6px;font-weight:700;font-size:13px;">Cover Photo <span style="font-size:11px;color:var(--muted);font-weight:400;">(pick one to feature on the cover)</span></label>
+    <div id="rb_cover_photos" style="border:1px solid var(--line);border-radius:6px;padding:8px;background:var(--card);margin-bottom:14px;display:flex;gap:8px;overflow-x:auto;">
+      ${coverPhotoPickerHtml}
+    </div>
 
     <label style="display:block;margin-bottom:6px;font-weight:700;font-size:13px;">Sections to Include <span style="font-size:11px;color:var(--muted);font-weight:400;">(drag to reorder)</span></label>
     <div id="rb_sections" style="border:1px solid var(--line);border-radius:6px;background:var(--card);margin-bottom:14px;">
@@ -3289,6 +3358,14 @@ function openReportBuilder() {
       ${filePickerHtml || '<div style="padding:16px;font-size:12px;color:var(--muted);font-style:italic;text-align:center;">No documents uploaded yet.</div>'}
     </div>
   `;
+
+  // Cover photo selection — visual highlight
+  modal.querySelectorAll('.rb-cover-photo').forEach(el => {
+    el.addEventListener('click', () => {
+      modal.querySelectorAll('.rb-cover-photo').forEach(p => p.classList.remove('selected'));
+      el.classList.add('selected');
+    });
+  });
 
   // Drag-drop reorder for sections
   let dragSrc = null;
@@ -3330,6 +3407,7 @@ function openReportBuilder() {
 
     const selectedDocIds = [...modal.querySelectorAll('.rb-doc:checked')].map(cb => cb.dataset.docId);
     const reportTitle = modal.querySelector('#rb_title').value.trim() || 'Project Report';
+    const coverPhotoUrl = modal.querySelector('input[name="rb_cover_photo"]:checked')?.value || '';
 
     // Close modal immediately so user can keep working
     modal.classList.remove('on');
@@ -3342,6 +3420,7 @@ function openReportBuilder() {
         sections: orderedSections,
         docIds: selectedDocIds,
         reportTitle,
+        coverPhotoUrl,
       });
       hideReportProgress();
       showReportComplete(reportTitle, reportDoc);
@@ -3357,7 +3436,7 @@ function openReportBuilder() {
   modal.querySelectorAll('[data-pdf-thumb]').forEach(el => renderPdfThumbnail(el));
 }
 
-async function generateProjectReportPdf({ sections, docIds, reportTitle }) {
+async function generateProjectReportPdf({ sections, docIds, reportTitle, coverPhotoUrl }) {
   const { jsPDF } = window.jspdf;
   const doc = new jsPDF({ orientation: 'p', unit: 'mm', format: 'letter' });
   const p = state.activeProject;
@@ -3433,78 +3512,193 @@ async function generateProjectReportPdf({ sections, docIds, reportTitle }) {
 
   // ─── COVER SHEET ───
   if (sections.includes('cover')) {
-    // Big navy band on top
-    doc.setFillColor(...NAVY);
-    doc.rect(0, 0, pageW, 80, 'F');
+    // Page background — light off-white
+    doc.setFillColor(248, 249, 252);
+    doc.rect(0, 0, pageW, pageH, 'F');
 
+    const NAVY_DARK = [13, 45, 94];
+    const NAVY_MID = [26, 61, 114];
+    const BLUE_BRIGHT = [30, 90, 200];
+    const ORANGE_BRIGHT = [232, 93, 4];
+
+    // ─── Top-left navy blob (organic shape via overlapping ellipses) ───
+    doc.setFillColor(...NAVY_DARK);
+    // Big rounded rectangle covering top-left quadrant
+    doc.roundedRect(-30, -30, 130, 110, 50, 50, 'F');
+    // Lighter navy accent overlapping
+    doc.setFillColor(...NAVY_MID);
+    doc.roundedRect(60, -20, 95, 75, 40, 40, 'F');
+
+    // ─── JG Logo top-left ───
     if (logoDataUrl) {
-      try { doc.addImage(logoDataUrl, 'PNG', pageW/2 - 18, 22, 36, 36); } catch (_) {}
+      try {
+        // White background circle behind logo for contrast
+        doc.setFillColor(255, 255, 255);
+        doc.circle(38, 38, 22, 'F');
+        doc.addImage(logoDataUrl, 'PNG', 22, 22, 32, 32);
+      } catch (_) {}
     }
 
-    doc.setFontSize(28);
-    doc.setTextColor(255, 255, 255);
-    doc.setFont('helvetica', 'bold');
-    doc.text('JG RESTORATION', pageW/2, 70, { align: 'center' });
-
+    // ─── PROJECT label with orange dash ───
+    doc.setDrawColor(...ORANGE_BRIGHT);
+    doc.setLineWidth(1.4);
+    doc.line(20, 105, 32, 105);
     doc.setFontSize(9);
-    doc.setTextColor(...GOLD);
-    doc.setFont('helvetica', 'normal');
-    doc.text('FIRE  ·  WATER  ·  MOLD  ·  RECONSTRUCTION', pageW/2, 76, { align: 'center' });
-
-    // Title block
-    let y = 110;
-    doc.setFontSize(24);
-    doc.setTextColor(...NAVY);
+    doc.setTextColor(...NAVY_DARK);
     doc.setFont('helvetica', 'bold');
-    doc.text(reportTitle.toUpperCase(), pageW/2, y, { align: 'center' });
-    y += 6;
-    doc.setDrawColor(...ORANGE);
-    doc.setLineWidth(0.8);
-    doc.line(pageW/2 - 30, y, pageW/2 + 30, y);
-    y += 18;
+    doc.text('PROJECT', 36, 106, { charSpace: 1.5 });
 
-    // Project info card
-    doc.setFillColor(244, 246, 251);
-    doc.rect(margin + 8, y, pageW - margin*2 - 16, 70, 'F');
+    // ─── Massive REPORT title ───
+    doc.setFontSize(64);
+    doc.setTextColor(...BLUE_BRIGHT);
+    doc.setFont('helvetica', 'bold');
+    doc.text('REPORT', 20, 135);
 
-    const cardX = margin + 16;
-    let cy = y + 12;
-    const fieldRow = (label, value) => {
-      doc.setFontSize(8);
-      doc.setTextColor(...MUTED);
+    // Year underneath (extracted from report title or current year)
+    const titleYear = (reportTitle.match(/\b(20\d{2})\b/) || [, new Date().getFullYear()])[1];
+    doc.setFontSize(48);
+    doc.setTextColor(...BLUE_BRIGHT);
+    doc.text(String(titleYear), 20, 158);
+
+    // ─── Right-side striped circle / photo ───
+    const circleX = pageW - 65;
+    const circleY = 95;
+    const circleR = 45;
+
+    if (coverPhotoUrl) {
+      try {
+        // Fetch & embed the cover photo, clipped to a circle (approximated by drawing
+        // photo then using a circle outline + corner-mask via two overlapping fills)
+        const photoData = await fetchAsDataUrl(coverPhotoUrl);
+        if (photoData) {
+          // jsPDF doesn't natively clip to circle; draw photo as square then mask corners
+          doc.addImage(photoData, 'JPEG', circleX - circleR, circleY - circleR, circleR * 2, circleR * 2, undefined, 'FAST');
+          // Mask corners with background-color circle outline (4 corner squares)
+          // Simpler approach: draw a thick navy ring on top to suggest framing
+          doc.setDrawColor(...NAVY_DARK);
+          doc.setLineWidth(3);
+          doc.circle(circleX, circleY, circleR + 1.5, 'S');
+          // Inner thin orange accent ring
+          doc.setDrawColor(...ORANGE_BRIGHT);
+          doc.setLineWidth(0.5);
+          doc.circle(circleX, circleY, circleR - 1, 'S');
+        } else {
+          throw new Error('photo fetch failed');
+        }
+      } catch {
+        // Fallback to striped circle if photo fails
+        drawStripedCircle();
+      }
+    } else {
+      drawStripedCircle();
+    }
+
+    function drawStripedCircle() {
+      doc.setFillColor(...NAVY_DARK);
+      doc.circle(circleX, circleY, circleR, 'F');
+      // Diagonal stripe pattern via clipped lines
+      doc.setDrawColor(...NAVY_MID);
+      doc.setLineWidth(1.5);
+      for (let i = -circleR; i < circleR; i += 4) {
+        doc.line(circleX + i - circleR, circleY - circleR, circleX + i + circleR, circleY + circleR);
+      }
+      // Decorative arc (orange curve to the left of circle)
+      doc.setDrawColor(...ORANGE_BRIGHT);
+      doc.setLineWidth(0.8);
+      doc.circle(circleX - 20, circleY, circleR + 10, 'S');
+    }
+
+    // PROJECT SITE PHOTO label inside circle (only if no photo)
+    if (!coverPhotoUrl) {
+      doc.setFontSize(9);
+      doc.setTextColor(255, 255, 255);
       doc.setFont('helvetica', 'bold');
-      doc.text(label.toUpperCase(), cardX, cy);
-      doc.setFontSize(11);
-      doc.setTextColor(...TEXT);
+      doc.text('PROJECT SITE PHOTO', circleX, circleY, { align: 'center', charSpace: 1.5 });
+      doc.setFontSize(7);
+      doc.setTextColor(180, 195, 220);
       doc.setFont('helvetica', 'normal');
-      doc.text(String(value || '—'), cardX, cy + 5);
-      cy += 12;
+      doc.text('(NO PHOTO SELECTED)', circleX, circleY + 6, { align: 'center', charSpace: 1.2 });
+    }
+
+    // ─── Decorative orange arc through the right side ───
+    doc.setDrawColor(...ORANGE_BRIGHT);
+    doc.setLineWidth(0.8);
+    doc.line(circleX - circleR - 5, circleY - circleR - 8, circleX - circleR - 25, circleY + circleR + 25);
+
+    // ─── Info rows: PREPARED BY / PROPERTY / CLAIM ───
+    let infoY = 195;
+    const labelX = 20;
+    const valueX = 60;
+
+    const infoRow = (label, value, sublabel) => {
+      doc.setFontSize(8);
+      doc.setTextColor(...NAVY_DARK);
+      doc.setFont('helvetica', 'bold');
+      doc.text(label, labelX, infoY, { charSpace: 1.3 });
+      doc.setFontSize(12);
+      doc.setTextColor(...NAVY_DARK);
+      doc.setFont('helvetica', 'bold');
+      doc.text(String(value || '—'), valueX, infoY);
+      if (sublabel) {
+        doc.setFontSize(9);
+        doc.setTextColor(120, 132, 160);
+        doc.setFont('helvetica', 'normal');
+        doc.text(sublabel, valueX, infoY + 5);
+      }
+      // Divider line
+      doc.setDrawColor(220, 226, 240);
+      doc.setLineWidth(0.3);
+      doc.line(labelX, infoY + 9, pageW / 2 + 10, infoY + 9);
+      infoY += 14;
     };
 
-    fieldRow('Job Number', p.albi_job_number);
-    fieldRow('Customer', p.customer_name);
-    fieldRow('Address', p.property_address);
-    fieldRow('Project Manager', p.albi_pm_name);
+    infoRow('CUSTOMER', p.customer_name, p.customer_phone);
+    infoRow('PREPARED BY', p.albi_pm_name, 'Project Manager');
+    infoRow('PROPERTY', p.property_address || '');
 
-    // Generated date in bottom-right of card
-    cy = y + 70 - 8;
+    // Claim # — only if available
+    const claimNo = p.albi_job_number || '';
     doc.setFontSize(8);
-    doc.setTextColor(...MUTED);
-    doc.setFont('helvetica', 'italic');
-    doc.text(`Generated ${new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}`, pageW - margin - 8, cy, { align: 'right' });
+    doc.setTextColor(...NAVY_DARK);
+    doc.setFont('helvetica', 'bold');
+    doc.text('CLAIM', labelX, infoY, { charSpace: 1.3 });
+    doc.setFontSize(11);
+    doc.setTextColor(...NAVY_DARK);
+    doc.setFont('helvetica', 'normal');
+    doc.text(`Claim · ${claimNo}`, valueX, infoY);
 
-    // Bottom contact strip
-    doc.setFillColor(...NAVY);
-    doc.rect(0, pageH - 18, pageW, 18, 'F');
+    // ─── Bottom wave footer (3 stacked colored bands with curves) ───
+    const footerH = 38;
+    const footerStartY = pageH - footerH;
+
+    // Bottom band: orange (deepest)
+    doc.setFillColor(...ORANGE_BRIGHT);
+    doc.rect(0, pageH - 16, pageW, 16, 'F');
+
+    // Middle wave: navy dark
+    doc.setFillColor(...NAVY_DARK);
+    // Approximate wave using triangles + rect
+    doc.rect(0, pageH - 28, pageW, 16, 'F');
+    // Curved top edge — draw triangles on alternating positions
+    for (let x = 0; x < pageW; x += 8) {
+      doc.triangle(x, pageH - 28, x + 4, pageH - 31, x + 8, pageH - 28, 'F');
+    }
+
+    // Top wave: bright blue
+    doc.setFillColor(...BLUE_BRIGHT);
+    doc.rect(0, footerStartY, pageW, 12, 'F');
+    for (let x = 0; x < pageW; x += 10) {
+      doc.triangle(x, footerStartY, x + 5, footerStartY - 4, x + 10, footerStartY, 'F');
+    }
+
+    // Footer text
+    doc.setFillColor(...ORANGE_BRIGHT);
+    doc.circle(20, pageH - 7, 1.5, 'F');
     doc.setFontSize(9);
     doc.setTextColor(255, 255, 255);
     doc.setFont('helvetica', 'bold');
-    doc.text('JG RESTORATION', margin, pageH - 11);
-    doc.setFont('helvetica', 'normal');
-    doc.setFontSize(8);
-    doc.text('Appleton: (920) 428-4200  ·  Stevens Point: (715) 254-7223', margin, pageH - 6);
-    doc.setFont('helvetica', 'bold');
-    doc.text('jg-restoration.com', pageW - margin, pageH - 8, { align: 'right' });
+    doc.text('JG RESTORATION', 25, pageH - 6, { charSpace: 1.5 });
+    doc.text(String(titleYear), pageW - margin, pageH - 6, { align: 'right', charSpace: 1.5 });
   }
 
   // ─── PROJECT SUMMARY ───
@@ -3674,10 +3868,12 @@ async function generateProjectReportPdf({ sections, docIds, reportTitle }) {
 
   // ─── DOCUMENTS BY CATEGORY (selected files) ───
   // Image files: embed full-page directly into the report
-  // PDF files: emit a divider page; pdf-lib merge below will insert their actual pages
-  // Other files (Word/Excel/etc): list by name only on a summary page
+  // PDF files: pdf-lib merge below inserts their actual pages
+  // Other files (Word/Excel/etc): list by name only IF Documents section is checked
+  // Category divider/listing pages only render if Documents section is explicitly enabled
   const selectedDocs = (state.documents || []).filter(d => docIds.includes(d.id));
-  const pdfDocsToMerge = []; // collected for pdf-lib merge
+  const pdfDocsToMerge = [];
+  const showDocumentsSection = sections.includes('documents');
 
   if (selectedDocs.length) {
     const byCat = {};
@@ -3689,23 +3885,25 @@ async function generateProjectReportPdf({ sections, docIds, reportTitle }) {
       // Skip Photos here — they're handled in the photos section already
       if (cat === 'Photos') continue;
 
-      // Category divider page
-      doc.addPage(); pageNum++;
-      drawFooter(pageNum);
-      let y = drawHeader();
-      y = sectionTitle(cat, y);
+      // Only render the category divider/listing page if Documents section is enabled
+      if (showDocumentsSection) {
+        doc.addPage(); pageNum++;
+        drawFooter(pageNum);
+        let y = drawHeader();
+        y = sectionTitle(cat, y);
 
-      doc.setFontSize(10);
-      doc.setTextColor(...TEXT);
-      doc.setFont('helvetica', 'normal');
-      for (const d of list) {
-        y = checkPageBreak(y, 6);
-        const ext = (d.filename.match(/\.[a-z0-9]+$/i) || [''])[0].toUpperCase().replace('.', '');
-        doc.text(`• ${d.filename}${ext ? '  [' + ext + ']' : ''}`, margin + 2, y);
-        y += 5;
-      }
+        doc.setFontSize(10);
+        doc.setTextColor(...TEXT);
+        doc.setFont('helvetica', 'normal');
+        for (const d of list) {
+          y = checkPageBreak(y, 6);
+          const ext = (d.filename.match(/\.[a-z0-9]+$/i) || [''])[0].toUpperCase().replace('.', '');
+          doc.text(`• ${d.filename}${ext ? '  [' + ext + ']' : ''}`, margin + 2, y);
+          y += 5;
+        }
+      } // end showDocumentsSection
 
-      // Inline images for this category
+      // Inline images for this category — always shown (regardless of section toggle)
       const imageFiles = list.filter(d => /\.(jpe?g|png|gif|webp)$/i.test(d.filename));
       const otherFiles = list.filter(d => !/\.(jpe?g|png|gif|webp)$/i.test(d.filename));
 
