@@ -1651,7 +1651,7 @@ async function loadFromV2(){
     // Fetch assignments for current date + unassigned pool (only meaningful for today)
     // Also fetch a count of future-scheduled assignments for the stats badge
     const fetches = [
-      sbFetch('/rest/v1/dispatch_assignments_v2?select=tech_id,job_id,market,position&order=market,tech_id,position' + dateFilter)
+      sbFetch('/rest/v1/dispatch_assignments_v2?select=tech_id,job_id,market,position,start_time,end_time&order=market,tech_id,position' + dateFilter)
     ];
     if (_isViewingToday()) {
       fetches.push(sbFetch('/rest/v1/dispatch_unassigned_v2?select=job_id,market,position&order=market,position'));
@@ -1686,10 +1686,28 @@ async function loadFromV2(){
 
     // Group assignments by tech, sorted by position
     const techAssigns = {}; // uuid -> [job_id...]
+    // Also build the time-override map from start_time/end_time fields
+    // so saved per-card times survive a refresh.
+    const newJobOverrides = {};
     dbAssigns.forEach(r => {
       if (!techAssigns[r.tech_id]) techAssigns[r.tech_id] = [];
       techAssigns[r.tech_id].push(r.job_id);
+      // Populate jobOverrides if both times are present
+      if (r.start_time && r.end_time) {
+        const tInfo = uuidToTech[r.tech_id];
+        if (tInfo) {
+          newJobOverrides[tInfo.name + '|' + r.job_id] = {
+            start: String(r.start_time).substring(0, 5), // 'HH:MM' from 'HH:MM:SS'
+            end: String(r.end_time).substring(0, 5)
+          };
+        }
+      }
     });
+    // Replace jobOverrides for the techs/jobs we just loaded
+    // (don't wipe entries for jobs not in this date — leave them alone)
+    for (const k in newJobOverrides) {
+      jobOverrides[k] = newJobOverrides[k];
+    }
 
     // Reset all tech jobs first (assignments differ per date)
     for (const loc of ['appleton','stevens']) {
@@ -4026,6 +4044,11 @@ function saveTimeOverride(){
   const end = document.getElementById('time-end').value;
   if(!start||!end) return;
   jobOverrides[timeModalTech+'|'+timeModalJob] = {start, end};
+  // Persist to DB so refresh keeps the times
+  const techLoc = Object.keys(techQ.appleton||{}).includes(timeModalTech) ? 'appleton' : 'stevens';
+  if (typeof opUpdateAssignment === 'function') {
+    opUpdateAssignment(techLoc, timeModalTech, timeModalJob, { start_time: start, end_time: end });
+  }
   closeTimeModal();
   render();
   showToast('⏰ Time set: '+start+' – '+end);
@@ -4034,6 +4057,11 @@ function saveTimeOverride(){
 function clearTimeOverride(){
   if(!timeModalTech||!timeModalJob) return;
   delete jobOverrides[timeModalTech+'|'+timeModalJob];
+  // Persist clear to DB
+  const techLoc = Object.keys(techQ.appleton||{}).includes(timeModalTech) ? 'appleton' : 'stevens';
+  if (typeof opUpdateAssignment === 'function') {
+    opUpdateAssignment(techLoc, timeModalTech, timeModalJob, { start_time: null, end_time: null });
+  }
   closeTimeModal();
   render();
   showToast('Time override cleared');
@@ -4431,6 +4459,8 @@ function setTechStart(nm, timeStr){
   // Only shift cards that were on the default sequential schedule (no manual override)
   const techLoc = Object.keys(techQ.appleton||{}).includes(nm) ? 'appleton' : 'stevens';
   const tech = techQ[techLoc]?.[nm];
+  // Track each cascaded change so we can persist to DB
+  const cascadedWrites = [];
   if(tech){
     let runHr = oldStart;
     tech.jobs.forEach(jid => {
@@ -4443,15 +4473,22 @@ function setTechStart(nm, timeStr){
       // Shift this card by delta
       const ns = curStart + delta;
       const ne = curEnd + delta;
-      jobOverrides[key] = {start:decToTime(ns), end:decToTime(ne)};
+      const newStartStr = decToTime(ns);
+      const newEndStr = decToTime(ne);
+      jobOverrides[key] = {start: newStartStr, end: newEndStr};
+      cascadedWrites.push({ jid: jid, start_time: newStartStr, end_time: newEndStr });
       runHr = curEnd + 0.25;
     });
   }
 
   lastLocalChange = Date.now();
-  markLaneChanged(techLoc, nm);
-  saveBoardState();
   render();
+  // Persist all cascaded times to DB so refresh keeps them
+  if (typeof opUpdateAssignment === 'function') {
+    cascadedWrites.forEach(function(w){
+      opUpdateAssignment(techLoc, nm, w.jid, { start_time: w.start_time, end_time: w.end_time });
+    });
+  }
 }function getTechStart(nm){
   return techStartTimes[nm] !== undefined ? techStartTimes[nm] : START;
 }
