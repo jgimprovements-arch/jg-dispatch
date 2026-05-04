@@ -603,6 +603,146 @@
     text-transform: uppercase;
     letter-spacing: .4px;
   }
+
+  /* Monthly calendar */
+  .cal-month {
+    background: var(--card);
+    border-radius: 10px;
+    padding: 18px 22px;
+    margin-bottom: 18px;
+    border: 1px solid var(--line);
+  }
+  .cal-month-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 14px;
+  }
+  .cal-month-head h3 {
+    margin: 0;
+    flex: 1;
+    color: var(--navy);
+    font-size: 18px;
+    font-weight: 700;
+    text-align: center;
+  }
+  .cal-nav {
+    background: var(--bg);
+    border: 1px solid var(--line);
+    color: var(--navy);
+    width: 32px; height: 32px;
+    border-radius: 6px;
+    font-size: 18px;
+    font-weight: 700;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background .15s, border-color .15s;
+  }
+  .cal-nav:hover { background: #fff; border-color: var(--orange); color: var(--orange); }
+  .cal-today-btn {
+    width: auto;
+    padding: 0 14px;
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+  }
+  .cal-grid {
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .cal-grid-header {
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    background: var(--bg);
+    border-bottom: 1px solid var(--line);
+  }
+  .cal-dow {
+    padding: 8px;
+    text-align: center;
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: .04em;
+  }
+  .cal-grid-body {
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    grid-auto-rows: minmax(80px, auto);
+  }
+  .cal-cell {
+    border-right: 1px solid var(--line);
+    border-bottom: 1px solid var(--line);
+    padding: 4px 6px;
+    background: #fff;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-height: 80px;
+    font-size: 11px;
+  }
+  .cal-cell:nth-child(7n) { border-right: 0; }
+  .cal-cell-other { background: #fafbfd; color: #b8c0d0; }
+  .cal-cell-other .cal-cell-num { color: #b8c0d0; }
+  .cal-cell-past { background: #fbfcfe; }
+  .cal-cell-today {
+    background: #fff8f0;
+    border: 2px solid var(--orange);
+  }
+  .cal-cell-today .cal-cell-num {
+    background: var(--orange);
+    color: #fff;
+    border-radius: 50%;
+    width: 22px;
+    height: 22px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+  }
+  .cal-cell-num {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--navy);
+  }
+  .cal-cell-chips {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    overflow: hidden;
+  }
+  .cal-chip {
+    font-size: 10px;
+    padding: 2px 5px;
+    border-radius: 3px;
+    color: #fff;
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .cal-chip-pending { background: #b6bccc; }
+  .cal-chip-scheduled { background: var(--gold); }
+  .cal-chip-in_progress { background: var(--orange); }
+  .cal-chip-complete { background: var(--green); }
+  .cal-chip-blocked { background: var(--red); }
+  .cal-chip-skipped { background: #c5cad6; opacity: .6; }
+  .cal-chip-more {
+    font-size: 10px;
+    color: var(--muted);
+    font-weight: 600;
+    padding: 0 5px;
+  }
+  @media (max-width: 600px) {
+    .cal-grid-body { grid-auto-rows: minmax(54px, auto); }
+    .cal-cell { min-height: 54px; padding: 2px 4px; }
+    .cal-cell-num { font-size: 10px; }
+    .cal-chip { font-size: 9px; padding: 1px 3px; }
+  }
   .cal-header {
     display: flex;
     border-bottom: 1px solid var(--line);
@@ -971,80 +1111,99 @@ async function render() {
     month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit'
   });
 
-  // Calendar bounds
+  // Build monthly calendar
   const scheduled = phasesArr.filter(p => p.scheduled_start);
   let calHtml = '';
   if (scheduled.length) {
-    const dates = scheduled.flatMap(p => {
-      const s = new Date(p.scheduled_start);
-      const e = p.scheduled_end ? new Date(p.scheduled_end) : new Date(s.getTime() + 86400000);
-      return [s, e];
-    });
-    let minDate = new Date(Math.min(...dates));
-    let maxDate = new Date(Math.max(...dates));
-    minDate = new Date(minDate.getTime() - 2 * 86400000);
-    maxDate = new Date(maxDate.getTime() + 2 * 86400000);
-    minDate.setHours(0,0,0,0);
-    maxDate.setHours(0,0,0,0);
-    const totalMs = maxDate - minDate;
-    const totalDays = Math.ceil(totalMs / 86400000);
+    // Determine which month to show — use stored state, else default to current month or earliest phase month
+    if (!window._custCalDate) {
+      const today = new Date();
+      const earliest = scheduled.reduce((min, p) => {
+        const d = new Date(p.scheduled_start);
+        return !min || d < min ? d : min;
+      }, null);
+      // Default: today's month if any phase happens this month, else earliest phase month
+      const inProgressNow = scheduled.find(p => {
+        const s = new Date(p.scheduled_start);
+        const e = p.scheduled_end ? new Date(p.scheduled_end) : s;
+        return today >= s && today <= e;
+      });
+      window._custCalDate = inProgressNow
+        ? new Date(today.getFullYear(), today.getMonth(), 1)
+        : new Date(earliest.getFullYear(), earliest.getMonth(), 1);
+    }
+    const viewDate = window._custCalDate;
+    const year = viewDate.getFullYear();
+    const month = viewDate.getMonth();
+    const monthName = viewDate.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
 
+    // Generate 6-week grid: starts on Sunday before the 1st
+    const firstOfMonth = new Date(year, month, 1);
+    const startDay = new Date(firstOfMonth);
+    startDay.setDate(1 - firstOfMonth.getDay());
     const today = new Date(); today.setHours(0,0,0,0);
-    const todayPct = ((today - minDate) / totalMs) * 100;
-    const todayInRange = todayPct >= 0 && todayPct <= 100;
 
-    // Build day cells for header + body grid
-    const showEveryN = totalDays > 60 ? 7 : (totalDays > 30 ? 3 : 1);
-    const dayCells = [];
-    for (let i = 0; i <= totalDays; i++) {
-      const d = new Date(minDate.getTime() + i * 86400000);
-      const left = (i / totalDays) * 100;
-      const showLabel = (i % showEveryN === 0);
-      const isWeekend = d.getDay() === 0 || d.getDay() === 6;
-      dayCells.push({ date: d, left, showLabel, isWeekend });
+    const weeks = [];
+    for (let w = 0; w < 6; w++) {
+      const week = [];
+      for (let d = 0; d < 7; d++) {
+        const cellDate = new Date(startDay);
+        cellDate.setDate(startDay.getDate() + (w * 7) + d);
+        cellDate.setHours(0,0,0,0);
+
+        // Find phases active on this day
+        const dayPhases = scheduled.filter(p => {
+          const s = new Date(p.scheduled_start); s.setHours(0,0,0,0);
+          const e = p.scheduled_end ? new Date(p.scheduled_end) : s;
+          e.setHours(0,0,0,0);
+          return cellDate >= s && cellDate <= e;
+        });
+
+        week.push({
+          date: cellDate,
+          isCurrentMonth: cellDate.getMonth() === month,
+          isToday: cellDate.getTime() === today.getTime(),
+          isPast: cellDate < today,
+          phases: dayPhases,
+        });
+      }
+      weeks.push(week);
+      // Stop early if we've passed the month and last cell isn't current month
+      if (week[6].date.getMonth() !== month && w >= 3) break;
     }
 
-    // Date header strip
-    const headerTicks = dayCells.map(c => c.showLabel
-      ? `<div class="cal-day-tick" style="left:${c.left}%;"><span>${c.date.toLocaleDateString('en-US',{month:'short',day:'numeric'})}</span></div>`
-      : ''
-    ).join('');
+    const dayHeaders = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].map(d => `<div class="cal-dow">${d}</div>`).join('');
 
-    // Weekend shading overlay
-    const weekendOverlay = dayCells.filter(c => c.isWeekend).map(c => {
-      const w = (1 / totalDays) * 100;
-      return `<div class="cal-weekend" style="left:${c.left}%;width:${w}%;"></div>`;
-    }).join('');
-
-    const bars = phasesArr.map(p => {
-      if (!p.scheduled_start) return '';
-      const start = new Date(p.scheduled_start);
-      const end = p.scheduled_end ? new Date(p.scheduled_end) : new Date(start.getTime() + 86400000);
-      const left = ((start - minDate) / totalMs) * 100;
-      const width = Math.max(((end - start) / totalMs) * 100, 1);
-      return `
-        <div class="cal-row">
-          <div class="cal-label">${p.phase_name}</div>
-          <div class="cal-track">
-            <div class="cal-bar cal-bar-${p.status}" style="left:${left}%;width:${width}%;" title="${p.phase_name}: ${fmtShortDate(start)} → ${fmtShortDate(end)}"></div>
-          </div>
-        </div>`;
+    const cellsHtml = weeks.flat().map(cell => {
+      const phaseChips = cell.phases.slice(0, 3).map(p => {
+        const start = new Date(p.scheduled_start); start.setHours(0,0,0,0);
+        const isFirst = cell.date.getTime() === start.getTime();
+        return `<div class="cal-chip cal-chip-${p.status}" title="${p.phase_name} (${p.status.replace('_',' ')})">${isFirst ? p.phase_name : '·'}</div>`;
+      }).join('');
+      const overflow = cell.phases.length > 3 ? `<div class="cal-chip-more">+${cell.phases.length - 3}</div>` : '';
+      const cls = [
+        'cal-cell',
+        cell.isCurrentMonth ? '' : 'cal-cell-other',
+        cell.isToday ? 'cal-cell-today' : '',
+        cell.isPast ? 'cal-cell-past' : '',
+      ].filter(Boolean).join(' ');
+      return `<div class="${cls}">
+        <div class="cal-cell-num">${cell.date.getDate()}</div>
+        <div class="cal-cell-chips">${phaseChips}${overflow}</div>
+      </div>`;
     }).join('');
 
     calHtml = `
-      <div class="timeline">
-        <h3>Timeline · ${fmtShortDate(minDate)} → ${fmtShortDate(maxDate)}</h3>
-        <div class="cal-header">
-          <div class="cal-label-spacer"></div>
-          <div class="cal-track cal-track-header">${headerTicks}</div>
+      <div class="cal-month">
+        <div class="cal-month-head">
+          <button class="cal-nav" data-cal-nav="prev" aria-label="Previous month">‹</button>
+          <h3>${monthName}</h3>
+          <button class="cal-nav" data-cal-nav="next" aria-label="Next month">›</button>
+          <button class="cal-nav cal-today-btn" data-cal-nav="today">Today</button>
         </div>
-        <div class="cal-body">
-          <div class="cal-weekend-overlay">
-            <div class="cal-label-spacer"></div>
-            <div class="cal-track">${weekendOverlay}</div>
-          </div>
-          ${todayInRange ? `<div class="cal-today-line" style="left:calc(160px + ((100% - 160px) * ${todayPct/100}));"><span class="cal-today-label">TODAY</span></div>` : ''}
-          ${bars}
+        <div class="cal-grid">
+          <div class="cal-grid-header">${dayHeaders}</div>
+          <div class="cal-grid-body">${cellsHtml}</div>
         </div>
       </div>
     `;
@@ -1114,6 +1273,23 @@ async function render() {
 
   // Wire customer composer
   wireCustomerComposer(project);
+
+  // Wire calendar nav
+  document.querySelectorAll('[data-cal-nav]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const dir = btn.dataset.calNav;
+      const cur = window._custCalDate || new Date();
+      if (dir === 'prev') {
+        window._custCalDate = new Date(cur.getFullYear(), cur.getMonth() - 1, 1);
+      } else if (dir === 'next') {
+        window._custCalDate = new Date(cur.getFullYear(), cur.getMonth() + 1, 1);
+      } else if (dir === 'today') {
+        const t = new Date();
+        window._custCalDate = new Date(t.getFullYear(), t.getMonth(), 1);
+      }
+      render();
+    });
+  });
 }
 
 const CUST_BUCKET = 'rebuild-journal-attachments';
