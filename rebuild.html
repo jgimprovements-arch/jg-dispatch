@@ -2133,7 +2133,7 @@ JG.collectProjectImages = function() {
   const out = [];
   // Documents (includes Photos category — replaces former separate field_photos)
   for (const d of (state.documents || [])) {
-    if (isImg(d.filename)) out.push({ url: d.file_url, name: d.filename, category: d.category, _kind: 'doc' });
+    if (isImg(d.filename)) out.push({ url: d.file_url, name: cleanFilename(d.filename), category: d.category, _kind: 'doc' });
   }
   // Selection attachments (sketches/photos)
   for (const s of (state.selections || [])) {
@@ -3105,7 +3105,7 @@ function renderDocumentsTab() {
               <button class="doc-menu-item doc-menu-danger doc-del" data-id="${d.id}"><span class="doc-menu-icon">✕</span> Delete</button>
             </div>
             ${thumb}
-            <div class="doc-recent-name">${d.filename}</div>
+            <div class="doc-recent-name">${cleanFilename(d.filename)}</div>
             <div class="doc-recent-cat">${d.category}</div>
           </${tag}>`;
         }).join('')}
@@ -3152,6 +3152,12 @@ function renderDocumentsTab() {
     </div>
     <input type="file" id="docFileInput" multiple style="display:none;" accept="image/*,application/pdf,.doc,.docx,.xls,.xlsx,.heic">
   `;
+}
+
+function cleanFilename(name) {
+  if (!name) return '';
+  // Strip leading timestamp prefixes: "1777855535941-", "638936327385843321_", etc.
+  return name.replace(/^\d{8,}[_-]+/, '');
 }
 
 function renderDocRow(d) {
@@ -3202,8 +3208,8 @@ function renderDocRow(d) {
       </div>
       <div class="doc-card-info">
         ${isImage
-          ? `<a href="#" data-lightbox-doc="${d.id}" class="doc-card-name" title="${d.filename}">${d.filename}</a>`
-          : `<a href="${d.file_url}" target="_blank" class="doc-card-name" title="${d.filename}">${d.filename}</a>`}
+          ? `<a href="#" data-lightbox-doc="${d.id}" class="doc-card-name" title="${d.filename}">${cleanFilename(d.filename)}</a>`
+          : `<a href="${d.file_url}" target="_blank" class="doc-card-name" title="${d.filename}">${cleanFilename(d.filename)}</a>`}
         <div class="doc-card-meta">${sizeKb ? sizeKb + ' · ' : ''}${fmtRelative(d.uploaded_at)}${d.uploaded_by_email ? ' by ' + d.uploaded_by_email.split('@')[0] : ''}</div>
         ${photoLine}
       </div>
@@ -3554,7 +3560,7 @@ function openReportBuilder() {
           <span class="rb-handle"></span>
           <input type="checkbox" class="rb-doc" data-doc-id="${d.id}" data-cat="${cat}" checked>
           ${thumb}
-          <span class="rb-row-label rb-doc-name">${d.filename}</span>
+          <span class="rb-row-label rb-doc-name">${cleanFilename(d.filename)}</span>
         </div>`;
     }).join('')}
   `).join('');
@@ -4228,7 +4234,7 @@ async function generateProjectReportPdf({ sections, docIds, reportTitle, coverPh
         for (const d of list) {
           y = checkPageBreak(y, 6);
           const ext = (d.filename.match(/\.[a-z0-9]+$/i) || [''])[0].toUpperCase().replace('.', '');
-          doc.text(`• ${d.filename}${ext ? '  [' + ext + ']' : ''}`, margin + 2, y);
+          doc.text(`• ${cleanFilename(d.filename)}${ext ? '  [' + ext + ']' : ''}`, margin + 2, y);
           y += 5;
         }
       } // end showDocumentsSection
@@ -4245,7 +4251,7 @@ async function generateProjectReportPdf({ sections, docIds, reportTitle, coverPh
         doc.setFontSize(10);
         doc.setTextColor(...NAVY);
         doc.setFont('helvetica', 'bold');
-        doc.text(img.filename, margin, py);
+        doc.text(cleanFilename(img.filename), margin, py);
         // Embed full-size image
         try {
           const dataUrl = await fetchAsDataUrl(img.file_url);
@@ -4722,7 +4728,7 @@ function renderTabContent() {
       e.stopPropagation();
       const d = state.documents.find(x => x.id === btn.dataset.id);
       if (!d) return;
-      const newName = prompt('Rename file:', d.filename);
+      const newName = prompt('Rename file:', cleanFilename(d.filename));
       if (!newName || newName.trim() === '' || newName === d.filename) return;
       const trimmed = newName.trim();
       const { error } = await sb.from('rebuild_documents').update({ filename: trimmed }).eq('id', d.id);
