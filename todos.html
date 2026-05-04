@@ -238,6 +238,10 @@
   }
   .check:hover { border-color: var(--orange); transform: scale(1.08); }
   .check.checked { background: var(--green); border-color: var(--green); }
+  .check.checked:hover {
+    background: var(--orange);
+    border-color: var(--orange);
+  }
 
   .todo-body { flex: 1; min-width: 0; }
   .title {
@@ -381,9 +385,9 @@
       <option value="low">Low</option>
     </select>
     <select id="filterAssignment">
-      <option value="me">Assigned to Me</option>
-      <option value="created">Created by Me</option>
-      <option value="both">Both</option>
+      <option value="both">Mine (assigned or created)</option>
+      <option value="me">Assigned to Me Only</option>
+      <option value="created">Created by Me Only</option>
     </select>
     <input type="text" id="filterSearch" placeholder="🔍 Search title or details…">
   </div>
@@ -408,7 +412,7 @@ const state = {
   projects: {},
   filterStatus: 'open',
   filterPriority: 'all',
-  filterAssignment: 'me',
+  filterAssignment: 'both',
   filterSearch: '',
 };
 
@@ -442,43 +446,19 @@ async function init() {
   wire();
   render();
 
-  // Diagnostic banner — shows what we read so you can verify
-  await renderDiagnostic();
-
   // Realtime
   sb.channel('my_todos_' + state.email)
     .on('postgres_changes', { event: '*', schema: 'public', table: 'rebuild_todos' }, async () => {
       await loadTodos();
       render();
-      await renderDiagnostic();
     })
     .subscribe();
 }
 
 async function renderDiagnostic() {
-  // Query ALL todos to see what's actually in the DB
-  const { data: all, error } = await sb.from('rebuild_todos').select('*').limit(20);
-  const mineByEmail = (all || []).filter(t =>
-    (t.assignee_email || '').toLowerCase() === state.email ||
-    (t.created_by_email || '').toLowerCase() === state.email
-  );
-  const banner = document.getElementById('diagBanner') || (() => {
-    const d = document.createElement('div');
-    d.id = 'diagBanner';
-    d.style.cssText = 'background:#fff8f0;border:1px solid #f5a623;border-radius:8px;padding:10px 14px;margin-bottom:14px;font-size:11px;color:#0d2d5e;font-family:monospace;';
-    document.querySelector('main').insertBefore(d, document.getElementById('content'));
-    return d;
-  })();
-  const filtered = applyFilters(state.todos);
-  banner.innerHTML = `
-    <b>Diagnostic:</b><br>
-    Reading as: <b>${state.email}</b><br>
-    state.todos.length: <b>${state.todos.length}</b><br>
-    After filters (status=${state.filterStatus}, priority=${state.filterPriority}, assignment=${state.filterAssignment}): <b>${filtered.length}</b><br>
-    ${state.todos.length && !filtered.length ? `<br><span style="color:#d64545;">⚠ Todos exist but filtered out. First todo:<br><pre style="background:#fff;padding:6px;border:1px solid #eee;font-size:10px;overflow:auto;">${JSON.stringify(state.todos[0], null, 2)}</pre></span>` : ''}
-    ${error ? `<br><span style="color:#d64545;">ERR: ${error.message}</span>` : ''}
-  `;
+  // (removed — was a debugging aid)
 }
+
 
 async function loadTodos() {
   const email = state.email;
@@ -607,7 +587,7 @@ function render() {
     return `
       <div class="todo-card ${isDone ? 'done' : ''} ${!isDone && (t.priority === 'urgent' || t.priority === 'high') ? 'priority-' + t.priority : ''}" data-id="${t.id}">
         <div class="todo-card-main">
-          <button class="check ${isDone ? 'checked' : ''}" data-act="toggle" data-id="${t.id}">${isDone ? '✓' : ''}</button>
+          <button class="check ${isDone ? 'checked' : ''}" data-act="toggle" data-id="${t.id}" title="${isDone ? 'Click to reopen' : 'Mark done'}">${isDone ? '✓' : ''}</button>
           <div class="todo-body">
             <div class="title">${esc(t.title)}</div>
             ${t.body ? `<div class="desc">${esc(t.body)}</div>` : ''}
