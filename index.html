@@ -1744,8 +1744,30 @@ async function loadFromV2(){
         const loc = _fromV2Market(r.market);
         unGrouped[loc].push(r.job_id);
       });
+      // Build set of jobs currently assigned to a tech lane (any market)
+      const assignedAnywhere = new Set();
+      for (const l of ['appleton','stevens']) {
+        for (const nm in (techQ[l] || {})) {
+          (techQ[l][nm].jobs || []).forEach(jid => assignedAnywhere.add(jid));
+        }
+      }
+      // Merge v2 pool with in-memory unassigned. v2 rows define explicit
+      // ordering for jobs that have been touched. Other in-memory jobs
+      // (from Albi load) stay in the pool too — never wipe them just
+      // because v2 happens to be empty for that market. And never include
+      // a job that's now on a tech lane.
       for (const loc of ['appleton','stevens']) {
-        if (unGrouped[loc].length) unassigned[loc] = unGrouped[loc];
+        if (unGrouped[loc].length) {
+          const v2Set = new Set(unGrouped[loc]);
+          const extras = (unassigned[loc] || []).filter(jid =>
+            !v2Set.has(jid) && jobs[jid] && !assignedAnywhere.has(jid));
+          const v2Filtered = unGrouped[loc].filter(jid => !assignedAnywhere.has(jid));
+          unassigned[loc] = v2Filtered.concat(extras);
+        } else {
+          // No v2 rows — keep in-memory unassigned but filter out anything assigned
+          unassigned[loc] = (unassigned[loc] || []).filter(jid =>
+            jobs[jid] && !assignedAnywhere.has(jid));
+        }
       }
     } else {
       // Non-today view: pool = ALL schedulable jobs (in-memory `jobs` map is
