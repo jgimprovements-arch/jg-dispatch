@@ -816,7 +816,11 @@ async function loadAll() {
     // Sales chases — competitive loss-event tracking. Different from touches
     // (relationship maintenance with partners) — chases are JG showing up at
     // a fire/water/vehicle-impact scene to win the work directly.
-    sbSafe('/rest/v1/sales_chases?market=eq.'+mq+'&order=event_date.desc&limit=2000')
+    sbSafe('/rest/v1/sales_chases?market=eq.'+mq+'&order=event_date.desc&limit=2000'),
+    // Route templates — drive recurring route prediction on the calendar.
+    // Mobile manages these via Plan Route → Make Recurring; desktop is
+    // read-only on templates today (calendar shows them; doesn't edit them).
+    sbSafe('/rest/v1/sales_route_templates?active=eq.true&order=name.asc&limit=100')
   ]);
 
   ST.partners       = results[0].status === 'fulfilled' ? (results[0].value || []) : [];
@@ -827,6 +831,7 @@ async function loadAll() {
   ST.lastSyncLog    = (results[5].status === 'fulfilled' && results[5].value && results[5].value.length) ? results[5].value[0] : null;
   ST.referralPayouts = results[6].status === 'fulfilled' ? (results[6].value || []) : [];
   ST.chases         = results[7].status === 'fulfilled' ? (results[7].value || []) : [];
+  ST.routeTemplates = results[8].status === 'fulfilled' ? (results[8].value || []) : [];
 
   // Log any partial failures rather than swallowing them
   results.forEach(function(r, i){
@@ -2307,7 +2312,14 @@ function _bgSignature() {
     ST._chaseSaving ? 1 : 0,
     (ST.chases || []).length,
     // Route edit state
-    ST.editingRouteId || ''
+    ST.editingRouteId || '',
+    // Calendar state
+    ST.routesView || 'list',
+    ST.calMonth || '',
+    ST._calPopupRouteId || '',
+    ST._calPopupTemplateId || '',
+    ST._calPopupDate || '',
+    (ST.routeTemplates || []).length
   ].join('|');
 }
 
@@ -2897,12 +2909,167 @@ function _renderNow() {
 
   // ── ROUTES TAB ────────────────────────────────────────────────────────────
   if (ST.tab === 'routes') {
-    h += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">';
+    if (!ST.routesView) ST.routesView = 'list'; // 'list' | 'calendar'
+
+    // Header row with view toggle + Plan Route
+    h += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;flex-wrap:wrap;gap:10px;">';
+    h += '<div style="display:flex;align-items:center;gap:14px;">';
     h += '<div style="font-size:13px;font-weight:700;color:var(--navy);">Sales Routes — ' + ST.market + '</div>';
-    h += '<button class="btn btn-gold" onclick="ST.modal=\'add-route\';render()">+ Plan Route</button>';
+    // List/Calendar toggle pills
+    h += '<div style="display:flex;gap:4px;background:rgba(13,45,94,.06);border-radius:18px;padding:3px;">';
+    h += '<button onclick="ST.routesView=\'list\';render()" style="padding:5px 14px;border-radius:14px;border:none;background:' + (ST.routesView==='list'?'#fff':'transparent') + ';color:var(--navy);font-size:11px;font-weight:700;cursor:pointer;font-family:DM Sans,sans-serif;box-shadow:' + (ST.routesView==='list'?'0 1px 3px rgba(13,45,94,.1)':'none') + ';">📋 List</button>';
+    h += '<button onclick="ST.routesView=\'calendar\';render()" style="padding:5px 14px;border-radius:14px;border:none;background:' + (ST.routesView==='calendar'?'#fff':'transparent') + ';color:var(--navy);font-size:11px;font-weight:700;cursor:pointer;font-family:DM Sans,sans-serif;box-shadow:' + (ST.routesView==='calendar'?'0 1px 3px rgba(13,45,94,.1)':'none') + ';">📅 Calendar</button>';
+    h += '</div></div>';
+    h += '<button class="btn btn-gold" onclick="ST.editingRouteId=null;ST.modal=\'add-route\';render()">+ Plan Route</button>';
     h += '</div>';
-    if (!ST.routes.length) h += '<div style="text-align:center;padding:40px;color:var(--muted);">No routes yet. Plan your first route for today.</div>';
+
     var visibleRoutes = isAdmin() ? ST.routes : ST.routes.filter(function(r){return r.rep_name===currentRepName();});
+
+    // ── CALENDAR VIEW ──────────────────────────────────────────────────────
+    if (ST.routesView === 'calendar') {
+      // Default to current month if not set
+      if (!ST.calMonth) {
+        var n = new Date();
+        ST.calMonth = n.getFullYear() + '-' + String(n.getMonth()+1).padStart(2,'0');
+      }
+      var ym = ST.calMonth.split('-');
+      var calY = parseInt(ym[0], 10);
+      var calM = parseInt(ym[1], 10) - 1; // 0-indexed
+      var firstDay = new Date(calY, calM, 1);
+      var lastDay  = new Date(calY, calM + 1, 0);
+      var daysInMonth = lastDay.getDate();
+      var startWeekday = firstDay.getDay(); // 0=Sun
+
+      var monthName = firstDay.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+      var todayStr  = ST.today;
+
+      // Compute which dates each template will fire on this month.
+      // Returns map: 'YYYY-MM-DD' → array of template objects firing that day.
+      var templateFires = {};
+      (ST.routeTemplates || []).forEach(function(t){
+        if (!t.recurrence || !t.active) return;
+        // Filter by rep visibility — admin sees all, reps see their own
+        if (!isAdmin() && t.rep_name && t.rep_name !== currentRepName()) return;
+        for (var d = 1; d <= daysInMonth; d++) {
+          var test = new Date(calY, calM, d);
+          var dow = test.getDay();
+          var dom = test.getDate();
+          var fires = false;
+          if (t.recurrence === 'weekly') {
+            fires = (t.recurrence_day === dow);
+          } else if (t.recurrence === 'biweekly') {
+            // We can't know exactly when biweekly fires without anchor date
+            // (last_generated). Approximate: every other occurrence of the
+            // weekday starting from the 1st-week occurrence. Best effort.
+            if (t.recurrence_day === dow) {
+              var occ = Math.ceil(dom / 7);
+              fires = (occ % 2 === 1); // 1st, 3rd, 5th occurrences
+            }
+          } else if (t.recurrence === 'monthly') {
+            var pattern = t.recurrence_pattern || 'day-of-month';
+            if (pattern === 'day-of-month') {
+              fires = (t.recurrence_day === dom);
+            } else if (pattern === 'nth-weekday') {
+              if (t.recurrence_day === dow) {
+                var occurrence = Math.ceil(dom / 7);
+                if (t.recurrence_week_of_month === -1) {
+                  // "Last" weekday: next week's same DOW lands in next month
+                  var next = new Date(calY, calM, dom + 7);
+                  fires = (next.getMonth() !== calM);
+                } else {
+                  fires = (occurrence === t.recurrence_week_of_month);
+                }
+              }
+            }
+          }
+          if (fires) {
+            var k = calY + '-' + String(calM+1).padStart(2,'0') + '-' + String(d).padStart(2,'0');
+            if (!templateFires[k]) templateFires[k] = [];
+            templateFires[k].push(t);
+          }
+        }
+      });
+
+      // Group real routes by date string for fast lookup
+      var routesByDate = {};
+      visibleRoutes.forEach(function(r){
+        if (!r.route_date) return;
+        if (!routesByDate[r.route_date]) routesByDate[r.route_date] = [];
+        routesByDate[r.route_date].push(r);
+      });
+
+      // Month nav header
+      h += '<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px;margin-bottom:14px;">';
+      h += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">';
+      h += '<button onclick="changeCalMonth(-1)" style="background:transparent;border:1.5px solid var(--border);border-radius:6px;padding:6px 12px;cursor:pointer;font-size:14px;font-family:DM Sans,sans-serif;color:var(--navy);">◀</button>';
+      h += '<div style="font-size:16px;font-weight:700;color:var(--navy);">' + monthName + '</div>';
+      h += '<button onclick="changeCalMonth(1)" style="background:transparent;border:1.5px solid var(--border);border-radius:6px;padding:6px 12px;cursor:pointer;font-size:14px;font-family:DM Sans,sans-serif;color:var(--navy);">▶</button>';
+      h += '</div>';
+
+      // Day-of-week headers
+      h += '<div style="display:grid;grid-template-columns:repeat(7,1fr);gap:4px;margin-bottom:6px;">';
+      ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].forEach(function(d){
+        h += '<div style="font-size:10px;font-weight:700;color:var(--muted);text-align:center;text-transform:uppercase;letter-spacing:.04em;padding:4px;">' + d + '</div>';
+      });
+      h += '</div>';
+
+      // Calendar grid
+      h += '<div style="display:grid;grid-template-columns:repeat(7,1fr);gap:4px;">';
+      // Leading empty cells before the 1st
+      for (var i = 0; i < startWeekday; i++) {
+        h += '<div style="min-height:90px;background:rgba(13,45,94,.02);border-radius:6px;"></div>';
+      }
+      for (var d = 1; d <= daysInMonth; d++) {
+        var dateStr = calY + '-' + String(calM+1).padStart(2,'0') + '-' + String(d).padStart(2,'0');
+        var isToday = (dateStr === todayStr);
+        var dayRoutes = routesByDate[dateStr] || [];
+        var dayTemplates = templateFires[dateStr] || [];
+        // Filter out templates whose route already exists today (avoid double-show)
+        dayTemplates = dayTemplates.filter(function(t){
+          return !dayRoutes.some(function(r){ return r.notes && r.notes.indexOf('From template: '+t.name) !== -1; });
+        });
+
+        var bg = isToday ? 'rgba(232,93,4,.06)' : '#fff';
+        var brd = isToday ? '2px solid var(--orange)' : '1px solid var(--border)';
+        h += '<div style="min-height:90px;background:' + bg + ';border:' + brd + ';border-radius:6px;padding:5px;display:flex;flex-direction:column;gap:2px;">';
+        h += '<div style="font-size:11px;font-weight:' + (isToday?'800':'600') + ';color:' + (isToday?'var(--orange)':'var(--navy)') + ';margin-bottom:2px;">' + d + '</div>';
+
+        // Render real routes (full color, clickable to view detail)
+        dayRoutes.forEach(function(r){
+          var stops = r.stops || [];
+          var done = stops.filter(function(s){ return s.completed; }).length;
+          var lbl = (r.name || (stops.length + ' stops'));
+          if (lbl.length > 18) lbl = lbl.slice(0, 16) + '…';
+          h += '<button onclick="openRouteDetailPopup(\'' + r.id + '\')" style="display:block;width:100%;text-align:left;background:linear-gradient(135deg, var(--orange) 0%, #d05303 100%);color:#fff;border:none;border-radius:4px;padding:3px 6px;font-size:10px;font-weight:700;cursor:pointer;font-family:DM Sans,sans-serif;line-height:1.2;" title="' + _ve(r.name||'Route') + ' — ' + done + '/' + stops.length + ' stops">';
+          h += _ve(lbl);
+          if (stops.length > 0) h += ' <span style="opacity:.85;font-weight:500;">' + done + '/' + stops.length + '</span>';
+          h += '</button>';
+        });
+
+        // Render template previews (faded, lower z-feel)
+        dayTemplates.forEach(function(t){
+          var lbl = t.name || 'Recurring';
+          if (lbl.length > 18) lbl = lbl.slice(0, 16) + '…';
+          h += '<button onclick="openTemplatePreviewPopup(\'' + t.id + '\',\'' + dateStr + '\')" style="display:block;width:100%;text-align:left;background:rgba(232,93,4,.12);color:var(--orange);border:1px dashed rgba(232,93,4,.4);border-radius:4px;padding:2px 5px;font-size:10px;font-weight:600;cursor:pointer;font-family:DM Sans,sans-serif;line-height:1.2;" title="Recurring: ' + _ve(t.name||'') + ' — will generate on ' + dateStr + '">';
+          h += '⟳ ' + _ve(lbl);
+          h += '</button>';
+        });
+
+        h += '</div>';
+      }
+      h += '</div>';
+
+      // Legend
+      h += '<div style="display:flex;gap:14px;margin-top:14px;font-size:10px;color:var(--muted);">';
+      h += '<div style="display:flex;align-items:center;gap:5px;"><span style="width:14px;height:8px;background:linear-gradient(135deg, var(--orange) 0%, #d05303 100%);border-radius:2px;"></span>Real route</div>';
+      h += '<div style="display:flex;align-items:center;gap:5px;"><span style="width:14px;height:8px;background:rgba(232,93,4,.12);border:1px dashed rgba(232,93,4,.4);border-radius:2px;"></span>Recurring (will generate)</div>';
+      h += '</div>';
+      h += '</div>';
+    }
+
+    // ── LIST VIEW (existing, unchanged) ────────────────────────────────────
+    if (ST.routesView === 'list') {
+    if (!ST.routes.length) h += '<div style="text-align:center;padding:40px;color:var(--muted);">No routes yet. Plan your first route for today.</div>';
     visibleRoutes.slice(0,10).forEach(function(route) {
       var stops = route.stops || [];
       var done = stops.filter(function(s){ return s.completed; }).length;
@@ -2937,6 +3104,7 @@ function _renderNow() {
       });
       h += '</div></div>';
     });
+    } // end if (ST.routesView === 'list')
   }
 
   // ── FOLLOW-UPS TAB ────────────────────────────────────────────────────────
@@ -4029,6 +4197,95 @@ function _buildModalHtml() {
       }
     }
 
+    // ── CALENDAR ROUTE DETAIL POPUP ──
+    if (ST.modal === 'cal-route-popup') {
+      var popRoute = ST._calPopupRouteId
+        ? ST.routes.find(function(r){ return r.id === ST._calPopupRouteId; })
+        : null;
+      if (!popRoute) {
+        mh += '<div class="modal-title">Route not found</div>';
+        mh += '<div style="display:flex;justify-content:flex-end;margin-top:14px;"><button onclick="ST.modal=null;ST._calPopupRouteId=null;render()" style="padding:8px 16px;border-radius:6px;border:1.5px solid var(--border);background:transparent;cursor:pointer;font-size:12px;">Close</button></div>';
+      } else {
+        var popStops = popRoute.stops || [];
+        var popDone = popStops.filter(function(s){ return s.completed; }).length;
+        mh += '<div class="modal-title">' + (popRoute.name ? '🚗 ' + _ve(popRoute.name) : '🚗 Route — ' + fmtDate(popRoute.route_date)) + '</div>';
+        mh += '<div style="background:rgba(13,45,94,.04);border-radius:8px;padding:10px 12px;margin-bottom:14px;font-size:12px;">';
+        mh += '<div style="display:flex;gap:14px;flex-wrap:wrap;">';
+        mh += '<span><strong>Date:</strong> ' + fmtDate(popRoute.route_date) + '</span>';
+        if (popRoute.rep_name) mh += '<span><strong>Rep:</strong> ' + _ve(popRoute.rep_name) + '</span>';
+        mh += '<span><strong>Status:</strong> ' + _ve(popRoute.status||'Planned') + '</span>';
+        mh += '<span><strong>Progress:</strong> ' + popDone + '/' + popStops.length + ' stops</span>';
+        mh += '</div>';
+        if (popRoute.notes) mh += '<div style="margin-top:6px;color:var(--muted);font-style:italic;">' + _ve(popRoute.notes) + '</div>';
+        mh += '</div>';
+        if (popStops.length === 0) {
+          mh += '<div style="color:var(--muted);font-style:italic;font-size:12px;">No stops on this route.</div>';
+        } else {
+          mh += '<div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;margin-bottom:6px;">Stops</div>';
+          popStops.forEach(function(s, idx){
+            mh += '<div style="display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid var(--border);">';
+            mh += '<div style="width:22px;height:22px;border-radius:50%;background:' + (s.completed?'var(--ok)':'var(--border)') + ';display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:' + (s.completed?'#fff':'var(--muted)') + ';flex-shrink:0;">' + (s.completed?'✓':(idx+1)) + '</div>';
+            mh += '<div style="flex:1;"><div style="font-size:12px;font-weight:600;color:var(--navy);">' + _ve(s.partner_name||'Stop '+(idx+1)) + '</div>';
+            if (s.address) mh += '<div style="font-size:10px;color:var(--muted);">' + _ve(s.address) + '</div>';
+            mh += '</div></div>';
+          });
+        }
+        mh += '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">';
+        mh += '<button onclick="ST.modal=null;ST._calPopupRouteId=null;render()" style="padding:8px 16px;border-radius:6px;border:1.5px solid var(--border);background:transparent;cursor:pointer;font-size:12px;">Close</button>';
+        mh += '<button onclick="ST._calPopupRouteId=null;editRoute(\'' + popRoute.id + '\')" style="padding:8px 18px;border-radius:6px;border:none;background:var(--orange);color:#fff;font-size:12px;font-weight:700;cursor:pointer;">✏️ Edit Route</button>';
+        mh += '</div>';
+      }
+    }
+
+    // ── CALENDAR TEMPLATE PREVIEW POPUP ──
+    if (ST.modal === 'cal-template-popup') {
+      var popTpl = ST._calPopupTemplateId
+        ? (ST.routeTemplates||[]).find(function(t){ return t.id === ST._calPopupTemplateId; })
+        : null;
+      if (!popTpl) {
+        mh += '<div class="modal-title">Template not found</div>';
+        mh += '<div style="display:flex;justify-content:flex-end;margin-top:14px;"><button onclick="ST.modal=null;ST._calPopupTemplateId=null;render()" style="padding:8px 16px;border-radius:6px;border:1.5px solid var(--border);background:transparent;cursor:pointer;font-size:12px;">Close</button></div>';
+      } else {
+        var dayNames = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+        var weekLabels = {1:'1st',2:'2nd',3:'3rd',4:'4th',5:'5th','-1':'Last'};
+        mh += '<div class="modal-title">⟳ Recurring Route Preview</div>';
+        mh += '<div style="background:rgba(232,93,4,.06);border:1px dashed rgba(232,93,4,.4);border-radius:8px;padding:12px 14px;margin-bottom:14px;">';
+        mh += '<div style="font-size:14px;font-weight:700;color:var(--navy);margin-bottom:4px;">' + _ve(popTpl.name||'Recurring Route') + '</div>';
+        mh += '<div style="font-size:11px;color:var(--muted);">Will generate on <strong>' + fmtDate(ST._calPopupDate) + '</strong></div>';
+        mh += '</div>';
+        // Recurrence summary
+        mh += '<div style="font-size:12px;margin-bottom:10px;color:var(--text);"><strong>Recurrence:</strong> ';
+        if (popTpl.recurrence === 'weekly') {
+          mh += 'Every ' + (dayNames[popTpl.recurrence_day] || 'week');
+        } else if (popTpl.recurrence === 'biweekly') {
+          mh += 'Every other ' + (dayNames[popTpl.recurrence_day] || 'week');
+        } else if (popTpl.recurrence === 'monthly') {
+          var pat = popTpl.recurrence_pattern || 'day-of-month';
+          if (pat === 'nth-weekday') {
+            mh += (weekLabels[popTpl.recurrence_week_of_month] || '') + ' ' + (dayNames[popTpl.recurrence_day] || '') + ' of each month';
+          } else {
+            mh += 'Day ' + popTpl.recurrence_day + ' of each month';
+          }
+        }
+        mh += '</div>';
+        if (popTpl.rep_name) mh += '<div style="font-size:12px;margin-bottom:10px;"><strong>Rep:</strong> ' + _ve(popTpl.rep_name) + '</div>';
+        // Stops preview
+        var tplStops = popTpl.stops || [];
+        if (tplStops.length > 0) {
+          mh += '<div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;margin-bottom:6px;">Stops (' + tplStops.length + ')</div>';
+          tplStops.forEach(function(s, idx){
+            mh += '<div style="display:flex;align-items:center;gap:8px;padding:6px 10px;border-bottom:1px solid var(--border);">';
+            mh += '<div style="width:18px;height:18px;border-radius:50%;background:rgba(232,93,4,.15);color:var(--orange);display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:700;flex-shrink:0;">' + (idx+1) + '</div>';
+            mh += '<div style="flex:1;"><div style="font-size:11px;font-weight:600;color:var(--navy);">' + _ve(s.partner_name||'Stop '+(idx+1)) + '</div>';
+            if (s.address) mh += '<div style="font-size:10px;color:var(--muted);">' + _ve(s.address) + '</div>';
+            mh += '</div></div>';
+          });
+        }
+        mh += '<div style="font-size:10px;color:var(--muted);margin-top:14px;font-style:italic;">This is a preview — the route will be auto-generated on the date above.</div>';
+        mh += '<div style="display:flex;justify-content:flex-end;margin-top:14px;"><button onclick="ST.modal=null;ST._calPopupTemplateId=null;ST._calPopupDate=null;render()" style="padding:8px 18px;border-radius:6px;border:none;background:var(--orange);color:#fff;font-size:12px;font-weight:700;cursor:pointer;">Close</button></div>';
+      }
+    }
+
     if (ST.modal === 'add-route') {
       // Editing mode is signaled by ST.editingRouteId. When set, prefill all
       // fields from the existing route record. Single modal handles both
@@ -4495,6 +4752,42 @@ async function submitRoute() {
 function editRoute(routeId) {
   ST.editingRouteId = routeId;
   ST.modal = 'add-route';
+  render();
+}
+
+// ── CALENDAR HELPERS ──────────────────────────────────────────────────────
+// Navigate the calendar by ±N months. Adjusts ST.calMonth (YYYY-MM string).
+function changeCalMonth(delta) {
+  var ym = (ST.calMonth || '').split('-');
+  var y = parseInt(ym[0], 10);
+  var m = parseInt(ym[1], 10) - 1; // 0-indexed
+  if (isNaN(y) || isNaN(m)) {
+    var n = new Date();
+    y = n.getFullYear(); m = n.getMonth();
+  }
+  m += delta;
+  while (m < 0) { m += 12; y -= 1; }
+  while (m > 11) { m -= 12; y += 1; }
+  ST.calMonth = y + '-' + String(m+1).padStart(2,'0');
+  render();
+}
+
+// Open route-detail popup. Uses a dedicated modal mode so it doesn't
+// clobber any existing edit flow. Click "Edit" inside the popup to
+// jump into the edit modal.
+function openRouteDetailPopup(routeId) {
+  ST._calPopupRouteId = routeId;
+  ST._calPopupTemplateId = null;
+  ST._calPopupDate = null;
+  ST.modal = 'cal-route-popup';
+  render();
+}
+
+function openTemplatePreviewPopup(templateId, dateStr) {
+  ST._calPopupTemplateId = templateId;
+  ST._calPopupDate = dateStr;
+  ST._calPopupRouteId = null;
+  ST.modal = 'cal-template-popup';
   render();
 }
 

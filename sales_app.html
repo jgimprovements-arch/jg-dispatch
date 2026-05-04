@@ -707,7 +707,13 @@ if ('serviceWorker' in navigator) {
       <div style="font-size:16px;font-weight:700;color:var(--navy);">My Routes</div>
       <button onclick="openPlanRoute()" style="background:var(--orange);color:#fff;border:none;border-radius:10px;padding:8px 16px;font-size:13px;font-weight:700;cursor:pointer;font-family:DM Sans,sans-serif;">+ Plan Route</button>
     </div>
+    <!-- View toggle: List vs Week. Same pill pattern as desktop's calendar toggle. -->
+    <div style="display:flex;gap:4px;background:rgba(13,45,94,.06);border-radius:18px;padding:3px;margin-bottom:12px;width:fit-content;">
+      <button id="rv-list" onclick="setRoutesViewMobile('list')" style="padding:6px 16px;border-radius:14px;border:none;background:#fff;color:var(--navy);font-size:11px;font-weight:700;cursor:pointer;font-family:inherit;box-shadow:0 1px 3px rgba(13,45,94,.1);">📋 List</button>
+      <button id="rv-week" onclick="setRoutesViewMobile('week')" style="padding:6px 16px;border-radius:14px;border:none;background:transparent;color:var(--navy);font-size:11px;font-weight:700;cursor:pointer;font-family:inherit;">📅 Week</button>
+    </div>
     <div id="routes-list"></div>
+    <div id="routes-week" style="display:none;"></div>
   </div>
 
   <!-- FOLLOW-UPS -->
@@ -3527,6 +3533,253 @@ async function deleteChaseMobile(chaseId) {
 }
 
 // ── ROUTES ────────────────────────────────────────────────────────────────
+// Mobile routes screen has two views — List (existing) and Week (calendar
+// strip showing 7 days). User toggles via pills at top of screen. Week view
+// shows real routes prominent + recurring template predictions faded.
+
+function setRoutesViewMobile(view) {
+  APP.routesView = view;
+  var p1 = document.getElementById('rv-list');
+  var p2 = document.getElementById('rv-week');
+  if (p1 && p2) {
+    if (view === 'list') {
+      p1.style.background = '#fff'; p1.style.boxShadow = '0 1px 3px rgba(13,45,94,.1)';
+      p2.style.background = 'transparent'; p2.style.boxShadow = 'none';
+    } else {
+      p2.style.background = '#fff'; p2.style.boxShadow = '0 1px 3px rgba(13,45,94,.1)';
+      p1.style.background = 'transparent'; p1.style.boxShadow = 'none';
+    }
+  }
+  document.getElementById('routes-list').style.display = view === 'list' ? 'block' : 'none';
+  document.getElementById('routes-week').style.display = view === 'week' ? 'block' : 'none';
+  if (view === 'week') renderRoutesWeek();
+}
+
+function renderRoutesWeek() {
+  var el = document.getElementById('routes-week');
+  if (!el) return;
+  if (!APP.weekStartOffset) APP.weekStartOffset = 0;
+
+  // Week starts on the Sunday of the current calendar week + offset
+  var now = new Date();
+  now.setHours(0,0,0,0);
+  var sunday = new Date(now);
+  sunday.setDate(now.getDate() - now.getDay() + (APP.weekStartOffset * 7));
+
+  var weekDays = [];
+  for (var i = 0; i < 7; i++) {
+    var d = new Date(sunday);
+    d.setDate(sunday.getDate() + i);
+    weekDays.push(d);
+  }
+  var fmtKey = function(d){ return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0'); };
+  var todayKey = fmtKey(now);
+
+  // Compute template fires for each day in this week
+  var templateFires = {};
+  (APP.routeTemplates || []).forEach(function(t){
+    if (!t.recurrence || !t.active) return;
+    weekDays.forEach(function(day){
+      var dow = day.getDay();
+      var dom = day.getDate();
+      var fires = false;
+      if (t.recurrence === 'weekly') {
+        fires = (t.recurrence_day === dow);
+      } else if (t.recurrence === 'biweekly') {
+        if (t.recurrence_day === dow) {
+          var occ = Math.ceil(dom / 7);
+          fires = (occ % 2 === 1);
+        }
+      } else if (t.recurrence === 'monthly') {
+        var pat = t.recurrence_pattern || 'day-of-month';
+        if (pat === 'day-of-month') {
+          fires = (t.recurrence_day === dom);
+        } else if (pat === 'nth-weekday') {
+          if (t.recurrence_day === dow) {
+            var occurrence = Math.ceil(dom / 7);
+            if (t.recurrence_week_of_month === -1) {
+              var next = new Date(day); next.setDate(dom + 7);
+              fires = (next.getMonth() !== day.getMonth());
+            } else {
+              fires = (occurrence === t.recurrence_week_of_month);
+            }
+          }
+        }
+      }
+      if (fires) {
+        var k = fmtKey(day);
+        if (!templateFires[k]) templateFires[k] = [];
+        templateFires[k].push(t);
+      }
+    });
+  });
+
+  // Group routes by date
+  var routesByDate = {};
+  (APP.routes||[]).forEach(function(r){
+    if (!r.route_date) return;
+    if (!routesByDate[r.route_date]) routesByDate[r.route_date] = [];
+    routesByDate[r.route_date].push(r);
+  });
+
+  var html = '';
+  // Week range header with prev/next
+  var weekStart = weekDays[0];
+  var weekEnd = weekDays[6];
+  var rangeStr = weekStart.toLocaleDateString('en-US',{month:'short',day:'numeric'}) + ' – ' + weekEnd.toLocaleDateString('en-US',{month:'short',day:'numeric'});
+  html += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">';
+  html += '<button onclick="changeWeekMobile(-1)" style="background:transparent;border:1.5px solid var(--border);border-radius:10px;padding:8px 14px;font-size:14px;cursor:pointer;font-family:inherit;color:var(--navy);">◀</button>';
+  html += '<div style="font-size:14px;font-weight:700;color:var(--navy);">' + rangeStr + '</div>';
+  html += '<button onclick="changeWeekMobile(1)" style="background:transparent;border:1.5px solid var(--border);border-radius:10px;padding:8px 14px;font-size:14px;cursor:pointer;font-family:inherit;color:var(--navy);">▶</button>';
+  html += '</div>';
+
+  // Day strip — vertical list of 7 days for mobile readability
+  weekDays.forEach(function(day){
+    var key = fmtKey(day);
+    var isToday = (key === todayKey);
+    var dayRoutes = routesByDate[key] || [];
+    var dayTemplates = templateFires[key] || [];
+    // Avoid double-show for templates that already generated their route
+    dayTemplates = dayTemplates.filter(function(t){
+      return !dayRoutes.some(function(r){ return r.notes && r.notes.indexOf('From template: '+t.name) !== -1; });
+    });
+    var dayName = day.toLocaleDateString('en-US',{weekday:'short'});
+    var dayNum = day.getDate();
+    var bg = isToday ? 'rgba(232,93,4,.06)' : 'var(--card)';
+    var brd = isToday ? '2px solid var(--orange)' : '1px solid var(--border)';
+
+    html += '<div style="background:' + bg + ';border:' + brd + ';border-radius:12px;padding:12px;margin-bottom:8px;">';
+    html += '<div style="display:flex;align-items:baseline;gap:8px;margin-bottom:' + (dayRoutes.length || dayTemplates.length ? '8px' : '0') + ';">';
+    html += '<div style="font-size:11px;font-weight:700;color:' + (isToday?'var(--orange)':'var(--muted)') + ';text-transform:uppercase;letter-spacing:.04em;">' + dayName + '</div>';
+    html += '<div style="font-size:18px;font-weight:800;color:' + (isToday?'var(--orange)':'var(--navy)') + ';">' + dayNum + '</div>';
+    if (isToday) html += '<span style="font-size:9px;font-weight:700;padding:2px 7px;border-radius:4px;background:var(--orange);color:#fff;">TODAY</span>';
+    html += '</div>';
+
+    if (dayRoutes.length === 0 && dayTemplates.length === 0) {
+      // Empty day — keep it minimal
+    } else {
+      dayRoutes.forEach(function(r){
+        var stops = r.stops || [];
+        var done = stops.filter(function(s){ return s.completed; }).length;
+        var lbl = r.name || (stops.length + ' stops');
+        html += '<button onclick="openRouteDetailMobile(\'' + r.id + '\')" style="display:block;width:100%;text-align:left;background:linear-gradient(135deg, var(--orange) 0%, #d05303 100%);color:#fff;border:none;border-radius:8px;padding:8px 12px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit;margin-bottom:5px;box-shadow:0 2px 8px rgba(232,93,4,.2);">';
+        html += '🚗 ' + lbl + ' <span style="opacity:.85;font-weight:500;font-size:11px;">' + done + '/' + stops.length + '</span>';
+        html += '</button>';
+      });
+      dayTemplates.forEach(function(t){
+        html += '<button onclick="openTemplatePreviewMobile(\'' + t.id + '\',\'' + key + '\')" style="display:block;width:100%;text-align:left;background:rgba(232,93,4,.1);color:var(--orange);border:1px dashed rgba(232,93,4,.4);border-radius:8px;padding:7px 12px;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit;margin-bottom:5px;">';
+        html += '⟳ ' + (t.name || 'Recurring') + ' <span style="font-size:10px;font-weight:500;opacity:.8;">(will generate)</span>';
+        html += '</button>';
+      });
+    }
+    html += '</div>';
+  });
+
+  // Legend
+  html += '<div style="display:flex;gap:14px;margin-top:8px;font-size:10px;color:var(--muted);justify-content:center;">';
+  html += '<div style="display:flex;align-items:center;gap:5px;"><span style="width:10px;height:10px;background:linear-gradient(135deg, var(--orange) 0%, #d05303 100%);border-radius:2px;"></span>Real route</div>';
+  html += '<div style="display:flex;align-items:center;gap:5px;"><span style="width:10px;height:10px;background:rgba(232,93,4,.1);border:1px dashed rgba(232,93,4,.4);border-radius:2px;"></span>Recurring</div>';
+  html += '</div>';
+
+  el.innerHTML = html;
+}
+
+function changeWeekMobile(delta) {
+  if (!APP.weekStartOffset) APP.weekStartOffset = 0;
+  APP.weekStartOffset += delta;
+  renderRoutesWeek();
+}
+
+// Mobile route detail popup — uses the partner-detail-overlay sheet
+// because it's already wired with back-button handler.
+function openRouteDetailMobile(routeId) {
+  var route = (APP.routes||[]).find(function(r){ return r.id === routeId; });
+  if (!route) { toast('Route not found'); return; }
+  var stops = route.stops || [];
+  var done = stops.filter(function(s){ return s.completed; }).length;
+  var html = '';
+  html += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">';
+  html += '<div style="font-size:16px;font-weight:700;color:var(--navy);">🚗 ' + (route.name || 'Route') + '</div>';
+  html += '<button onclick="closeRouteDetailMobile()" style="border:none;background:transparent;font-size:22px;cursor:pointer;color:var(--muted);padding:0;width:32px;height:32px;">✕</button>';
+  html += '</div>';
+  html += '<div style="background:rgba(13,45,94,.04);border-radius:10px;padding:10px 12px;margin-bottom:14px;font-size:12px;line-height:1.6;">';
+  html += '<div><strong>Date:</strong> ' + (route.route_date ? new Date(route.route_date+'T00:00:00').toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'}) : '—') + '</div>';
+  if (route.rep_name) html += '<div><strong>Rep:</strong> ' + route.rep_name + '</div>';
+  html += '<div><strong>Status:</strong> ' + (route.status||'Planned') + ' · ' + done + '/' + stops.length + ' stops</div>';
+  if (route.notes) html += '<div style="color:var(--muted);font-style:italic;margin-top:4px;">' + route.notes + '</div>';
+  html += '</div>';
+  if (stops.length === 0) {
+    html += '<div style="color:var(--muted);font-style:italic;font-size:12px;">No stops on this route.</div>';
+  } else {
+    html += '<div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;margin-bottom:6px;">Stops</div>';
+    stops.forEach(function(s, idx){
+      html += '<div style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border);">';
+      html += '<div style="width:22px;height:22px;border-radius:50%;background:' + (s.completed?'var(--ok)':'rgba(13,45,94,.08)') + ';display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:' + (s.completed?'#fff':'var(--muted)') + ';flex-shrink:0;">' + (s.completed?'✓':(idx+1)) + '</div>';
+      html += '<div style="flex:1;"><div style="font-size:13px;font-weight:600;color:var(--navy);">' + (s.partner_name||'Stop '+(idx+1)) + '</div>';
+      if (s.address) html += '<div style="font-size:11px;color:var(--muted);">' + s.address + '</div>';
+      html += '</div></div>';
+    });
+  }
+  html += '<div style="display:flex;gap:8px;margin-top:14px;">';
+  html += '<button onclick="closeRouteDetailMobile();openEditRouteMobile(\'' + routeId + '\')" style="flex:1;padding:14px;border-radius:10px;border:none;background:var(--orange);color:#fff;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit;">✏️ Edit Route</button>';
+  html += '</div>';
+
+  document.getElementById('partner-detail-body').innerHTML = html;
+  document.getElementById('partner-detail-overlay').classList.add('open');
+  _navPushOverlay('partner-detail-overlay', closeRouteDetailMobile);
+}
+
+function closeRouteDetailMobile() {
+  document.getElementById('partner-detail-overlay').classList.remove('open');
+  _navPopOverlay('partner-detail-overlay');
+}
+
+function openTemplatePreviewMobile(templateId, dateStr) {
+  var t = (APP.routeTemplates||[]).find(function(x){ return x.id === templateId; });
+  if (!t) { toast('Template not found'); return; }
+  var dayNames = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+  var weekLabels = {1:'1st',2:'2nd',3:'3rd',4:'4th',5:'5th','-1':'Last'};
+  var html = '';
+  html += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">';
+  html += '<div style="font-size:16px;font-weight:700;color:var(--navy);">⟳ Recurring Preview</div>';
+  html += '<button onclick="closeRouteDetailMobile()" style="border:none;background:transparent;font-size:22px;cursor:pointer;color:var(--muted);padding:0;width:32px;height:32px;">✕</button>';
+  html += '</div>';
+  html += '<div style="background:rgba(232,93,4,.06);border:1px dashed rgba(232,93,4,.4);border-radius:10px;padding:12px 14px;margin-bottom:14px;">';
+  html += '<div style="font-size:14px;font-weight:700;color:var(--navy);margin-bottom:4px;">' + (t.name||'Recurring Route') + '</div>';
+  html += '<div style="font-size:11px;color:var(--muted);">Will generate on <strong>' + new Date(dateStr+'T00:00:00').toLocaleDateString('en-US',{weekday:'long',month:'short',day:'numeric'}) + '</strong></div>';
+  html += '</div>';
+  html += '<div style="font-size:13px;margin-bottom:10px;"><strong>Recurrence:</strong> ';
+  if (t.recurrence === 'weekly') {
+    html += 'Every ' + (dayNames[t.recurrence_day]||'week');
+  } else if (t.recurrence === 'biweekly') {
+    html += 'Every other ' + (dayNames[t.recurrence_day]||'week');
+  } else if (t.recurrence === 'monthly') {
+    var pat = t.recurrence_pattern || 'day-of-month';
+    if (pat === 'nth-weekday') {
+      html += (weekLabels[t.recurrence_week_of_month]||'') + ' ' + (dayNames[t.recurrence_day]||'') + ' of month';
+    } else {
+      html += 'Day ' + t.recurrence_day + ' of month';
+    }
+  }
+  html += '</div>';
+  if (t.rep_name) html += '<div style="font-size:13px;margin-bottom:10px;"><strong>Rep:</strong> ' + t.rep_name + '</div>';
+  var tStops = t.stops || [];
+  if (tStops.length > 0) {
+    html += '<div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;margin-bottom:6px;">Stops (' + tStops.length + ')</div>';
+    tStops.forEach(function(s, idx){
+      html += '<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);">';
+      html += '<div style="width:18px;height:18px;border-radius:50%;background:rgba(232,93,4,.15);color:var(--orange);display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:700;flex-shrink:0;">' + (idx+1) + '</div>';
+      html += '<div style="flex:1;"><div style="font-size:12px;font-weight:600;color:var(--navy);">' + (s.partner_name||'Stop '+(idx+1)) + '</div>';
+      if (s.address) html += '<div style="font-size:10px;color:var(--muted);">' + s.address + '</div>';
+      html += '</div></div>';
+    });
+  }
+  html += '<div style="font-size:11px;color:var(--muted);margin-top:12px;font-style:italic;">This is a preview — the route auto-generates on the date above.</div>';
+  document.getElementById('partner-detail-body').innerHTML = html;
+  document.getElementById('partner-detail-overlay').classList.add('open');
+  _navPushOverlay('partner-detail-overlay', closeRouteDetailMobile);
+}
+
 function renderRoutes() {
   var el = document.getElementById('routes-list');
   if (!APP.routes.length) {
