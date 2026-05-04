@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Your Project Schedule · JG Restoration</title>
 <link rel="icon" href="https://jgimprovements-arch.github.io/jg-dispatch/logo.png">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <style>
   :root {
     --navy: #0d2d5e;
@@ -466,6 +467,33 @@
   }
   .cj-photo:hover { transform: scale(1.02); border-color: var(--orange); }
   .cj-photo img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .cj-photo-pdf {
+    background: #fff;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .cj-photo-pdf img { object-fit: contain; }
+  .cj-pdf-fallback {
+    font-size: 36px;
+  }
+  .cj-photo-doc {
+    background: var(--bg);
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    padding: 8px;
+    text-decoration: none;
+    color: var(--navy);
+    text-align: center;
+  }
+  .cj-doc-icon { font-size: 28px; }
+  .cj-doc-name {
+    font-size: 11px;
+    margin-top: 6px;
+    overflow: hidden;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    word-break: break-word;
+  }
   .cj-tags { margin-top: 10px; display: flex; gap: 6px; flex-wrap: wrap; }
   .cj-tag {
     font-size: 11px;
@@ -1081,12 +1109,25 @@ async function render() {
           const body = (e.body || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
             .replace(/@([A-Za-z][A-Za-z0-9_.\-\s]{1,40})/g, m => `<span class="cj-mention">${m}</span>`)
             .replace(/\n/g, '<br>');
-          const atts = (e.attachments || []).filter(a =>
-            /^image\//.test(a.mime_type || '') || /\.(jpe?g|png|gif|webp|heic)$/i.test(a.filename || '')
-          );
-          const attHtml = atts.length ? `
+          const allAtts = (e.attachments || []);
+          const attHtml = allAtts.length ? `
             <div class="cj-photos">
-              ${atts.map(a => `<a href="${a.file_url}" target="_blank" class="cj-photo"><img src="${a.file_url}" loading="lazy" alt=""></a>`).join('')}
+              ${allAtts.map(a => {
+                const isImage = /^image\//.test(a.mime_type || '') || /\.(jpe?g|png|gif|webp|heic)$/i.test(a.filename || '');
+                const isPdf = /\.pdf$/i.test(a.filename || '') || /pdf/i.test(a.mime_type || '');
+                if (isImage) {
+                  return `<a href="${a.file_url}" target="_blank" class="cj-photo"><img src="${a.file_url}" loading="lazy" alt=""></a>`;
+                }
+                if (isPdf) {
+                  return `<a href="${a.file_url}" target="_blank" class="cj-photo cj-photo-pdf" data-pdf-thumb="${a.file_url}" title="${escHtml(a.filename)}">
+                    <span class="cj-pdf-fallback">📕</span>
+                  </a>`;
+                }
+                return `<a href="${a.file_url}" target="_blank" class="cj-photo cj-photo-doc" title="${escHtml(a.filename)}">
+                  <span class="cj-doc-icon">📄</span>
+                  <span class="cj-doc-name">${escHtml(a.filename || 'file')}</span>
+                </a>`;
+              }).join('')}
             </div>` : '';
           return `
             <div class="cj-entry">
@@ -1269,6 +1310,9 @@ async function render() {
   // Wire customer composer
   wireCustomerComposer(project);
 
+  // Render PDF thumbnails for journal attachments
+  renderPdfThumbsForCustomer();
+
   // Wire calendar nav
   document.querySelectorAll('[data-cal-nav]').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -1290,6 +1334,45 @@ async function render() {
 const CUST_BUCKET = 'rebuild-journal-attachments';
 const CUST_MESSAGE_HOOK = 'https://hooks.zapier.com/hooks/catch/12653197/uvule41/';
 let custFiles = [];
+
+// Set PDF.js worker once
+if (window.pdfjsLib) {
+  window.pdfjsLib.GlobalWorkerOptions.workerSrc =
+    'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+}
+
+async function renderPdfThumbsForCustomer() {
+  if (!window.pdfjsLib) return;
+  const els = document.querySelectorAll('[data-pdf-thumb]');
+  for (const el of els) {
+    const url = el.dataset.pdfThumb;
+    if (!url) continue;
+    try {
+      const loadingTask = window.pdfjsLib.getDocument({
+        url,
+        disableRange: true,
+        disableStream: true,
+      });
+      const pdf = await loadingTask.promise;
+      const page = await pdf.getPage(1);
+      const viewport = page.getViewport({ scale: 1 });
+      const targetWidth = 240;
+      const scale = targetWidth / viewport.width;
+      const scaled = page.getViewport({ scale });
+      const canvas = document.createElement('canvas');
+      canvas.width = scaled.width;
+      canvas.height = scaled.height;
+      await page.render({ canvasContext: canvas.getContext('2d'), viewport: scaled }).promise;
+      const img = document.createElement('img');
+      img.src = canvas.toDataURL('image/jpeg', 0.85);
+      img.alt = '';
+      el.innerHTML = '';
+      el.appendChild(img);
+    } catch (e) {
+      console.warn('PDF thumb failed', url, e);
+    }
+  }
+}
 
 function wireCustomerComposer(project) {
   const attInput = document.getElementById('custJrAttach');
