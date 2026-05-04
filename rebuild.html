@@ -515,6 +515,139 @@
   .kpi.alert .value { color: var(--orange); }
   .kpi.alert .label { color: var(--orange); }
 
+  /* ──── Recently Worked panel ──── */
+  .recent-wrap {
+    padding: 8px 0;
+  }
+  .recent-head {
+    background: linear-gradient(135deg, #0d2d5e 0%, #1a4080 50%, #0d2d5e 100%);
+    border-radius: 14px;
+    padding: 26px 30px;
+    margin-bottom: 18px;
+    color: #fff;
+    position: relative;
+    overflow: hidden;
+    box-shadow: 0 6px 20px rgba(13,45,94,.18);
+  }
+  .recent-head::before {
+    content: '';
+    position: absolute;
+    top: -60px; right: -60px;
+    width: 260px; height: 260px;
+    background: radial-gradient(circle, rgba(232,93,4,.22) 0%, transparent 70%);
+    pointer-events: none;
+  }
+  .recent-tag {
+    display: inline-block;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    color: var(--orange);
+    background: rgba(232,93,4,.18);
+    border: 1px solid rgba(232,93,4,.4);
+    padding: 3px 11px;
+    border-radius: 999px;
+    margin-bottom: 10px;
+    position: relative;
+    z-index: 1;
+  }
+  .recent-head h2 {
+    margin: 0 0 6px;
+    color: #fff;
+    font-size: 24px;
+    font-weight: 800;
+    letter-spacing: -.3px;
+    position: relative;
+    z-index: 1;
+  }
+  .recent-sub {
+    margin: 0;
+    color: rgba(255,255,255,.75);
+    font-size: 13px;
+    position: relative;
+    z-index: 1;
+  }
+  .recent-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 12px;
+  }
+  .recent-card {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 16px 18px;
+    cursor: pointer;
+    transition: border-color .15s, box-shadow .15s, transform .15s;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .recent-card:hover {
+    border-color: var(--orange);
+    box-shadow: 0 4px 14px rgba(232,93,4,.12);
+    transform: translateY(-2px);
+  }
+  .recent-card-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+  }
+  .recent-card-job {
+    font-weight: 800;
+    color: var(--navy);
+    font-size: 15px;
+    letter-spacing: -.2px;
+  }
+  .recent-card-suffix {
+    background: var(--orange);
+    color: #fff;
+    font-size: 10px;
+    font-weight: 700;
+    padding: 3px 8px;
+    border-radius: 999px;
+    letter-spacing: .5px;
+  }
+  .recent-card-customer {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text);
+  }
+  .recent-card-addr {
+    font-size: 12px;
+    color: var(--muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .recent-card-meta {
+    font-size: 11px;
+    color: var(--muted);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+  .recent-card-foot {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 8px;
+    padding-top: 10px;
+    border-top: 1px solid var(--line);
+  }
+  .recent-card-scope {
+    font-weight: 800;
+    color: var(--green);
+    font-size: 14px;
+  }
+  .recent-card-pct {
+    font-size: 11px;
+    color: var(--muted);
+    font-weight: 600;
+  }
+
   /* ──── Tabbed sections ──── */
   .tabs {
     display: flex;
@@ -3470,9 +3603,84 @@ async function selectProject(id) {
   state.activeProject = state.projects.find(p => p.id === id);
   renderProjects();
   if (!state.activeProject) return;
+  pushRecentProject(id);
   updateUrlHash();
   await Promise.all([loadPhases(), loadSelections(), loadMessages(), loadHistory(), loadDocuments(), loadJournalEntries(), loadTodos()]);
   renderDetail();
+}
+
+// Track the last 5 projects this user opened
+function pushRecentProject(id) {
+  if (!id || !state.pmEmail) return;
+  const key = 'jg_recent_projects_' + state.pmEmail;
+  let list = [];
+  try { list = JSON.parse(localStorage.getItem(key) || '[]'); } catch {}
+  list = [id, ...list.filter(x => x !== id)].slice(0, 5);
+  try { localStorage.setItem(key, JSON.stringify(list)); } catch {}
+}
+
+function getRecentProjects() {
+  if (!state.pmEmail) return [];
+  const key = 'jg_recent_projects_' + state.pmEmail;
+  let ids = [];
+  try { ids = JSON.parse(localStorage.getItem(key) || '[]'); } catch {}
+  return ids
+    .map(id => state.projects.find(p => p.id === id))
+    .filter(Boolean);
+}
+
+function renderEmptyState() {
+  const pane = $('#detailPane');
+  if (!pane || state.activeProjectId) return;
+  const recent = getRecentProjects();
+  if (!recent.length) {
+    // Fall back to original empty state
+    pane.innerHTML = `
+      <div class="empty" id="emptyState">
+        <h2>Select a rebuild project</h2>
+        <p>Pick a project from the left rail. Active Albi jobs (BRD / REB / REM / RZE) auto-sync — click <b>⟳ Sync Albi</b> to pull them now, or set up the Albi webhook for live updates.</p>
+        <button class="btn primary" onclick="document.getElementById('syncAlbiAllBtn').click()">Sync from Albi Now</button>
+      </div>`;
+    return;
+  }
+  pane.innerHTML = `
+    <div class="recent-wrap">
+      <div class="recent-head">
+        <div class="recent-tag">Recently Worked</div>
+        <h2>Pick up where you left off</h2>
+        <p class="recent-sub">Your last 5 projects · click any card to open</p>
+      </div>
+      <div class="recent-grid">
+        ${recent.map(p => {
+          const pct = projectProgress(p.id);
+          const amt = p.estimated_revenue || p.scope_amount;
+          const scopeStr = amt ? '$' + Number(amt).toLocaleString(undefined, { maximumFractionDigits: 0 }) : null;
+          const pmFirst = p.albi_pm_name ? p.albi_pm_name.split(' ')[0] : null;
+          return `
+            <div class="recent-card" data-id="${p.id}">
+              <div class="recent-card-head">
+                <div class="recent-card-job">${p.albi_job_number || ('Albi #' + p.albi_project_id)}</div>
+                ${p.albi_suffix ? `<span class="recent-card-suffix">${p.albi_suffix}</span>` : ''}
+              </div>
+              <div class="recent-card-customer">${p.customer_name || '—'}</div>
+              ${p.property_address ? `<div class="recent-card-addr">📍 ${p.property_address}</div>` : ''}
+              <div class="recent-card-meta">
+                <span>${p.market === 'stevens_point' ? 'Stevens Point' : 'Appleton'}</span>
+                ${pmFirst ? `<span>· PM: ${pmFirst}</span>` : ''}
+                ${p.albi_status ? `<span>· ${p.albi_status}</span>` : ''}
+              </div>
+              <div class="recent-card-foot">
+                ${scopeStr ? `<span class="recent-card-scope">${scopeStr}</span>` : '<span></span>'}
+                ${pct ? `<span class="recent-card-pct">${pct}% complete</span>` : ''}
+              </div>
+            </div>`;
+        }).join('')}
+      </div>
+    </div>
+  `;
+  pane.querySelectorAll('.recent-card').forEach(c => {
+    c.addEventListener('click', () => selectProject(c.dataset.id));
+  });
 }
 
 // Persist active project + tab in URL hash so refresh restores the same view
@@ -8960,6 +9168,9 @@ function wireNotifBell() {
   if (restored?.p) {
     if (restored.t) state.tab = restored.t;
     selectProject(restored.p);
+  } else {
+    // Show "Recently Worked" panel if no project restored
+    renderEmptyState();
   }
 
   // Auto-sync from Albi in background (doesn't block the UI)
