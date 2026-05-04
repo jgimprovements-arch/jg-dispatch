@@ -442,13 +442,42 @@ async function init() {
   wire();
   render();
 
+  // Diagnostic banner — shows what we read so you can verify
+  await renderDiagnostic();
+
   // Realtime
   sb.channel('my_todos_' + state.email)
     .on('postgres_changes', { event: '*', schema: 'public', table: 'rebuild_todos' }, async () => {
       await loadTodos();
       render();
+      await renderDiagnostic();
     })
     .subscribe();
+}
+
+async function renderDiagnostic() {
+  // Query ALL todos to see what's actually in the DB
+  const { data: all, error } = await sb.from('rebuild_todos').select('id, title, assignee_email, created_by_email').limit(20);
+  const mineByEmail = (all || []).filter(t =>
+    (t.assignee_email || '').toLowerCase() === state.email ||
+    (t.created_by_email || '').toLowerCase() === state.email
+  );
+  const banner = document.getElementById('diagBanner') || (() => {
+    const d = document.createElement('div');
+    d.id = 'diagBanner';
+    d.style.cssText = 'background:#fff8f0;border:1px solid #f5a623;border-radius:8px;padding:10px 14px;margin-bottom:14px;font-size:12px;color:#0d2d5e;font-family:monospace;';
+    document.querySelector('main').insertBefore(d, document.getElementById('content'));
+    return d;
+  })();
+  banner.innerHTML = `
+    <b>Diagnostic:</b><br>
+    Reading as: <b>${state.email}</b><br>
+    Total todos in DB (sample of 20): <b>${(all || []).length}</b>${error ? ' · <span style="color:#d64545;">ERR: ' + error.message + '</span>' : ''}<br>
+    Match this email (assignee or creator): <b>${mineByEmail.length}</b><br>
+    state.todos.length: <b>${state.todos.length}</b><br>
+    ${(all || []).length && !mineByEmail.length ? `<br><span style="color:#d64545;">⚠ DB has todos but none match your email. Sample: <br>` +
+      (all || []).slice(0,3).map(t => `&nbsp;&nbsp;"${(t.title||'').slice(0,40)}" · assignee=${t.assignee_email} · creator=${t.created_by_email}`).join('<br>') + `</span>` : ''}
+  `;
 }
 
 async function loadTodos() {
