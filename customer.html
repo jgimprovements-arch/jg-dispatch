@@ -532,7 +532,53 @@
     border-radius: 8px;
     padding: 14px 16px;
     border: 1px solid var(--line);
+    transition: border-color .15s;
   }
+  .cj-entry.collapsed {
+    cursor: pointer;
+    padding: 12px 14px;
+  }
+  .cj-entry.collapsed:hover { border-color: var(--orange); background: #fff; }
+  .cj-entry.collapsed .cj-header { margin-bottom: 0; }
+  .cj-entry.collapsed .cj-body,
+  .cj-entry.collapsed .cj-photos,
+  .cj-entry.collapsed .cj-tags { display: none; }
+  .cj-collapsed-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+  }
+  .cj-collapsed-info { flex: 1; min-width: 0; }
+  .cj-collapsed-preview {
+    font-size: 13px;
+    color: var(--muted);
+    margin-top: 3px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .cj-collapsed-meta {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-shrink: 0;
+  }
+  .cj-att-badge {
+    background: var(--orange);
+    color: #fff;
+    font-size: 11px;
+    font-weight: 700;
+    padding: 3px 8px;
+    border-radius: 999px;
+    white-space: nowrap;
+  }
+  .cj-chevron {
+    color: var(--muted);
+    font-size: 14px;
+    transition: transform .15s;
+  }
+  .cj-entry:not(.collapsed) .cj-chevron { transform: rotate(90deg); color: var(--orange); }
   .cj-header {
     display: flex; align-items: flex-start; gap: 12px;
     margin-bottom: 10px;
@@ -1297,6 +1343,12 @@ async function render() {
             .replace(/@([A-Za-z][A-Za-z0-9_.\-\s]{1,40})/g, m => `<span class="cj-mention">${m}</span>`)
             .replace(/\n/g, '<br>');
           const allAtts = (e.attachments || []);
+          const attCount = allAtts.length;
+          // Plain-text preview for collapsed view (no HTML, single line)
+          const previewText = (e.body || '').replace(/\s+/g, ' ').trim();
+          const previewDisplay = previewText
+            ? escHtml(previewText.length > 80 ? previewText.slice(0, 80) + '…' : previewText)
+            : (attCount ? `<span style="color:var(--muted);font-style:italic;">${attCount} attachment${attCount > 1 ? 's' : ''}</span>` : '<span style="color:var(--muted);font-style:italic;">(no message)</span>');
           const attHtml = allAtts.length ? `
             <div class="cj-photos">
               ${allAtts.map(a => {
@@ -1317,12 +1369,17 @@ async function render() {
               }).join('')}
             </div>` : '';
           return `
-            <div class="cj-entry">
-              <div class="cj-header">
+            <div class="cj-entry collapsed" data-entry-id="${e.id}">
+              <div class="cj-collapsed-row">
                 <div class="cj-avatar">${escHtml(initials)}</div>
-                <div>
+                <div class="cj-collapsed-info">
                   <div class="cj-author">${escHtml(author)}</div>
-                  <div class="cj-date">${dateStr}</div>
+                  <div class="cj-collapsed-preview">${previewDisplay}</div>
+                </div>
+                <div class="cj-collapsed-meta">
+                  ${attCount ? `<span class="cj-att-badge">📎 ${attCount}</span>` : ''}
+                  <span class="cj-date">${dateStr}</span>
+                  <span class="cj-chevron">›</span>
                 </div>
               </div>
               <div class="cj-body">${body}</div>
@@ -1499,8 +1556,20 @@ async function render() {
   // Wire customer composer
   wireCustomerComposer(project);
 
-  // Render PDF thumbnails for journal attachments
-  renderPdfThumbsForCustomer();
+  // Wire journal expand/collapse + lazy PDF thumb render
+  document.querySelectorAll('.cj-entry.collapsed, .cj-entry:not(.collapsed)').forEach(entry => {
+    entry.addEventListener('click', (e) => {
+      // Don't collapse if user clicked an attachment link
+      if (e.target.closest('a')) return;
+      const wasCollapsed = entry.classList.contains('collapsed');
+      entry.classList.toggle('collapsed');
+      // Lazy-render PDF thumbs the first time this entry expands
+      if (wasCollapsed && !entry.dataset.thumbsRendered) {
+        entry.dataset.thumbsRendered = '1';
+        renderPdfThumbsIn(entry);
+      }
+    });
+  });
 
   // Wire calendar nav
   document.querySelectorAll('[data-cal-nav]').forEach(btn => {
@@ -1530,10 +1599,12 @@ if (window.pdfjsLib) {
     'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 }
 
-async function renderPdfThumbsForCustomer() {
+async function renderPdfThumbsIn(scope) {
   if (!window.pdfjsLib) return;
-  const els = document.querySelectorAll('[data-pdf-thumb]');
+  const root = scope || document;
+  const els = root.querySelectorAll('[data-pdf-thumb]');
   for (const el of els) {
+    if (el.dataset.thumbDone) continue;
     const url = el.dataset.pdfThumb;
     if (!url) continue;
     try {
@@ -1557,6 +1628,7 @@ async function renderPdfThumbsForCustomer() {
       img.alt = '';
       el.innerHTML = '';
       el.appendChild(img);
+      el.dataset.thumbDone = '1';
     } catch (e) {
       console.warn('PDF thumb failed', url, e);
     }
