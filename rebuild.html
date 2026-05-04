@@ -6684,6 +6684,7 @@ async function postJournalEntry() {
           project_id: state.activeProjectId,
           recipient_email: m.email,
           event_type: 'journal_mention',
+          selection_id: entry.id, // reused field — points to journal entry
           title: `${state.pmName} mentioned you`,
           body: body.slice(0, 200),
         });
@@ -6711,6 +6712,10 @@ async function postJournalEntry() {
 
   toast('Entry posted');
   await loadJournalEntries();
+  // Manually refresh own notifications in case realtime missed self-mentions
+  await loadNotifications();
+  renderNotifBadge();
+  if (state.notifPanelOpen) renderNotifList();
   renderTabContent();
 }
 
@@ -7650,6 +7655,8 @@ function setupRealtime() {
           }
           // ANY open session tries to claim and send the email — first one wins
           // (atomic: only update if email_sent_at is still NULL)
+          // SKIP emails for journal_mention — in-app notification is enough since recipients are signed in
+          if (n.event_type === 'journal_mention') return;
           const { data: claimed } = await sb.from('rebuild_notifications')
             .update({ email_sent_at: new Date().toISOString() })
             .eq('id', n.id)
@@ -7763,6 +7770,7 @@ function renderNotifList() {
       customer_changes_requested: '↻',
       install_approved: '📅',
       install_changes_requested: '↻',
+      journal_mention: '💬',
     }[n.event_type] || '🔔';
     return `
       <div class="notif-item ${n.read_at ? '' : 'unread'}" data-id="${n.id}" data-project="${n.project_id || ''}">
@@ -7793,6 +7801,7 @@ function renderNotifList() {
         customer_changes_requested: 'selections',
         install_approved: 'selections',
         install_changes_requested: 'selections',
+        journal_mention: 'journal',
       };
       const targetTab = tabForEvent[n?.event_type] || 'selections';
 
@@ -7808,7 +7817,7 @@ function renderNotifList() {
       // Scroll to and flash-highlight the specific item
       if (n?.selection_id) {
         setTimeout(() => {
-          const card = document.querySelector(`.selection-card[data-id="${n.selection_id}"]`);
+          const card = document.querySelector(`.selection-card[data-id="${n.selection_id}"], .jr-entry[data-id="${n.selection_id}"]`);
           if (card) {
             card.scrollIntoView({ behavior: 'smooth', block: 'center' });
             card.style.transition = 'box-shadow .3s, outline .3s';
@@ -7819,7 +7828,7 @@ function renderNotifList() {
               card.style.boxShadow = '';
             }, 2400);
           }
-        }, 200);
+        }, 400);
       }
 
       // Close panel
