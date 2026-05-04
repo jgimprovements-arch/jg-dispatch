@@ -427,6 +427,90 @@
     .cust-invoice-info { flex-basis: 100%; order: -1; }
   }
 
+  /* Selections section */
+  .cust-sel-list { display: flex; flex-direction: column; gap: 12px; }
+  .cust-sel-card {
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 14px 16px;
+    background: var(--bg);
+    transition: border-color .15s, box-shadow .15s;
+  }
+  .cust-sel-card.pending {
+    border-color: var(--orange);
+    background: #fff8f0;
+    box-shadow: 0 2px 8px rgba(232,93,4,.08);
+  }
+  .cust-sel-card.approved {
+    border-color: #c8e6d4;
+    background: #f4faf6;
+  }
+  .cust-sel-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 12px;
+    margin-bottom: 8px;
+  }
+  .cust-sel-cat {
+    font-weight: 700;
+    color: var(--navy);
+    font-size: 15px;
+  }
+  .cust-sel-desc {
+    font-size: 13px;
+    color: var(--muted);
+    margin-top: 2px;
+  }
+  .cust-sel-status {
+    font-size: 11px;
+    font-weight: 700;
+    padding: 4px 10px;
+    border-radius: 999px;
+    text-transform: uppercase;
+    letter-spacing: .3px;
+    white-space: nowrap;
+  }
+  .cust-sel-status.pending { background: var(--orange); color: #fff; }
+  .cust-sel-status.approved { background: #2d9c5f; color: #fff; }
+  .cust-sel-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 14px;
+    font-size: 12px;
+    color: var(--muted);
+    margin: 6px 0 10px;
+  }
+  .cust-sel-meta b { color: var(--navy); font-weight: 600; }
+  .cust-sel-install {
+    font-size: 13px;
+    color: #1f7a4a;
+    font-weight: 600;
+    margin-top: 6px;
+  }
+  .cust-sel-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 10px;
+    flex-wrap: wrap;
+  }
+  .cust-sel-btn {
+    padding: 9px 18px;
+    border-radius: 999px;
+    font-size: 13px;
+    font-weight: 700;
+    text-decoration: none;
+    display: inline-block;
+    transition: background .15s, transform .15s;
+  }
+  .cust-sel-btn.primary {
+    background: var(--orange);
+    color: #fff;
+    border: 1px solid var(--orange);
+  }
+  .cust-sel-btn.primary:hover { background: #d05303; transform: translateY(-1px); }
+  .cust-sel-empty { font-size: 13px; color: var(--muted); }
+
   /* Journal section */
   .journal-section {
     background: var(--card);
@@ -981,6 +1065,7 @@ if (!token) {
     .on('postgres_changes', { event: '*', schema: 'public', table: 'rebuild_projects' }, () => render())
     .on('postgres_changes', { event: '*', schema: 'public', table: 'rebuild_journal_entries' }, () => render())
     .on('postgres_changes', { event: '*', schema: 'public', table: 'rebuild_documents' }, () => render())
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'rebuild_selections' }, () => render())
     .subscribe();
 }
 
@@ -1027,12 +1112,71 @@ async function render() {
   );
   const visibleDocs = docsArr.filter(d => !visiblePhotos.includes(d));
 
+  // Material selections (pending approval, approved, install scheduled)
+  const { data: selections } = await sb.from('rebuild_selections')
+    .select('*, vendor_sub:rebuild_subs(company_name)')
+    .eq('project_id', project.id)
+    .in('status', ['awaiting_customer', 'awaiting_customer_install', 'approved', 'install_scheduled'])
+    .order('created_at', { ascending: false });
+  const selectionsArr = selections || [];
+
   const completedCount = phasesArr.filter(p => p.status === 'complete').length;
   const totalCount = phasesArr.length;
   const pct = totalCount ? Math.round((completedCount / totalCount) * 100) : 0;
 
   const inProgress = phasesArr.find(p => p.status === 'in_progress');
   const nextScheduled = phasesArr.find(p => p.status === 'scheduled');
+
+  // Build selections section (pending approvals + approved history)
+  const fmtMoney = n => n ? '$' + Number(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '—';
+  const fmtSelDate = d => d ? new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '';
+  const approvalBase = location.href.replace(/customer\.html.*$/i, '').replace(/\/$/, '');
+  const buildApprovalLink = (sel) => {
+    const page = sel.status === 'awaiting_customer_install' ? 'install_approval.html' : 'approval.html';
+    return `${approvalBase}/${page}?t=${sel.customer_token}`;
+  };
+  const selectionsHtml = selectionsArr.length ? `
+    <div class="cust-section">
+      <h3>Material Selections</h3>
+      <div class="cust-sel-list">
+        ${selectionsArr.map(s => {
+          const isPending = s.status === 'awaiting_customer' || s.status === 'awaiting_customer_install';
+          const isApproved = s.status === 'approved' || s.status === 'install_scheduled';
+          const cls = isPending ? 'pending' : (isApproved ? 'approved' : '');
+          const statusLbl = s.status === 'awaiting_customer' ? 'Approval Needed'
+            : s.status === 'awaiting_customer_install' ? 'Install Date Approval'
+            : s.status === 'install_scheduled' ? 'Install Scheduled'
+            : 'Approved';
+          const statusCls = isPending ? 'pending' : 'approved';
+          const vendor = s.vendor_sub?.company_name || s.vendor_name || '';
+          const installLine = s.approved_install_date && isApproved
+            ? `<div class="cust-sel-install">📅 Install scheduled: ${fmtSelDate(s.approved_install_date)}</div>` : '';
+          const action = isPending
+            ? `<a href="${buildApprovalLink(s)}" class="cust-sel-btn primary">→ Review &amp; Approve</a>`
+            : '';
+          return `
+            <div class="cust-sel-card ${cls}">
+              <div class="cust-sel-head">
+                <div>
+                  <div class="cust-sel-cat">${escHtml(s.category || 'Selection')}</div>
+                  ${s.description ? `<div class="cust-sel-desc">${escHtml(s.description)}</div>` : ''}
+                </div>
+                <div class="cust-sel-status ${statusCls}">${statusLbl}</div>
+              </div>
+              <div class="cust-sel-meta">
+                ${vendor ? `<span><b>Vendor:</b> ${escHtml(vendor)}</span>` : ''}
+                ${s.sku ? `<span><b>SKU:</b> ${escHtml(s.sku)}</span>` : ''}
+                ${s.quantity ? `<span><b>Qty:</b> ${escHtml(String(s.quantity))}${s.unit ? ' ' + escHtml(s.unit) : ''}</span>` : ''}
+                ${s.total_cost ? `<span><b>Total:</b> ${fmtMoney(s.total_cost)}</span>` : ''}
+              </div>
+              ${installLine}
+              ${action ? `<div class="cust-sel-actions">${action}</div>` : ''}
+            </div>
+          `;
+        }).join('')}
+      </div>
+    </div>
+  ` : '';
 
   // Build external links section (DocuSketch / Hover, only if customer-visible)
   const extLinks = [];
@@ -1329,6 +1473,7 @@ async function render() {
 
     ${calHtml}
 
+    ${selectionsHtml}
     ${extLinksHtml}
     ${photosHtml}
     ${invoicesHtml}
