@@ -204,6 +204,28 @@
     color: #fff;
     border-color: var(--navy);
   }
+  .rail .filter-select {
+    width: 100%;
+    padding: 7px 28px 7px 10px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--navy);
+    background: var(--card) url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path d='M1 1l4 4 4-4' stroke='%237884a0' stroke-width='1.5' fill='none' stroke-linecap='round'/></svg>") no-repeat right 10px center;
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    appearance: none;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  .rail .filter-select:focus { outline: none; border-color: var(--orange); }
+  .rail .filter-select.active {
+    background-color: var(--navy);
+    color: #fff;
+    border-color: var(--navy);
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path d='M1 1l4 4 4-4' stroke='%23ffffff' stroke-width='1.5' fill='none' stroke-linecap='round'/></svg>");
+  }
   .rail .search {
     width: 100%;
     padding: 7px 10px;
@@ -2228,21 +2250,21 @@
     <aside class="rail">
       <div class="rail-head">
         <h2>Rebuilds <span class="count" id="projCount">0</span></h2>
-        <div class="filters status-filters-scroll" id="statusFilters">
-          <button class="on" data-st="all">All</button>
-          <button data-st="albi:new">New</button>
-          <button data-st="albi:waiting_for_mit">Waiting for Mit</button>
-          <button data-st="albi:estimate_shipped">Estimate Shipped</button>
-          <button data-st="albi:down_payment_received">Down Payment</button>
-          <button data-st="albi:material_hold">Material Hold</button>
-          <button data-st="albi:wo_scheduling">WO Scheduling</button>
-          <button data-st="albi:active_construction">Active Construction</button>
-          <button data-st="albi:final_construction">Final Construction</button>
-          <button data-st="albi:on_hold">On Hold</button>
-        </div>
-        <div class="filters" id="pmFilters" style="margin-top:4px;">
-          <button class="on" data-pm="all">All PMs</button>
-        </div>
+        <select class="filter-select" id="statusFilter">
+          <option value="all">All Statuses</option>
+          <option value="albi:new">New</option>
+          <option value="albi:waiting_for_mit">Waiting for Mit</option>
+          <option value="albi:estimate_shipped">Estimate Shipped</option>
+          <option value="albi:down_payment_received">Down Payment</option>
+          <option value="albi:material_hold">Material Hold</option>
+          <option value="albi:wo_scheduling">WO Scheduling</option>
+          <option value="albi:active_construction">Active Construction</option>
+          <option value="albi:final_construction">Final Construction</option>
+          <option value="albi:on_hold">On Hold</option>
+        </select>
+        <select class="filter-select" id="pmFilter" style="margin-top:6px;">
+          <option value="all">All PMs</option>
+        </select>
         <input type="text" class="search" placeholder="Search job # or customer…" id="searchInput">
       </div>
       <button class="new-btn" id="syncAlbiAllBtn" title="Pull all matching active jobs from Albi">⟳ Sync from Albi</button>
@@ -2625,21 +2647,23 @@ function renderProjects() {
   }
   $('#projCount').textContent = items.length;
 
-  // Render dynamic PM filter buttons based on PMs present in current projects
+  // Render dynamic PM filter options based on PMs present in current projects
   const pms = Array.from(new Set(state.projects.map(p => p.albi_pm_name).filter(Boolean))).sort();
-  const pmBar = $('#pmFilters');
-  if (pmBar) {
-    pmBar.innerHTML = `<button class="${state.filterPm==='all'?'on':''}" data-pm="all">All PMs</button>` +
-      pms.map(pm => {
-        const first = pm.split(' ')[0];
-        return `<button class="${state.filterPm===pm?'on':''}" data-pm="${pm.replace(/"/g,'&quot;')}" title="${pm}">${first}</button>`;
-      }).join('');
-    $$('#pmFilters button').forEach(b => b.addEventListener('click', () => {
-      $$('#pmFilters button').forEach(x => x.classList.remove('on'));
-      b.classList.add('on');
-      state.filterPm = b.dataset.pm;
-      renderProjects();
-    }));
+  const pmSel = $('#pmFilter');
+  if (pmSel) {
+    const cur = state.filterPm || 'all';
+    pmSel.innerHTML = `<option value="all">All PMs</option>` +
+      pms.map(pm => `<option value="${pm.replace(/"/g,'&quot;')}">${pm}</option>`).join('');
+    pmSel.value = pms.includes(cur) || cur === 'all' ? cur : 'all';
+    pmSel.classList.toggle('active', pmSel.value !== 'all');
+    if (!pmSel.dataset.wired) {
+      pmSel.addEventListener('change', () => {
+        state.filterPm = pmSel.value;
+        pmSel.classList.toggle('active', pmSel.value !== 'all');
+        renderProjects();
+      });
+      pmSel.dataset.wired = '1';
+    }
   }
 
   if (items.length === 0) {
@@ -2684,12 +2708,14 @@ function projectProgress(projectId) {
 }
 
 // ──── Filter UI ────
-$$('#statusFilters button').forEach(b => b.addEventListener('click', () => {
-  $$('#statusFilters button').forEach(x => x.classList.remove('on'));
-  b.classList.add('on');
-  state.filterStatus = b.dataset.st;
-  renderProjects();
-}));
+const _statusSel = $('#statusFilter');
+if (_statusSel) {
+  _statusSel.addEventListener('change', () => {
+    state.filterStatus = _statusSel.value;
+    _statusSel.classList.toggle('active', _statusSel.value !== 'all');
+    renderProjects();
+  });
+}
 $('#searchInput').addEventListener('input', e => {
   state.search = e.target.value;
   renderProjects();
