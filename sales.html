@@ -924,8 +924,8 @@ async function completeFollowup(id) {
 }
 
 async function saveRoute(data) {
-  data.market = ST.market;
-  data.total_stops = (data.stops||[]).length;
+  if (!data.market) data.market = ST.market;
+  if (data.total_stops == null) data.total_stops = (data.stops||[]).length;
   await sb('/rest/v1/sales_routes', {method:'POST',headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json','Prefer':'return=minimal'},body:JSON.stringify(data)});
   await loadAll();
 }
@@ -2305,7 +2305,9 @@ function _bgSignature() {
     ST.chaseOutcome || 'all',
     ST._chaseEditingId || '',
     ST._chaseSaving ? 1 : 0,
-    (ST.chases || []).length
+    (ST.chases || []).length,
+    // Route edit state
+    ST.editingRouteId || ''
   ].join('|');
 }
 
@@ -2905,15 +2907,24 @@ function _renderNow() {
       var stops = route.stops || [];
       var done = stops.filter(function(s){ return s.completed; }).length;
       h += '<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;margin-bottom:12px;overflow:hidden;">';
-      h += '<div style="background:var(--navy);padding:10px 14px;display:flex;align-items:center;justify-content:space-between;">';
-      h += '<div style="display:flex;align-items:center;gap:10px;">';
-      h += '<span style="font-size:13px;font-weight:700;color:#fff;">' + fmtDate(route.route_date) + '</span>';
+      h += '<div style="background:linear-gradient(135deg, #0d2d5e 0%, #1a4080 50%, #0d2d5e 100%);padding:10px 14px;display:flex;align-items:center;justify-content:space-between;">';
+      h += '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">';
+      // Route name takes prominence if set; otherwise the date is the title
+      if (route.name) {
+        h += '<span style="font-size:13px;font-weight:700;color:#fff;">' + _ve(route.name) + '</span>';
+        h += '<span style="font-size:11px;color:rgba(255,255,255,.7);">' + fmtDate(route.route_date) + '</span>';
+      } else {
+        h += '<span style="font-size:13px;font-weight:700;color:#fff;">' + fmtDate(route.route_date) + '</span>';
+      }
       h += '<span style="font-size:10px;padding:2px 8px;border-radius:4px;background:rgba(255,255,255,.15);color:rgba(255,255,255,.85);">' + (route.rep_name||'') + '</span>';
       var stColor = route.status === 'Completed' ? 'rgba(76,219,122,.2)' : 'rgba(245,166,35,.2)';
       var stTxt   = route.status === 'Completed' ? '#4cdb7a' : 'var(--gold)';
       h += '<span style="font-size:10px;padding:2px 8px;border-radius:4px;background:' + stColor + ';color:' + stTxt + ';">' + (route.status||'Planned') + '</span>';
       h += '</div>';
+      h += '<div style="display:flex;align-items:center;gap:10px;">';
       h += '<span style="font-size:11px;color:rgba(255,255,255,.7);">' + done + '/' + stops.length + ' stops</span>';
+      h += '<button onclick="editRoute(\'' + route.id + '\')" style="background:rgba(255,255,255,.15);border:1px solid rgba(255,255,255,.25);color:#fff;padding:4px 10px;border-radius:5px;font-size:10px;font-weight:600;cursor:pointer;font-family:DM Sans,sans-serif;">✏️ Edit</button>';
+      h += '</div>';
       h += '</div><div style="padding:10px;">';
       stops.forEach(function(stop, idx) {
         var rid = route.id;
@@ -4019,25 +4030,50 @@ function _buildModalHtml() {
     }
 
     if (ST.modal === 'add-route') {
-      mh += '<div class="modal-title">🚗 Plan Route</div>';
+      // Editing mode is signaled by ST.editingRouteId. When set, prefill all
+      // fields from the existing route record. Single modal handles both
+      // create and edit to avoid duplicating the stop-picker UI.
+      var editingRoute = ST.editingRouteId
+        ? ST.routes.find(function(r){ return r.id === ST.editingRouteId; })
+        : null;
+      var existingStopIds = {};
+      if (editingRoute && editingRoute.stops) {
+        editingRoute.stops.forEach(function(s){
+          if (s.partner_id) existingStopIds[s.partner_id] = true;
+        });
+      }
+      var rNameVal = editingRoute && editingRoute.name ? editingRoute.name : '';
+      var rDateVal = editingRoute && editingRoute.route_date ? editingRoute.route_date : ST.today;
+      var rRepVal  = editingRoute && editingRoute.rep_name ? editingRoute.rep_name : currentRepName();
+      var rNotesVal= editingRoute && editingRoute.notes ? editingRoute.notes : '';
+
+      mh += '<div class="modal-title">' + (editingRoute ? '✏️ Edit Route' : '🚗 Plan Route') + '</div>';
+      mh += '<div class="form-group"><label class="form-label">Route Name (optional)</label>';
+      mh += '<input class="form-input" id="rName" placeholder="e.g. Tuesday Plumber Loop" value="' + rNameVal.replace(/"/g,'&quot;') + '"></div>';
       mh += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">';
-      mh += '<div class="form-group"><label class="form-label">Date</label><input class="form-input" type="date" id="rDate" value="' + ST.today + '"></div>';
-      mh += '<div class="form-group"><label class="form-label">Rep Name</label><select class="form-select" id="rRep">' + _repOptions(currentRepName(), '— Select rep —') + '</select></div>';
+      mh += '<div class="form-group"><label class="form-label">Date</label><input class="form-input" type="date" id="rDate" value="' + rDateVal + '"></div>';
+      mh += '<div class="form-group"><label class="form-label">Rep Name</label><select class="form-select" id="rRep">' + _repOptions(rRepVal, '— Select rep —') + '</select></div>';
       mh += '</div>';
-      mh += '<div class="form-group"><label class="form-label">Select Stops (click to add)</label>';
+      mh += '<div class="form-group"><label class="form-label">Select Stops (click to toggle)</label>';
       mh += '<div style="max-height:240px;overflow-y:auto;border:1.5px solid var(--border);border-radius:6px;">';
       ST.partners.forEach(function(p,i) {
-        mh += '<div style="padding:8px 12px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px;cursor:pointer;background:' + (i%2===0?'var(--surface)':'#fff') + '" onclick="this.classList.toggle(\'selected\');this.style.background=this.classList.contains(\'selected\')?\'rgba(232,93,4,.08)\':null;">';
+        var preselected = existingStopIds[p.id];
+        var rowBg = preselected ? 'rgba(232,93,4,.08)' : (i%2===0?'var(--surface)':'#fff');
+        var rowClass = preselected ? 'selected' : '';
+        mh += '<div class="' + rowClass + '" style="padding:8px 12px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px;cursor:pointer;background:' + rowBg + '" onclick="this.classList.toggle(\'selected\');this.style.background=this.classList.contains(\'selected\')?\'rgba(232,93,4,.08)\':null;">';
         mh += '<span>🚗</span>';
-        mh += '<span style="font-size:12px;font-weight:600;" data-pid="' + p.id + '" data-pname="' + p.name + '" data-paddr="' + (p.address||p.city||'') + '">' + p.name + '</span>';
+        mh += '<span style="font-size:12px;font-weight:600;" data-pid="' + p.id + '" data-pname="' + (p.name||'').replace(/"/g,'&quot;') + '" data-paddr="' + ((p.address||p.city||'')+'').replace(/"/g,'&quot;') + '">' + p.name + '</span>';
         mh += '<span style="font-size:10px;color:var(--muted);">' + (p.company||'') + (p.city?' · '+p.city:'') + '</span>';
         mh += '</div>';
       });
       mh += '</div></div>';
-      mh += '<div class="form-group"><label class="form-label">Notes</label><input class="form-input" id="rNotes" placeholder="e.g. Focus on south Appleton today"></div>';
+      mh += '<div class="form-group"><label class="form-label">Notes</label><input class="form-input" id="rNotes" placeholder="e.g. Focus on south Appleton today" value="' + rNotesVal.replace(/"/g,'&quot;') + '"></div>';
       mh += '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">';
-      mh += '<button style="padding:8px 16px;border-radius:6px;border:1.5px solid var(--border);background:transparent;cursor:pointer;font-size:12px;" onclick="ST.modal=null;render()">Cancel</button>';
-      mh += '<button style="padding:8px 20px;border-radius:6px;border:none;background:var(--orange);color:#fff;font-size:12px;font-weight:600;cursor:pointer;" onclick="submitRoute()">Save Route</button>';
+      if (editingRoute) {
+        mh += '<button style="padding:8px 14px;border-radius:6px;border:1.5px solid var(--danger);background:transparent;color:var(--danger);cursor:pointer;font-size:12px;font-weight:600;margin-right:auto;" onclick="deleteRoute(\'' + editingRoute.id + '\')">🗑 Delete</button>';
+      }
+      mh += '<button style="padding:8px 16px;border-radius:6px;border:1.5px solid var(--border);background:transparent;cursor:pointer;font-size:12px;" onclick="ST.modal=null;ST.editingRouteId=null;render()">Cancel</button>';
+      mh += '<button style="padding:8px 20px;border-radius:6px;border:none;background:var(--orange);color:#fff;font-size:12px;font-weight:600;cursor:pointer;" onclick="submitRoute()">' + (editingRoute ? 'Save Changes' : 'Save Route') + '</button>';
       mh += '</div>';
     }
 
@@ -4380,19 +4416,103 @@ async function submitEditTouch() {
   await loadAll();
 }
 
-function submitRoute() {
+async function submitRoute() {
+  // Gather selected stops from the picker. When editing, preserve each
+  // stop's completion state by matching against the existing route's stops
+  // — otherwise an edit would silently un-complete partially-done routes.
+  var existingByPid = {};
+  if (ST.editingRouteId) {
+    var existing = ST.routes.find(function(r){ return r.id === ST.editingRouteId; });
+    if (existing && existing.stops) {
+      existing.stops.forEach(function(s){
+        if (s.partner_id) existingByPid[s.partner_id] = s;
+      });
+    }
+  }
+
   var stops = [];
   document.querySelectorAll('.modal-box .selected [data-pid]').forEach(function(el,i) {
-    stops.push({partner_id:el.dataset.pid, partner_name:el.dataset.pname, address:el.dataset.paddr, order:i, completed:false});
+    var prior = existingByPid[el.dataset.pid];
+    stops.push({
+      partner_id:    el.dataset.pid,
+      partner_name:  el.dataset.pname,
+      address:       el.dataset.paddr,
+      order:         i,
+      completed:     prior ? !!prior.completed : false,
+      // Preserve any other fields the prior stop had (notes, completed_at, etc.)
+      completed_at:  prior ? prior.completed_at : null,
+      notes:         prior ? prior.notes : null
+    });
   });
-  saveRoute({
+
+  var body = {
     route_date: document.getElementById('rDate').value,
-    rep_name: document.getElementById('rRep').value,
-    stops: stops,
-    notes: document.getElementById('rNotes').value,
-    status: 'Planned'
-  });
+    rep_name:   document.getElementById('rRep').value,
+    name:       document.getElementById('rName').value || null,
+    stops:      stops,
+    notes:      document.getElementById('rNotes').value,
+    total_stops: stops.length,
+    completed_stops: stops.filter(function(s){ return s.completed; }).length,
+    market:     ST.market
+  };
+
+  if (ST.editingRouteId) {
+    // PATCH existing route
+    var routeId = ST.editingRouteId;
+    body.status = body.completed_stops === stops.length && stops.length > 0
+      ? 'Completed'
+      : (body.completed_stops > 0 ? 'In Progress' : 'Planned');
+    body.updated_at = new Date().toISOString();
+    try {
+      var resp = await fetch(SB_URL + '/rest/v1/sales_routes?id=eq.' + routeId, {
+        method: 'PATCH',
+        headers: {
+          'apikey': SB_KEY,
+          'Authorization': 'Bearer ' + SB_KEY,
+          'Content-Type': 'application/json',
+          'Prefer': 'return=minimal'
+        },
+        body: JSON.stringify(body)
+      });
+      if (!resp.ok) throw new Error(await resp.text());
+    } catch(err) {
+      console.error('Edit route failed:', err);
+      alert('Save failed: ' + err.message);
+      return;
+    }
+  } else {
+    // POST new route
+    body.status = 'Planned';
+    await saveRoute(body);
+  }
+
   ST.modal = null;
+  ST.editingRouteId = null;
+  await loadAll();
+}
+
+// Edit / delete helpers for routes
+function editRoute(routeId) {
+  ST.editingRouteId = routeId;
+  ST.modal = 'add-route';
+  render();
+}
+
+async function deleteRoute(routeId) {
+  if (!confirm('Delete this route? This cannot be undone.')) return;
+  try {
+    var resp = await fetch(SB_URL + '/rest/v1/sales_routes?id=eq.' + routeId, {
+      method: 'DELETE',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+    });
+    if (!resp.ok) throw new Error(await resp.text());
+    ST.modal = null;
+    ST.editingRouteId = null;
+    await loadAll();
+  } catch(err) {
+    console.error('Delete route failed:', err);
+    alert('Delete failed: ' + err.message);
+  }
 }
 
 function submitFollowup() {

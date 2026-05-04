@@ -372,6 +372,7 @@
     border: 1px solid var(--border);
     margin-bottom: 14px;
     box-shadow: 0 2px 8px rgba(13,45,94,.06);
+    position: relative;
   }
 
   /* ── FOLLOW-UPS SCREEN ── */
@@ -872,6 +873,25 @@ if ('serviceWorker' in navigator) {
               <option value="5">Friday</option>
             </select>
           </div>
+        </div>
+        <!-- Monthly sub-pattern: day-of-month vs nth-weekday-of-month -->
+        <div id="pr-monthly-pattern-row" style="display:none;margin-top:8px;">
+          <div class="field-label">Monthly Pattern</div>
+          <select id="pr-monthly-pattern" onchange="prUpdateMonthlyPattern()" style="width:100%;padding:10px 12px;border:1.5px solid var(--border);border-radius:10px;font-size:13px;font-family:DM Sans,sans-serif;background:#fff;margin-top:4px;">
+            <option value="day-of-month">Same day of month (e.g. the 15th)</option>
+            <option value="nth-weekday">Nth weekday of month (e.g. 1st Monday)</option>
+          </select>
+        </div>
+        <!-- Nth-weekday: which week of the month -->
+        <div id="pr-nth-week-row" style="display:none;margin-top:8px;">
+          <div class="field-label">Which Week</div>
+          <select id="pr-nth-week" style="width:100%;padding:10px 12px;border:1.5px solid var(--border);border-radius:10px;font-size:13px;font-family:DM Sans,sans-serif;background:#fff;margin-top:4px;">
+            <option value="1">1st</option>
+            <option value="2">2nd</option>
+            <option value="3">3rd</option>
+            <option value="4">4th</option>
+            <option value="-1">Last</option>
+          </select>
         </div>
         <div style="margin-top:8px;">
           <div class="field-label">Template Name</div>
@@ -2065,7 +2085,32 @@ function checkRecurringRoutes() {
       return diffDays >= 14;
     }
     if (t.recurrence === 'monthly') {
-      return t.recurrence_day === dom;
+      // Two patterns supported:
+      //   'day-of-month'  → recurrence_day = day of month (e.g. 15)
+      //   'nth-weekday'   → recurrence_day = day of week (0..6),
+      //                     recurrence_week_of_month = 1..5 or -1 (last)
+      // Old templates without recurrence_pattern default to day-of-month
+      // (the original behavior) for backward compatibility.
+      var pattern = t.recurrence_pattern || 'day-of-month';
+      if (pattern === 'day-of-month') {
+        return t.recurrence_day === dom;
+      }
+      if (pattern === 'nth-weekday') {
+        // Today's weekday must match
+        if (t.recurrence_day !== dow) return false;
+        // Compute which occurrence of this weekday today is in the month.
+        // For the 1st-4th case: occurrenceN = ceil(dom / 7).
+        // For "last" (-1): true if adding 7 days lands in the next month.
+        var occurrence = Math.ceil(dom / 7);
+        if (t.recurrence_week_of_month === -1) {
+          // Check if next week's same weekday is a different month
+          var next = new Date(today);
+          next.setDate(dom + 7);
+          return next.getMonth() !== today.getMonth();
+        }
+        return occurrence === t.recurrence_week_of_month;
+      }
+      return false;
     }
     return false;
   });
@@ -2179,35 +2224,157 @@ function prUpdateDayOptions() {
   var rec = document.getElementById('pr-recurrence').value;
   var label = document.getElementById('pr-day-label');
   var sel = document.getElementById('pr-recurrence-day');
+  var monthlyPatternRow = document.getElementById('pr-monthly-pattern-row');
+  var monthlyPattern = document.getElementById('pr-monthly-pattern');
+
   if (rec === 'monthly') {
-    label.textContent = 'Day of Month';
-    var opts = '';
-    for (var d = 1; d <= 28; d++) opts += '<option value="'+d+'">'+d+'</option>';
-    sel.innerHTML = opts;
-    sel.value = new Date().getDate();
+    monthlyPatternRow.style.display = 'block';
+    // The actual day-of-week vs day-of-month toggle is delegated to
+    // prUpdateMonthlyPattern based on the pattern dropdown
+    prUpdateMonthlyPattern();
   } else {
+    monthlyPatternRow.style.display = 'none';
+    document.getElementById('pr-nth-week-row').style.display = 'none';
     label.textContent = 'Day of Week';
     sel.innerHTML = '<option value="1">Monday</option><option value="2">Tuesday</option><option value="3">Wednesday</option><option value="4">Thursday</option><option value="5">Friday</option>';
     sel.value = new Date().getDay() || 1;
   }
 }
 
+function prUpdateMonthlyPattern() {
+  var pattern = document.getElementById('pr-monthly-pattern').value;
+  var label = document.getElementById('pr-day-label');
+  var sel = document.getElementById('pr-recurrence-day');
+  var nthWeekRow = document.getElementById('pr-nth-week-row');
+
+  if (pattern === 'nth-weekday') {
+    // "1st Monday" style: show nth-week selector + weekday selector
+    nthWeekRow.style.display = 'block';
+    label.textContent = 'Weekday';
+    sel.innerHTML = '<option value="1">Monday</option><option value="2">Tuesday</option><option value="3">Wednesday</option><option value="4">Thursday</option><option value="5">Friday</option><option value="6">Saturday</option><option value="0">Sunday</option>';
+    sel.value = '1';
+  } else {
+    // Day-of-month: hide nth-week, show day-of-month dropdown
+    nthWeekRow.style.display = 'none';
+    label.textContent = 'Day of Month';
+    var opts = '';
+    for (var d = 1; d <= 28; d++) opts += '<option value="'+d+'">'+d+'</option>';
+    sel.innerHTML = opts;
+    sel.value = new Date().getDate();
+  }
+}
+
 function openPlanRoute() {
   _prStops = [];
+  APP._editingRouteId = null;
   var today = new Date().toISOString().split('T')[0];
   document.getElementById('pr-date').value = today;
   document.getElementById('pr-rep').value = APP.repName || '';
   document.getElementById('pr-search').value = '';
   document.getElementById('pr-results').style.display = 'none';
+  // Reset name + recurring section
+  var nameEl = document.getElementById('pr-template-name');
+  if (nameEl) nameEl.value = '';
+  var recurringEl = document.getElementById('pr-recurring');
+  if (recurringEl) {
+    recurringEl.checked = false;
+    var optsEl = document.getElementById('pr-recurring-opts');
+    if (optsEl) optsEl.style.display = 'none';
+  }
+  // Update plan-route title + button to "Plan" not "Edit"
+  var titleEl = document.querySelector('#plan-route-overlay .sheet-title');
+  if (titleEl) titleEl.textContent = 'Plan a Route';
+  var saveBtn = document.querySelector('#plan-route-overlay .submit-btn');
+  if (saveBtn) saveBtn.textContent = 'Save Route';
+  // Hide the delete button if it exists
+  var delBtn = document.getElementById('pr-delete-btn');
+  if (delBtn) delBtn.style.display = 'none';
+
   prRenderStops();
   document.getElementById('plan-route-overlay').classList.add('open');
   _navPushOverlay('plan-route-overlay', closePlanRoute);
+}
+
+function openEditRouteMobile(routeId) {
+  var route = (APP.routes||[]).find(function(r){ return r.id === routeId; });
+  if (!route) { toast('Route not found'); return; }
+  APP._editingRouteId = routeId;
+
+  // Pre-fill the form
+  _prStops = (route.stops||[]).map(function(s){
+    return {
+      partner_id:   s.partner_id,
+      partner_name: s.partner_name,
+      address:      s.address || '',
+      duration:     s.duration || 45,
+      order:        s.order
+    };
+  });
+  document.getElementById('pr-date').value = route.route_date;
+  document.getElementById('pr-rep').value = route.rep_name || APP.repName || '';
+  document.getElementById('pr-search').value = '';
+  document.getElementById('pr-results').style.display = 'none';
+  // Pre-fill name (we reuse pr-template-name as the route name input — same field)
+  var nameEl = document.getElementById('pr-template-name');
+  if (nameEl) nameEl.value = route.name || '';
+  // Hide recurring section in edit mode — recurring is set on creation,
+  // editing the route itself doesn't change the template.
+  var recurringEl = document.getElementById('pr-recurring');
+  if (recurringEl) {
+    recurringEl.checked = false;
+    var optsEl = document.getElementById('pr-recurring-opts');
+    if (optsEl) optsEl.style.display = 'none';
+  }
+  // Update title + button text to reflect edit
+  var titleEl = document.querySelector('#plan-route-overlay .sheet-title');
+  if (titleEl) titleEl.textContent = 'Edit Route';
+  var saveBtn = document.querySelector('#plan-route-overlay .submit-btn');
+  if (saveBtn) saveBtn.textContent = 'Save Changes';
+
+  // Show delete button (inject if not already in DOM)
+  var delBtn = document.getElementById('pr-delete-btn');
+  if (!delBtn) {
+    delBtn = document.createElement('button');
+    delBtn.id = 'pr-delete-btn';
+    delBtn.style.cssText = 'width:100%;padding:12px;border-radius:10px;border:1.5px solid var(--danger);background:transparent;color:var(--danger);font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;margin-top:8px;';
+    delBtn.textContent = '🗑 Delete Route';
+    delBtn.onclick = function(){ deleteRouteMobile(APP._editingRouteId); };
+    if (saveBtn && saveBtn.parentNode) saveBtn.parentNode.insertBefore(delBtn, saveBtn.nextSibling);
+  } else {
+    delBtn.style.display = 'block';
+  }
+
+  prRenderStops();
+  document.getElementById('plan-route-overlay').classList.add('open');
+  _navPushOverlay('plan-route-overlay', closePlanRoute);
+}
+
+async function deleteRouteMobile(routeId) {
+  if (!routeId) return;
+  if (!confirm('Delete this route? Cannot be undone.')) return;
+  try {
+    var resp = await fetch(SB_URL + '/rest/v1/sales_routes?id=eq.' + routeId, {
+      method: 'DELETE',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+    });
+    if (!resp.ok) throw new Error(await resp.text());
+    toast('✓ Route deleted');
+    closePlanRoute();
+    var r = await sb('/rest/v1/sales_routes?order=route_date.desc&limit=20');
+    APP.routes = r || [];
+    renderRoutes();
+    renderHome();
+  } catch(err) {
+    console.error('deleteRouteMobile error:', err);
+    toast('Delete failed');
+  }
 }
 
 function closePlanRoute() {
   document.getElementById('plan-route-overlay').classList.remove('open');
   _navPopOverlay('plan-route-overlay');
   _prStops = [];
+  APP._editingRouteId = null;
 }
 
 function prSearch() {
@@ -2293,43 +2460,121 @@ async function submitPlanRoute() {
   var routeDate = document.getElementById('pr-date').value;
   var repName = document.getElementById('pr-rep').value || APP.repName;
   var isRecurring = document.getElementById('pr-recurring').checked;
+  // Route name lives on the recurring template form when recurring;
+  // we reuse it as the route's own name too so the route in the list
+  // shows the same label as the template.
+  var routeName = document.getElementById('pr-template-name')
+    ? document.getElementById('pr-template-name').value.trim() || null
+    : null;
+
+  var editingRouteId = APP._editingRouteId || null;
 
   try {
     // Resolve market from rep's profile (routes are always per-rep, no partner context)
     var routeMarket = (window.JG_SHARED && window.JG_SHARED.market)
       ? window.JG_SHARED.market.resolveMarketForRoute()
       : (APP.repMarket || 'Appleton');
-    // Save the route
-    await fetch(SB_URL + '/rest/v1/sales_routes', {
-      method: 'POST',
-      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
-      body: JSON.stringify({ route_date: routeDate, rep_name: repName, stops: _prStops, notes: '', status: 'Planned', market: routeMarket, total_stops: _prStops.length })
-    });
 
-    // If recurring, also save as template
-    if (isRecurring) {
-      var tmplName = document.getElementById('pr-template-name').value || repName + ' Route';
-      var recurrence = document.getElementById('pr-recurrence').value;
-      var recDay = parseInt(document.getElementById('pr-recurrence-day').value);
-      var tmplStops = _prStops.map(function(s){
-        return { partner_id: s.partner_id, partner_name: s.partner_name, address: s.address||'', duration: s.duration||45, order: s.order };
+    if (editingRouteId) {
+      // Edit mode — preserve completion state for stops still in the route.
+      var existingRoute = (APP.routes||[]).find(function(r){ return r.id === editingRouteId; });
+      var existingMap = {};
+      if (existingRoute && existingRoute.stops) {
+        existingRoute.stops.forEach(function(s){
+          if (s.partner_id) existingMap[s.partner_id] = s;
+        });
+      }
+      var mergedStops = _prStops.map(function(s){
+        var prior = existingMap[s.partner_id];
+        return {
+          partner_id:   s.partner_id,
+          partner_name: s.partner_name,
+          address:      s.address || '',
+          duration:     s.duration || 45,
+          order:        s.order,
+          completed:    prior ? !!prior.completed : false
+        };
       });
-      await fetch(SB_URL + '/rest/v1/sales_route_templates', {
+      var completedCount = mergedStops.filter(function(s){ return s.completed; }).length;
+      var status = completedCount === mergedStops.length && mergedStops.length > 0 ? 'Completed' :
+                   completedCount > 0 ? 'In Progress' : (existingRoute && existingRoute.status) || 'Planned';
+
+      var resp = await fetch(SB_URL + '/rest/v1/sales_routes?id=eq.' + editingRouteId, {
+        method: 'PATCH',
+        headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: routeName,
+          route_date: routeDate,
+          rep_name: repName,
+          stops: mergedStops,
+          total_stops: mergedStops.length,
+          completed_stops: completedCount,
+          status: status,
+          updated_at: new Date().toISOString()
+        })
+      });
+      if (!resp.ok) throw new Error(await resp.text());
+      toast('✓ Route updated');
+    } else {
+      // Save the route (new)
+      await fetch(SB_URL + '/rest/v1/sales_routes', {
         method: 'POST',
         headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
-        body: JSON.stringify({ name: tmplName, market: routeMarket, stops: tmplStops, recurrence: recurrence, recurrence_day: recDay, active: true, last_generated: routeDate })
+        body: JSON.stringify({ name: routeName, route_date: routeDate, rep_name: repName, stops: _prStops, notes: '', status: 'Planned', market: routeMarket, total_stops: _prStops.length })
       });
-      toast('✓ Route saved + recurring template created');
-    } else {
-      toast('✓ Route saved');
+
+      // If recurring, also save as template
+      if (isRecurring) {
+        var tmplName = document.getElementById('pr-template-name').value || repName + ' Route';
+        var recurrence = document.getElementById('pr-recurrence').value;
+        var recDay = parseInt(document.getElementById('pr-recurrence-day').value);
+
+        // Determine monthly pattern. For weekly/biweekly this stays as
+        // the default "day-of-month" since the field is irrelevant there.
+        var recPattern = 'day-of-month';
+        var nthWeek = null;
+        if (recurrence === 'monthly') {
+          var patternEl = document.getElementById('pr-monthly-pattern');
+          recPattern = patternEl ? patternEl.value : 'day-of-month';
+          if (recPattern === 'nth-weekday') {
+            var nthEl = document.getElementById('pr-nth-week');
+            nthWeek = nthEl ? parseInt(nthEl.value) : 1;
+          }
+        }
+
+        var tmplStops = _prStops.map(function(s){
+          return { partner_id: s.partner_id, partner_name: s.partner_name, address: s.address||'', duration: s.duration||45, order: s.order };
+        });
+        await fetch(SB_URL + '/rest/v1/sales_route_templates', {
+          method: 'POST',
+          headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
+          body: JSON.stringify({
+            name: tmplName,
+            market: routeMarket,
+            stops: tmplStops,
+            recurrence: recurrence,
+            recurrence_day: recDay,
+            recurrence_pattern: recPattern,
+            recurrence_week_of_month: nthWeek,
+            active: true,
+            last_generated: routeDate
+          })
+        });
+        toast('✓ Route saved + recurring template created');
+      } else {
+        toast('✓ Route saved');
+      }
     }
 
     closePlanRoute();
-    var r = await sb('/rest/v1/sales_routes?rep_name=eq.' + encodeURIComponent(repName) + '&order=route_date.desc&limit=20');
+    var r = await sb('/rest/v1/sales_routes?order=route_date.desc&limit=20');
     APP.routes = r || [];
     renderRoutes();
     renderHome();
-  } catch(e) { toast('Error saving route'); }
+  } catch(e) {
+    console.error('submitPlanRoute error:', e);
+    toast('Error saving route');
+  }
 }
 
 // ── PARTNER EDIT ──────────────────────────────────────────────────────────
@@ -3293,8 +3538,17 @@ function renderRoutes() {
     var done = stops.filter(function(s){ return s.completed; }).length;
     var startMins = 8*60;
     var html = '<div class="route-card-full"><div class="route-card-hdr">';
-    html += '<div class="route-card-hdr-title">' + fmtDate(route.route_date) + '</div>';
-    html += '<div class="route-card-hdr-meta">' + done + '/' + stops.length + ' stops · ' + (route.status||'Planned') + '</div>';
+    // Show route name if available, otherwise the formatted date. When name
+    // is present, date moves to the meta line.
+    if (route.name) {
+      html += '<div class="route-card-hdr-title">' + route.name + '</div>';
+      html += '<div class="route-card-hdr-meta">' + fmtDate(route.route_date) + ' · ' + done + '/' + stops.length + ' · ' + (route.status||'Planned') + '</div>';
+    } else {
+      html += '<div class="route-card-hdr-title">' + fmtDate(route.route_date) + '</div>';
+      html += '<div class="route-card-hdr-meta">' + done + '/' + stops.length + ' stops · ' + (route.status||'Planned') + '</div>';
+    }
+    // Edit button — top-right of card. Anyone can edit (matches desktop).
+    html += '<button onclick="event.stopPropagation();openEditRouteMobile(' + JSON.stringify(route.id) + ')" style="position:absolute;top:12px;right:12px;font-size:11px;padding:5px 12px;border-radius:14px;border:1.5px solid var(--border);background:var(--card);color:var(--navy);cursor:pointer;font-family:inherit;font-weight:600;">Edit</button>';
     html += '</div>';
     stops.forEach(function(s, i) {
       var endMins = startMins + (s.duration||45);
