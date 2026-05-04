@@ -910,6 +910,9 @@ async function silentAlbiRefresh(){
       }
     }
   }
+  // Re-load from _v2 so persisted per-card hours/start_time/end_time are
+  // re-applied on top of the fresh Albi data (otherwise Albi's defaults overwrite).
+  await loadFromV2();
   render();
   hideCacheBanner();
   showToast('✓ Jobs updated from Albi');
@@ -2440,10 +2443,10 @@ function renderBoard(){
         <button class="c-time-btn" onclick="event.stopPropagation();openTimeModal('${nm}','${jid}')"
           style="flex:1;display:flex;align-items:center;justify-content:center;gap:8px;padding:8px 12px;border:1.5px solid ${ov?'#e85d04':'rgba(0,0,0,.12)'};border-radius:8px;background:${ov?'rgba(232,93,4,.06)':'#fff'};font-family:'DM Mono',monospace;font-size:12px;font-weight:600;color:${ov?'#e85d04':'#0d2d5e'};cursor:pointer;width:100%;">
           <span style="font-size:10px;color:#7a9ab8;font-weight:500;">START</span>
-          <span>${jt.start}</span>
+          <span>${fmt12hr(jt.start)}</span>
           <span style="opacity:.4;">→</span>
           <span style="font-size:10px;color:#7a9ab8;font-weight:500;">END</span>
-          <span>${jt.end}</span>
+          <span>${fmt12hr(jt.end)}</span>
           <span style="opacity:.5;font-size:11px;margin-left:4px;">✏️</span>
         </button>
       </div>
@@ -2519,10 +2522,10 @@ function renderBoard(){
           <button class="c-time-btn" onclick="event.stopPropagation();openTimeModal('${nm}','${jid}')"
             style="flex:1;display:flex;align-items:center;justify-content:center;gap:8px;padding:8px 12px;border:1.5px solid ${ov?'#e85d04':'rgba(0,0,0,.12)'};border-radius:8px;background:${ov?'rgba(232,93,4,.06)':'#fff'};font-family:'DM Mono',monospace;font-size:12px;font-weight:600;color:${ov?'#e85d04':'#0d2d5e'};cursor:pointer;width:100%;">
             <span style="font-size:10px;color:#7a9ab8;font-weight:500;">START</span>
-            <span>${jt.start}</span>
+            <span>${fmt12hr(jt.start)}</span>
             <span style="opacity:.4;">→</span>
             <span style="font-size:10px;color:#7a9ab8;font-weight:500;">END</span>
-            <span>${jt.end}</span>
+            <span>${fmt12hr(jt.end)}</span>
             <span style="opacity:.5;font-size:11px;margin-left:4px;">✏️</span>
           </button>
         </div>
@@ -2799,6 +2802,18 @@ function dist(a,b,c,d){const R=3958.8,dLat=(c-a)*Math.PI/180,dLng=(d-b)*Math.PI/
 function tripCls(m){return m<5?'tb-ok':m<=15?'tb-warn':'tb-far';}
 function tripLbl(m){return m.toFixed(1)+'mi'+(m>15?' ⚠':'');}
 function fmtT(h){const hr=Math.floor(h),mn=Math.round((h-hr)*60),ap=hr>=12?'PM':'AM';const dh=hr>12?hr-12:(hr===0?12:hr);return dh+':'+(mn<10?'0':'')+mn+' '+ap;}
+// Format an "HH:MM" 24-hour time string as "H:MM AM/PM" for display.
+// Returns the input unchanged if it doesn't look like a time string.
+function fmtT12(s){
+  if(!s||typeof s!=='string'||!/^\d{1,2}:\d{2}/.test(s))return s||'';
+  const parts=s.split(':');
+  const hr=parseInt(parts[0],10);
+  const mn=parts[1].substring(0,2);
+  if(isNaN(hr))return s;
+  const ap=hr>=12?'PM':'AM';
+  const dh=hr>12?hr-12:(hr===0?12:hr);
+  return dh+':'+mn+' '+ap;
+}
 function freeAt(jlist){let h=START;jlist.forEach(jid=>{const j=jobs[jid];if(j)h+=j.hrs+0.25;});return h;}
 function updHrs(jid,v){
   const n=parseFloat(v);
@@ -4441,6 +4456,18 @@ function decToTime(dec){
 function decToTime12(dec){
   const h = Math.floor(dec);
   const m = Math.round((dec - h) * 60);
+  const ap = h >= 12 ? 'PM' : 'AM';
+  const dh = h > 12 ? h - 12 : (h === 0 ? 12 : h);
+  return dh + ':' + String(m).padStart(2,'0') + ' ' + ap;
+}
+
+// Convert 'HH:MM' or 'HH:MM:SS' string to 12-hour 'h:MM AM/PM' format
+function fmt12hr(s){
+  if (!s) return '';
+  const parts = String(s).split(':');
+  const h = parseInt(parts[0], 10);
+  const m = parseInt(parts[1] || '0', 10);
+  if (isNaN(h) || isNaN(m)) return s;
   const ap = h >= 12 ? 'PM' : 'AM';
   const dh = h > 12 ? h - 12 : (h === 0 ? 12 : h);
   return dh + ':' + String(m).padStart(2,'0') + ' ' + ap;
