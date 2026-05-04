@@ -1515,6 +1515,149 @@
   }
   .albi-ctrl-item:hover { background: var(--bg); color: var(--orange); }
 
+  /* ─── TO-DOS TAB ─── */
+  .todo-tab { padding: 4px 0; }
+  .todo-composer {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 14px 16px;
+    margin-bottom: 16px;
+  }
+  .todo-composer-grid {
+    display: grid;
+    grid-template-columns: 2fr 1.4fr 1fr 1fr auto;
+    gap: 8px;
+    align-items: stretch;
+  }
+  .todo-composer-grid input,
+  .todo-composer-grid select,
+  .todo-composer textarea {
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 8px 10px;
+    font-size: 13px;
+    font-family: inherit;
+    color: var(--navy);
+    background: #fff;
+  }
+  .todo-composer-grid input:focus,
+  .todo-composer-grid select:focus,
+  .todo-composer textarea:focus { outline: none; border-color: var(--orange); }
+  .todo-composer textarea {
+    width: 100%;
+    box-sizing: border-box;
+    resize: vertical;
+    min-height: 50px;
+  }
+  @media (max-width: 900px) {
+    .todo-composer-grid { grid-template-columns: 1fr 1fr; }
+    .todo-composer-grid > input:first-child { grid-column: 1 / -1; }
+  }
+  .todo-section-label {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .5px;
+    color: var(--muted);
+    margin: 14px 0 8px;
+  }
+  .todo-empty {
+    background: var(--bg);
+    border: 1px dashed var(--line);
+    border-radius: 8px;
+    padding: 24px;
+    text-align: center;
+    color: var(--muted);
+    font-size: 13px;
+  }
+  .todo-list { display: flex; flex-direction: column; }
+  .todo-card {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    margin-bottom: 8px;
+    transition: border-color .15s, box-shadow .15s;
+  }
+  .todo-card:hover { border-color: var(--orange); }
+  .todo-card.done { opacity: .65; }
+  .todo-card.done .todo-card-title { text-decoration: line-through; color: var(--muted); }
+  .todo-card-main {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 12px 14px;
+  }
+  .todo-check {
+    width: 22px; height: 22px; flex-shrink: 0;
+    border-radius: 50%;
+    border: 2px solid var(--line);
+    background: #fff;
+    cursor: pointer;
+    color: #fff;
+    font-size: 13px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin-top: 2px;
+    transition: background .15s, border-color .15s;
+  }
+  .todo-check:hover { border-color: var(--orange); }
+  .todo-check.checked { background: var(--green); border-color: var(--green); }
+  .todo-card-body { flex: 1; min-width: 0; }
+  .todo-card-title {
+    font-weight: 700;
+    color: var(--navy);
+    font-size: 14px;
+    margin-bottom: 2px;
+    word-wrap: break-word;
+  }
+  .todo-card-desc {
+    font-size: 13px;
+    color: var(--text);
+    margin-bottom: 6px;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+  }
+  .todo-card-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+    margin-top: 6px;
+  }
+  .todo-pill {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .4px;
+    padding: 3px 8px;
+    border-radius: 999px;
+  }
+  .todo-meta-item { font-size: 12px; color: var(--text); }
+  .todo-meta-item.overdue { color: var(--red); font-weight: 700; }
+  .todo-meta-item.due-today { color: var(--orange); font-weight: 700; }
+  .todo-card-actions { display: flex; gap: 4px; flex-shrink: 0; }
+  .todo-card-actions .btn { padding: 4px 8px; font-size: 12px; }
+  .todo-closed-wrap {
+    margin-top: 14px;
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 10px 14px;
+  }
+  .todo-closed-wrap summary {
+    cursor: pointer;
+    font-weight: 600;
+    font-size: 12px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: .5px;
+    user-select: none;
+  }
+  .todo-closed-wrap[open] summary { margin-bottom: 10px; }
+
   /* ─── JOURNAL TAB ─── */
   .jr-wrap { display: flex; flex-direction: column; gap: 18px; padding: 16px 0; }
   .jr-composer {
@@ -2402,6 +2545,8 @@ const state = {
     } catch { return 'Unknown'; }
   })(),
   journalEntries: [],
+  todos: [],
+  allStaff: [],
   tab: 'phases',
 };
 
@@ -2623,6 +2768,28 @@ async function loadEmployees() {
     .eq('role', 'Carpenter')
     .order('name');
   state.employees = data || [];
+}
+
+// All active staff for to-do assignment (any role)
+async function loadAllStaff() {
+  if (!sb) { state.allStaff = []; return; }
+  const { data } = await sb.from('employees')
+    .select('id, name, role, email, personal_email, active')
+    .eq('active', true)
+    .order('role')
+    .order('name');
+  state.allStaff = data || [];
+}
+
+async function loadTodos() {
+  if (!sb || !state.activeProjectId) { state.todos = []; return; }
+  const { data } = await sb.from('rebuild_todos')
+    .select('*')
+    .eq('project_id', state.activeProjectId)
+    .order('status', { ascending: true })
+    .order('priority', { ascending: false })
+    .order('created_at', { ascending: false });
+  state.todos = data || [];
 }
 
 function renderProjects() {
@@ -3202,7 +3369,7 @@ async function selectProject(id) {
   renderProjects();
   if (!state.activeProject) return;
   updateUrlHash();
-  await Promise.all([loadPhases(), loadSelections(), loadMessages(), loadHistory(), loadDocuments(), loadJournalEntries()]);
+  await Promise.all([loadPhases(), loadSelections(), loadMessages(), loadHistory(), loadDocuments(), loadJournalEntries(), loadTodos()]);
   renderDetail();
 }
 
@@ -5043,6 +5210,7 @@ function renderDetail() {
       <button class="${state.tab==='selections'?'on':''}" data-tab="selections">Selections ${overdueSelections ? `<span class="badge">${overdueSelections}</span>` : ''}</button>
       <button class="${state.tab==='messages'?'on':''}" data-tab="messages">Messages</button>
       <button class="${state.tab==='journal'?'on':''}" data-tab="journal">Journal ${(state.journalEntries||[]).filter(e => !e.deleted_at).length ? `<span class="badge">${state.journalEntries.filter(e=>!e.deleted_at).length}</span>` : ''}</button>
+      <button class="${state.tab==='todos'?'on':''}" data-tab="todos">To-Dos ${(state.todos||[]).filter(t => t.status === 'open' || t.status === 'in_progress').length ? `<span class="badge">${state.todos.filter(t => t.status === 'open' || t.status === 'in_progress').length}</span>` : ''}</button>
       <button class="${state.tab==='documents'?'on':''}" data-tab="documents">Documents</button>
       <button class="${state.tab==='audit'?'on':''}" data-tab="audit">Audit Trail</button>
     </div>
@@ -5099,6 +5267,7 @@ function renderTabContent() {
   else if (state.tab === 'selections') c.innerHTML = renderSelectionsTab();
   else if (state.tab === 'messages') c.innerHTML = renderMessagesTab();
   else if (state.tab === 'journal') c.innerHTML = renderJournalTab();
+  else if (state.tab === 'todos') c.innerHTML = renderTodosTab();
   else if (state.tab === 'audit')   c.innerHTML = renderAuditTab();
   else if (state.tab === 'documents') c.innerHTML = renderDocumentsTab();
   else c.innerHTML = `<div class="empty" style="padding:40px 20px;">
@@ -5186,6 +5355,11 @@ function renderTabContent() {
   // Wire journal tab
   if (state.tab === 'journal') {
     wireJournalTab();
+  }
+
+  // Wire todos tab
+  if (state.tab === 'todos') {
+    wireTodosTab();
   }
 
   // Wire documents tab
@@ -6769,6 +6943,374 @@ function openSendPreviewModal({ title, to, subject, body, onSend, brandedTemplat
   });
 }
 
+// ═══════════════════ TO-DOS TAB ═══════════════════
+
+// Build full assignee roster: admins + PMs (from email constants) + active employees (carpenter, office, etc.)
+function getTodoAssignees() {
+  const list = [];
+  // Admins
+  ADMIN_EMAILS.forEach(email => {
+    list.push({
+      email: email.toLowerCase(),
+      name: email.split('@')[0].replace(/\./g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
+      kind: 'admin',
+    });
+  });
+  // PMs
+  PM_EMAILS.forEach(email => {
+    list.push({
+      email: email.toLowerCase(),
+      name: email.split('@')[0].replace(/\./g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
+      kind: 'pm',
+    });
+  });
+  // Employees (carpenter, office, etc.)
+  (state.allStaff || []).forEach(e => {
+    const email = (e.email || e.personal_email || '').toLowerCase();
+    if (!email) return;
+    const role = (e.role || '').toLowerCase();
+    let kind = 'office';
+    if (role.includes('carpenter')) kind = 'carpenter';
+    else if (role.includes('office') || role.includes('admin assistant') || role.includes('coord')) kind = 'office';
+    else if (role.includes('pm') || role.includes('project manager') || role.includes('estimator')) kind = 'pm';
+    list.push({ email, name: e.name, kind, role: e.role });
+  });
+  // Dedupe by email (admin/PM constants take precedence over employee role)
+  const seen = new Set();
+  return list.filter(p => {
+    const k = (p.email || '').toLowerCase();
+    if (!k || seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  }).sort((a, b) => {
+    const order = { admin: 0, pm: 1, carpenter: 2, office: 3 };
+    return (order[a.kind] - order[b.kind]) || a.name.localeCompare(b.name);
+  });
+}
+
+const TODO_PRIORITY_META = {
+  urgent: { label: 'Urgent', color: '#d64545', bg: 'rgba(214,69,69,.12)' },
+  high:   { label: 'High',   color: '#e85d04', bg: 'rgba(232,93,4,.12)' },
+  normal: { label: 'Normal', color: '#7884a0', bg: 'rgba(120,132,160,.12)' },
+  low:    { label: 'Low',    color: '#4a90e2', bg: 'rgba(74,144,226,.12)' },
+};
+const TODO_STATUS_META = {
+  open:        { label: 'Open',        color: '#7884a0', bg: 'rgba(120,132,160,.12)' },
+  in_progress: { label: 'In Progress', color: '#e85d04', bg: 'rgba(232,93,4,.15)' },
+  done:        { label: 'Done',        color: '#2d9c5f', bg: 'rgba(45,156,95,.15)' },
+  cancelled:   { label: 'Cancelled',   color: '#7884a0', bg: 'rgba(120,132,160,.08)' },
+};
+
+function renderTodosTab() {
+  const todos = state.todos || [];
+  const assignees = getTodoAssignees();
+  const open = todos.filter(t => t.status === 'open' || t.status === 'in_progress');
+  const closed = todos.filter(t => t.status === 'done' || t.status === 'cancelled');
+
+  const composer = `
+    <div class="todo-composer">
+      <div class="todo-composer-grid">
+        <input type="text" id="todoTitle" placeholder="What needs to get done?" maxlength="200">
+        <select id="todoAssignee">
+          <option value="">Assign to…</option>
+          ${['admin','pm','carpenter','office'].map(kind => {
+            const group = assignees.filter(a => a.kind === kind);
+            if (!group.length) return '';
+            const lbl = { admin: 'Admins', pm: 'Project Managers', carpenter: 'Carpenters', office: 'Office' }[kind];
+            return `<optgroup label="${lbl}">${group.map(a => `<option value="${a.email}" data-name="${esc(a.name)}" data-kind="${a.kind}">${esc(a.name)}</option>`).join('')}</optgroup>`;
+          }).join('')}
+        </select>
+        <select id="todoPriority">
+          <option value="normal">Normal</option>
+          <option value="urgent">🔥 Urgent</option>
+          <option value="high">⚡ High</option>
+          <option value="low">Low</option>
+        </select>
+        <input type="date" id="todoDue" placeholder="Due date">
+        <button class="btn primary" id="todoCreateBtn">+ Add</button>
+      </div>
+      <textarea id="todoBody" placeholder="Details (optional)" rows="2" style="margin-top:8px;"></textarea>
+    </div>
+  `;
+
+  const renderTodoCard = (t) => {
+    const pm = TODO_PRIORITY_META[t.priority] || TODO_PRIORITY_META.normal;
+    const sm = TODO_STATUS_META[t.status] || TODO_STATUS_META.open;
+    const isDone = t.status === 'done' || t.status === 'cancelled';
+    const dueClass = (() => {
+      if (!t.due_date || isDone) return '';
+      const today = new Date(); today.setHours(0,0,0,0);
+      const due = new Date(t.due_date + 'T00:00:00');
+      if (due < today) return 'overdue';
+      if (due.getTime() === today.getTime()) return 'due-today';
+      return '';
+    })();
+    return `
+      <div class="todo-card ${isDone ? 'done' : ''}" data-id="${t.id}">
+        <div class="todo-card-main">
+          <button class="todo-check ${isDone ? 'checked' : ''}" data-act="toggle" data-id="${t.id}" title="${isDone ? 'Reopen' : 'Mark done'}">
+            ${isDone ? '✓' : ''}
+          </button>
+          <div class="todo-card-body">
+            <div class="todo-card-title">${esc(t.title)}</div>
+            ${t.body ? `<div class="todo-card-desc">${esc(t.body)}</div>` : ''}
+            <div class="todo-card-meta">
+              <span class="todo-pill" style="background:${pm.bg};color:${pm.color};">${pm.label}</span>
+              <span class="todo-pill" style="background:${sm.bg};color:${sm.color};">${sm.label}</span>
+              <span class="todo-meta-item">👤 ${esc(t.assignee_name || t.assignee_email)}</span>
+              ${t.due_date ? `<span class="todo-meta-item ${dueClass}">📅 ${fmtDate(t.due_date)}</span>` : ''}
+              <span class="todo-meta-item" style="color:var(--muted);font-size:11px;">by ${esc(t.created_by_name || t.created_by_email)}</span>
+            </div>
+          </div>
+          <div class="todo-card-actions">
+            ${!isDone && t.status === 'open' ? `<button class="btn ghost" data-act="start" data-id="${t.id}" title="Start">▶</button>` : ''}
+            <button class="btn ghost" data-act="edit" data-id="${t.id}" title="Edit">✎</button>
+            <button class="btn ghost-red" data-act="delete" data-id="${t.id}" title="Delete">×</button>
+          </div>
+        </div>
+      </div>
+    `;
+  };
+
+  const openHtml = open.length
+    ? `<div class="todo-section-label">Open · ${open.length}</div>${open.map(renderTodoCard).join('')}`
+    : `<div class="todo-empty">No open to-dos. Add one above.</div>`;
+  const closedHtml = closed.length
+    ? `<details class="todo-closed-wrap"><summary>Completed · ${closed.length}</summary>${closed.map(renderTodoCard).join('')}</details>`
+    : '';
+
+  return `
+    <div class="todo-tab">
+      ${composer}
+      <div class="todo-list">
+        ${openHtml}
+        ${closedHtml}
+      </div>
+    </div>
+  `;
+}
+
+async function createTodo() {
+  const title = $('#todoTitle').value.trim();
+  if (!title) { toast('Title required'); return; }
+  const sel = $('#todoAssignee');
+  const email = sel.value;
+  if (!email) { toast('Pick an assignee'); return; }
+  const opt = sel.options[sel.selectedIndex];
+  const assigneeName = opt.dataset.name || email;
+  const assigneeKind = opt.dataset.kind || 'office';
+  const priority = $('#todoPriority').value;
+  const due = $('#todoDue').value || null;
+  const body = $('#todoBody').value.trim() || null;
+  const p = state.activeProject;
+
+  const { data, error } = await sb.from('rebuild_todos').insert({
+    project_id: state.activeProjectId,
+    title, body,
+    assignee_email: email.toLowerCase(),
+    assignee_name: assigneeName,
+    assignee_kind: assigneeKind,
+    created_by_email: state.pmEmail,
+    created_by_name: state.pmName,
+    status: 'open',
+    priority,
+    due_date: due,
+  }).select();
+  if (error) { toast('Save failed: ' + error.message); return; }
+  const todo = data?.[0];
+  if (!todo) return;
+
+  // History
+  await sb.from('rebuild_todo_history').insert({
+    todo_id: todo.id, action: 'created', actor: state.pmEmail,
+    details: `Assigned to ${assigneeName} · ${priority}${due ? ' · due ' + due : ''}`,
+  });
+
+  // Notification (skip self-assigns)
+  if (email.toLowerCase() !== (state.pmEmail || '').toLowerCase()) {
+    try {
+      await sb.from('rebuild_notifications').insert({
+        project_id: state.activeProjectId,
+        recipient_email: email.toLowerCase(),
+        event_type: 'todo_assigned',
+        selection_id: todo.id, // reused field for entity ID
+        title: `New to-do: ${title}`,
+        body: `${state.pmName || 'JG Platform'} assigned you a to-do${due ? ` (due ${fmtDate(due)})` : ''} on ${p?.albi_job_number || 'project'}.${body ? '\n\n' + body : ''}`,
+      });
+    } catch (e) { console.warn('todo notif insert failed', e); }
+  }
+
+  // Albi timeline note
+  logToAlbi('todo_created', `To-Do created — assigned to ${assigneeName}: ${title}${due ? ' (due ' + fmtDate(due) + ')' : ''}`);
+
+  // Reset composer
+  $('#todoTitle').value = '';
+  $('#todoBody').value = '';
+  $('#todoAssignee').value = '';
+  $('#todoPriority').value = 'normal';
+  $('#todoDue').value = '';
+
+  toast('To-do added');
+  await loadTodos();
+  if (state.tab === 'todos') renderDetail();
+}
+
+async function toggleTodoDone(id) {
+  const t = state.todos.find(x => x.id === id);
+  if (!t) return;
+  const isDone = t.status === 'done';
+  const updates = isDone
+    ? { status: 'open', completed_at: null, completed_by_email: null }
+    : { status: 'done', completed_at: new Date().toISOString(), completed_by_email: state.pmEmail };
+  await sb.from('rebuild_todos').update(updates).eq('id', id);
+  await sb.from('rebuild_todo_history').insert({
+    todo_id: id, action: isDone ? 'reopened' : 'completed', actor: state.pmEmail,
+    details: isDone ? 'Reopened' : `Completed by ${state.pmName || state.pmEmail}`,
+  });
+  // Notify creator that it's done (if creator != completer)
+  if (!isDone && t.created_by_email && t.created_by_email.toLowerCase() !== (state.pmEmail || '').toLowerCase()) {
+    try {
+      await sb.from('rebuild_notifications').insert({
+        project_id: t.project_id,
+        recipient_email: t.created_by_email.toLowerCase(),
+        event_type: 'todo_completed',
+        selection_id: id,
+        title: `To-do completed: ${t.title}`,
+        body: `${state.pmName || state.pmEmail} marked your to-do done.`,
+      });
+    } catch (e) { console.warn('todo done notif failed', e); }
+  }
+  await loadTodos();
+  if (state.tab === 'todos') renderDetail();
+}
+
+async function startTodo(id) {
+  await sb.from('rebuild_todos').update({ status: 'in_progress' }).eq('id', id);
+  await sb.from('rebuild_todo_history').insert({
+    todo_id: id, action: 'status_change', actor: state.pmEmail, details: 'Started',
+  });
+  await loadTodos();
+  if (state.tab === 'todos') renderDetail();
+}
+
+async function deleteTodo(id) {
+  if (!confirm('Delete this to-do?')) return;
+  await sb.from('rebuild_todo_history').insert({
+    todo_id: id, action: 'deleted', actor: state.pmEmail, details: 'Deleted',
+  });
+  await sb.from('rebuild_todos').delete().eq('id', id);
+  await loadTodos();
+  if (state.tab === 'todos') renderDetail();
+}
+
+function openTodoEditModal(id) {
+  const t = state.todos.find(x => x.id === id);
+  if (!t) return;
+  const assignees = getTodoAssignees();
+  let modal = document.getElementById('modalTodoEdit');
+  if (!modal) {
+    modal = document.createElement('div');
+    modal.id = 'modalTodoEdit';
+    modal.className = 'modal-back';
+    modal.innerHTML = `<div class="modal"><h3>Edit To-Do <button class="close" data-close>×</button></h3><div class="modal-body" id="todoEditBody"></div></div>`;
+    document.body.appendChild(modal);
+    modal.querySelector('[data-close]').addEventListener('click', () => modal.classList.remove('on'));
+  }
+  $('#todoEditBody').innerHTML = `
+    <label>Title</label>
+    <input type="text" id="te_title" value="${esc(t.title)}">
+    <label>Details</label>
+    <textarea id="te_body" rows="3">${esc(t.body || '')}</textarea>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px;">
+      <div>
+        <label>Assignee</label>
+        <select id="te_assignee">
+          ${['admin','pm','carpenter','office'].map(kind => {
+            const group = assignees.filter(a => a.kind === kind);
+            if (!group.length) return '';
+            const lbl = { admin: 'Admins', pm: 'Project Managers', carpenter: 'Carpenters', office: 'Office' }[kind];
+            return `<optgroup label="${lbl}">${group.map(a => `<option value="${a.email}" data-name="${esc(a.name)}" data-kind="${a.kind}" ${a.email === t.assignee_email ? 'selected' : ''}>${esc(a.name)}</option>`).join('')}</optgroup>`;
+          }).join('')}
+        </select>
+      </div>
+      <div>
+        <label>Priority</label>
+        <select id="te_priority">
+          <option value="urgent" ${t.priority==='urgent'?'selected':''}>🔥 Urgent</option>
+          <option value="high" ${t.priority==='high'?'selected':''}>⚡ High</option>
+          <option value="normal" ${t.priority==='normal'?'selected':''}>Normal</option>
+          <option value="low" ${t.priority==='low'?'selected':''}>Low</option>
+        </select>
+      </div>
+    </div>
+    <label>Due Date</label>
+    <input type="date" id="te_due" value="${t.due_date || ''}">
+    <div style="display:flex;justify-content:flex-end;gap:6px;margin-top:14px;">
+      <button class="btn" id="te_cancel">Cancel</button>
+      <button class="btn primary" id="te_save">Save</button>
+    </div>
+  `;
+  modal.classList.add('on');
+  $('#te_cancel').onclick = () => modal.classList.remove('on');
+  $('#te_save').onclick = async () => {
+    const title = $('#te_title').value.trim();
+    if (!title) { toast('Title required'); return; }
+    const aSel = $('#te_assignee');
+    const aEmail = aSel.value;
+    const aOpt = aSel.options[aSel.selectedIndex];
+    const aName = aOpt?.dataset.name || aEmail;
+    const aKind = aOpt?.dataset.kind || 'office';
+    const updates = {
+      title,
+      body: $('#te_body').value.trim() || null,
+      assignee_email: aEmail.toLowerCase(),
+      assignee_name: aName,
+      assignee_kind: aKind,
+      priority: $('#te_priority').value,
+      due_date: $('#te_due').value || null,
+    };
+    const reassigned = aEmail.toLowerCase() !== (t.assignee_email || '').toLowerCase();
+    await sb.from('rebuild_todos').update(updates).eq('id', id);
+    await sb.from('rebuild_todo_history').insert({
+      todo_id: id, action: reassigned ? 'reassigned' : 'edited', actor: state.pmEmail,
+      details: reassigned ? `Reassigned to ${aName}` : 'Edited',
+    });
+    if (reassigned && aEmail.toLowerCase() !== (state.pmEmail || '').toLowerCase()) {
+      try {
+        await sb.from('rebuild_notifications').insert({
+          project_id: t.project_id,
+          recipient_email: aEmail.toLowerCase(),
+          event_type: 'todo_assigned',
+          selection_id: id,
+          title: `Reassigned to-do: ${title}`,
+          body: `${state.pmName || 'JG Platform'} reassigned a to-do to you.`,
+        });
+      } catch (e) { console.warn('todo reassign notif failed', e); }
+    }
+    modal.classList.remove('on');
+    toast('Saved');
+    await loadTodos();
+    if (state.tab === 'todos') renderDetail();
+  };
+}
+
+function wireTodosTab() {
+  if (state.tab !== 'todos') return;
+  const btn = $('#todoCreateBtn');
+  if (btn) btn.addEventListener('click', createTodo);
+  document.querySelectorAll('.todo-card [data-act]').forEach(b => {
+    b.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const act = b.dataset.act;
+      const id = b.dataset.id;
+      if (act === 'toggle') toggleTodoDone(id);
+      else if (act === 'start') startTodo(id);
+      else if (act === 'edit') openTodoEditModal(id);
+      else if (act === 'delete') deleteTodo(id);
+    });
+  });
+}
+
 // ═══════════════════ JOURNAL TAB ═══════════════════
 const JOURNAL_BUCKET = 'rebuild-journal-attachments';
 
@@ -7950,6 +8492,8 @@ function setupRealtime() {
         () => { if (state.activeProjectId) { loadPhases().then(() => renderDetail()); } })
     .on('postgres_changes', { event: '*', schema: 'public', table: 'rebuild_selections' },
         () => { if (state.activeProjectId) { loadSelections().then(() => renderDetail()); } })
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'rebuild_todos' },
+        () => { if (state.activeProjectId) { loadTodos().then(() => renderDetail()); } })
     .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'rebuild_notifications' },
         async (payload) => {
           const n = payload.new;
@@ -8081,6 +8625,8 @@ function renderNotifList() {
       install_changes_requested: '↻',
       journal_mention: '💬',
       customer_journal: '🧑',
+      todo_assigned: '✅',
+      todo_completed: '✔',
     }[n.event_type] || '🔔';
     return `
       <div class="notif-item ${n.read_at ? '' : 'unread'}" data-id="${n.id}" data-project="${n.project_id || ''}">
@@ -8113,6 +8659,8 @@ function renderNotifList() {
         install_changes_requested: 'selections',
         journal_mention: 'journal',
         customer_journal: 'journal',
+        todo_assigned: 'todos',
+        todo_completed: 'todos',
       };
       const targetTab = tabForEvent[n?.event_type] || 'selections';
 
@@ -8209,7 +8757,7 @@ function wireNotifBell() {
 // ──── Boot ────
 (async function init() {
   // Load cached projects + roster in parallel — renders board instantly
-  await Promise.all([loadProjects(), loadSubs(), loadEmployees()]);
+  await Promise.all([loadProjects(), loadSubs(), loadEmployees(), loadAllStaff()]);
   setupRealtime();
   wireNotifBell();
   loadNotifications();
