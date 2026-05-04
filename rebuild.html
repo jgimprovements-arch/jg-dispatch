@@ -1055,7 +1055,7 @@
     font-size: 13px;
     font-family: inherit;
   }
-  .msg-composer textarea { resize: vertical; min-height: 80px; }
+  .msg-composer textarea { resize: vertical; min-height: 220px; line-height: 1.5; padding: 12px 14px; }
   .msg-composer-foot {
     display: flex;
     justify-content: space-between;
@@ -8177,7 +8177,7 @@ function renderMessagesTab() {
             <input id="msg_subject" placeholder="Re: ${p.albi_job_number || 'project'}">
           </div>
         </div>
-        <textarea id="msg_body" placeholder="Type your message…" rows="4"></textarea>
+        <textarea id="msg_body" placeholder="Type your message…" rows="10"></textarea>
         <div id="msg_attachments_wrap" style="display:none;margin-top:8px;">
           <div id="msg_attachments_list" class="msg-att-list"></div>
           <input type="file" id="msg_file_input" multiple style="display:none;">
@@ -8368,6 +8368,36 @@ async function sendMessage() {
 
   // Fire-and-forget to Zapier (skip for internal notes)
   if (!isInternal) {
+    // For emails, wrap body in branded HTML template (logo + signature)
+    // SMS uses plain body unchanged.
+    const brandedBody = (channel === 'email')
+      ? (() => {
+          // Convert body lines to <p> tags, preserving signature line breaks
+          const bodyLines = body.split('\n');
+          // If body already ends with a sign-off, strip it so we don't duplicate
+          const cleanLines = bodyLines.filter(line => {
+            const t = line.trim().toLowerCase();
+            return !/^(thanks|thank you|sincerely|best|regards|cheers),?$/.test(t)
+              && !/^jg restoration$/i.test(line.trim());
+          });
+          const introLine = cleanLines[0] || '';
+          const restLines = cleanLines.slice(1).filter(l => l.trim() && !l.includes('Please call me at'));
+          const bodyHtml = restLines
+            .map(line => line.trim() ? `<p style="margin:0 0 12px;font-size:15px;line-height:1.5;color:#1a2540;">${line}</p>` : '')
+            .join('');
+          const pmFirst = (fromName || 'JG Restoration').split(' ')[0];
+          const pmPhone = p.albi_pm_phone ? fmtPhone(p.albi_pm_phone) : '(920) 428-4200';
+          return buildBrandedEmail({
+            preheader: subject || `Update on ${p.albi_job_number || 'your project'}`,
+            headline: '',
+            intro: introLine,
+            bodyHtml,
+            signoffName: `${pmFirst}<br><span style="color:#7884a0;font-weight:400;font-size:13px;">JG Restoration</span>`,
+            signoffPhone: pmPhone,
+          });
+        })()
+      : body;
+
     const payload = {
       message_id: inserted?.id,
       project_id: p.id,
@@ -8381,7 +8411,7 @@ async function sendMessage() {
       recipient_name: recipient.name || '',
       recipient_type: recipient.type,
       subject: subject || `Re: ${p.albi_job_number || 'project'}`,
-      body: body,
+      body: brandedBody,
       // Attachments — Zapier Gmail action takes a comma-separated list of URLs
       attachment_count: uploadedAttachments.length,
       attachment_urls: uploadedAttachments.map(a => a.url).join(','),
