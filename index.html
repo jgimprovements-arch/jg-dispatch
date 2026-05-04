@@ -1651,7 +1651,7 @@ async function loadFromV2(){
     // Fetch assignments for current date + unassigned pool (only meaningful for today)
     // Also fetch a count of future-scheduled assignments for the stats badge
     const fetches = [
-      sbFetch('/rest/v1/dispatch_assignments_v2?select=tech_id,job_id,market,position,start_time,end_time&order=market,tech_id,position' + dateFilter)
+      sbFetch('/rest/v1/dispatch_assignments_v2?select=tech_id,job_id,market,position,start_time,end_time,hours&order=market,tech_id,position' + dateFilter)
     ];
     if (_isViewingToday()) {
       fetches.push(sbFetch('/rest/v1/dispatch_unassigned_v2?select=job_id,market,position&order=market,position'));
@@ -1701,6 +1701,10 @@ async function loadFromV2(){
             end: String(r.end_time).substring(0, 5)
           };
         }
+      }
+      // Apply persisted hours to the in-memory job (if it exists)
+      if (r.hours !== null && r.hours !== undefined && jobs[r.job_id]) {
+        jobs[r.job_id].hrs = parseFloat(r.hours);
       }
     });
     // Replace jobOverrides for the techs/jobs we just loaded
@@ -2796,7 +2800,23 @@ function tripCls(m){return m<5?'tb-ok':m<=15?'tb-warn':'tb-far';}
 function tripLbl(m){return m.toFixed(1)+'mi'+(m>15?' ⚠':'');}
 function fmtT(h){const hr=Math.floor(h),mn=Math.round((h-hr)*60),ap=hr>=12?'PM':'AM';const dh=hr>12?hr-12:(hr===0?12:hr);return dh+':'+(mn<10?'0':'')+mn+' '+ap;}
 function freeAt(jlist){let h=START;jlist.forEach(jid=>{const j=jobs[jid];if(j)h+=j.hrs+0.25;});return h;}
-function updHrs(jid,v){const n=parseFloat(v);if(!isNaN(n)&&n>0)jobs[jid].hrs=n;renderBoard();updateStats();}
+function updHrs(jid,v){
+  const n=parseFloat(v);
+  if(isNaN(n)||n<=0||!jobs[jid]) return;
+  jobs[jid].hrs=n;
+  // Persist to DB on whichever tech has this job assigned
+  if (typeof opUpdateAssignment === 'function') {
+    for (const l of ['appleton','stevens']) {
+      for (const nm in (techQ[l] || {})) {
+        if (techQ[l][nm] && techQ[l][nm].jobs && techQ[l][nm].jobs.includes(jid)) {
+          opUpdateAssignment(l, nm, jid, { hours: n });
+        }
+      }
+    }
+  }
+  renderBoard();
+  updateStats();
+}
 function updateStats(){
   let asgn=0,unasgn=0,waste=0,active=0;
   Object.entries(LOCATIONS).forEach(([l,depot])=>{
