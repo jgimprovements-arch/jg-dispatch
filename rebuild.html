@@ -1526,7 +1526,7 @@
   }
   .todo-composer-grid {
     display: grid;
-    grid-template-columns: 2fr 1.4fr 1fr 1fr auto;
+    grid-template-columns: 1.3fr 1.6fr 1.3fr 1fr 1fr auto;
     gap: 8px;
     align-items: stretch;
   }
@@ -1552,7 +1552,6 @@
   }
   @media (max-width: 900px) {
     .todo-composer-grid { grid-template-columns: 1fr 1fr; }
-    .todo-composer-grid > input:first-child { grid-column: 1 / -1; }
   }
   .todo-section-label {
     font-size: 11px;
@@ -1634,6 +1633,12 @@
     letter-spacing: .4px;
     padding: 3px 8px;
     border-radius: 999px;
+  }
+  .todo-pill-type {
+    background: var(--navy);
+    color: #fff;
+    text-transform: none;
+    letter-spacing: 0;
   }
   .todo-meta-item { font-size: 12px; color: var(--text); }
   .todo-meta-item.overdue { color: var(--red); font-weight: 700; }
@@ -7001,6 +7006,30 @@ const TODO_STATUS_META = {
   cancelled:   { label: 'Cancelled',   color: '#7884a0', bg: 'rgba(120,132,160,.08)' },
 };
 
+// Task types — mirrors Albi's task list. Custom JG types added at bottom.
+const TODO_TASK_TYPES = [
+  'Billing Corrections',
+  'Create Invoice',
+  'Make Follow Up Phone Call',
+  'Prepare Estimate',
+  'Prepare Payment',
+  'Provide Update',
+  'Review Email Sent',
+  'Schedule Work',
+  'Send Email',
+  'Send Message',
+  'Send to Attorney',
+  'Ship Estimate',
+  'Ship Invoice',
+  'Ship Statement',
+  'Ship Statement with F/C',
+  // Custom JG types — add more here as needed
+  'Order Materials',
+  'Sub Coordination',
+  'Site Visit',
+  'Other',
+];
+
 function renderTodosTab() {
   const todos = state.todos || [];
   const assignees = getTodoAssignees();
@@ -7010,7 +7039,11 @@ function renderTodosTab() {
   const composer = `
     <div class="todo-composer">
       <div class="todo-composer-grid">
-        <input type="text" id="todoTitle" placeholder="What needs to get done?" maxlength="200">
+        <select id="todoTaskType">
+          <option value="">Task type…</option>
+          ${TODO_TASK_TYPES.map(t => `<option value="${esc(t)}">${esc(t)}</option>`).join('')}
+        </select>
+        <input type="text" id="todoTitle" placeholder="Title (auto-fills from type, editable)" maxlength="200">
         <select id="todoAssignee">
           <option value="">Assign to…</option>
           ${['admin','pm','carpenter','office'].map(kind => {
@@ -7055,6 +7088,7 @@ function renderTodosTab() {
             <div class="todo-card-title">${esc(t.title)}</div>
             ${t.body ? `<div class="todo-card-desc">${esc(t.body)}</div>` : ''}
             <div class="todo-card-meta">
+              ${t.task_type ? `<span class="todo-pill todo-pill-type">${esc(t.task_type)}</span>` : ''}
               <span class="todo-pill" style="background:${pm.bg};color:${pm.color};">${pm.label}</span>
               <span class="todo-pill" style="background:${sm.bg};color:${sm.color};">${sm.label}</span>
               <span class="todo-meta-item">👤 ${esc(t.assignee_name || t.assignee_email)}</span>
@@ -7102,11 +7136,13 @@ async function createTodo() {
   const priority = $('#todoPriority').value;
   const due = $('#todoDue').value || null;
   const body = $('#todoBody').value.trim() || null;
+  const taskType = $('#todoTaskType')?.value || null;
   const p = state.activeProject;
 
   const { data, error } = await sb.from('rebuild_todos').insert({
     project_id: state.activeProjectId,
     title, body,
+    task_type: taskType,
     assignee_email: email.toLowerCase(),
     assignee_name: assigneeName,
     assignee_kind: assigneeKind,
@@ -7149,6 +7185,7 @@ async function createTodo() {
   $('#todoAssignee').value = '';
   $('#todoPriority').value = 'normal';
   $('#todoDue').value = '';
+  if ($('#todoTaskType')) $('#todoTaskType').value = '';
 
   toast('To-do added');
   await loadTodos();
@@ -7217,6 +7254,11 @@ function openTodoEditModal(id) {
     modal.querySelector('[data-close]').addEventListener('click', () => modal.classList.remove('on'));
   }
   $('#todoEditBody').innerHTML = `
+    <label>Task Type</label>
+    <select id="te_task_type">
+      <option value="">— None —</option>
+      ${TODO_TASK_TYPES.map(tt => `<option value="${esc(tt)}" ${t.task_type === tt ? 'selected' : ''}>${esc(tt)}</option>`).join('')}
+    </select>
     <label>Title</label>
     <input type="text" id="te_title" value="${esc(t.title)}">
     <label>Details</label>
@@ -7263,6 +7305,7 @@ function openTodoEditModal(id) {
     const updates = {
       title,
       body: $('#te_body').value.trim() || null,
+      task_type: $('#te_task_type').value || null,
       assignee_email: aEmail.toLowerCase(),
       assignee_name: aName,
       assignee_kind: aKind,
@@ -7298,6 +7341,23 @@ function wireTodosTab() {
   if (state.tab !== 'todos') return;
   const btn = $('#todoCreateBtn');
   if (btn) btn.addEventListener('click', createTodo);
+
+  // Task type prefills title (only if title is empty or matches a previous prefill)
+  const taskTypeSel = $('#todoTaskType');
+  const titleInput = $('#todoTitle');
+  if (taskTypeSel && titleInput) {
+    let lastPrefilled = '';
+    taskTypeSel.addEventListener('change', () => {
+      const v = taskTypeSel.value;
+      if (!v) return;
+      // Only overwrite if title is empty or still equals our last prefill
+      if (!titleInput.value.trim() || titleInput.value === lastPrefilled) {
+        titleInput.value = v;
+        lastPrefilled = v;
+      }
+    });
+  }
+
   document.querySelectorAll('.todo-card [data-act]').forEach(b => {
     b.addEventListener('click', (e) => {
       e.stopPropagation();
