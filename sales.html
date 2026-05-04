@@ -2367,7 +2367,17 @@ function _renderNow() {
   h += '<div class="sales-tabs" style="border:none;padding:0;">';
   var tabs = isAdmin() ? ['partners','touches','routes','followups','referrals','import','admin'] : ['partners','touches','routes','followups','referrals'];
   var tabLabels = {partners:'👥 Partners', touches:'📋 Touches', routes:'🚗 Routes', followups:'🔔 Follow-ups', referrals:'⭐ Referrals', import:'📥 Import', admin:'🔐 Admin'};
-  var overdueCount = ST.followups.filter(function(f){ return !f.completed && daysUntil(f.due_date) <= 0; }).length;
+  // Overdue badge counts follow-ups that are visible in the current market
+  // tab — same filter the followups tab itself applies. Keeps the badge
+  // consistent with the list when you click in.
+  var overdueCount = ST.followups.filter(function(f){
+    if (f.completed || daysUntil(f.due_date) > 0) return false;
+    if (!isAdmin() && f.assigned_to !== currentRepName()) return false;
+    if (window.JG_SHARED && typeof window.JG_SHARED.repMatchesMarket === 'function') {
+      if (!window.JG_SHARED.repMatchesMarket(f.assigned_to, ST.market)) return false;
+    }
+    return true;
+  }).length;
   tabs.forEach(function(t) {
     var label = tabLabels[t];
     if (t === 'followups' && overdueCount > 0) {
@@ -3110,12 +3120,25 @@ function _renderNow() {
   // ── FOLLOW-UPS TAB ────────────────────────────────────────────────────────
   if (ST.tab === 'followups') {
     var myFU = isAdmin() ? ST.followups : ST.followups.filter(function(f){return f.assigned_to===currentRepName();});
+
+    // Filter by rep's home market — same pattern as the Touches tab. Without
+    // this, Stevens Point reps' follow-ups appear on the Appleton tab if
+    // someone tagged a follow-up's market as Appleton but assigned it to a
+    // SP rep (or vice versa). The fail-open helper ensures unknown reps
+    // (former employees, missing employee records) still show — bias toward
+    // visibility over hiding data.
+    if (window.JG_SHARED && typeof window.JG_SHARED.repMatchesMarket === 'function') {
+      myFU = myFU.filter(function(f){
+        return window.JG_SHARED.repMatchesMarket(f.assigned_to, ST.market);
+      });
+    }
+
     var overdue  = myFU.filter(function(f){ return daysUntil(f.due_date) < 0; });
     var today2   = myFU.filter(function(f){ return daysUntil(f.due_date) === 0; });
     var upcoming = myFU.filter(function(f){ return daysUntil(f.due_date) > 0; });
 
     h += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">';
-    h += '<div style="font-size:13px;font-weight:700;color:var(--navy);">' + ST.followups.length + ' open follow-ups</div>';
+    h += '<div style="font-size:13px;font-weight:700;color:var(--navy);">' + myFU.length + ' open follow-ups</div>';
     h += '<button class="btn btn-gold" onclick="ST.modal=\'add-followup\';render()">+ Add Follow-up</button>';
     h += '</div>';
 
