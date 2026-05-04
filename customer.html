@@ -137,6 +137,74 @@
     margin-bottom: 18px;
     border: 1px solid var(--line);
   }
+
+  /* Journal section */
+  .journal-section {
+    background: var(--card);
+    border-radius: 10px;
+    padding: 18px 22px;
+    margin-bottom: 18px;
+    border: 1px solid var(--line);
+  }
+  .journal-section h3 {
+    margin: 0 0 14px;
+    color: var(--navy);
+    font-size: 14px;
+    text-transform: uppercase;
+    letter-spacing: .4px;
+  }
+  .journal-feed { display: flex; flex-direction: column; gap: 14px; }
+  .cj-entry {
+    background: var(--bg);
+    border-radius: 8px;
+    padding: 14px 16px;
+    border: 1px solid var(--line);
+  }
+  .cj-header {
+    display: flex; align-items: flex-start; gap: 12px;
+    margin-bottom: 10px;
+  }
+  .cj-avatar {
+    width: 38px; height: 38px; border-radius: 50%;
+    background: var(--orange); color: #fff;
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 700; font-size: 14px;
+    flex-shrink: 0;
+  }
+  .cj-author { font-weight: 700; color: var(--navy); font-size: 14px; }
+  .cj-date { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .cj-body {
+    color: var(--text);
+    font-size: 14px;
+    line-height: 1.5;
+    word-wrap: break-word;
+  }
+  .cj-mention { color: var(--orange); font-weight: 600; }
+  .cj-photos {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+    gap: 8px;
+    margin-top: 12px;
+  }
+  .cj-photo {
+    border-radius: 6px;
+    overflow: hidden;
+    aspect-ratio: 1 / 1;
+    border: 1px solid var(--line);
+    transition: transform .15s, border-color .15s;
+    display: block;
+  }
+  .cj-photo:hover { transform: scale(1.02); border-color: var(--orange); }
+  .cj-photo img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .cj-tags { margin-top: 10px; display: flex; gap: 6px; flex-wrap: wrap; }
+  .cj-tag {
+    font-size: 11px;
+    padding: 3px 8px;
+    border-radius: 4px;
+    font-weight: 600;
+    background: rgba(30,90,200,.1);
+    color: var(--navy);
+  }
   .phases h3 {
     margin: 0 0 14px;
     color: var(--navy);
@@ -373,6 +441,9 @@ const main = document.getElementById('main');
 const fmtDate = d => d ? new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '—';
 const fmtShortDate = d => d ? new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '—';
 const titleCase = s => String(s||'').replace(/_/g,' ').replace(/\b\w/g, c => c.toUpperCase());
+const escHtml = s => String(s == null ? '' : s)
+  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 const fmtPhone = v => {
   if (!v) return '';
   const d = String(v).replace(/\D/g,'');
@@ -393,6 +464,7 @@ if (!token) {
   sb.channel('customer_view_' + token)
     .on('postgres_changes', { event: '*', schema: 'public', table: 'rebuild_phases' }, () => render())
     .on('postgres_changes', { event: '*', schema: 'public', table: 'rebuild_projects' }, () => render())
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'rebuild_journal_entries' }, () => render())
     .subscribe();
 }
 
@@ -412,12 +484,64 @@ async function render() {
   const { data: phases } = await sb.from('rebuild_phases')
     .select('*').eq('project_id', project.id).order('sequence');
   const phasesArr = phases || [];
+
+  // Customer-visible journal entries (newest first)
+  const { data: journal } = await sb.from('rebuild_journal_entries')
+    .select('*, attachments:rebuild_journal_attachments(file_url, filename, mime_type)')
+    .eq('project_id', project.id)
+    .eq('customer_visible', true)
+    .is('deleted_at', null)
+    .order('created_at', { ascending: false })
+    .limit(100);
+  const journalArr = journal || [];
+
   const completedCount = phasesArr.filter(p => p.status === 'complete').length;
   const totalCount = phasesArr.length;
   const pct = totalCount ? Math.round((completedCount / totalCount) * 100) : 0;
 
   const inProgress = phasesArr.find(p => p.status === 'in_progress');
   const nextScheduled = phasesArr.find(p => p.status === 'scheduled');
+
+  // Build journal section
+  const journalHtml = journalArr.length ? `
+    <div class="journal-section">
+      <h3>Project Updates</h3>
+      <div class="journal-feed">
+        ${journalArr.map(e => {
+          const dateStr = new Date(e.created_at).toLocaleString('en-US', {
+            month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit'
+          });
+          const author = e.author_name || 'JG Restoration';
+          const initials = author.split(' ').map(s => s[0]).slice(0,2).join('').toUpperCase();
+          const phaseTag = e.phase_name ? `<span class="cj-tag">📋 ${escHtml(e.phase_name)}</span>` : '';
+          const body = (e.body || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+            .replace(/@([A-Za-z][A-Za-z0-9_.\-\s]{1,40})/g, m => `<span class="cj-mention">${m}</span>`)
+            .replace(/\n/g, '<br>');
+          const atts = (e.attachments || []).filter(a =>
+            /^image\//.test(a.mime_type || '') || /\.(jpe?g|png|gif|webp|heic)$/i.test(a.filename || '')
+          );
+          const attHtml = atts.length ? `
+            <div class="cj-photos">
+              ${atts.map(a => `<a href="${a.file_url}" target="_blank" class="cj-photo"><img src="${a.file_url}" loading="lazy" alt=""></a>`).join('')}
+            </div>` : '';
+          return `
+            <div class="cj-entry">
+              <div class="cj-header">
+                <div class="cj-avatar">${escHtml(initials)}</div>
+                <div>
+                  <div class="cj-author">${escHtml(author)}</div>
+                  <div class="cj-date">${dateStr}</div>
+                </div>
+              </div>
+              <div class="cj-body">${body}</div>
+              ${attHtml}
+              ${phaseTag ? `<div class="cj-tags">${phaseTag}</div>` : ''}
+            </div>
+          `;
+        }).join('')}
+      </div>
+    </div>
+  ` : '';
 
   document.getElementById('lastUpdated').textContent = new Date().toLocaleString('en-US', {
     month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit'
@@ -542,6 +666,8 @@ async function render() {
       <h3>All Phases</h3>
       ${phasesArr.length ? phasesList : '<div style="color:var(--muted);font-size:13px;">Schedule is being prepared. Check back soon.</div>'}
     </div>
+
+    ${journalHtml}
   `;
 }
 </script>
