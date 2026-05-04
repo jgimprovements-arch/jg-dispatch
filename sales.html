@@ -690,7 +690,11 @@ async function loadAll() {
     // Latest sync log entry for the "last synced X minutes ago" status display
     sbSafe('/rest/v1/albi_referral_sync_log?order=started_at.desc&limit=1'),
     // Referral payouts (money JG paid to partners for their referrals)
-    sbSafe('/rest/v1/referral_payouts?order=paid_date.desc&limit=5000')
+    sbSafe('/rest/v1/referral_payouts?order=paid_date.desc&limit=5000'),
+    // Sales chases — competitive loss-event tracking. Different from touches
+    // (relationship maintenance with partners) — chases are JG showing up at
+    // a fire/water/vehicle-impact scene to win the work directly.
+    sbSafe('/rest/v1/sales_chases?market=eq.'+mq+'&order=event_date.desc&limit=2000')
   ]);
 
   ST.partners       = results[0].status === 'fulfilled' ? (results[0].value || []) : [];
@@ -700,6 +704,7 @@ async function loadAll() {
   ST.albiReferrals  = results[4].status === 'fulfilled' ? (results[4].value || []) : [];
   ST.lastSyncLog    = (results[5].status === 'fulfilled' && results[5].value && results[5].value.length) ? results[5].value[0] : null;
   ST.referralPayouts = results[6].status === 'fulfilled' ? (results[6].value || []) : [];
+  ST.chases         = results[7].status === 'fulfilled' ? (results[7].value || []) : [];
 
   // Log any partial failures rather than swallowing them
   results.forEach(function(r, i){
@@ -1068,6 +1073,129 @@ function importAlbi(){ST.modal=null;importFromAlbi();}
 // — admin and reps. Each payout is denormalized with partner_id so we can
 // quickly sum payouts per partner without a join.
 // ─────────────────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────────────────
+// SALES CHASES
+// ─────────────────────────────────────────────────────────────────────────
+// Loss-event tracking. Anyone can log/edit a chase (admin or rep).
+
+function openLogChase(chaseId) {
+  ST._chaseEditingId = chaseId || null;
+  ST._chaseSaving = false;
+  ST.modal = 'log-chase';
+  render();
+}
+
+async function saveChase() {
+  if (ST._chaseSaving) return;
+
+  // Read form
+  var dateEl     = document.getElementById('cs-date');
+  var timeEl     = document.getElementById('cs-time');
+  var lossTypeEl = document.getElementById('cs-loss-type');
+  var lossOtherEl= document.getElementById('cs-loss-other');
+  var addrEl     = document.getElementById('cs-address');
+  var cityEl     = document.getElementById('cs-city');
+  var stateEl    = document.getElementById('cs-state');
+  var zipEl      = document.getElementById('cs-zip');
+  var contactEl  = document.getElementById('cs-contact');
+  var contactPhEl= document.getElementById('cs-contact-phone');
+  var contactRoleEl = document.getElementById('cs-contact-role');
+  var contactNotesEl= document.getElementById('cs-contact-notes');
+  var outcomeEl  = document.getElementById('cs-outcome');
+  var competitorEl= document.getElementById('cs-competitor');
+  var albiCodeEl = document.getElementById('cs-albi-code');
+  var outcomeNotesEl= document.getElementById('cs-outcome-notes');
+
+  if (!dateEl || !dateEl.value) { alert('Event date is required.'); return; }
+  if (!lossTypeEl || !lossTypeEl.value) { alert('Loss type is required.'); return; }
+
+  ST._chaseSaving = true;
+  render();
+
+  var auth = (window.JG_SHARED && window.JG_SHARED.auth) || {};
+  var loggedByEmail = (auth.currentEmail && auth.currentEmail()) || 'unknown';
+  var loggedByName  = (typeof currentRepName === 'function' ? currentRepName() : null) || loggedByEmail;
+
+  // Build the body. Empty strings get nulled so the DB stays clean.
+  var nullIfEmpty = function(s) { return s && s.trim() ? s.trim() : null; };
+  var body = {
+    event_date:        dateEl.value,
+    event_time:        timeEl && timeEl.value ? timeEl.value : null,
+    market:            ST.market,
+    address:           addrEl ? nullIfEmpty(addrEl.value) : null,
+    city:              cityEl ? nullIfEmpty(cityEl.value) : null,
+    state:             stateEl ? nullIfEmpty(stateEl.value) : null,
+    zip:               zipEl ? nullIfEmpty(zipEl.value) : null,
+    loss_type:         lossTypeEl.value,
+    loss_type_other:   lossOtherEl ? nullIfEmpty(lossOtherEl.value) : null,
+    contact_name:      contactEl ? nullIfEmpty(contactEl.value) : null,
+    contact_phone:     contactPhEl ? nullIfEmpty(contactPhEl.value) : null,
+    contact_role:      contactRoleEl ? nullIfEmpty(contactRoleEl.value) : null,
+    contact_notes:     contactNotesEl ? nullIfEmpty(contactNotesEl.value) : null,
+    outcome:           outcomeEl ? nullIfEmpty(outcomeEl.value) : null,
+    outcome_notes:     outcomeNotesEl ? nullIfEmpty(outcomeNotesEl.value) : null,
+    competitor_name:   competitorEl ? nullIfEmpty(competitorEl.value) : null,
+    albi_project_code: albiCodeEl ? nullIfEmpty(albiCodeEl.value) : null,
+    logged_by:         loggedByEmail,
+    logged_by_name:    loggedByName,
+    updated_at:        new Date().toISOString()
+  };
+
+  var editingId = ST._chaseEditingId;
+  try {
+    var url, method;
+    if (editingId) {
+      url = SB_URL + '/rest/v1/sales_chases?id=eq.' + editingId;
+      method = 'PATCH';
+    } else {
+      url = SB_URL + '/rest/v1/sales_chases';
+      method = 'POST';
+    }
+    var resp = await fetch(url, {
+      method: method,
+      headers: {
+        'apikey': SB_KEY,
+        'Authorization': 'Bearer ' + SB_KEY,
+        'Content-Type': 'application/json',
+        'Prefer': 'return=representation'
+      },
+      body: JSON.stringify(body)
+    });
+    if (!resp.ok) throw new Error('Save failed: ' + (await resp.text()));
+
+    if (typeof showOk === 'function') showOk(editingId ? '✓ Chase updated' : '✓ Chase logged');
+    ST.modal = null;
+    ST._chaseEditingId = null;
+    ST._chaseSaving = false;
+    await loadAll();
+    render();
+  } catch(err) {
+    console.error('saveChase error:', err);
+    alert('Save failed: ' + (err.message || err));
+    ST._chaseSaving = false;
+    render();
+  }
+}
+
+async function deleteChase(chaseId) {
+  if (!confirm('Delete this chase record? This cannot be undone.')) return;
+  try {
+    var resp = await fetch(SB_URL + '/rest/v1/sales_chases?id=eq.' + chaseId, {
+      method: 'DELETE',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+    });
+    if (!resp.ok) throw new Error('Delete failed: ' + (await resp.text()));
+    if (typeof showOk === 'function') showOk('✓ Chase deleted');
+    ST.modal = null;
+    ST._chaseEditingId = null;
+    await loadAll();
+    render();
+  } catch(err) {
+    console.error('deleteChase error:', err);
+    alert('Delete failed: ' + (err.message || err));
+  }
+}
 
 function openReferralPayouts(albiReferralId) {
   ST._payoutSheetReferralId = albiReferralId;
@@ -2048,7 +2176,14 @@ function _bgSignature() {
     ST._showInspector ? 1 : 0,
     ST._inspectResult || '',
     ST.referralYear || 'all',
-    ST.referralRep || 'all'
+    ST.referralRep || 'all',
+    // Chases sub-tab state
+    ST.touchSubTab || 'touches',
+    ST.chaseYear || 'all',
+    ST.chaseOutcome || 'all',
+    ST._chaseEditingId || '',
+    ST._chaseSaving ? 1 : 0,
+    (ST.chases || []).length
   ].join('|');
 }
 
@@ -2277,6 +2412,18 @@ function _renderNow() {
 
   // ── TOUCHES TAB ───────────────────────────────────────────────────────────
   if (ST.tab === 'touches') {
+    // Sub-tab pills: Touches vs Chases. Chases share the Touches tab UI
+    // because both are outreach activities, but they have separate data
+    // models — touches link to existing partners; chases are unstructured
+    // loss-event tracking (fires, water losses, vehicle impacts).
+    if (!ST.touchSubTab) ST.touchSubTab = 'touches';
+    h += '<div style="display:flex;gap:6px;margin-bottom:14px;">';
+    h += '<button onclick="ST.touchSubTab=\'touches\';render()" style="padding:8px 18px;border-radius:20px;border:1.5px solid ' + (ST.touchSubTab==='touches'?'var(--orange)':'var(--border)') + ';background:' + (ST.touchSubTab==='touches'?'var(--orange)':'var(--surface)') + ';color:' + (ST.touchSubTab==='touches'?'#fff':'var(--navy)') + ';font-size:12px;font-weight:700;cursor:pointer;font-family:DM Sans,sans-serif;">📋 Touches</button>';
+    h += '<button onclick="ST.touchSubTab=\'chases\';render()" style="padding:8px 18px;border-radius:20px;border:1.5px solid ' + (ST.touchSubTab==='chases'?'var(--orange)':'var(--border)') + ';background:' + (ST.touchSubTab==='chases'?'var(--orange)':'var(--surface)') + ';color:' + (ST.touchSubTab==='chases'?'#fff':'var(--navy)') + ';font-size:12px;font-weight:700;cursor:pointer;font-family:DM Sans,sans-serif;">🚨 Chases</button>';
+    h += '</div>';
+  }
+
+  if (ST.tab === 'touches' && ST.touchSubTab === 'touches') {
     // ── Compute base set first (rep home market filter applied) ──────────
     // The stats cards below reflect this scoped pool, not the full ST.touches.
     // That way "Today / This Week / Positive / Total" answer the question
@@ -2517,6 +2664,110 @@ function _renderNow() {
           groupTouches.forEach(function(t){ h += _renderTouchRow(t); });
         });
       }
+    }
+  }
+
+  // ── CHASES SUB-TAB ────────────────────────────────────────────────────────
+  // Lives inside the Touches tab as a sibling sub-tab. Tracks loss events
+  // (fires, water losses, vehicle impacts) where JG showed up to compete
+  // for the work. Different from touches: no required partner_id, has
+  // outcome tracking, often the contact is a brand-new homeowner.
+  if (ST.tab === 'touches' && ST.touchSubTab === 'chases') {
+    var allChases = (ST.chases || []).filter(function(c){ return c.market === ST.market; });
+
+    // Year filter — current year by default. Useful for win-rate analysis.
+    if (!ST.chaseYear) ST.chaseYear = String(new Date().getFullYear());
+    var chases = ST.chaseYear === 'all'
+      ? allChases
+      : allChases.filter(function(c){ return (c.event_date||'').slice(0,4) === ST.chaseYear; });
+
+    // Outcome filter
+    if (!ST.chaseOutcome) ST.chaseOutcome = 'all';
+    if (ST.chaseOutcome !== 'all') {
+      chases = chases.filter(function(c){ return c.outcome === ST.chaseOutcome; });
+    }
+
+    // Header row
+    h += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">';
+    h += '<div style="font-size:13px;font-weight:700;color:var(--navy);">🚨 Chases — ' + _ve(ST.market) + '</div>';
+    h += '<button class="btn btn-gold" onclick="openLogChase()">+ Log Chase</button>';
+    h += '</div>';
+
+    // Stat cards: total, won, lost, pending, win rate
+    var totalChases  = chases.length;
+    var wonChases    = chases.filter(function(c){ return c.outcome === 'Won'; }).length;
+    var lostChases   = chases.filter(function(c){ return c.outcome === 'Lost to competitor'; }).length;
+    var pendingChases= chases.filter(function(c){ return c.outcome === 'Pending'; }).length;
+    var decided      = wonChases + lostChases;
+    var winRate      = decided > 0 ? Math.round((wonChases/decided)*100) : 0;
+
+    h += '<div class="sales-stat-row" style="margin-bottom:14px;">';
+    h += '<div class="sales-stat"><div class="sales-stat-val">' + totalChases + '</div><div class="sales-stat-lbl">Total Chases</div></div>';
+    h += '<div class="sales-stat"><div class="sales-stat-val" style="color:var(--ok);">' + wonChases + '</div><div class="sales-stat-lbl">Won</div></div>';
+    h += '<div class="sales-stat"><div class="sales-stat-val" style="color:var(--danger);">' + lostChases + '</div><div class="sales-stat-lbl">Lost</div></div>';
+    h += '<div class="sales-stat"><div class="sales-stat-val" style="color:var(--orange);">' + winRate + '%</div><div class="sales-stat-lbl">Win Rate</div></div>';
+    h += '</div>';
+
+    // Filters
+    h += '<div style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;align-items:center;">';
+    h += '<span style="font-size:11px;color:var(--muted);font-weight:600;">YEAR:</span>';
+    var availableYears = Array.from(new Set(allChases.map(function(c){ return (c.event_date||'').slice(0,4); }).filter(Boolean))).sort().reverse();
+    if (availableYears.length === 0) availableYears = [String(new Date().getFullYear())];
+    availableYears.concat(['all']).forEach(function(y){
+      var label = y === 'all' ? 'All' : y;
+      var active = ST.chaseYear === y;
+      h += '<button onclick="ST.chaseYear=\'' + y + '\';render()" style="padding:5px 12px;border-radius:14px;border:1px solid ' + (active?'var(--orange)':'var(--border)') + ';background:' + (active?'var(--orange)':'var(--surface)') + ';color:' + (active?'#fff':'var(--navy)') + ';font-size:11px;font-weight:600;cursor:pointer;font-family:DM Sans,sans-serif;">' + label + '</button>';
+    });
+    h += '<span style="font-size:11px;color:var(--muted);font-weight:600;margin-left:14px;">OUTCOME:</span>';
+    ['all','Won','Lost to competitor','Pending','No contact','Declined','Other'].forEach(function(o){
+      var label = o === 'all' ? 'All' : (o === 'Lost to competitor' ? 'Lost' : (o === 'No contact' ? 'No contact' : o));
+      var active = ST.chaseOutcome === o;
+      h += '<button onclick="ST.chaseOutcome=\'' + o + '\';render()" style="padding:5px 10px;border-radius:14px;border:1px solid ' + (active?'var(--orange)':'var(--border)') + ';background:' + (active?'var(--orange)':'var(--surface)') + ';color:' + (active?'#fff':'var(--navy)') + ';font-size:11px;font-weight:600;cursor:pointer;font-family:DM Sans,sans-serif;">' + label + '</button>';
+    });
+    h += '</div>';
+
+    // Chases list
+    if (chases.length === 0) {
+      h += '<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:40px 20px;text-align:center;color:var(--muted);font-size:13px;">';
+      h += 'No chases match these filters. ';
+      if (allChases.length === 0) {
+        h += 'Click <strong>+ Log Chase</strong> above to start tracking loss events.';
+      }
+      h += '</div>';
+    } else {
+      h += '<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden;">';
+      chases.forEach(function(c){
+        var outcomeColor = c.outcome === 'Won' ? 'var(--ok)' :
+                           c.outcome === 'Lost to competitor' ? 'var(--danger)' :
+                           c.outcome === 'Pending' ? 'var(--orange)' : 'var(--muted)';
+        var lossIcon = c.loss_type === 'Fire' ? '🔥' :
+                       c.loss_type === 'Water Loss' ? '💧' :
+                       c.loss_type === 'Vehicle Impact' ? '🚗' : '⚠';
+        h += '<div onclick="openLogChase(\'' + c.id + '\')" style="padding:12px 16px;border-bottom:1px solid var(--border);cursor:pointer;" onmouseover="this.style.background=\'rgba(232,93,4,.04)\'" onmouseout="this.style.background=\'transparent\'">';
+        h += '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">';
+        h += '<span style="font-size:18px;">' + lossIcon + '</span>';
+        h += '<span style="font-size:13px;font-weight:700;color:var(--navy);">' + _ve(c.loss_type || '') + (c.loss_type === 'Other' && c.loss_type_other ? ' · ' + _ve(c.loss_type_other) : '') + '</span>';
+        if (c.outcome) h += '<span style="font-size:11px;font-weight:700;padding:2px 8px;border-radius:4px;background:rgba(13,45,94,.04);color:' + outcomeColor + ';">' + _ve(c.outcome) + '</span>';
+        h += '<span style="font-size:11px;color:var(--muted);margin-left:auto;">' + (c.event_date ? fmtDate(c.event_date) : '—') + (c.event_time ? ' · ' + c.event_time.slice(0,5) : '') + '</span>';
+        h += '</div>';
+        if (c.address || c.city) {
+          h += '<div style="font-size:12px;color:var(--muted);margin-top:3px;">📍 ' + _ve([c.address, c.city].filter(Boolean).join(', ')) + '</div>';
+        }
+        if (c.contact_name) {
+          h += '<div style="font-size:12px;color:var(--txt);margin-top:3px;">👤 ' + _ve(c.contact_name) + (c.contact_role ? ' (' + _ve(c.contact_role) + ')' : '') + '</div>';
+        }
+        if (c.competitor_name) {
+          h += '<div style="font-size:11px;color:var(--danger);margin-top:3px;">→ Lost to: ' + _ve(c.competitor_name) + '</div>';
+        }
+        if (c.albi_project_code) {
+          h += '<div style="font-size:11px;color:var(--ok);margin-top:3px;">✓ Linked to Albi: <strong>' + _ve(c.albi_project_code) + '</strong></div>';
+        }
+        if (c.logged_by_name) {
+          h += '<div style="font-size:10px;color:var(--muted);margin-top:3px;">Logged by ' + _ve(c.logged_by_name) + '</div>';
+        }
+        h += '</div>';
+      });
+      h += '</div>';
     }
   }
 
@@ -3460,6 +3711,93 @@ function _buildModalHtml() {
         mh += '<button style="padding:8px 20px;border-radius:6px;border:1.5px solid var(--border);background:transparent;font-size:12px;cursor:pointer;font-family:DM Sans,sans-serif;" onclick="ST.modal=\'partner-detail\';ST.selected=\'' + (ref.referrer_partner_id||'') + '\';ST._payoutSheetReferralId=null;ST._payoutSheetEditingId=null;render()">← Back to Partner</button>';
         mh += '</div>';
       }
+    }
+
+    // ── LOG / EDIT CHASE MODAL ──
+    if (ST.modal === 'log-chase') {
+      var editingId = ST._chaseEditingId;
+      var c = editingId ? (ST.chases||[]).find(function(x){ return x.id === editingId; }) : null;
+      mh += '<div class="modal-title">' + (editingId ? '✏️ Edit Chase' : '🚨 Log a Chase') + '</div>';
+
+      // Prefill helper — uses existing chase if editing, otherwise sane defaults
+      var pf = function(field, fallback) { return c && c[field] != null ? String(c[field]).replace(/"/g, '&quot;') : (fallback || ''); };
+
+      // WHEN
+      mh += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px;">';
+      mh += '<div><label style="font-size:10px;color:var(--muted);font-weight:600;display:block;margin-bottom:3px;">EVENT DATE *</label>';
+      mh += '<input id="cs-date" type="date" value="' + pf('event_date', new Date().toISOString().slice(0,10)) + '" style="width:100%;padding:8px 10px;border:1.5px solid var(--border);border-radius:6px;font-size:13px;font-family:DM Sans,sans-serif;"></div>';
+      mh += '<div><label style="font-size:10px;color:var(--muted);font-weight:600;display:block;margin-bottom:3px;">TIME (optional)</label>';
+      mh += '<input id="cs-time" type="time" value="' + (c && c.event_time ? c.event_time.slice(0,5) : '') + '" style="width:100%;padding:8px 10px;border:1.5px solid var(--border);border-radius:6px;font-size:13px;font-family:DM Sans,sans-serif;"></div>';
+      mh += '</div>';
+
+      // WHAT — loss type
+      mh += '<div style="margin-bottom:10px;"><label style="font-size:10px;color:var(--muted);font-weight:600;display:block;margin-bottom:3px;">LOSS TYPE *</label>';
+      mh += '<select id="cs-loss-type" onchange="document.getElementById(\'cs-loss-other-row\').style.display=this.value===\'Other\'?\'block\':\'none\'" style="width:100%;padding:8px 10px;border:1.5px solid var(--border);border-radius:6px;font-size:13px;font-family:DM Sans,sans-serif;">';
+      ['Fire','Water Loss','Vehicle Impact','Other'].forEach(function(lt){
+        mh += '<option value="' + lt + '"' + (c && c.loss_type === lt ? ' selected' : '') + '>' + lt + '</option>';
+      });
+      mh += '</select></div>';
+      mh += '<div id="cs-loss-other-row" style="margin-bottom:10px;display:' + (c && c.loss_type === 'Other' ? 'block' : 'none') + ';"><label style="font-size:10px;color:var(--muted);font-weight:600;display:block;margin-bottom:3px;">SPECIFY</label>';
+      mh += '<input id="cs-loss-other" placeholder="e.g. Roof collapse, mold discovery..." value="' + pf('loss_type_other') + '" style="width:100%;padding:8px 10px;border:1.5px solid var(--border);border-radius:6px;font-size:13px;font-family:DM Sans,sans-serif;"></div>';
+
+      // WHERE
+      mh += '<div style="margin-bottom:10px;"><label style="font-size:10px;color:var(--muted);font-weight:600;display:block;margin-bottom:3px;">ADDRESS</label>';
+      mh += '<input id="cs-address" placeholder="123 Main St" value="' + pf('address') + '" style="width:100%;padding:8px 10px;border:1.5px solid var(--border);border-radius:6px;font-size:13px;font-family:DM Sans,sans-serif;"></div>';
+      mh += '<div style="display:grid;grid-template-columns:2fr 1fr 1fr;gap:8px;margin-bottom:10px;">';
+      mh += '<div><label style="font-size:10px;color:var(--muted);font-weight:600;display:block;margin-bottom:3px;">CITY</label>';
+      mh += '<input id="cs-city" value="' + pf('city') + '" style="width:100%;padding:8px 10px;border:1.5px solid var(--border);border-radius:6px;font-size:13px;font-family:DM Sans,sans-serif;"></div>';
+      mh += '<div><label style="font-size:10px;color:var(--muted);font-weight:600;display:block;margin-bottom:3px;">STATE</label>';
+      mh += '<input id="cs-state" value="' + pf('state', 'WI') + '" style="width:100%;padding:8px 10px;border:1.5px solid var(--border);border-radius:6px;font-size:13px;font-family:DM Sans,sans-serif;"></div>';
+      mh += '<div><label style="font-size:10px;color:var(--muted);font-weight:600;display:block;margin-bottom:3px;">ZIP</label>';
+      mh += '<input id="cs-zip" value="' + pf('zip') + '" style="width:100%;padding:8px 10px;border:1.5px solid var(--border);border-radius:6px;font-size:13px;font-family:DM Sans,sans-serif;"></div>';
+      mh += '</div>';
+
+      // WHO
+      mh += '<div style="display:grid;grid-template-columns:2fr 1fr;gap:8px;margin-bottom:10px;">';
+      mh += '<div><label style="font-size:10px;color:var(--muted);font-weight:600;display:block;margin-bottom:3px;">PERSON SPOKEN TO</label>';
+      mh += '<input id="cs-contact" placeholder="John Smith" value="' + pf('contact_name') + '" style="width:100%;padding:8px 10px;border:1.5px solid var(--border);border-radius:6px;font-size:13px;font-family:DM Sans,sans-serif;"></div>';
+      mh += '<div><label style="font-size:10px;color:var(--muted);font-weight:600;display:block;margin-bottom:3px;">PHONE</label>';
+      mh += '<input id="cs-contact-phone" placeholder="920-555-1234" value="' + pf('contact_phone') + '" style="width:100%;padding:8px 10px;border:1.5px solid var(--border);border-radius:6px;font-size:13px;font-family:DM Sans,sans-serif;"></div>';
+      mh += '</div>';
+      mh += '<div style="margin-bottom:10px;"><label style="font-size:10px;color:var(--muted);font-weight:600;display:block;margin-bottom:3px;">CONTACT ROLE</label>';
+      mh += '<select id="cs-contact-role" style="width:100%;padding:8px 10px;border:1.5px solid var(--border);border-radius:6px;font-size:13px;font-family:DM Sans,sans-serif;">';
+      mh += '<option value="">— Select —</option>';
+      ['Homeowner','Tenant','Adjuster','PD/Fire','Witness','Other'].forEach(function(r){
+        mh += '<option value="' + r + '"' + (c && c.contact_role === r ? ' selected' : '') + '>' + r + '</option>';
+      });
+      mh += '</select></div>';
+      mh += '<div style="margin-bottom:14px;"><label style="font-size:10px;color:var(--muted);font-weight:600;display:block;margin-bottom:3px;">CONVERSATION NOTES</label>';
+      mh += '<textarea id="cs-contact-notes" rows="2" placeholder="What was said, any commitments..." style="width:100%;padding:8px 10px;border:1.5px solid var(--border);border-radius:6px;font-size:13px;font-family:DM Sans,sans-serif;resize:vertical;">' + pf('contact_notes') + '</textarea></div>';
+
+      // OUTCOME
+      mh += '<div style="background:rgba(13,45,94,.04);border-radius:8px;padding:10px 12px;margin-bottom:10px;">';
+      mh += '<label style="font-size:10px;color:var(--muted);font-weight:700;display:block;margin-bottom:6px;">OUTCOME</label>';
+      mh += '<select id="cs-outcome" onchange="document.getElementById(\'cs-competitor-row\').style.display=this.value===\'Lost to competitor\'?\'block\':\'none\';document.getElementById(\'cs-albi-row\').style.display=this.value===\'Won\'?\'block\':\'none\'" style="width:100%;padding:8px 10px;border:1.5px solid var(--border);border-radius:6px;font-size:13px;font-family:DM Sans,sans-serif;">';
+      mh += '<option value="">— Pending Update —</option>';
+      ['Won','Lost to competitor','No contact','Declined','Pending','Other'].forEach(function(o){
+        mh += '<option value="' + o + '"' + (c && c.outcome === o ? ' selected' : '') + '>' + o + '</option>';
+      });
+      mh += '</select>';
+      // Conditional fields based on outcome
+      mh += '<div id="cs-competitor-row" style="margin-top:8px;display:' + (c && c.outcome === 'Lost to competitor' ? 'block' : 'none') + ';">';
+      mh += '<label style="font-size:10px;color:var(--muted);font-weight:600;display:block;margin-bottom:3px;">COMPETITOR</label>';
+      mh += '<input id="cs-competitor" placeholder="SERVPRO, ServiceMaster, etc." value="' + pf('competitor_name') + '" style="width:100%;padding:8px 10px;border:1.5px solid var(--border);border-radius:6px;font-size:13px;font-family:DM Sans,sans-serif;"></div>';
+      mh += '<div id="cs-albi-row" style="margin-top:8px;display:' + (c && c.outcome === 'Won' ? 'block' : 'none') + ';">';
+      mh += '<label style="font-size:10px;color:var(--muted);font-weight:600;display:block;margin-bottom:3px;">ALBI PROJECT CODE (when known)</label>';
+      mh += '<input id="cs-albi-code" placeholder="Smith-1234-FIR" value="' + pf('albi_project_code') + '" style="width:100%;padding:8px 10px;border:1.5px solid var(--border);border-radius:6px;font-size:13px;font-family:DM Sans,sans-serif;"></div>';
+      mh += '<div style="margin-top:8px;"><label style="font-size:10px;color:var(--muted);font-weight:600;display:block;margin-bottom:3px;">OUTCOME NOTES</label>';
+      mh += '<textarea id="cs-outcome-notes" rows="2" placeholder="Why pending, what next..." style="width:100%;padding:8px 10px;border:1.5px solid var(--border);border-radius:6px;font-size:13px;font-family:DM Sans,sans-serif;resize:vertical;">' + pf('outcome_notes') + '</textarea></div>';
+      mh += '</div>';
+
+      // Footer
+      var saving = ST._chaseSaving;
+      mh += '<div style="display:flex;gap:8px;margin-top:14px;">';
+      if (editingId) {
+        mh += '<button onclick="deleteChase(\'' + editingId + '\')" style="padding:9px 14px;border-radius:6px;border:1.5px solid var(--danger);background:transparent;color:var(--danger);font-size:12px;font-weight:700;cursor:pointer;font-family:DM Sans,sans-serif;">🗑 Delete</button>';
+      }
+      mh += '<button onclick="ST.modal=null;ST._chaseEditingId=null;render()" style="padding:9px 14px;border-radius:6px;border:1.5px solid var(--border);background:transparent;font-size:12px;cursor:pointer;font-family:DM Sans,sans-serif;">Cancel</button>';
+      mh += '<button onclick="saveChase()"' + (saving?' disabled':'') + ' style="flex:1;padding:9px 18px;border-radius:6px;border:none;background:var(--orange);color:#fff;font-size:13px;font-weight:700;cursor:pointer;font-family:DM Sans,sans-serif;">' + (saving ? '⏳ Saving...' : (editingId ? 'Save Changes' : '💾 Log Chase')) + '</button>';
+      mh += '</div>';
     }
 
     if (ST.modal === 'log-touch') {
