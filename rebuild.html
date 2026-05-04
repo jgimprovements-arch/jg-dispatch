@@ -1221,6 +1221,21 @@
     background: rgba(255,255,255,.95);
     backdrop-filter: blur(4px);
   }
+  .doc-card-cust-badge {
+    position: absolute;
+    bottom: 6px; left: 6px;
+    z-index: 4;
+    background: rgba(45, 156, 95, .95);
+    color: #fff;
+    font-size: 14px;
+    width: 24px; height: 24px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 2px 6px rgba(0,0,0,.18);
+    backdrop-filter: blur(4px);
+  }
   .doc-card-info {
     padding: 10px 12px 12px;
     display: flex;
@@ -3332,6 +3347,7 @@ function renderDocumentsTab() {
             <button class="doc-recent-menu-trigger doc-menu-trigger" data-id="${d.id}" title="More actions">⋮</button>
             <div class="doc-menu" data-doc-menu="${d.id}" hidden>
               ${isPhoto ? `<button class="doc-menu-item doc-photo-edit" data-id="${d.id}"><span class="doc-menu-icon">✎</span> Edit photo info</button>` : ''}
+              <button class="doc-menu-item doc-toggle-vis" data-id="${d.id}"><span class="doc-menu-icon">${d.customer_visible ? '🔒' : '👁️'}</span> ${d.customer_visible ? 'Hide from customer' : 'Show customer'}</button>
               <button class="doc-menu-item doc-rename" data-id="${d.id}"><span class="doc-menu-icon">✏️</span> Rename</button>
               <button class="doc-menu-item doc-dl" data-id="${d.id}"><span class="doc-menu-icon">📥</span> Download</button>
               ${d.push_status !== 'sent' ? `<button class="doc-menu-item doc-retry" data-id="${d.id}"><span class="doc-menu-icon">↻</span> Retry Albi push</button>` : ''}
@@ -3432,12 +3448,14 @@ function renderDocRow(d) {
         <button class="doc-menu-trigger doc-card-menu-btn" data-id="${d.id}" title="More actions" aria-label="More actions">⋮</button>
         <div class="doc-menu" data-doc-menu="${d.id}" hidden>
           ${isPhoto ? `<button class="doc-menu-item doc-photo-edit" data-id="${d.id}"><span class="doc-menu-icon">✎</span> Edit photo info</button>` : ''}
+          <button class="doc-menu-item doc-toggle-vis" data-id="${d.id}"><span class="doc-menu-icon">${d.customer_visible ? '🔒' : '👁️'}</span> ${d.customer_visible ? 'Hide from customer' : 'Show customer'}</button>
           <button class="doc-menu-item doc-rename" data-id="${d.id}"><span class="doc-menu-icon">✏️</span> Rename</button>
           <button class="doc-menu-item doc-dl" data-id="${d.id}"><span class="doc-menu-icon">📥</span> Download</button>
           ${d.push_status !== 'sent' ? `<button class="doc-menu-item doc-retry" data-id="${d.id}"><span class="doc-menu-icon">↻</span> Retry Albi push</button>` : ''}
           <button class="doc-menu-item doc-menu-danger doc-del" data-id="${d.id}"><span class="doc-menu-icon">✕</span> Delete</button>
         </div>
         <span class="doc-card-albi">${albiBadge}</span>
+        ${d.customer_visible ? '<span class="doc-card-cust-badge" title="Visible to customer">👁️</span>' : ''}
       </div>
       <div class="doc-card-info">
         ${isImage
@@ -5037,6 +5055,17 @@ function renderTabContent() {
       await loadDocuments();
       renderDetail();
     }));
+    $$('.doc-toggle-vis').forEach(btn => btn.addEventListener('click', async e => {
+      e.stopPropagation();
+      const d = state.documents.find(x => x.id === btn.dataset.id);
+      if (!d) return;
+      const newVal = !d.customer_visible;
+      const { error } = await sb.from('rebuild_documents').update({ customer_visible: newVal }).eq('id', d.id);
+      if (error) { toast('Update failed: ' + error.message); return; }
+      toast(newVal ? '✓ Now visible to customer' : '🔒 Hidden from customer');
+      await loadDocuments();
+      renderDetail();
+    }));
     // Kebab menu open/close
     $$('.doc-menu-trigger').forEach(btn => {
       btn.addEventListener('mousedown', e => e.stopPropagation());
@@ -6546,6 +6575,8 @@ function renderJournalEntry(e, canEdit) {
   const isOwn = (e.author_email || '').toLowerCase() === (state.pmEmail || '').toLowerCase();
   const allowEdit = canEdit || isOwn;
   const allowEditFull = canEdit; // field can post but not edit
+  const isCustomer = e.author_role === 'customer';
+  const customerBadge = isCustomer ? '<span class="jr-customer-badge">🧑 Customer</span>' : '';
   const phaseTag = e.phase_name ? `<span class="jr-tag jr-tag-phase">📋 ${esc(e.phase_name)}</span>` : '';
   const subTag = e.sub_name ? `<span class="jr-tag jr-tag-sub">🔧 ${esc(e.sub_name)}</span>` : '';
   const visBadge = e.customer_visible
@@ -6581,7 +6612,7 @@ function renderJournalEntry(e, canEdit) {
         <div class="jr-author">
           <div class="jr-avatar">${(e.author_name || e.author_email || '?').slice(0,1).toUpperCase()}</div>
           <div>
-            <div class="jr-author-name">${esc(e.author_name || e.author_email)}</div>
+            <div class="jr-author-name">${esc(e.author_name || e.author_email)} ${customerBadge}</div>
             <div class="jr-meta">${fmtRelative(e.created_at)}${editedNote}</div>
           </div>
         </div>
@@ -7655,8 +7686,8 @@ function setupRealtime() {
           }
           // ANY open session tries to claim and send the email — first one wins
           // (atomic: only update if email_sent_at is still NULL)
-          // SKIP emails for journal_mention — in-app notification is enough since recipients are signed in
-          if (n.event_type === 'journal_mention') return;
+          // SKIP emails for journal events — customer_journal already emailed from customer.html, journal_mention is in-app only
+          if (n.event_type === 'journal_mention' || n.event_type === 'customer_journal') return;
           const { data: claimed } = await sb.from('rebuild_notifications')
             .update({ email_sent_at: new Date().toISOString() })
             .eq('id', n.id)
@@ -7772,6 +7803,7 @@ function renderNotifList() {
       install_approved: '📅',
       install_changes_requested: '↻',
       journal_mention: '💬',
+      customer_journal: '🧑',
     }[n.event_type] || '🔔';
     return `
       <div class="notif-item ${n.read_at ? '' : 'unread'}" data-id="${n.id}" data-project="${n.project_id || ''}">
@@ -7803,6 +7835,7 @@ function renderNotifList() {
         install_approved: 'selections',
         install_changes_requested: 'selections',
         journal_mention: 'journal',
+        customer_journal: 'journal',
       };
       const targetTab = tabForEvent[n?.event_type] || 'selections';
 

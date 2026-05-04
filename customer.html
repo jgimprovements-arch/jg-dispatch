@@ -138,6 +138,97 @@
     border: 1px solid var(--line);
   }
 
+  /* Customer composer */
+  .cust-composer {
+    background: var(--card);
+    border-radius: 10px;
+    padding: 18px 22px;
+    margin-bottom: 18px;
+    border: 1px solid var(--line);
+  }
+  .cust-composer h3 {
+    margin: 0 0 6px;
+    color: var(--navy);
+    font-size: 14px;
+    text-transform: uppercase;
+    letter-spacing: .4px;
+  }
+  .cust-composer-hint {
+    margin: 0 0 14px;
+    color: var(--muted);
+    font-size: 13px;
+  }
+  .cust-composer textarea {
+    width: 100%;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 10px 12px;
+    font-family: inherit;
+    font-size: 14px;
+    resize: vertical;
+    min-height: 70px;
+    color: var(--text);
+  }
+  .cust-composer textarea:focus { outline: none; border-color: var(--orange); }
+  .cust-composer-actions {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-top: 12px;
+  }
+  .cust-attach-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 9px 16px;
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    color: var(--navy);
+    font-weight: 600;
+    font-size: 13px;
+    cursor: pointer;
+    transition: border-color .15s, background .15s;
+  }
+  .cust-attach-btn:hover { border-color: var(--orange); background: #fff; }
+  .cust-post-btn {
+    padding: 10px 26px;
+    background: var(--orange);
+    color: #fff;
+    border: 0;
+    border-radius: 999px;
+    font-weight: 700;
+    font-size: 14px;
+    cursor: pointer;
+    transition: background .15s, transform .15s;
+  }
+  .cust-post-btn:hover { background: #d05303; transform: translateY(-1px); }
+  .cust-post-btn:disabled { opacity: .5; cursor: not-allowed; transform: none; }
+
+  .cust-att-preview { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+  .cust-att-preview:empty { display: none; }
+  .cust-att-thumb {
+    width: 90px; height: 90px;
+    border-radius: 6px;
+    overflow: hidden;
+    background: var(--bg);
+    border: 1px solid var(--line);
+    position: relative;
+  }
+  .cust-att-thumb img { width: 100%; height: 100%; object-fit: cover; }
+  .cust-att-thumb-doc {
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+  }
+  .cust-att-name {
+    position: absolute; bottom: 0; left: 0; right: 0;
+    background: rgba(0,0,0,.65); color: #fff;
+    font-size: 9px; padding: 2px 4px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+
   /* Customer photo gallery + doc list */
   .cust-section {
     background: var(--card);
@@ -905,7 +996,156 @@ async function render() {
     ${photosHtml}
     ${docsHtml}
     ${journalHtml}
+
+    <!-- Customer composer -->
+    <div class="cust-composer">
+      <h3>Send Update or Photos</h3>
+      <p class="cust-composer-hint">Share questions, photos, or documents with your project manager. They'll be notified right away.</p>
+      <textarea id="custJrBody" placeholder="What would you like to share?" rows="3"></textarea>
+      <div id="custJrPreview" class="cust-att-preview"></div>
+      <div class="cust-composer-actions">
+        <label class="cust-attach-btn">
+          📎 Attach photos or documents
+          <input type="file" id="custJrAttach" multiple accept="image/*,application/pdf,.doc,.docx" style="display:none;">
+        </label>
+        <button id="custJrPostBtn" class="cust-post-btn">Send</button>
+      </div>
+    </div>
   `;
+
+  // Wire customer composer
+  wireCustomerComposer(project);
+}
+
+const CUST_BUCKET = 'rebuild-journal-attachments';
+const CUST_MESSAGE_HOOK = 'https://hooks.zapier.com/hooks/catch/12653197/uvule41/';
+let custFiles = [];
+
+function wireCustomerComposer(project) {
+  const attInput = document.getElementById('custJrAttach');
+  const preview = document.getElementById('custJrPreview');
+  const postBtn = document.getElementById('custJrPostBtn');
+
+  if (attInput) {
+    attInput.addEventListener('change', () => {
+      custFiles = [...attInput.files];
+      preview.innerHTML = custFiles.map(f => {
+        const isImg = /^image\//.test(f.type);
+        if (isImg) {
+          const url = URL.createObjectURL(f);
+          return `<div class="cust-att-thumb"><img src="${url}" alt=""><div class="cust-att-name">${escHtml(f.name)}</div></div>`;
+        }
+        return `<div class="cust-att-thumb cust-att-thumb-doc"><span style="font-size:24px;">📄</span><div class="cust-att-name">${escHtml(f.name)}</div></div>`;
+      }).join('');
+    });
+  }
+
+  if (postBtn) {
+    postBtn.addEventListener('click', async () => {
+      const body = document.getElementById('custJrBody').value.trim();
+      if (!body && !custFiles.length) {
+        alert('Please type a message or attach a file before sending.');
+        return;
+      }
+      postBtn.disabled = true;
+      postBtn.textContent = 'Sending…';
+
+      try {
+        // Insert journal entry
+        const customerName = project.customer_name || 'Customer';
+        const { data: inserted, error: insErr } = await sb.from('rebuild_journal_entries').insert({
+          project_id: project.id,
+          body: body || '(file attached)',
+          author_email: project.customer_email || 'customer@portal',
+          author_name: customerName,
+          author_role: 'customer',
+          customer_visible: true,
+        }).select();
+        if (insErr) throw insErr;
+        const entry = inserted[0];
+
+        // Upload files
+        for (const f of custFiles) {
+          const safeName = f.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+          const path = `entries/${entry.id}/${Date.now()}-${safeName}`;
+          const { error: upErr } = await sb.storage.from(CUST_BUCKET).upload(path, f, {
+            contentType: f.type || 'application/octet-stream',
+            upsert: false,
+          });
+          if (upErr) { console.error('att upload failed', upErr); continue; }
+          const { data: urlData } = sb.storage.from(CUST_BUCKET).getPublicUrl(path);
+          await sb.from('rebuild_journal_attachments').insert({
+            entry_id: entry.id,
+            file_url: urlData.publicUrl,
+            filename: f.name,
+            mime_type: f.type || null,
+            file_size_bytes: f.size,
+          });
+        }
+
+        // Notify PM
+        if (project.albi_pm_email) {
+          await sb.from('rebuild_notifications').insert({
+            project_id: project.id,
+            recipient_email: project.albi_pm_email.toLowerCase(),
+            event_type: 'customer_journal',
+            selection_id: entry.id,
+            title: `${customerName} sent an update`,
+            body: (body || '(file attached)').slice(0, 200),
+          });
+
+          // Fire email immediately via Zapier hook (don't rely on PM having tab open)
+          try {
+            const fileUrls = [];
+            if (custFiles.length) {
+              // Re-grab attachment URLs we just inserted
+              const { data: atts } = await sb.from('rebuild_journal_attachments')
+                .select('file_url').eq('entry_id', entry.id);
+              if (atts) atts.forEach(a => fileUrls.push(a.file_url));
+            }
+            await fetch(CUST_MESSAGE_HOOK, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                channel: 'email',
+                to_email: project.albi_pm_email,
+                from_email: 'josh@jg-restoration.com',
+                from_name: 'JG Platform',
+                recipient_name: project.albi_pm_name || 'Project Manager',
+                recipient_type: 'pm_alert',
+                subject: `🧑 ${customerName} sent an update — ${project.albi_job_number || 'Project'}`,
+                body: `${customerName} just posted in the customer portal:\n\n${body || '(file attached)'}\n\nProject: ${project.albi_job_number || ''}\n${project.property_address || ''}\n\nLog into the JG Platform to view and reply.`,
+                attachment_count: fileUrls.length,
+                attachment_urls: fileUrls.join(','),
+                attachment_url_1: fileUrls[0] || '',
+                attachment_url_2: fileUrls[1] || '',
+                attachment_url_3: fileUrls[2] || '',
+                attachment_url_4: fileUrls[3] || '',
+              }),
+              mode: 'no-cors',
+            });
+          } catch (e) { console.warn('email hook failed', e); }
+        }
+
+        // Reset
+        document.getElementById('custJrBody').value = '';
+        if (attInput) attInput.value = '';
+        custFiles = [];
+        preview.innerHTML = '';
+        postBtn.disabled = false;
+        postBtn.textContent = 'Send';
+        alert('Sent! Your project manager will be notified.');
+
+        // Re-render to show new entry
+        render();
+      } catch (e) {
+        console.error('cust post failed', e);
+        alert('Sorry, something went wrong. Please try again or call (920) 428-4200.');
+        postBtn.disabled = false;
+        postBtn.textContent = 'Send';
+      }
+    });
+  }
 }
 </script>
 
