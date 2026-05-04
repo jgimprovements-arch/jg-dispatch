@@ -138,6 +138,72 @@
     border: 1px solid var(--line);
   }
 
+  /* Customer photo gallery + doc list */
+  .cust-section {
+    background: var(--card);
+    border-radius: 10px;
+    padding: 18px 22px;
+    margin-bottom: 18px;
+    border: 1px solid var(--line);
+  }
+  .cust-section h3 {
+    margin: 0 0 14px;
+    color: var(--navy);
+    font-size: 14px;
+    text-transform: uppercase;
+    letter-spacing: .4px;
+  }
+  .cust-photo-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    gap: 10px;
+  }
+  .cust-photo {
+    border-radius: 8px;
+    overflow: hidden;
+    aspect-ratio: 1 / 1;
+    border: 1px solid var(--line);
+    transition: transform .15s, border-color .15s, box-shadow .15s;
+    display: block;
+  }
+  .cust-photo:hover {
+    transform: scale(1.02);
+    border-color: var(--orange);
+    box-shadow: 0 4px 12px rgba(13,45,94,.12);
+  }
+  .cust-photo img { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+  .cust-doc-list { display: flex; flex-direction: column; gap: 8px; }
+  .cust-doc {
+    display: flex; align-items: center; gap: 12px;
+    padding: 12px 14px;
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    text-decoration: none;
+    color: var(--text);
+    transition: border-color .15s, transform .15s;
+  }
+  .cust-doc:hover {
+    border-color: var(--orange);
+    transform: translateY(-1px);
+  }
+  .cust-doc-icon { font-size: 24px; flex-shrink: 0; }
+  .cust-doc-info { flex: 1; min-width: 0; }
+  .cust-doc-name {
+    font-weight: 600;
+    color: var(--navy);
+    font-size: 14px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .cust-doc-meta {
+    font-size: 11px;
+    color: var(--muted);
+    margin-top: 2px;
+  }
+
   /* Journal section */
   .journal-section {
     background: var(--card);
@@ -205,6 +271,65 @@
     background: rgba(30,90,200,.1);
     color: var(--navy);
   }
+
+  /* Customer photos + docs */
+  .cust-section {
+    background: var(--card);
+    border-radius: 10px;
+    padding: 18px 22px;
+    margin-bottom: 18px;
+    border: 1px solid var(--line);
+  }
+  .cust-section h3 {
+    margin: 0 0 14px;
+    color: var(--navy);
+    font-size: 14px;
+    text-transform: uppercase;
+    letter-spacing: .4px;
+  }
+  .cust-photo-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    gap: 10px;
+  }
+  .cust-photo {
+    border-radius: 8px;
+    overflow: hidden;
+    aspect-ratio: 1 / 1;
+    border: 1px solid var(--line);
+    transition: transform .15s, border-color .15s;
+    display: block;
+  }
+  .cust-photo:hover { transform: scale(1.02); border-color: var(--orange); }
+  .cust-photo img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .cust-doc-cat { margin-bottom: 14px; }
+  .cust-doc-cat:last-child { margin-bottom: 0; }
+  .cust-doc-cat-label {
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: .4px;
+    margin-bottom: 8px;
+  }
+  .cust-doc-list { display: flex; flex-direction: column; gap: 6px; }
+  .cust-doc-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    text-decoration: none;
+    color: var(--navy);
+    font-size: 13px;
+    transition: border-color .15s, transform .15s;
+  }
+  .cust-doc-row:hover { border-color: var(--orange); transform: translateX(2px); }
+  .cust-doc-icon { font-size: 18px; flex-shrink: 0; }
+  .cust-doc-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+  .cust-doc-arrow { color: var(--muted); }
   .phases h3 {
     margin: 0 0 14px;
     color: var(--navy);
@@ -465,6 +590,7 @@ if (!token) {
     .on('postgres_changes', { event: '*', schema: 'public', table: 'rebuild_phases' }, () => render())
     .on('postgres_changes', { event: '*', schema: 'public', table: 'rebuild_projects' }, () => render())
     .on('postgres_changes', { event: '*', schema: 'public', table: 'rebuild_journal_entries' }, () => render())
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'rebuild_documents' }, () => render())
     .subscribe();
 }
 
@@ -495,12 +621,73 @@ async function render() {
     .limit(100);
   const journalArr = journal || [];
 
+  // Customer-visible documents and photos
+  const { data: docs } = await sb.from('rebuild_documents')
+    .select('*')
+    .eq('project_id', project.id)
+    .eq('customer_visible', true)
+    .order('uploaded_at', { ascending: false })
+    .limit(200);
+  const docsArr = docs || [];
+  const visiblePhotos = docsArr.filter(d =>
+    d.category === 'Photos' && (
+      /^image\//.test(d.mime_type || '') ||
+      /\.(jpe?g|png|gif|webp|heic)$/i.test(d.filename || '')
+    )
+  );
+  const visibleDocs = docsArr.filter(d => !visiblePhotos.includes(d));
+
+  // Customer-visible documents (photos + files) grouped by category
+  const { data: docs } = await sb.from('rebuild_documents')
+    .select('*')
+    .eq('project_id', project.id)
+    .eq('customer_visible', true)
+    .order('uploaded_at', { ascending: false });
+  const docsArr = docs || [];
+
   const completedCount = phasesArr.filter(p => p.status === 'complete').length;
   const totalCount = phasesArr.length;
   const pct = totalCount ? Math.round((completedCount / totalCount) * 100) : 0;
 
   const inProgress = phasesArr.find(p => p.status === 'in_progress');
   const nextScheduled = phasesArr.find(p => p.status === 'scheduled');
+
+  // Build photos gallery section
+  const photosHtml = visiblePhotos.length ? `
+    <div class="cust-section">
+      <h3>Project Photos</h3>
+      <div class="cust-photo-grid">
+        ${visiblePhotos.map(p => `
+          <a href="${p.file_url}" target="_blank" class="cust-photo">
+            <img src="${p.file_url}" loading="lazy" alt="">
+          </a>
+        `).join('')}
+      </div>
+    </div>
+  ` : '';
+
+  // Build documents section
+  const docsHtml = visibleDocs.length ? `
+    <div class="cust-section">
+      <h3>Documents</h3>
+      <div class="cust-doc-list">
+        ${visibleDocs.map(d => {
+          const isPdf = /\.pdf$/i.test(d.filename || '');
+          const sizeKb = d.file_size_bytes ? (d.file_size_bytes / 1024).toFixed(0) + ' KB' : '';
+          const cleanName = (d.filename || '').replace(/^\d{8,}[_-]+/, '');
+          return `
+            <a href="${d.file_url}" target="_blank" class="cust-doc">
+              <span class="cust-doc-icon">${isPdf ? '📕' : '📄'}</span>
+              <div class="cust-doc-info">
+                <div class="cust-doc-name">${escHtml(cleanName)}</div>
+                <div class="cust-doc-meta">${escHtml(d.category || '')}${sizeKb ? ' · ' + sizeKb : ''}</div>
+              </div>
+            </a>
+          `;
+        }).join('')}
+      </div>
+    </div>
+  ` : '';
 
   // Build journal section
   const journalHtml = journalArr.length ? `
@@ -540,6 +727,54 @@ async function render() {
           `;
         }).join('')}
       </div>
+    </div>
+  ` : '';
+
+  // Photos section (images) + Documents section (everything else)
+  const isImg = f => /\.(jpe?g|png|gif|webp|heic)$/i.test(f || '');
+  const photos = docsArr.filter(d => isImg(d.filename));
+  const otherDocs = docsArr.filter(d => !isImg(d.filename));
+
+  const photosHtml = photos.length ? `
+    <div class="cust-section">
+      <h3>Project Photos</h3>
+      <div class="cust-photo-grid">
+        ${photos.map(p => `
+          <a href="${p.file_url}" target="_blank" class="cust-photo">
+            <img src="${p.file_url}" loading="lazy" alt="">
+          </a>
+        `).join('')}
+      </div>
+    </div>
+  ` : '';
+
+  // Group other docs by category
+  const docsByCat = {};
+  otherDocs.forEach(d => {
+    const cat = d.category || 'Other';
+    if (!docsByCat[cat]) docsByCat[cat] = [];
+    docsByCat[cat].push(d);
+  });
+  const cleanFn = f => String(f || '').replace(/^\d{8,}[_-]+/, '');
+  const docsHtml = otherDocs.length ? `
+    <div class="cust-section">
+      <h3>Project Documents</h3>
+      ${Object.entries(docsByCat).map(([cat, list]) => `
+        <div class="cust-doc-cat">
+          <div class="cust-doc-cat-label">${escHtml(cat)}</div>
+          <div class="cust-doc-list">
+            ${list.map(d => {
+              const isPdf = /\.pdf$/i.test(d.filename);
+              const icon = isPdf ? '📕' : '📄';
+              return `<a href="${d.file_url}" target="_blank" class="cust-doc-row">
+                <span class="cust-doc-icon">${icon}</span>
+                <span class="cust-doc-name">${escHtml(cleanFn(d.filename))}</span>
+                <span class="cust-doc-arrow">→</span>
+              </a>`;
+            }).join('')}
+          </div>
+        </div>
+      `).join('')}
     </div>
   ` : '';
 
@@ -667,6 +902,8 @@ async function render() {
       ${phasesArr.length ? phasesList : '<div style="color:var(--muted);font-size:13px;">Schedule is being prepared. Check back soon.</div>'}
     </div>
 
+    ${photosHtml}
+    ${docsHtml}
     ${journalHtml}
   `;
 }
