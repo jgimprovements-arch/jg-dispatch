@@ -332,14 +332,29 @@ async function init() {
 
 async function loadTodos() {
   const email = state.email;
-  // Fetch todos where user is either assignee or creator
-  const { data } = await sb.from('rebuild_todos')
-    .select('*')
-    .or(`assignee_email.eq.${email},created_by_email.eq.${email}`)
-    .order('due_date', { ascending: true, nullsFirst: false })
-    .order('priority', { ascending: false })
-    .order('created_at', { ascending: false });
-  state.todos = data || [];
+  if (!email) { state.todos = []; return; }
+  // Two simple queries (more reliable than .or() with email values)
+  const [a, b] = await Promise.all([
+    sb.from('rebuild_todos').select('*').eq('assignee_email', email),
+    sb.from('rebuild_todos').select('*').eq('created_by_email', email),
+  ]);
+  if (a.error) console.error('loadTodos assignee err:', a.error);
+  if (b.error) console.error('loadTodos creator err:', b.error);
+  // Merge + dedupe by id
+  const map = new Map();
+  (a.data || []).forEach(t => map.set(t.id, t));
+  (b.data || []).forEach(t => map.set(t.id, t));
+  // Sort: due_date asc (nulls last), then priority desc, then created_at desc
+  const priorityRank = { urgent: 0, high: 1, normal: 2, low: 3 };
+  state.todos = Array.from(map.values()).sort((x, y) => {
+    if (x.due_date && !y.due_date) return -1;
+    if (!x.due_date && y.due_date) return 1;
+    if (x.due_date !== y.due_date) return (x.due_date || '').localeCompare(y.due_date || '');
+    const pr = (priorityRank[x.priority] ?? 9) - (priorityRank[y.priority] ?? 9);
+    if (pr !== 0) return pr;
+    return (y.created_at || '').localeCompare(x.created_at || '');
+  });
+  console.log('loadTodos:', email, '→', state.todos.length, 'rows');
 }
 
 async function loadProjects() {
