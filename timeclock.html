@@ -1539,73 +1539,37 @@ async function loadSchedule() {
       return;
     }
     var techId = TC.employee.id;
-    var todayISO = new Date().toISOString().split('T')[0];
 
-    // 1. Existing dispatch assignments (mitigation jobs)
+    // Fetch today's assignments (or unscheduled "today" rows) for this tech
+    var todayISO = new Date().toISOString().split('T')[0];
     var url = '/rest/v1/dispatch_assignments_v2'
             + '?tech_id=eq.' + techId
             + '&or=(scheduled_date.eq.' + todayISO + ',scheduled_date.is.null)'
             + '&select=id,job_id,market,position,scheduled_date'
             + '&order=position.asc';
-    var dispatchRows = (await sb(url)) || [];
-
-    // 2. Rebuild phase assignments where this employee is on a phase scheduled today
-    var rebuildAssigns = [];
-    try {
-      var rebuildUrl = '/rest/v1/rebuild_phase_assignees'
-                     + '?employee_id=eq.' + techId
-                     + '&select=id,phase_id,phase:rebuild_phases(id,phase_name,scheduled_start,scheduled_end,status,project_id,project:rebuild_projects(albi_job_number,customer_name,property_address,market))';
-      var rebuildRows = (await sb(rebuildUrl)) || [];
-      rebuildAssigns = rebuildRows.filter(function(r) {
-        var ph = r.phase;
-        if (!ph || !ph.scheduled_start) return false;
-        var s = ph.scheduled_start;
-        var e = ph.scheduled_end || ph.scheduled_start;
-        return s <= todayISO && todayISO <= e && ph.status !== 'complete';
-      });
-    } catch (e) {
-      console.warn('Rebuild schedule fetch failed:', e);
-    }
-
-    if (!dispatchRows.length && !rebuildAssigns.length) {
-      el.innerHTML = '<div class="empty" style="padding:16px 0;">No jobs scheduled today</div>';
+    var rows = await sb(url);
+    if (!rows || !rows.length) {
+      el.innerHTML = '<div class="empty" style="padding:16px 0;">No jobs assigned today</div>';
       if (marketEl) marketEl.textContent = '';
       return;
     }
 
+    // Resolve job names via existing TC.jobs cache (Albi data already loaded)
     var jobNameById = {};
     (TC.jobs || []).forEach(function(j){ jobNameById[String(j.id)] = j.name || j.id; });
 
-    var dispatchJobs = dispatchRows.map(function(r){
-      return {
-        id: String(r.job_id),
-        name: jobNameById[String(r.job_id)] || r.job_id,
-        kind: 'dispatch',
-        sub: '',
-        market: r.market,
-      };
+    var myJobs = rows.map(function(r){
+      return { id: String(r.job_id), name: jobNameById[String(r.job_id)] || r.job_id };
     });
 
-    var rebuildJobs = rebuildAssigns.map(function(r) {
-      var ph = r.phase;
-      var proj = ph.project || {};
-      return {
-        id: 'rebuild:' + (proj.albi_job_number || ph.project_id),
-        name: proj.albi_job_number || 'Rebuild',
-        kind: 'rebuild',
-        sub: '🔨 ' + ph.phase_name + (proj.customer_name ? ' · ' + proj.customer_name : ''),
-        market: proj.market,
-      };
-    });
+    // Show market label from first row (techs typically work one market)
+    var firstMarket = rows[0].market;
+    var myMarket = firstMarket === 'appleton' ? 'Appleton' : firstMarket === 'stevens_point' ? 'Stevens Point' : '';
 
-    var myJobs = dispatchJobs.concat(rebuildJobs);
-
-    var firstMarket = dispatchRows[0]?.market || rebuildJobs[0]?.market;
-    var myMarket = firstMarket === 'appleton' ? 'Appleton' : firstMarket === 'stevens_point' ? 'Stevens Point' : firstMarket || '';
     if (marketEl) marketEl.textContent = myMarket || '';
 
+    // Mark which job is currently active
     var activeJobId = TC.activeEntry ? TC.activeEntry.job_id : null;
-    var esc = function(s){ return String(s || '').replace(/'/g,"&#39;"); };
 
     el.innerHTML = myJobs.map(function(j) {
       var isActive = j.id === activeJobId;
@@ -1613,20 +1577,11 @@ async function loadSchedule() {
       var dotClass = isActive ? 'active' : '';
       var cardClass = isActive ? 'active-job' : '';
       var action = isActive ? '● Active' : (isCurrent ? '✓ Selected' : 'Tap to clock in');
-      var subLine = j.sub ? '<div style="font-size:11px;color:var(--muted);margin-top:2px;">' + esc(j.sub) + '</div>' : '';
-      var clickHandler;
-      if (j.kind === 'rebuild') {
-        // Strip 'rebuild:' prefix to get the actual job number for clock-in
-        var albiJobNumber = j.id.replace(/^rebuild:/, '');
-        clickHandler = 'onclick="selectJob(\'' + esc(albiJobNumber) + '\',\'' + esc(j.name) + '\',\'\')"';
-      } else {
-        clickHandler = 'onclick="selectJob(\'' + esc(j.id) + '\',\'' + esc(j.name) + '\',\'\')"';
-      }
-      return '<div class="schedule-job ' + cardClass + '" ' + clickHandler + '>' +
+      var esc = function(s){ return s.replace(/'/g,"&#39;"); };
+      return '<div class="schedule-job ' + cardClass + '" onclick="selectJob(\'' + j.id + '\',\'' + esc(j.name) + '\',\'\')">' +
         '<div class="schedule-job-dot ' + dotClass + '"></div>' +
         '<div class="schedule-job-info">' +
-          '<div class="schedule-job-name">' + esc(j.name) + '</div>' +
-          subLine +
+          '<div class="schedule-job-name">' + j.name + '</div>' +
         '</div>' +
         '<div class="schedule-job-action">' + action + '</div>' +
       '</div>';
@@ -2142,11 +2097,66 @@ async function clockIn() {
     status: 'active'
   };
 
-  var result = await sb('/rest/v1/time_entries', {
+  var resp = await fetch(SB_URL + '/rest/v1/time_entries', {
     method: 'POST',
     headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=representation' },
     body: JSON.stringify(payload)
   });
+
+  // ── 409: open session conflict — offer to close orphan and retry ────
+  // The DB constraint uq_one_open_session_per_employee blocks a second
+  // open session. Most common cause: tech walked away, phone died, or app
+  // closed without clocking out. We find the orphan, ask the user, close
+  // it, and retry the original clock-in.
+  if (resp.status === 409) {
+    var openR = await fetch(SB_URL + '/rest/v1/time_entries?employee_id=eq.' + TC.employee.id +
+      '&clock_out=is.null&select=id,job_name,clock_in&order=clock_in.desc&limit=1', {
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+    });
+    var openRows = openR.ok ? await openR.json() : [];
+    var orphan = openRows[0];
+    if (orphan) {
+      var openedAt = new Date(orphan.clock_in);
+      var hoursAgo = Math.round((Date.now() - openedAt.getTime()) / 3600000);
+      var when = openedAt.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZone: 'America/Chicago' });
+      var msg = 'You still have an open session from ' + hoursAgo + ' hour' + (hoursAgo === 1 ? '' : 's') + ' ago:\n\n' +
+                '• ' + (orphan.job_name || 'Unknown job') + '\n' +
+                '• Started ' + when + '\n\n' +
+                'Close it now and clock in fresh? The unclosed session will be flagged for admin review.';
+      if (confirm(msg)) {
+        // Close orphan with current time as clock_out (so admin can review and adjust)
+        var closeIso = new Date().toISOString();
+        var closeMin = Math.max(0, Math.floor((Date.now() - openedAt.getTime()) / 60000));
+        var closeR = await fetch(SB_URL + '/rest/v1/time_entries?id=eq.' + orphan.id, {
+          method: 'PATCH',
+          headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            clock_out: closeIso,
+            duration_minutes: closeMin,
+            status: 'auto_closed',
+            notes: 'Auto-closed by employee on next clock-in — session was left open from ' + when
+          })
+        });
+        if (!closeR.ok) {
+          toast('Couldn\'t close the open session — please ask office to fix it');
+          if (btn) { btn.style.opacity = '1'; btn.style.pointerEvents = ''; }
+          return;
+        }
+        // Retry the clock-in
+        resp = await fetch(SB_URL + '/rest/v1/time_entries', {
+          method: 'POST',
+          headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=representation' },
+          body: JSON.stringify(payload)
+        });
+      } else {
+        toast('Clock-in cancelled — fix the open session first');
+        if (btn) { btn.style.opacity = '1'; btn.style.pointerEvents = ''; }
+        return;
+      }
+    }
+  }
+
+  var result = resp.ok ? await resp.json() : null;
 
   if (result && result[0]) {
     TC.activeEntry = result[0];
