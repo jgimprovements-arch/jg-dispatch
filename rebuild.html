@@ -1151,7 +1151,20 @@
   .rb-doc-pdf-thumb.rendered { background: var(--bg); }
   .rb-doc-pdf-thumb.rendered .rb-doc-pdf-fallback { display: none; }
 
-  /* Cover photo picker */
+  .doc-back-btn {
+    padding: 6px 12px !important;
+    font-size: 12px !important;
+    font-weight: 600 !important;
+    color: var(--navy) !important;
+    border: 1px solid var(--line) !important;
+    background: var(--card) !important;
+    border-radius: 6px !important;
+  }
+  .doc-back-btn:hover {
+    background: var(--bg) !important;
+    border-color: var(--orange) !important;
+    color: var(--orange) !important;
+  }
   .rb-cover-photo {
     flex: 0 0 auto;
     cursor: pointer;
@@ -1751,6 +1764,7 @@
 <script src="sidebar.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.31/jspdf.plugin.autotable.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script>
@@ -2880,8 +2894,10 @@ function renderDocumentsTab() {
     const cat = state.docFolderOpen;
     const list = docs.filter(d => d.category === cat);
     return `
-      <div class="section-head">
-        <h3><a href="#" id="docBack" style="color:var(--muted);text-decoration:none;">← Folders</a> &nbsp;/&nbsp; ${cat}</h3>
+      <div class="section-head" style="display:flex;align-items:center;gap:12px;">
+        <button class="btn doc-back-btn" id="docBack" title="Back to folders">← Back</button>
+        <h3 style="margin:0;">${cat}</h3>
+        <div style="flex:1;"></div>
         <button class="btn primary" data-upload-cat="${cat}">📎 Upload to ${cat}</button>
       </div>
       ${list.length ? `<div class="doc-list">${list.map(d => renderDocRow(d)).join('')}</div>`
@@ -3510,195 +3526,137 @@ async function generateProjectReportPdf({ sections, docIds, reportTitle, coverPh
     }
   } catch (e) { console.warn('logo fetch failed', e); }
 
-  // ─── COVER SHEET ───
+  // ─── COVER SHEET (HTML-rendered to match brand design) ───
   if (sections.includes('cover')) {
-    // Page background — light off-white
-    doc.setFillColor(248, 249, 252);
-    doc.rect(0, 0, pageW, pageH, 'F');
-
-    const NAVY_DARK = [13, 45, 94];
-    const NAVY_MID = [26, 61, 114];
-    const BLUE_BRIGHT = [30, 90, 200];
-    const ORANGE_BRIGHT = [232, 93, 4];
-
-    // ─── Top-left navy blob (organic shape via overlapping ellipses) ───
-    doc.setFillColor(...NAVY_DARK);
-    // Big rounded rectangle covering top-left quadrant
-    doc.roundedRect(-30, -30, 130, 110, 50, 50, 'F');
-    // Lighter navy accent overlapping
-    doc.setFillColor(...NAVY_MID);
-    doc.roundedRect(60, -20, 95, 75, 40, 40, 'F');
-
-    // ─── JG Logo top-left ───
-    if (logoDataUrl) {
-      try {
-        // White background circle behind logo for contrast
-        doc.setFillColor(255, 255, 255);
-        doc.circle(38, 38, 22, 'F');
-        doc.addImage(logoDataUrl, 'PNG', 22, 22, 32, 32);
-      } catch (_) {}
-    }
-
-    // ─── PROJECT label with orange dash ───
-    doc.setDrawColor(...ORANGE_BRIGHT);
-    doc.setLineWidth(1.4);
-    doc.line(20, 105, 32, 105);
-    doc.setFontSize(9);
-    doc.setTextColor(...NAVY_DARK);
-    doc.setFont('helvetica', 'bold');
-    doc.text('PROJECT', 36, 106, { charSpace: 1.5 });
-
-    // ─── Massive REPORT title ───
-    doc.setFontSize(64);
-    doc.setTextColor(...BLUE_BRIGHT);
-    doc.setFont('helvetica', 'bold');
-    doc.text('REPORT', 20, 135);
-
-    // Year underneath (extracted from report title or current year)
     const titleYear = (reportTitle.match(/\b(20\d{2})\b/) || [, new Date().getFullYear()])[1];
-    doc.setFontSize(48);
-    doc.setTextColor(...BLUE_BRIGHT);
-    doc.text(String(titleYear), 20, 158);
-
-    // ─── Right-side striped circle / photo ───
-    const circleX = pageW - 65;
-    const circleY = 95;
-    const circleR = 45;
-
+    let coverPhotoData = '';
     if (coverPhotoUrl) {
       try {
-        // Fetch & embed the cover photo, clipped to a circle (approximated by drawing
-        // photo then using a circle outline + corner-mask via two overlapping fills)
-        const photoData = await fetchAsDataUrl(coverPhotoUrl);
-        if (photoData) {
-          // jsPDF doesn't natively clip to circle; draw photo as square then mask corners
-          doc.addImage(photoData, 'JPEG', circleX - circleR, circleY - circleR, circleR * 2, circleR * 2, undefined, 'FAST');
-          // Mask corners with background-color circle outline (4 corner squares)
-          // Simpler approach: draw a thick navy ring on top to suggest framing
-          doc.setDrawColor(...NAVY_DARK);
-          doc.setLineWidth(3);
-          doc.circle(circleX, circleY, circleR + 1.5, 'S');
-          // Inner thin orange accent ring
-          doc.setDrawColor(...ORANGE_BRIGHT);
-          doc.setLineWidth(0.5);
-          doc.circle(circleX, circleY, circleR - 1, 'S');
-        } else {
-          throw new Error('photo fetch failed');
-        }
-      } catch {
-        // Fallback to striped circle if photo fails
-        drawStripedCircle();
-      }
-    } else {
-      drawStripedCircle();
+        coverPhotoData = await fetchAsDataUrl(coverPhotoUrl);
+      } catch (_) {}
     }
+    const logoSrc = logoDataUrl || 'https://jgimprovements-arch.github.io/jg-dispatch/logo.png';
 
-    function drawStripedCircle() {
-      doc.setFillColor(...NAVY_DARK);
-      doc.circle(circleX, circleY, circleR, 'F');
-      // Diagonal stripe pattern via clipped lines
-      doc.setDrawColor(...NAVY_MID);
-      doc.setLineWidth(1.5);
-      for (let i = -circleR; i < circleR; i += 4) {
-        doc.line(circleX + i - circleR, circleY - circleR, circleX + i + circleR, circleY + circleR);
-      }
-      // Decorative arc (orange curve to the left of circle)
-      doc.setDrawColor(...ORANGE_BRIGHT);
-      doc.setLineWidth(0.8);
-      doc.circle(circleX - 20, circleY, circleR + 10, 'S');
+    const coverHtml = `
+      <div class="jg-cover" style="
+        width: 816px; height: 1056px; position: relative;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        background: #f8f9fc; overflow: hidden;
+      ">
+        <!-- Top-left navy blob -->
+        <div style="position:absolute; top:-60px; left:-80px; width:520px; height:380px;
+                    background: #0d2d5e; border-radius: 50%;"></div>
+        <!-- Lighter navy accent -->
+        <div style="position:absolute; top:-30px; left:200px; width:340px; height:240px;
+                    background: #1a3d72; border-radius: 50%; opacity:.95;"></div>
+
+        <!-- Logo on white circle -->
+        <div style="position:absolute; top:60px; left:80px; width:140px; height:140px;
+                    background:#fff; border-radius:50%; display:flex; align-items:center; justify-content:center;
+                    box-shadow: 0 4px 16px rgba(0,0,0,.12);">
+          <img src="${logoSrc}" style="width:108px; height:108px; object-fit:contain;" crossorigin="anonymous">
+        </div>
+
+        <!-- PROJECT label with orange dash -->
+        <div style="position:absolute; top:280px; left:75px; display:flex; align-items:center; gap:10px;">
+          <span style="display:inline-block; width:40px; height:3px; background:#e85d04;"></span>
+          <span style="font-size:12px; font-weight:700; color:#0d2d5e; letter-spacing:3px;">PROJECT</span>
+        </div>
+
+        <!-- Massive REPORT title -->
+        <div style="position:absolute; top:300px; left:75px;">
+          <div style="font-size:130px; font-weight:900; color:#1e5ac8; line-height:1; letter-spacing:-2px;
+                      -webkit-text-stroke: 2px #e85d04;">REPORT</div>
+          <div style="font-size:90px; font-weight:900; color:#1e5ac8; line-height:1; margin-top:-10px;
+                      -webkit-text-stroke: 2px #e85d04;">${titleYear}</div>
+        </div>
+
+        <!-- Right-side circle (photo or striped) -->
+        <div style="position:absolute; top:160px; right:60px; width:340px; height:340px;
+                    border-radius:50%; overflow:hidden;
+                    background: ${coverPhotoData ? '#0d2d5e' : 'repeating-linear-gradient(135deg, #1a3d72 0 6px, #0d2d5e 6px 16px)'};
+                    box-shadow: 0 0 0 6px #fff, 0 0 0 8px #1e5ac8;
+                    display:flex; align-items:center; justify-content:center;">
+          ${coverPhotoData
+            ? `<img src="${coverPhotoData}" style="width:100%; height:100%; object-fit:cover;">`
+            : `<div style="text-align:center; color:#fff;">
+                 <div style="font-size:14px; font-weight:700; letter-spacing:3px;">PROJECT SITE PHOTO</div>
+                 <div style="font-size:10px; opacity:.6; margin-top:6px; letter-spacing:1.5px;">NO PHOTO SELECTED</div>
+               </div>`
+          }
+        </div>
+
+        <!-- Decorative orange arc to the left of circle -->
+        <div style="position:absolute; top:140px; right:380px; width:60px; height:380px;
+                    border-left: 2px solid #e85d04; border-radius: 50% 0 0 50%;"></div>
+
+        <!-- Info section -->
+        <div style="position:absolute; top:580px; left:75px; right:75px; max-width:420px;">
+          ${[
+            ['CUSTOMER', escHtml(p.customer_name || '—'), escHtml(p.customer_phone || '')],
+            ['PREPARED BY', escHtml(p.albi_pm_name || '—'), 'Project Manager'],
+            ['PROPERTY', escHtml(p.property_address || '—'), ''],
+            ['CLAIM', `Claim · ${escHtml(p.albi_job_number || '—')}`, ''],
+          ].map(([label, value, sub]) => `
+            <div style="display:flex; align-items:flex-start; gap:24px; padding:14px 0; border-bottom:1px solid #d8dee8;">
+              <div style="font-size:11px; font-weight:700; color:#0d2d5e; letter-spacing:2.5px;
+                          width:120px; padding-top:4px;">${label}</div>
+              <div style="flex:1;">
+                <div style="font-size:18px; font-weight:700; color:#0d2d5e; line-height:1.2;">${value}</div>
+                ${sub ? `<div style="font-size:13px; color:#7884a0; margin-top:2px;">${sub}</div>` : ''}
+              </div>
+            </div>
+          `).join('')}
+        </div>
+
+        <!-- Bottom wave footer (3 stacked bands with smooth curves) -->
+        <svg style="position:absolute; bottom:0; left:0; width:100%; height:130px;" viewBox="0 0 816 130" preserveAspectRatio="none">
+          <path d="M0,40 C 200,10 600,70 816,30 L816,130 L0,130 Z" fill="#1e5ac8"/>
+          <path d="M0,70 C 250,40 550,100 816,60 L816,130 L0,130 Z" fill="#0d2d5e"/>
+          <path d="M0,100 C 200,80 600,130 816,90 L816,130 L0,130 Z" fill="#e85d04"/>
+        </svg>
+
+        <!-- Footer text -->
+        <div style="position:absolute; bottom:14px; left:75px; display:flex; align-items:center; gap:10px; color:#fff;">
+          <span style="display:inline-block; width:8px; height:8px; background:#e85d04; border-radius:50%;"></span>
+          <span style="font-size:12px; font-weight:700; letter-spacing:2.5px;">JG RESTORATION</span>
+        </div>
+        <div style="position:absolute; bottom:14px; right:75px; color:#fff; font-size:12px; font-weight:700; letter-spacing:2.5px;">
+          ${titleYear}
+        </div>
+      </div>
+    `;
+
+    // Render the HTML offscreen and capture via html2canvas
+    const offscreen = document.createElement('div');
+    offscreen.style.cssText = 'position:fixed; top:-99999px; left:-99999px; pointer-events:none;';
+    offscreen.innerHTML = coverHtml;
+    document.body.appendChild(offscreen);
+
+    try {
+      // Wait for the photo to actually load if present
+      const imgs = offscreen.querySelectorAll('img');
+      await Promise.all([...imgs].map(img => img.complete ? null : new Promise(res => {
+        img.onload = res; img.onerror = res;
+      })));
+      // Tiny delay for layout
+      await new Promise(r => setTimeout(r, 100));
+
+      const canvas = await window.html2canvas(offscreen.firstElementChild, {
+        scale: 2,
+        useCORS: true,
+        allowTaint: false,
+        backgroundColor: '#f8f9fc',
+        logging: false,
+      });
+      const coverImageData = canvas.toDataURL('image/jpeg', 0.92);
+      // Page dimensions in mm: 215.9 x 279.4 (US Letter)
+      doc.addImage(coverImageData, 'JPEG', 0, 0, pageW, pageH, undefined, 'FAST');
+    } catch (e) {
+      console.error('Cover render failed', e);
+    } finally {
+      offscreen.remove();
     }
-
-    // PROJECT SITE PHOTO label inside circle (only if no photo)
-    if (!coverPhotoUrl) {
-      doc.setFontSize(9);
-      doc.setTextColor(255, 255, 255);
-      doc.setFont('helvetica', 'bold');
-      doc.text('PROJECT SITE PHOTO', circleX, circleY, { align: 'center', charSpace: 1.5 });
-      doc.setFontSize(7);
-      doc.setTextColor(180, 195, 220);
-      doc.setFont('helvetica', 'normal');
-      doc.text('(NO PHOTO SELECTED)', circleX, circleY + 6, { align: 'center', charSpace: 1.2 });
-    }
-
-    // ─── Decorative orange arc through the right side ───
-    doc.setDrawColor(...ORANGE_BRIGHT);
-    doc.setLineWidth(0.8);
-    doc.line(circleX - circleR - 5, circleY - circleR - 8, circleX - circleR - 25, circleY + circleR + 25);
-
-    // ─── Info rows: PREPARED BY / PROPERTY / CLAIM ───
-    let infoY = 195;
-    const labelX = 20;
-    const valueX = 60;
-
-    const infoRow = (label, value, sublabel) => {
-      doc.setFontSize(8);
-      doc.setTextColor(...NAVY_DARK);
-      doc.setFont('helvetica', 'bold');
-      doc.text(label, labelX, infoY, { charSpace: 1.3 });
-      doc.setFontSize(12);
-      doc.setTextColor(...NAVY_DARK);
-      doc.setFont('helvetica', 'bold');
-      doc.text(String(value || '—'), valueX, infoY);
-      if (sublabel) {
-        doc.setFontSize(9);
-        doc.setTextColor(120, 132, 160);
-        doc.setFont('helvetica', 'normal');
-        doc.text(sublabel, valueX, infoY + 5);
-      }
-      // Divider line
-      doc.setDrawColor(220, 226, 240);
-      doc.setLineWidth(0.3);
-      doc.line(labelX, infoY + 9, pageW / 2 + 10, infoY + 9);
-      infoY += 14;
-    };
-
-    infoRow('CUSTOMER', p.customer_name, p.customer_phone);
-    infoRow('PREPARED BY', p.albi_pm_name, 'Project Manager');
-    infoRow('PROPERTY', p.property_address || '');
-
-    // Claim # — only if available
-    const claimNo = p.albi_job_number || '';
-    doc.setFontSize(8);
-    doc.setTextColor(...NAVY_DARK);
-    doc.setFont('helvetica', 'bold');
-    doc.text('CLAIM', labelX, infoY, { charSpace: 1.3 });
-    doc.setFontSize(11);
-    doc.setTextColor(...NAVY_DARK);
-    doc.setFont('helvetica', 'normal');
-    doc.text(`Claim · ${claimNo}`, valueX, infoY);
-
-    // ─── Bottom wave footer (3 stacked colored bands with curves) ───
-    const footerH = 38;
-    const footerStartY = pageH - footerH;
-
-    // Bottom band: orange (deepest)
-    doc.setFillColor(...ORANGE_BRIGHT);
-    doc.rect(0, pageH - 16, pageW, 16, 'F');
-
-    // Middle wave: navy dark
-    doc.setFillColor(...NAVY_DARK);
-    // Approximate wave using triangles + rect
-    doc.rect(0, pageH - 28, pageW, 16, 'F');
-    // Curved top edge — draw triangles on alternating positions
-    for (let x = 0; x < pageW; x += 8) {
-      doc.triangle(x, pageH - 28, x + 4, pageH - 31, x + 8, pageH - 28, 'F');
-    }
-
-    // Top wave: bright blue
-    doc.setFillColor(...BLUE_BRIGHT);
-    doc.rect(0, footerStartY, pageW, 12, 'F');
-    for (let x = 0; x < pageW; x += 10) {
-      doc.triangle(x, footerStartY, x + 5, footerStartY - 4, x + 10, footerStartY, 'F');
-    }
-
-    // Footer text
-    doc.setFillColor(...ORANGE_BRIGHT);
-    doc.circle(20, pageH - 7, 1.5, 'F');
-    doc.setFontSize(9);
-    doc.setTextColor(255, 255, 255);
-    doc.setFont('helvetica', 'bold');
-    doc.text('JG RESTORATION', 25, pageH - 6, { charSpace: 1.5 });
-    doc.text(String(titleYear), pageW - margin, pageH - 6, { align: 'right', charSpace: 1.5 });
   }
 
   // ─── PROJECT SUMMARY ───
