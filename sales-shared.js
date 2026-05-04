@@ -239,8 +239,18 @@
           }
           if (!displayName) return;
           var m = emp.market;
-          // Validate market value — only Appleton or Stevens Point. null/missing
-          // means "no specific market" → treated as both.
+          // Normalize the market value. The employees table uses
+          // lowercase-underscore convention (stevens_point, appleton) while
+          // the rest of the platform uses proper case with spaces (Stevens
+          // Point, Appleton). Map between them so the validator below
+          // accepts both formats.
+          if (typeof m === 'string') {
+            var mLower = m.toLowerCase().replace(/_/g, ' ').trim();
+            if (mLower === 'appleton') m = 'Appleton';
+            else if (mLower === 'stevens point') m = 'Stevens Point';
+          }
+          // Validate — only Appleton or Stevens Point. Anything else (null,
+          // empty, unknown) means "no specific market" → treated as both.
           if (m && MARKETS.indexOf(m) === -1) m = null;
           map[displayName] = m;
         });
