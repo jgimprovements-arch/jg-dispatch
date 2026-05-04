@@ -200,6 +200,14 @@
       .then(function(rows){
         if (!rows || !rows.length) return null;
         var m = rows[0].market;
+        // Normalize lowercase-underscore convention from the employees table
+        // (e.g. "stevens_point") to the proper-case format ("Stevens Point")
+        // used everywhere else in the platform.
+        if (typeof m === 'string') {
+          var mLower = m.toLowerCase().replace(/_/g, ' ').trim();
+          if (mLower === 'appleton') m = 'Appleton';
+          else if (mLower === 'stevens point') m = 'Stevens Point';
+        }
         if (!m || MARKETS.indexOf(m) === -1) return null;
         try {
           var cache = JSON.parse(localStorage.getItem(REP_MARKET_CACHE_KEY) || '{}');
