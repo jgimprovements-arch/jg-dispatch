@@ -3308,16 +3308,26 @@ async function renderPdfThumbnail(el) {
 async function uploadFilesToCategory(files, category) {
   if (!files || !files.length) return;
   toast(`Uploading ${files.length} file${files.length === 1 ? '' : 's'} to ${category}…`);
+  const uploadedDocs = [];
   for (const f of files) {
-    await uploadDocument(f, category);
+    const inserted = await uploadDocument(f, category, /* skipPush */ true);
+    if (inserted) uploadedDocs.push(inserted);
   }
   await loadDocuments();
   renderDetail();
+
+  // Single Albi push for the whole batch
+  if (uploadedDocs.length === 1) {
+    pushDocumentToAlbi(uploadedDocs[0]);
+  } else if (uploadedDocs.length > 1) {
+    pushDocumentBatchToAlbi(uploadedDocs, category);
+  }
+
   toast(`✓ ${files.length} file${files.length === 1 ? '' : 's'} uploaded to ${category}`);
 }
 
-async function uploadDocument(file, category) {
-  if (!sb || !state.activeProjectId) return;
+async function uploadDocument(file, category, skipPush) {
+  if (!sb || !state.activeProjectId) return null;
   const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
   const path = `projects/${state.activeProjectId}/${Date.now()}-${safeName}`;
   toast(`Uploading ${file.name}…`);
@@ -3326,7 +3336,7 @@ async function uploadDocument(file, category) {
     contentType: file.type || 'application/octet-stream',
     upsert: false,
   });
-  if (upErr) { toast('Upload failed: ' + upErr.message); return; }
+  if (upErr) { toast('Upload failed: ' + upErr.message); return null; }
 
   const { data: urlData } = sb.storage.from('rebuild-documents').getPublicUrl(path);
   const fileUrl = urlData.publicUrl;
@@ -3366,13 +3376,65 @@ async function uploadDocument(file, category) {
     ...photoFields,
   }).select();
 
-  if (insErr) { toast('Save failed: ' + insErr.message); return; }
+  if (insErr) { toast('Save failed: ' + insErr.message); return null; }
   toast(`${file.name} uploaded`);
-  await loadDocuments();
-  renderDetail();
 
-  // Push to Albi
-  pushDocumentToAlbi(inserted[0]);
+  // Skip push when caller (batch upload) handles it
+  if (!skipPush) {
+    await loadDocuments();
+    renderDetail();
+    pushDocumentToAlbi(inserted[0]);
+  }
+  return inserted[0];
+}
+
+async function pushDocumentBatchToAlbi(docs, category) {
+  if (!docs || !docs.length) return;
+  if (!ALBI_DOC_HOOK || ALBI_DOC_HOOK.startsWith('REPLACE_')) {
+    for (const d of docs) {
+      await sb.from('rebuild_documents').update({ push_status: 'skipped' }).eq('id', d.id);
+    }
+    return;
+  }
+  const p = state.activeProject;
+  try {
+    await fetch(ALBI_DOC_HOOK, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        batch: true,
+        project_id: p.id,
+        albi_project_id: p.albi_project_id,
+        albi_job_number: p.albi_job_number,
+        category,
+        file_count: docs.length,
+        // Comma-separated URLs and filenames for simple Zap iteration
+        file_urls: docs.map(d => d.file_url).join(','),
+        filenames: docs.map(d => d.filename).join(','),
+        // Also send as array for Zaps that prefer structured input
+        files: docs.map(d => ({
+          document_id: d.id,
+          filename: d.filename,
+          file_url: d.file_url,
+          mime_type: d.mime_type,
+        })),
+        notes: `JG Platform: ${docs.length} files uploaded under "${category}"`,
+      }),
+      mode: 'no-cors',
+    });
+    // Mark all docs as sent
+    const ids = docs.map(d => d.id);
+    await sb.from('rebuild_documents').update({
+      push_status: 'sent',
+      pushed_to_albi_at: new Date().toISOString(),
+    }).in('id', ids);
+  } catch (e) {
+    console.error('Albi batch push failed:', e);
+    const ids = docs.map(d => d.id);
+    await sb.from('rebuild_documents').update({ push_status: 'failed' }).in('id', ids);
+  }
+  await loadDocuments();
+  if (state.tab === 'documents') renderDetail();
 }
 
 async function pushDocumentToAlbi(doc) {
