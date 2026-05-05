@@ -11646,66 +11646,86 @@ function openTimecardDetail(empName) {
     h += '</div>';
   }
 
-  // ── Entries table ──
+  // ── Entries table (consolidated by day) ──
   if (entries.length) {
-    h += '<div style="font-size:12px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:8px;">Time Entries ('+entries.length+')</div>';
-    h += '<div style="overflow-x:auto;"><table class="tc-table" style="width:100%;font-size:13px;"><thead><tr><th>Date</th><th>Clock In</th><th>Clock Out</th><th>Actual</th><th>Billable</th><th>Break</th><th>Job</th><th>Verified</th><th>Flags</th><th></th></tr></thead><tbody>';
-    entries.forEach(function(e) {
-      var breaks = ST.breaks.filter(function(b){ return b.entry_id === e.id; });
-      var actual = e.duration_minutes || durMins(e);
-      var bill = billableMins(e, breaks);
-      var bkMins = breaks.reduce(function(s,b){ return s + (b.duration_minutes || 0); }, 0);
-      var early = isEarlyClockIn(e.clock_in);
-      var active = !e.clock_out;
-      var missedCO = active && ((Date.now() - new Date(e.clock_in).getTime()) > 12*60*60*1000);
-      var flagCell = '';
-      if (missedCO) {
-        flagCell = '<span style="color:#c62828;font-size:11px;font-weight:700;">⚠ Missed CO<br><button class="btn btn-sm" onclick="editEntry(\''+e.id+'\')">Fix</button> <button class="btn btn-sm" onclick="notifyMissedCO(\''+e.id+'\')" style="background:#6a1b9a;color:#fff;border-color:#6a1b9a;">🔔 Notify</button></span>';
-      } else if (early && !e.approved_early) {
-        flagCell = '<span style="color:#c62828;font-size:11px;font-weight:700;">Early<br><button class="btn btn-sm" onclick="approveEarly(\''+e.id+'\')">Approve</button> <button class="btn btn-sm" onclick="fixEarlyTo730(\''+e.id+'\')" style="background:#e85d04;color:#fff;border-color:#e85d04;" title="Move clock-in to 7:30 AM">→ 7:30</button></span>';
-      } else if (early && e.approved_early) {
-        flagCell = '<span style="color:#2e7d32;font-size:11px;">Early OK</span>';
+    var dayGroupsD = groupEntriesByDay(entries);
+    var dayKeysD = Object.keys(dayGroupsD).sort(function(a,b){
+      var ea = dayGroupsD[a][0], eb = dayGroupsD[b][0];
+      return new Date(ea.clock_in) - new Date(eb.clock_in);
+    });
+
+    h += '<div style="font-size:12px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:8px;">Time Entries — '+dayKeysD.length+(dayKeysD.length===1?' day':' days')+', '+entries.length+' total punches</div>';
+    h += '<div style="overflow-x:auto;"><table class="tc-table" style="width:100%;font-size:13px;"><thead><tr><th>Date</th><th>Clock In</th><th>Clock Out</th><th>Actual</th><th>Billable</th><th>Break</th><th>Punches</th><th>Verified</th><th>Flags</th><th></th></tr></thead><tbody>';
+
+    dayKeysD.forEach(function(dkD){
+      var dayEntriesD = dayGroupsD[dkD];
+      var firstD = dayEntriesD[0];
+      var dmD = dayMetrics(dayEntriesD, ST.breaks);
+      var activeD = dmD.hasOpen;
+      var lastED = dayEntriesD[dayEntriesD.length-1];
+      var missedCOD = activeD && ((Date.now() - new Date(lastED.clock_in).getTime()) > 12*60*60*1000);
+
+      var needsApprovalD = dayEntriesD.some(function(e){ return isEarlyClockIn(e.clock_in) && !e.approved_early; });
+      var anyAfterHoursD = dayEntriesD.some(function(e){ return isAfterHoursAdmin(e.clock_in); });
+      var anyOnCallNeedsBonusD = dayEntriesD.some(function(e){ return e.on_call_status === 'yes' && !e.on_call_bonus_id; });
+      var anyOnCallPaidD = dayEntriesD.some(function(e){ return e.on_call_status === 'yes' && e.on_call_bonus_id; });
+      var anyAwaitingTechConfirmD = dayEntriesD.some(function(e){ return isAfterHoursAdmin(e.clock_in) && (!e.on_call_status || e.on_call_status === 'unconfirmed'); });
+
+      var flagCellD = '';
+      if (missedCOD) {
+        flagCellD = '<span style="color:#c62828;font-size:11px;font-weight:700;">⚠ Missed CO</span>';
+      } else if (needsApprovalD) {
+        var earlyED = dayEntriesD.find(function(e){ return isEarlyClockIn(e.clock_in) && !e.approved_early; });
+        flagCellD = '<span style="color:#c62828;font-size:11px;font-weight:700;">Early<br><button class="btn btn-sm" onclick="event.stopPropagation();approveEarly(\''+earlyED.id+'\')">Approve</button> <button class="btn btn-sm" onclick="event.stopPropagation();fixEarlyTo730(\''+earlyED.id+'\')" style="background:#e85d04;color:#fff;border-color:#e85d04;">→ 7:30</button></span>';
+      } else if (dmD.anyEarly && dmD.anyApprovedEarly) {
+        flagCellD = '<span style="color:#2e7d32;font-size:11px;">Early OK</span>';
       }
-      // After-hours / on-call flag — independent, append regardless of early/missed status
-      if (isAfterHoursAdmin(e.clock_in)) {
-        var ocStatus_m = e.on_call_status || 'na';
-        var ocChip_m = '';
-        if (ocStatus_m === 'yes') {
-          if (e.on_call_bonus_id) {
-            ocChip_m = '<div style="color:#2e7d32;font-size:11px;font-weight:700;margin-top:4px;">🌙 ✓ $50 bonus paid</div>';
-          } else {
-            ocChip_m = '<div style="margin-top:4px;"><div style="color:#e65100;font-size:11px;font-weight:700;margin-bottom:2px;">🌙 On-call</div><button class="btn btn-sm" onclick="addOnCallBonus(\''+e.id+'\')" style="background:#2e7d32;color:#fff;border-color:#2e7d32;">+ $50 Bonus</button></div>';
-          }
-        } else if (ocStatus_m === 'no') {
-          ocChip_m = '<div style="color:var(--muted);font-size:11px;margin-top:4px;">🌙 After-hrs (not on-call)</div>';
+      if (anyAfterHoursD) {
+        var afterChip = '';
+        if (anyOnCallPaidD) {
+          afterChip = '<div style="color:#2e7d32;font-size:11px;font-weight:700;margin-top:4px;">🌙 ✓ $50 bonus paid</div>';
+        } else if (anyOnCallNeedsBonusD) {
+          var ocED = dayEntriesD.find(function(e){ return e.on_call_status === 'yes' && !e.on_call_bonus_id; });
+          afterChip = '<div style="margin-top:4px;"><div style="color:#e65100;font-size:11px;font-weight:700;margin-bottom:2px;">🌙 On-call</div><button class="btn btn-sm" onclick="event.stopPropagation();addOnCallBonus(\''+ocED.id+'\')" style="background:#2e7d32;color:#fff;border-color:#2e7d32;">+ $50 Bonus</button></div>';
+        } else if (anyAwaitingTechConfirmD) {
+          afterChip = '<div style="color:#e65100;font-size:11px;font-weight:700;margin-top:4px;">🌙 Awaiting tech confirm</div>';
         } else {
-          ocChip_m = '<div style="color:#e65100;font-size:11px;font-weight:700;margin-top:4px;">🌙 Awaiting tech confirm</div>';
+          afterChip = '<div style="color:var(--muted);font-size:11px;margin-top:4px;">🌙 After-hrs (not on-call)</div>';
         }
-        flagCell = (flagCell || '') + ocChip_m;
+        flagCellD = (flagCellD || '') + afterChip;
       }
-      var verifiedCell;
-      if (e.self_verified) {
-        verifiedCell = '<span title="Verified — click to unverify" style="color:#2e7d32;font-size:16px;font-weight:700;cursor:pointer;" onclick="toggleVerified(\''+e.id+'\',false)">✓</span>';
-      } else if (active) {
-        verifiedCell = '<span style="color:var(--muted);font-size:11px;">—</span>';
+
+      var allVerifiedD = dayEntriesD.every(function(e){ return e.self_verified || !e.clock_out; });
+      var verifiedCellD;
+      if (allVerifiedD && !activeD) {
+        verifiedCellD = '<span style="color:#2e7d32;font-size:16px;font-weight:700;">✓</span>';
+      } else if (activeD) {
+        verifiedCellD = '<span style="color:var(--muted);font-size:11px;">—</span>';
       } else {
-        verifiedCell = (typeof isAdmin === 'function' && isAdmin())
-          ? '<button title="Mark as verified" onclick="toggleVerified(\''+e.id+'\',true)" style="padding:2px 8px;border:1px solid #c62828;background:transparent;color:#c62828;border-radius:4px;font-size:10px;font-weight:700;cursor:pointer;font-family:inherit;">unverified</button>'
-          : '<span style="color:#c62828;font-size:11px;">unverified</span>';
+        verifiedCellD = '<span style="color:#c62828;font-size:11px;">unverified</span>';
       }
-      var rowBg = missedCO ? 'background:rgba(198,40,40,.08);' : (early && !e.approved_early ? 'background:rgba(198,40,40,.04);' : '');
-      h += '<tr style="'+rowBg+'">';
-      h += '<td>'+fmtD(new Date(e.clock_in))+'</td>';
-      h += '<td class="mono"'+(early && !e.approved_early ? ' style="color:#c62828;font-weight:700;"' : '')+'>'+fmt(e.clock_in)+'</td>';
-      h += '<td class="mono">'+(active ? (missedCO ? '<span class="badge" style="background:#c62828;color:#fff;">MISSED</span>' : '<span class="badge badge-green">Active</span>') : fmt(e.clock_out))+'</td>';
-      h += '<td>'+fmtDur(actual)+'</td>';
-      h += '<td><strong>'+fmtDur(bill)+'</strong></td>';
-      h += '<td>'+(bkMins ? fmtDur(bkMins) : '-')+'</td>';
-      h += '<td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+(e.job_name || '-')+'</td>';
-      h += '<td style="text-align:center;">'+verifiedCell+'</td>';
-      h += '<td>'+flagCell+'</td>';
+
+      var breakDisplayD;
+      if (dmD.totalBreakMins === 0) breakDisplayD = '-';
+      else if (dmD.autoBreakMins > 0) breakDisplayD = '<span title="Includes ' + dmD.autoBreakMins + 'm auto-break (>6.5h day)">' + fmtDur(dmD.totalBreakMins) + ' <span style="font-size:9px;color:#e85d04;font-weight:700;">AUTO</span></span>';
+      else breakDisplayD = fmtDur(dmD.totalBreakMins);
+
+      var rowBgD = missedCOD ? 'background:rgba(198,40,40,.08);'
+                : (needsApprovalD ? 'background:rgba(198,40,40,.04);' : '');
+      var clickAttrD = ' style="cursor:pointer;'+rowBgD+'" onclick="_openDayDetailModal(\''+escAttr(firstD.employee_name)+'\',\''+_dayKey(firstD.clock_in)+'\')"';
+
+      h += '<tr'+clickAttrD+'>';
+      h += '<td>'+fmtD(new Date(firstD.clock_in))+'</td>';
+      h += '<td class="mono"'+(dmD.anyEarly && !dmD.anyApprovedEarly?' style="color:#c62828;font-weight:700;"':'')+'>'+fmt(dmD.firstIn)+'</td>';
+      h += '<td class="mono">'+(activeD?(missedCOD?'<span class="badge" style="background:#c62828;color:#fff;">MISSED</span>':'<span class="badge badge-green">Active</span>'):fmt(dmD.lastOut))+'</td>';
+      h += '<td>'+fmtDur(dmD.actualMins)+'</td>';
+      h += '<td><strong>'+fmtDur(dmD.billableMins)+'</strong></td>';
+      h += '<td>'+breakDisplayD+'</td>';
+      h += '<td style="font-size:11px;"><span style="background:rgba(13,45,94,.06);padding:2px 8px;border-radius:10px;color:var(--navy);font-weight:700;">'+dayEntriesD.length+(dayEntriesD.length===1?' punch':' punches')+'</span></td>';
+      h += '<td style="text-align:center;">'+verifiedCellD+'</td>';
+      h += '<td>'+flagCellD+'</td>';
       if (!isApproved && typeof isAdmin === 'function' && isAdmin()) {
-        h += '<td><button class="btn btn-sm" onclick="editEntry(\''+e.id+'\')">Edit</button> <button class="btn btn-sm" onclick="openBreakEditor(\''+e.id+'\')" style="background:#f5a623;color:#fff;border-color:#f5a623;font-size:14px;" title="Edit breaks">🥪</button> <button class="btn btn-sm" onclick="openSplitEntry(\''+e.id+'\')" style="background:#0d2d5e;color:#fff;border-color:#0d2d5e;" title="Split into two entries">✂️</button> <button class="btn btn-sm" onclick="deleteEntry(\''+e.id+'\')" style="background:#c62828;color:#fff;border-color:#c62828;" title="Delete entry">🗑</button></td>';
+        h += '<td><button class="btn btn-sm" onclick="event.stopPropagation();_openDayDetailModal(\''+escAttr(firstD.employee_name)+'\',\''+_dayKey(firstD.clock_in)+'\')">Open</button></td>';
       } else {
         h += '<td></td>';
       }
