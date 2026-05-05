@@ -586,7 +586,10 @@ body {
           <button id="filter-sp" onclick="setJobMarket('Stevens Point')" style="padding:4px 10px;border-radius:20px;border:1.5px solid var(--border);font-size:11px;font-weight:600;cursor:pointer;background:transparent;color:var(--muted);">Stevens Pt</button>
         </div>
       </div>
-      <!-- Morning Meeting quick-clock (visible to all — for when schedule isn't ready) -->
+      <!-- Morning Meeting quick-clock — DO NOT REMOVE.
+           Non-job clock-in for ALL employees (incl. techs) when the dispatcher
+           schedule isn't ready in the morning. Without this, techs wait unpaid.
+           See selectMorningMeeting() function for full context. -->
       <div id="morning-meeting-option" style="margin-bottom:10px;">
         <button onclick="selectMorningMeeting()" id="morning-meeting-btn" style="width:100%;padding:12px 14px;border-radius:10px;border:1.5px dashed #e85d04;background:rgba(232,93,4,.04);color:#e85d04;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:space-between;transition:all .15s;">
           <span style="display:flex;align-items:center;gap:8px;">
@@ -1868,6 +1871,15 @@ function selectOfficeHours() {
   openJobSheet('', 'Office Hours', TC.clockedIn && TC.activeEntry);
 }
 
+// ──────────────────────────────────────────────────────────────────────────
+// MORNING MEETING — DO NOT REMOVE.
+// This is a non-job clock-in option visible to ALL employees (including techs).
+// Use case: dispatcher schedule isn't ready first thing in the morning, but
+// techs need something to clock into. Without this they wait unpaid.
+// Saved as job_name='Morning Meeting' with no job_id, status='active'.
+// Tech uses Switch Job to move from Morning Meeting → real job once ready.
+// Built 2026-05-05 after this feature was unintentionally removed in a refactor.
+// ──────────────────────────────────────────────────────────────────────────
 // Select Morning Meeting (non-job clock-in available to all employees —
 // used when schedule isn't ready yet and tech needs something to clock into).
 // Saved as job_name='Morning Meeting' with no job_id, status='active'.
@@ -3107,6 +3119,16 @@ function selectSwitchJob(id, name) {
   if (sel) { sel.textContent = '✓ ' + name; sel.style.display = 'block'; }
 }
 
+// ──────────────────────────────────────────────────────────────────────────
+// SUBMIT SWITCH JOB — ATOMIC, DO NOT SIMPLIFY.
+// This function MUST: (1) await the close-current-entry PATCH, (2) verify it
+// succeeded, (3) only then POST the new entry, (4) roll back on POST failure.
+// Reason: the DB constraint uq_one_open_session_per_employee blocks any
+// second open session. If the PATCH is still in flight when POST arrives,
+// PostgreSQL returns 409 and the switch silently fails. From 2026-04-29 to
+// 2026-05-04 a non-atomic version of this code locked every tech into one
+// job per day across the whole company. Don't go back there.
+// ──────────────────────────────────────────────────────────────────────────
 async function submitSwitchJob() {
   if (!_switchJobId) { toast('Select a job first'); return; }
   if (!TC.activeEntry) { toast('Not clocked in'); return; }
