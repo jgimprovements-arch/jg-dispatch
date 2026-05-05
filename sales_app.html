@@ -767,11 +767,19 @@ if ('serviceWorker' in navigator) {
     </div>
     <!-- Touches view -->
     <div id="touches-view">
-      <div class="search-bar">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#6b7a96" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
-        <input type="text" placeholder="Search notes, partner..." id="touches-search-input" oninput="filterTouchesSA(this.value)" autocomplete="off" autocapitalize="off" autocorrect="off">
+      <!-- View toggle: List vs Week (calendar). Same pattern as routes. -->
+      <div style="display:flex;gap:4px;background:rgba(13,45,94,.06);border-radius:18px;padding:3px;margin-bottom:12px;width:fit-content;">
+        <button id="tv-list" onclick="setTouchesViewMobile('list')" style="padding:6px 16px;border-radius:14px;border:none;background:#fff;color:var(--navy);font-size:11px;font-weight:700;cursor:pointer;font-family:inherit;box-shadow:0 1px 3px rgba(13,45,94,.1);">📋 List</button>
+        <button id="tv-week" onclick="setTouchesViewMobile('week')" style="padding:6px 16px;border-radius:14px;border:none;background:transparent;color:var(--navy);font-size:11px;font-weight:700;cursor:pointer;font-family:inherit;">📅 Week</button>
       </div>
-      <div id="touches-list-sa"></div>
+      <div id="touches-list-mode">
+        <div class="search-bar">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#6b7a96" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+          <input type="text" placeholder="Search notes, partner..." id="touches-search-input" oninput="filterTouchesSA(this.value)" autocomplete="off" autocapitalize="off" autocorrect="off">
+        </div>
+        <div id="touches-list-sa"></div>
+      </div>
+      <div id="touches-week-mode" style="display:none;"></div>
     </div>
     <!-- Chases view -->
     <div id="chases-view" style="display:none;">
@@ -3536,6 +3544,270 @@ async function deleteChaseMobile(chaseId) {
 // Mobile routes screen has two views — List (existing) and Week (calendar
 // strip showing 7 days). User toggles via pills at top of screen. Week view
 // shows real routes prominent + recurring template predictions faded.
+
+// ── TOUCHES WEEK VIEW (MOBILE) ────────────────────────────────────────────
+// Same week-strip pattern as the routes mobile week view, but shows
+// touches counts (past) and scheduled routes (future) instead of just routes.
+
+function setTouchesViewMobile(view) {
+  APP.touchesView = view;
+  var p1 = document.getElementById('tv-list');
+  var p2 = document.getElementById('tv-week');
+  if (p1 && p2) {
+    if (view === 'list') {
+      p1.style.background = '#fff'; p1.style.boxShadow = '0 1px 3px rgba(13,45,94,.1)';
+      p2.style.background = 'transparent'; p2.style.boxShadow = 'none';
+    } else {
+      p2.style.background = '#fff'; p2.style.boxShadow = '0 1px 3px rgba(13,45,94,.1)';
+      p1.style.background = 'transparent'; p1.style.boxShadow = 'none';
+    }
+  }
+  document.getElementById('touches-list-mode').style.display = view === 'list' ? 'block' : 'none';
+  document.getElementById('touches-week-mode').style.display = view === 'week' ? 'block' : 'none';
+  if (view === 'week') renderTouchesWeek();
+}
+
+function renderTouchesWeek() {
+  var el = document.getElementById('touches-week-mode');
+  if (!el) return;
+  if (!APP.touchWeekOffset) APP.touchWeekOffset = 0;
+
+  var now = new Date();
+  now.setHours(0,0,0,0);
+  var sunday = new Date(now);
+  sunday.setDate(now.getDate() - now.getDay() + (APP.touchWeekOffset * 7));
+
+  var weekDays = [];
+  for (var i = 0; i < 7; i++) {
+    var d = new Date(sunday);
+    d.setDate(sunday.getDate() + i);
+    weekDays.push(d);
+  }
+  var fmtKey = function(d){ return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0'); };
+  var todayKey = fmtKey(now);
+
+  // Group touches by date — apply rep market filter (same as desktop)
+  var market = APP.repMarket || 'Appleton';
+  var touchesByDate = {};
+  (APP.touches || []).forEach(function(t){
+    if (!t.touch_date) return;
+    if (window.JG_SHARED && typeof window.JG_SHARED.repMatchesMarket === 'function') {
+      if (!window.JG_SHARED.repMatchesMarket(t.logged_by, market)) return;
+    }
+    if (!touchesByDate[t.touch_date]) touchesByDate[t.touch_date] = [];
+    touchesByDate[t.touch_date].push(t);
+  });
+
+  // Routes by date
+  var routesByDate = {};
+  (APP.routes || []).forEach(function(r){
+    if (!r.route_date) return;
+    if (!routesByDate[r.route_date]) routesByDate[r.route_date] = [];
+    routesByDate[r.route_date].push(r);
+  });
+
+  // Template fires for the displayed week
+  var templateFires = {};
+  (APP.routeTemplates || []).forEach(function(t){
+    if (!t.recurrence || !t.active) return;
+    weekDays.forEach(function(day){
+      var dow = day.getDay();
+      var dom = day.getDate();
+      var fires = false;
+      if (t.recurrence === 'weekly') {
+        fires = (t.recurrence_day === dow);
+      } else if (t.recurrence === 'biweekly') {
+        if (t.recurrence_day === dow) {
+          var occ = Math.ceil(dom / 7);
+          fires = (occ % 2 === 1);
+        }
+      } else if (t.recurrence === 'monthly') {
+        var pat = t.recurrence_pattern || 'day-of-month';
+        if (pat === 'day-of-month') {
+          fires = (t.recurrence_day === dom);
+        } else if (pat === 'nth-weekday') {
+          if (t.recurrence_day === dow) {
+            var occurrence = Math.ceil(dom / 7);
+            if (t.recurrence_week_of_month === -1) {
+              var nx = new Date(day); nx.setDate(dom + 7);
+              fires = (nx.getMonth() !== day.getMonth());
+            } else {
+              fires = (occurrence === t.recurrence_week_of_month);
+            }
+          }
+        }
+      }
+      if (fires) {
+        var k = fmtKey(day);
+        if (!templateFires[k]) templateFires[k] = [];
+        templateFires[k].push(t);
+      }
+    });
+  });
+
+  var html = '';
+  // Week range header
+  var weekStart = weekDays[0];
+  var weekEnd = weekDays[6];
+  var rangeStr = weekStart.toLocaleDateString('en-US',{month:'short',day:'numeric'}) + ' – ' + weekEnd.toLocaleDateString('en-US',{month:'short',day:'numeric'});
+  html += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">';
+  html += '<button onclick="changeTouchWeekMobile(-1)" style="background:transparent;border:1.5px solid var(--border);border-radius:10px;padding:8px 14px;font-size:14px;cursor:pointer;font-family:inherit;color:var(--navy);">◀</button>';
+  html += '<div style="font-size:14px;font-weight:700;color:var(--navy);">' + rangeStr + '</div>';
+  html += '<button onclick="changeTouchWeekMobile(1)" style="background:transparent;border:1.5px solid var(--border);border-radius:10px;padding:8px 14px;font-size:14px;cursor:pointer;font-family:inherit;color:var(--navy);">▶</button>';
+  html += '</div>';
+
+  // Day strip — vertical list of 7 days for mobile readability
+  weekDays.forEach(function(day){
+    var key = fmtKey(day);
+    var isToday = (key === todayKey);
+    var dayTouches = touchesByDate[key] || [];
+    var dayRoutes = routesByDate[key] || [];
+    var dayTemplates = templateFires[key] || [];
+    dayTemplates = dayTemplates.filter(function(t){
+      return !dayRoutes.some(function(r){ return r.notes && r.notes.indexOf('From template: '+t.name) !== -1; });
+    });
+
+    var hasContent = dayTouches.length > 0 || dayRoutes.length > 0 || dayTemplates.length > 0;
+    var dayName = day.toLocaleDateString('en-US',{weekday:'short'});
+    var dayNum = day.getDate();
+    var bg = isToday ? 'rgba(232,93,4,.06)' : 'var(--card)';
+    var brd = isToday ? '2px solid var(--orange)' : '1px solid var(--border)';
+    var clickAttr = hasContent ? 'onclick="openTouchDayDetailMobile(\'' + key + '\')"' : '';
+    var cursorStyle = hasContent ? 'cursor:pointer;' : '';
+
+    html += '<div ' + clickAttr + ' style="background:' + bg + ';border:' + brd + ';border-radius:12px;padding:12px;margin-bottom:8px;' + cursorStyle + '">';
+    html += '<div style="display:flex;align-items:baseline;gap:8px;margin-bottom:' + (hasContent ? '8px' : '0') + ';">';
+    html += '<div style="font-size:11px;font-weight:700;color:' + (isToday?'var(--orange)':'var(--muted)') + ';text-transform:uppercase;letter-spacing:.04em;">' + dayName + '</div>';
+    html += '<div style="font-size:18px;font-weight:800;color:' + (isToday?'var(--orange)':'var(--navy)') + ';">' + dayNum + '</div>';
+    if (isToday) html += '<span style="font-size:9px;font-weight:700;padding:2px 7px;border-radius:4px;background:var(--orange);color:#fff;">TODAY</span>';
+    html += '</div>';
+
+    if (dayTouches.length > 0) {
+      var pos = dayTouches.filter(function(t){ return t.outcome === 'Positive'; }).length;
+      html += '<div style="background:linear-gradient(135deg, var(--ok) 0%, #176e3c 100%);color:#fff;border-radius:8px;padding:8px 12px;font-size:13px;font-weight:700;margin-bottom:5px;box-shadow:0 2px 8px rgba(31,139,76,.2);">';
+      html += '✓ ' + dayTouches.length + ' touch' + (dayTouches.length !== 1 ? 'es' : '');
+      if (pos > 0) html += ' <span style="opacity:.85;font-weight:500;font-size:11px;">(' + pos + ' positive)</span>';
+      html += '</div>';
+    }
+    dayRoutes.forEach(function(r){
+      var stops = r.stops || [];
+      var done = stops.filter(function(s){ return s.completed; }).length;
+      html += '<div style="background:linear-gradient(135deg, var(--orange) 0%, #d05303 100%);color:#fff;border-radius:8px;padding:8px 12px;font-size:13px;font-weight:700;margin-bottom:5px;box-shadow:0 2px 8px rgba(232,93,4,.2);">';
+      html += '🚗 ' + (r.name || 'Route') + ' <span style="opacity:.85;font-weight:500;font-size:11px;">' + done + '/' + stops.length + '</span>';
+      html += '</div>';
+    });
+    dayTemplates.forEach(function(t){
+      html += '<div style="background:rgba(232,93,4,.1);color:var(--orange);border:1px dashed rgba(232,93,4,.4);border-radius:8px;padding:7px 12px;font-size:12px;font-weight:700;margin-bottom:5px;">';
+      html += '⟳ ' + (t.name || 'Recurring');
+      html += '</div>';
+    });
+
+    html += '</div>';
+  });
+
+  // Legend
+  html += '<div style="display:flex;gap:12px;margin-top:8px;font-size:10px;color:var(--muted);justify-content:center;flex-wrap:wrap;">';
+  html += '<div style="display:flex;align-items:center;gap:5px;"><span style="width:10px;height:10px;background:linear-gradient(135deg, var(--ok) 0%, #176e3c 100%);border-radius:2px;"></span>Touches</div>';
+  html += '<div style="display:flex;align-items:center;gap:5px;"><span style="width:10px;height:10px;background:linear-gradient(135deg, var(--orange) 0%, #d05303 100%);border-radius:2px;"></span>Route</div>';
+  html += '<div style="display:flex;align-items:center;gap:5px;"><span style="width:10px;height:10px;background:rgba(232,93,4,.1);border:1px dashed rgba(232,93,4,.4);border-radius:2px;"></span>Recurring</div>';
+  html += '</div>';
+
+  el.innerHTML = html;
+}
+
+function changeTouchWeekMobile(delta) {
+  if (!APP.touchWeekOffset) APP.touchWeekOffset = 0;
+  APP.touchWeekOffset += delta;
+  renderTouchesWeek();
+}
+
+// Day detail popup — uses partner-detail-overlay for the sheet UI
+function openTouchDayDetailMobile(dateStr) {
+  APP._touchDayDate = dateStr;
+  var market = APP.repMarket || 'Appleton';
+
+  var dayTouches = (APP.touches || []).filter(function(t){
+    if (t.touch_date !== dateStr) return false;
+    if (window.JG_SHARED && typeof window.JG_SHARED.repMatchesMarket === 'function') {
+      return window.JG_SHARED.repMatchesMarket(t.logged_by, market);
+    }
+    return true;
+  });
+  var dayRoutes = (APP.routes || []).filter(function(r){ return r.route_date === dateStr; });
+
+  var dDt = new Date(dateStr + 'T00:00:00');
+  var dLabel = dDt.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
+  var todayKey = (function(){
+    var t = new Date(); t.setHours(0,0,0,0);
+    return t.getFullYear() + '-' + String(t.getMonth()+1).padStart(2,'0') + '-' + String(t.getDate()).padStart(2,'0');
+  })();
+  var isTodayDay = dateStr === todayKey;
+
+  var html = '';
+  html += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">';
+  html += '<div style="font-size:16px;font-weight:700;color:var(--navy);">' + dLabel;
+  if (isTodayDay) html += ' <span style="font-size:9px;background:var(--orange);color:#fff;padding:2px 7px;border-radius:4px;font-weight:700;margin-left:5px;">TODAY</span>';
+  html += '</div>';
+  html += '<button onclick="closeTouchDayDetailMobile()" style="border:none;background:transparent;font-size:22px;cursor:pointer;color:var(--muted);padding:0;width:32px;height:32px;">✕</button>';
+  html += '</div>';
+
+  // Summary chips
+  html += '<div style="display:flex;gap:8px;margin-bottom:14px;font-size:11px;flex-wrap:wrap;">';
+  if (dayTouches.length > 0) {
+    var pos = dayTouches.filter(function(t){ return t.outcome === 'Positive'; }).length;
+    html += '<div style="background:rgba(31,139,76,.1);color:var(--ok);padding:5px 10px;border-radius:6px;font-weight:700;">✓ ' + dayTouches.length + (pos > 0 ? ' · ' + pos + ' +' : '') + '</div>';
+  }
+  if (dayRoutes.length > 0) {
+    html += '<div style="background:rgba(232,93,4,.1);color:var(--orange);padding:5px 10px;border-radius:6px;font-weight:700;">🚗 ' + dayRoutes.length + ' route' + (dayRoutes.length !== 1 ? 's' : '') + '</div>';
+  }
+  html += '</div>';
+
+  // Routes section
+  if (dayRoutes.length > 0) {
+    html += '<div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;margin-bottom:6px;">Routes</div>';
+    dayRoutes.forEach(function(r){
+      var rStops = r.stops || [];
+      var rDone = rStops.filter(function(s){ return s.completed; }).length;
+      html += '<div onclick="closeTouchDayDetailMobile();openRouteDetailMobile(\'' + r.id + '\')" style="padding:10px 12px;background:rgba(232,93,4,.04);border:1px solid rgba(232,93,4,.2);border-radius:10px;margin-bottom:6px;cursor:pointer;">';
+      html += '<div style="font-size:13px;font-weight:700;color:var(--navy);">🚗 ' + (r.name || (rStops.length + ' stops')) + '</div>';
+      if (r.rep_name) html += '<div style="font-size:11px;color:var(--muted);margin-top:2px;">' + r.rep_name + ' · ' + (r.status || 'Planned') + ' · ' + rDone + '/' + rStops.length + '</div>';
+      html += '</div>';
+    });
+  }
+
+  // Touches
+  if (dayTouches.length > 0) {
+    html += '<div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;margin:14px 0 6px;">Touches Logged</div>';
+    dayTouches.slice().sort(function(a,b){ return (b.logged_at||'').localeCompare(a.logged_at||''); }).forEach(function(t){
+      var icon = t.touch_type === 'Visit' ? '🚗' : t.touch_type === 'Call' ? '📞' : t.touch_type === 'Drop-in' ? '📦' : t.touch_type === 'Email' ? '✉️' : t.touch_type === 'Text' ? '💬' : t.touch_type === 'Event' ? '🎟' : '·';
+      var oColor = t.outcome === 'Positive' ? 'var(--ok)' : t.outcome === 'Not Interested' ? 'var(--danger)' : 'var(--muted)';
+      html += '<div style="padding:10px 0;border-bottom:1px solid var(--border);">';
+      html += '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">';
+      html += '<span>' + icon + '</span>';
+      html += '<span style="font-size:13px;font-weight:700;color:var(--navy);">' + (t.partner_name || '(Unknown)') + '</span>';
+      if (t.touch_type) html += '<span style="font-size:9px;background:rgba(13,45,94,.06);color:var(--navy);padding:1px 6px;border-radius:4px;font-weight:600;">' + t.touch_type + '</span>';
+      if (t.outcome) html += '<span style="font-size:9px;font-weight:700;color:' + oColor + ';">' + t.outcome + '</span>';
+      html += '</div>';
+      if (t.notes) html += '<div style="font-size:12px;color:var(--text);margin-top:4px;line-height:1.4;">' + t.notes + '</div>';
+      if (t.logged_by) html += '<div style="font-size:10px;color:var(--muted);margin-top:3px;">by ' + t.logged_by + '</div>';
+      html += '</div>';
+    });
+  }
+
+  if (dayTouches.length === 0 && dayRoutes.length === 0) {
+    html += '<div style="text-align:center;padding:30px 20px;color:var(--muted);font-style:italic;">No activity on this day.</div>';
+  }
+
+  document.getElementById('partner-detail-body').innerHTML = html;
+  document.getElementById('partner-detail-overlay').classList.add('open');
+  _navPushOverlay('partner-detail-overlay', closeTouchDayDetailMobile);
+}
+
+function closeTouchDayDetailMobile() {
+  document.getElementById('partner-detail-overlay').classList.remove('open');
+  _navPopOverlay('partner-detail-overlay');
+  APP._touchDayDate = null;
+}
 
 function setRoutesViewMobile(view) {
   APP.routesView = view;

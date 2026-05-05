@@ -2319,7 +2319,11 @@ function _bgSignature() {
     ST._calPopupRouteId || '',
     ST._calPopupTemplateId || '',
     ST._calPopupDate || '',
-    (ST.routeTemplates || []).length
+    (ST.routeTemplates || []).length,
+    // Touches calendar state
+    ST.touchesView || 'list',
+    ST.touchCalMonth || '',
+    ST._touchDayPopupDate || ''
   ].join('|');
 }
 
@@ -2600,7 +2604,15 @@ function _renderNow() {
 
     h += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">';
     h += '<div style="font-size:13px;font-weight:700;color:var(--navy);">' + headline + '</div>';
+    h += '<div style="display:flex;align-items:center;gap:10px;">';
+    // List/Calendar toggle pills — same pattern as routes view toggle
+    if (!ST.touchesView) ST.touchesView = 'list';
+    h += '<div style="display:flex;gap:4px;background:rgba(13,45,94,.06);border-radius:18px;padding:3px;">';
+    h += '<button onclick="ST.touchesView=\'list\';render()" style="padding:5px 14px;border-radius:14px;border:none;background:' + (ST.touchesView==='list'?'#fff':'transparent') + ';color:var(--navy);font-size:11px;font-weight:700;cursor:pointer;font-family:DM Sans,sans-serif;box-shadow:' + (ST.touchesView==='list'?'0 1px 3px rgba(13,45,94,.1)':'none') + ';">📋 List</button>';
+    h += '<button onclick="ST.touchesView=\'calendar\';render()" style="padding:5px 14px;border-radius:14px;border:none;background:' + (ST.touchesView==='calendar'?'#fff':'transparent') + ';color:var(--navy);font-size:11px;font-weight:700;cursor:pointer;font-family:DM Sans,sans-serif;box-shadow:' + (ST.touchesView==='calendar'?'0 1px 3px rgba(13,45,94,.1)':'none') + ';">📅 Calendar</button>';
+    h += '</div>';
     h += '<button class="btn btn-gold" onclick="ST.modal=\'log-touch\';ST.selected=null;render()">+ Log Touch</button>';
+    h += '</div>';
     h += '</div>';
 
     h += '<div class="sales-stat-row" style="margin-bottom:16px;">';
@@ -2665,6 +2677,9 @@ function _renderNow() {
       });
       return '<select onchange="ST.' + id + '=this.value;render()" style="padding:6px 28px 6px 12px;border-radius:6px;border:1.5px solid ' + bc + ';font-size:12px;font-weight:600;font-family:DM Sans,sans-serif;background:' + bg + ';color:' + col + ';cursor:pointer;outline:none;appearance:none;-webkit-appearance:none;background-image:url(\'data:image/svg+xml;utf8,<svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;10&quot; height=&quot;10&quot; viewBox=&quot;0 0 10 10&quot;><path d=&quot;M2 3l3 4 3-4&quot; stroke=&quot;' + chev + '&quot; stroke-width=&quot;1.5&quot; fill=&quot;none&quot; stroke-linecap=&quot;round&quot; stroke-linejoin=&quot;round&quot;/></svg>\');background-repeat:no-repeat;background-position:right 8px center;">' + opts + '</select>';
     }
+
+    // ── LIST VIEW: filter bar + grouping (calendar view skips this) ─────
+    if (ST.touchesView === 'list') {
 
     h += '<div style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;align-items:center;">';
     h += '<input style="padding:7px 12px;border-radius:6px;border:1.5px solid var(--border);font-size:12px;font-family:DM Sans,sans-serif;outline:none;width:200px;" placeholder="Search notes, partner..." value="' + _ve(ST.touchSearchQ) + '" oninput="ST.touchSearchQ=this.value;render()">';
@@ -2810,6 +2825,176 @@ function _renderNow() {
           groupTouches.forEach(function(t){ h += _renderTouchRow(t); });
         });
       }
+    }
+
+    } // end if (ST.touchesView === 'list')
+
+    // ── CALENDAR VIEW ──────────────────────────────────────────────────────
+    if (ST.touchesView === 'calendar') {
+      // Default to current month
+      if (!ST.touchCalMonth) {
+        var n = new Date();
+        ST.touchCalMonth = n.getFullYear() + '-' + String(n.getMonth()+1).padStart(2,'0');
+      }
+      var ym = ST.touchCalMonth.split('-');
+      var calY = parseInt(ym[0], 10);
+      var calM = parseInt(ym[1], 10) - 1;
+      var firstDay = new Date(calY, calM, 1);
+      var lastDay  = new Date(calY, calM + 1, 0);
+      var daysInMonth = lastDay.getDate();
+      var startWeekday = firstDay.getDay();
+
+      var monthName = firstDay.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+      var todayStr  = ST.today;
+
+      // Group touches by date — uses statBase (already market + rep filtered)
+      var touchesByDate = {};
+      statBase.forEach(function(t){
+        if (!t.touch_date) return;
+        if (!touchesByDate[t.touch_date]) touchesByDate[t.touch_date] = [];
+        touchesByDate[t.touch_date].push(t);
+      });
+
+      // Real routes by date — only include routes visible to this user/market
+      var routesByDate = {};
+      var visibleRoutes = isAdmin() ? ST.routes : ST.routes.filter(function(r){return r.rep_name===currentRepName();});
+      // Apply rep market filter to routes too — match what touches sees
+      if (window.JG_SHARED && typeof window.JG_SHARED.repMatchesMarket === 'function') {
+        visibleRoutes = visibleRoutes.filter(function(r){
+          return window.JG_SHARED.repMatchesMarket(r.rep_name, ST.market);
+        });
+      }
+      visibleRoutes.forEach(function(r){
+        if (!r.route_date) return;
+        if (!routesByDate[r.route_date]) routesByDate[r.route_date] = [];
+        routesByDate[r.route_date].push(r);
+      });
+
+      // Predict template fires for this month — same math as routes calendar
+      var templateFires = {};
+      (ST.routeTemplates || []).forEach(function(t){
+        if (!t.recurrence || !t.active) return;
+        if (!isAdmin() && t.rep_name && t.rep_name !== currentRepName()) return;
+        if (window.JG_SHARED && typeof window.JG_SHARED.repMatchesMarket === 'function') {
+          if (!window.JG_SHARED.repMatchesMarket(t.rep_name, ST.market)) return;
+        }
+        for (var d = 1; d <= daysInMonth; d++) {
+          var test = new Date(calY, calM, d);
+          var dow = test.getDay();
+          var dom = test.getDate();
+          var fires = false;
+          if (t.recurrence === 'weekly') {
+            fires = (t.recurrence_day === dow);
+          } else if (t.recurrence === 'biweekly') {
+            if (t.recurrence_day === dow) {
+              var occ = Math.ceil(dom / 7);
+              fires = (occ % 2 === 1);
+            }
+          } else if (t.recurrence === 'monthly') {
+            var pattern = t.recurrence_pattern || 'day-of-month';
+            if (pattern === 'day-of-month') {
+              fires = (t.recurrence_day === dom);
+            } else if (pattern === 'nth-weekday') {
+              if (t.recurrence_day === dow) {
+                var occurrence = Math.ceil(dom / 7);
+                if (t.recurrence_week_of_month === -1) {
+                  var nx = new Date(calY, calM, dom + 7);
+                  fires = (nx.getMonth() !== calM);
+                } else {
+                  fires = (occurrence === t.recurrence_week_of_month);
+                }
+              }
+            }
+          }
+          if (fires) {
+            var k = calY + '-' + String(calM+1).padStart(2,'0') + '-' + String(d).padStart(2,'0');
+            if (!templateFires[k]) templateFires[k] = [];
+            templateFires[k].push(t);
+          }
+        }
+      });
+
+      // Month nav header
+      h += '<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px;margin-bottom:14px;">';
+      h += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">';
+      h += '<button onclick="changeTouchCalMonth(-1)" style="background:transparent;border:1.5px solid var(--border);border-radius:6px;padding:6px 12px;cursor:pointer;font-size:14px;font-family:DM Sans,sans-serif;color:var(--navy);">◀</button>';
+      h += '<div style="font-size:16px;font-weight:700;color:var(--navy);">' + monthName + '</div>';
+      h += '<button onclick="changeTouchCalMonth(1)" style="background:transparent;border:1.5px solid var(--border);border-radius:6px;padding:6px 12px;cursor:pointer;font-size:14px;font-family:DM Sans,sans-serif;color:var(--navy);">▶</button>';
+      h += '</div>';
+
+      // Day-of-week headers
+      h += '<div style="display:grid;grid-template-columns:repeat(7,1fr);gap:4px;margin-bottom:6px;">';
+      ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].forEach(function(d){
+        h += '<div style="font-size:10px;font-weight:700;color:var(--muted);text-align:center;text-transform:uppercase;letter-spacing:.04em;padding:4px;">' + d + '</div>';
+      });
+      h += '</div>';
+
+      // Calendar grid
+      h += '<div style="display:grid;grid-template-columns:repeat(7,1fr);gap:4px;">';
+      // Leading empty cells
+      for (var i = 0; i < startWeekday; i++) {
+        h += '<div style="min-height:90px;background:rgba(13,45,94,.02);border-radius:6px;"></div>';
+      }
+      for (var d = 1; d <= daysInMonth; d++) {
+        var dateStr = calY + '-' + String(calM+1).padStart(2,'0') + '-' + String(d).padStart(2,'0');
+        var isToday = (dateStr === todayStr);
+        var isPast = dateStr < todayStr;
+        var isFuture = dateStr > todayStr;
+        var dayTouches = touchesByDate[dateStr] || [];
+        var dayRoutes = routesByDate[dateStr] || [];
+        var dayTemplates = templateFires[dateStr] || [];
+        // Hide template predictions for dates where the route already exists
+        dayTemplates = dayTemplates.filter(function(t){
+          return !dayRoutes.some(function(r){ return r.notes && r.notes.indexOf('From template: '+t.name) !== -1; });
+        });
+
+        var hasContent = dayTouches.length > 0 || dayRoutes.length > 0 || dayTemplates.length > 0;
+        var bg = isToday ? 'rgba(232,93,4,.06)' : '#fff';
+        var brd = isToday ? '2px solid var(--orange)' : '1px solid var(--border)';
+        var clickHandler = hasContent ? 'openTouchCalDayPopup(\'' + dateStr + '\')' : '';
+        var cellCursor = hasContent ? 'cursor:pointer;' : '';
+        h += '<div ' + (clickHandler ? 'onclick="' + clickHandler + '"' : '') + ' style="min-height:90px;background:' + bg + ';border:' + brd + ';border-radius:6px;padding:5px;display:flex;flex-direction:column;gap:2px;' + cellCursor + 'transition:background .12s;" onmouseover="if(this.dataset.has)this.style.background=\'rgba(232,93,4,.04)\'" onmouseout="this.style.background=\'' + bg + '\'" data-has="' + (hasContent?'1':'') + '">';
+        h += '<div style="font-size:11px;font-weight:' + (isToday?'800':'600') + ';color:' + (isToday?'var(--orange)':'var(--navy)') + ';margin-bottom:2px;">' + d + '</div>';
+
+        // Touches: count summary in green for completed activity
+        if (dayTouches.length > 0) {
+          var positives = dayTouches.filter(function(t){ return t.outcome === 'Positive'; }).length;
+          h += '<div style="background:linear-gradient(135deg, var(--green) 0%, #176e3c 100%);color:#fff;border-radius:4px;padding:3px 6px;font-size:10px;font-weight:700;line-height:1.2;">';
+          h += '✓ ' + dayTouches.length + ' touch' + (dayTouches.length !== 1 ? 'es' : '');
+          if (positives > 0) h += ' <span style="opacity:.85;font-weight:500;">(' + positives + ' +)</span>';
+          h += '</div>';
+        }
+
+        // Real routes (orange pill)
+        dayRoutes.forEach(function(r){
+          var stops = r.stops || [];
+          var lbl = (r.name || (stops.length + ' stops'));
+          if (lbl.length > 16) lbl = lbl.slice(0, 14) + '…';
+          h += '<div style="background:linear-gradient(135deg, var(--orange) 0%, #d05303 100%);color:#fff;border-radius:4px;padding:3px 6px;font-size:10px;font-weight:700;line-height:1.2;">';
+          h += '🚗 ' + _ve(lbl);
+          h += '</div>';
+        });
+
+        // Future template predictions (faded)
+        dayTemplates.forEach(function(t){
+          var lbl = t.name || 'Recurring';
+          if (lbl.length > 16) lbl = lbl.slice(0, 14) + '…';
+          h += '<div style="background:rgba(232,93,4,.12);color:var(--orange);border:1px dashed rgba(232,93,4,.4);border-radius:4px;padding:2px 5px;font-size:10px;font-weight:600;line-height:1.2;">';
+          h += '⟳ ' + _ve(lbl);
+          h += '</div>';
+        });
+
+        h += '</div>';
+      }
+      h += '</div>';
+
+      // Legend
+      h += '<div style="display:flex;gap:14px;margin-top:14px;font-size:10px;color:var(--muted);flex-wrap:wrap;">';
+      h += '<div style="display:flex;align-items:center;gap:5px;"><span style="width:14px;height:8px;background:linear-gradient(135deg, var(--green) 0%, #176e3c 100%);border-radius:2px;"></span>Touches logged</div>';
+      h += '<div style="display:flex;align-items:center;gap:5px;"><span style="width:14px;height:8px;background:linear-gradient(135deg, var(--orange) 0%, #d05303 100%);border-radius:2px;"></span>Scheduled route</div>';
+      h += '<div style="display:flex;align-items:center;gap:5px;"><span style="width:14px;height:8px;background:rgba(232,93,4,.12);border:1px dashed rgba(232,93,4,.4);border-radius:2px;"></span>Recurring (will generate)</div>';
+      h += '</div>';
+      h += '</div>';
     }
   }
 
@@ -4309,6 +4494,102 @@ function _buildModalHtml() {
       }
     }
 
+    // ── TOUCHES CALENDAR DAY POPUP ──
+    if (ST.modal === 'touch-day-popup') {
+      var dayDate = ST._touchDayPopupDate;
+      if (!dayDate) {
+        mh += '<div class="modal-title">No date</div>';
+      } else {
+        // Gather touches + routes for that day, applying same market/rep filter
+        // as the calendar shows
+        var dayTouches = ST.touches.filter(function(t){ return t.touch_date === dayDate; });
+        if (window.JG_SHARED && typeof window.JG_SHARED.repMatchesMarket === 'function') {
+          dayTouches = dayTouches.filter(function(t){
+            return window.JG_SHARED.repMatchesMarket(t.logged_by, ST.market);
+          });
+        }
+        if (ST.touchFilterRep !== 'All') {
+          dayTouches = dayTouches.filter(function(t){ return t.logged_by === ST.touchFilterRep; });
+        }
+        var dayVisibleRoutes = isAdmin() ? ST.routes : ST.routes.filter(function(r){return r.rep_name===currentRepName();});
+        if (window.JG_SHARED && typeof window.JG_SHARED.repMatchesMarket === 'function') {
+          dayVisibleRoutes = dayVisibleRoutes.filter(function(r){
+            return window.JG_SHARED.repMatchesMarket(r.rep_name, ST.market);
+          });
+        }
+        var dayRoutes = dayVisibleRoutes.filter(function(r){ return r.route_date === dayDate; });
+
+        // Format date — "Tuesday, May 4, 2026" style
+        var dDt = new Date(dayDate + 'T00:00:00');
+        var dLabel = dDt.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
+        var isPastDay = dayDate < ST.today;
+        var isFutureDay = dayDate > ST.today;
+        var isTodayDay = dayDate === ST.today;
+
+        mh += '<div class="modal-title">' + dLabel;
+        if (isTodayDay) mh += ' <span style="font-size:10px;background:var(--orange);color:#fff;padding:2px 8px;border-radius:4px;font-weight:700;margin-left:6px;">TODAY</span>';
+        mh += '</div>';
+
+        // Summary chips
+        mh += '<div style="display:flex;gap:14px;margin-bottom:14px;font-size:12px;flex-wrap:wrap;">';
+        if (dayTouches.length > 0) {
+          var pos = dayTouches.filter(function(t){ return t.outcome === 'Positive'; }).length;
+          mh += '<div style="background:rgba(31,139,76,.1);color:var(--green);padding:6px 12px;border-radius:6px;font-weight:700;">✓ ' + dayTouches.length + ' touch' + (dayTouches.length !== 1 ? 'es' : '') + (pos > 0 ? ' · ' + pos + ' positive' : '') + '</div>';
+        }
+        if (dayRoutes.length > 0) {
+          mh += '<div style="background:rgba(232,93,4,.1);color:var(--orange);padding:6px 12px;border-radius:6px;font-weight:700;">🚗 ' + dayRoutes.length + ' route' + (dayRoutes.length !== 1 ? 's' : '') + '</div>';
+        }
+        mh += '</div>';
+
+        // Routes section (if any)
+        if (dayRoutes.length > 0) {
+          mh += '<div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;margin-bottom:6px;letter-spacing:.05em;">' + (isFutureDay ? 'Scheduled Routes' : 'Routes') + '</div>';
+          dayRoutes.forEach(function(r){
+            var rStops = r.stops || [];
+            var rDone = rStops.filter(function(s){ return s.completed; }).length;
+            mh += '<div onclick="ST.modal=null;ST._touchDayPopupDate=null;openRouteDetailPopup(\'' + r.id + '\')" style="padding:10px 12px;background:rgba(232,93,4,.04);border:1px solid rgba(232,93,4,.2);border-radius:8px;margin-bottom:6px;cursor:pointer;transition:background .12s;" onmouseover="this.style.background=\'rgba(232,93,4,.08)\'" onmouseout="this.style.background=\'rgba(232,93,4,.04)\'">';
+            mh += '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">';
+            mh += '<span style="font-size:13px;font-weight:700;color:var(--navy);">🚗 ' + _ve(r.name || (rStops.length + ' stops')) + '</span>';
+            if (r.rep_name) mh += '<span style="font-size:10px;color:var(--muted);">' + _ve(r.rep_name) + '</span>';
+            var rsClr = r.status === 'Completed' ? 'var(--green)' : (r.status === 'In Progress' ? 'var(--orange)' : 'var(--muted)');
+            mh += '<span style="font-size:10px;font-weight:700;color:' + rsClr + ';margin-left:auto;">' + (r.status || 'Planned') + ' · ' + rDone + '/' + rStops.length + '</span>';
+            mh += '</div>';
+            mh += '</div>';
+          });
+        }
+
+        // Touches section
+        if (dayTouches.length > 0) {
+          mh += '<div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;margin:14px 0 6px;letter-spacing:.05em;">Touches Logged</div>';
+          // Sort by logged_at if available, else by touch_date
+          dayTouches.slice().sort(function(a,b){
+            return (b.logged_at || '').localeCompare(a.logged_at || '');
+          }).forEach(function(t){
+            var icon = t.touch_type === 'Visit' ? '🚗' : t.touch_type === 'Call' ? '📞' : t.touch_type === 'Drop-in' ? '📦' : t.touch_type === 'Email' ? '✉️' : t.touch_type === 'Text' ? '💬' : t.touch_type === 'Event' ? '🎟' : '·';
+            var oColor = t.outcome === 'Positive' ? 'var(--green)' : t.outcome === 'Not Interested' ? 'var(--danger)' : 'var(--muted)';
+            mh += '<div style="padding:10px 12px;border-bottom:1px solid var(--border);">';
+            mh += '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">';
+            mh += '<span style="font-size:13px;">' + icon + '</span>';
+            mh += '<span style="font-size:13px;font-weight:700;color:var(--navy);">' + _ve(t.partner_name || '(Unknown partner)') + '</span>';
+            if (t.touch_type) mh += '<span style="font-size:10px;background:rgba(13,45,94,.06);color:var(--navy);padding:1px 7px;border-radius:4px;font-weight:600;">' + _ve(t.touch_type) + '</span>';
+            if (t.outcome) mh += '<span style="font-size:10px;font-weight:700;color:' + oColor + ';">' + _ve(t.outcome) + '</span>';
+            if (t.logged_by) mh += '<span style="font-size:10px;color:var(--muted);margin-left:auto;">' + _ve(t.logged_by) + '</span>';
+            mh += '</div>';
+            if (t.notes) mh += '<div style="font-size:12px;color:var(--text);margin-top:4px;line-height:1.4;">' + _ve(t.notes) + '</div>';
+            mh += '</div>';
+          });
+        }
+
+        if (dayTouches.length === 0 && dayRoutes.length === 0) {
+          mh += '<div style="text-align:center;padding:30px 20px;color:var(--muted);font-style:italic;">No activity on this day.</div>';
+        }
+
+        mh += '<div style="display:flex;justify-content:flex-end;margin-top:14px;">';
+        mh += '<button onclick="ST.modal=null;ST._touchDayPopupDate=null;render()" style="padding:8px 18px;border-radius:6px;border:none;background:var(--orange);color:#fff;font-size:12px;font-weight:700;cursor:pointer;">Close</button>';
+        mh += '</div>';
+      }
+    }
+
     if (ST.modal === 'add-route') {
       // Editing mode is signaled by ST.editingRouteId. When set, prefill all
       // fields from the existing route record. Single modal handles both
@@ -4811,6 +5092,32 @@ function openTemplatePreviewPopup(templateId, dateStr) {
   ST._calPopupDate = dateStr;
   ST._calPopupRouteId = null;
   ST.modal = 'cal-template-popup';
+  render();
+}
+
+// ── TOUCHES CALENDAR HELPERS ──────────────────────────────────────────────
+// Same pattern as routes calendar but operates on ST.touchCalMonth and
+// renders a different popup showing the day's touches + any scheduled
+// route activity.
+
+function changeTouchCalMonth(delta) {
+  var ym = (ST.touchCalMonth || '').split('-');
+  var y = parseInt(ym[0], 10);
+  var m = parseInt(ym[1], 10) - 1;
+  if (isNaN(y) || isNaN(m)) {
+    var n = new Date();
+    y = n.getFullYear(); m = n.getMonth();
+  }
+  m += delta;
+  while (m < 0) { m += 12; y -= 1; }
+  while (m > 11) { m -= 12; y += 1; }
+  ST.touchCalMonth = y + '-' + String(m+1).padStart(2,'0');
+  render();
+}
+
+function openTouchCalDayPopup(dateStr) {
+  ST._touchDayPopupDate = dateStr;
+  ST.modal = 'touch-day-popup';
   render();
 }
 
