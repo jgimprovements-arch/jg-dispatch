@@ -15,8 +15,37 @@
 <link rel="apple-touch-icon" sizes="180x180" href="logo.png">
 <link rel="manifest" href="timeclock-manifest.json">
 <script>
+// Register a dedicated timeclock service worker (sw-timeclock.js) that
+// uses NETWORK-FIRST strategy for timeclock.html so code updates always
+// propagate. Also unregister the OLD sw.js if a previous version of this
+// page registered it (it was sales-only and shouldn't have been hooked
+// up to timeclock anyway).
 if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('sw.js').then(function(reg){ reg.update(); });
+  // 1. Unregister the old sales SW if it was registered against this scope
+  navigator.serviceWorker.getRegistrations().then(function(regs){
+    regs.forEach(function(r){
+      if (r.active && r.active.scriptURL && r.active.scriptURL.indexOf('/sw.js') !== -1) {
+        // Old shared sw.js — unregister so it stops controlling timeclock
+        r.unregister();
+      }
+    });
+    // 2. Register the new dedicated timeclock SW
+    navigator.serviceWorker.register('sw-timeclock.js').then(function(reg){
+      reg.update();
+    });
+  });
+
+  // 3. Listen for the SW's 'sw-updated' message and auto-reload so the
+  //    user sees fresh code without tapping anything. One-shot guard so
+  //    we don't loop on a SW that keeps posting messages.
+  var _swReloaded = false;
+  navigator.serviceWorker.addEventListener('message', function(e){
+    if (e.data && e.data.type === 'sw-updated' && !_swReloaded) {
+      _swReloaded = true;
+      // Brief delay so any in-flight save can complete
+      setTimeout(function(){ window.location.reload(); }, 250);
+    }
+  });
 }
 </script>
 <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=DM+Mono:wght@500;600&display=swap" rel="stylesheet">
