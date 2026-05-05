@@ -376,7 +376,8 @@ body {
       <input type="date" class="date-input" id="date-from" onchange="markCustomRange()">
       <span class="date-label">To</span>
       <input type="date" class="date-input" id="date-to" onchange="markCustomRange()">
-      <button class="btn-primary" onclick="runReport()" id="run-btn" style="margin-left:auto;">Run Report</button>
+      <button class="btn-secondary" onclick="runAllJobsReport()" id="all-jobs-btn" style="margin-left:auto;">📊 All Jobs</button>
+      <button class="btn-primary" onclick="runReport()" id="run-btn">Run Report</button>
     </div>
   </div>
 
@@ -837,6 +838,7 @@ async function runReport() {
     showToast('Pick a job first');
     return;
   }
+  STATE.allJobsMode = false;
   const fromVal = document.getElementById('date-from').value;
   const toVal = document.getElementById('date-to').value;
   STATE.fromDate = fromVal || null;
@@ -864,6 +866,166 @@ async function runReport() {
     loadingEl.style.display = 'none';
     showToast('Could not load entries — check console');
   }
+}
+
+// Run an "All Jobs" report for the selected date range. Pulls every time_entries
+// row with a job_id assigned, groups by job, and shows per-job totals + a
+// company-wide tech breakdown. Use case: monthly billing audit, customer
+// dispute on a tech's productivity, period-end labor cost reports.
+async function runAllJobsReport() {
+  const fromVal = document.getElementById('date-from').value;
+  const toVal = document.getElementById('date-to').value;
+  if (!fromVal && !toVal) {
+    if (!confirm('No date range selected — this will pull EVERY time entry across ALL jobs. Continue?')) return;
+  }
+  STATE.allJobsMode = true;
+  STATE.selectedJob = null;
+  STATE.fromDate = fromVal || null;
+  STATE.toDate = toVal || null;
+
+  const reportSection = document.getElementById('report-section');
+  const loadingEl = document.getElementById('loading');
+  reportSection.style.display = 'none';
+  loadingEl.style.display = 'block';
+
+  try {
+    // Paginate through all entries with a job_id. Same pattern as the job-list
+    // load: PostgREST caps at 1000 per request.
+    const PAGE = 1000;
+    let from = 0;
+    let allEntries = [];
+    while (true) {
+      let url = '/rest/v1/time_entries?job_id=not.is.null&select=*&order=clock_in.asc&limit=' + PAGE + '&offset=' + from;
+      if (STATE.fromDate) url += '&clock_in=gte.' + STATE.fromDate + 'T00:00:00';
+      if (STATE.toDate)   url += '&clock_in=lte.' + STATE.toDate + 'T23:59:59';
+      const rows = await sb(url);
+      if (!Array.isArray(rows) || rows.length === 0) break;
+      allEntries = allEntries.concat(rows);
+      if (rows.length < PAGE) break;
+      from += PAGE;
+      if (from > 50000) {
+        showToast('Result capped at 50,000 entries — narrow the date range');
+        break;
+      }
+    }
+    STATE.entries = allEntries;
+    renderAllJobsReport();
+    loadingEl.style.display = 'none';
+    reportSection.style.display = 'block';
+    reportSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  } catch(e) {
+    console.error('All-jobs report failed', e);
+    loadingEl.style.display = 'none';
+    showToast('Could not load entries — check console');
+  }
+}
+
+function renderAllJobsReport() {
+  const entries = STATE.entries || [];
+
+  // Header
+  document.getElementById('rpt-job-name').textContent = 'All Jobs Time Report';
+  let metaText;
+  if (STATE.fromDate || STATE.toDate) {
+    metaText = (STATE.fromDate ? fmtDate(STATE.fromDate + 'T00:00:00') : 'Beginning') +
+               ' – ' + (STATE.toDate ? fmtDate(STATE.toDate + 'T00:00:00') : 'Today');
+  } else {
+    metaText = 'All time';
+  }
+  metaText += '  ·  ' + entries.length.toLocaleString() + ' entries';
+  document.getElementById('rpt-job-meta').textContent = metaText;
+
+  // Aggregate
+  let totalMins = 0;
+  const jobMap = {};   // job_id -> { name, total_minutes, entry_count, techs:{name:minutes} }
+  const techMap = {};  // tech key -> { name, market, total_minutes, entry_count, jobs:Set }
+
+  entries.forEach(e => {
+    let mins = parseFloat(e.duration_minutes);
+    if (isNaN(mins) || mins <= 0) {
+      if (e.clock_in && e.clock_out) mins = (new Date(e.clock_out) - new Date(e.clock_in)) / 60000;
+      else mins = 0;
+    }
+    totalMins += mins;
+
+    const jid = String(e.job_id);
+    if (!jobMap[jid]) {
+      jobMap[jid] = { job_id: jid, name: e.job_name || '(no name)', total_minutes: 0, entry_count: 0, techs: {} };
+    }
+    jobMap[jid].total_minutes += mins;
+    jobMap[jid].entry_count += 1;
+    const tName = e.employee_name || '(unknown)';
+    jobMap[jid].techs[tName] = (jobMap[jid].techs[tName] || 0) + mins;
+
+    const tKey = e.employee_id || tName;
+    if (!techMap[tKey]) {
+      techMap[tKey] = { name: tName, market: e.market || '', total_minutes: 0, entry_count: 0, jobs: new Set() };
+    }
+    techMap[tKey].total_minutes += mins;
+    techMap[tKey].entry_count += 1;
+    techMap[tKey].jobs.add(jid);
+  });
+
+  const jobs = Object.values(jobMap).sort((a,b) => b.total_minutes - a.total_minutes);
+  const techs = Object.values(techMap).sort((a,b) => b.total_minutes - a.total_minutes);
+
+  // Summary cards
+  document.getElementById('rpt-summary').innerHTML =
+    '<div class="summary-card"><div class="summary-value">' + fmtDecimalHours(totalMins) + '</div><div class="summary-label">Total Hours</div></div>' +
+    '<div class="summary-card"><div class="summary-value">' + jobs.length + '</div><div class="summary-label">Jobs</div></div>' +
+    '<div class="summary-card"><div class="summary-value">' + techs.length + '</div><div class="summary-label">Technicians</div></div>' +
+    '<div class="summary-card"><div class="summary-value">' + entries.length.toLocaleString() + '</div><div class="summary-label">Entries</div></div>';
+
+  if (entries.length === 0) {
+    document.getElementById('rpt-body').innerHTML =
+      '<div style="padding:60px 20px;text-align:center;color:var(--muted);">No time entries in the selected range.</div>';
+    return;
+  }
+
+  // Tech breakdown across all jobs
+  const techSummary = '<div class="tech-summary">' +
+    '<div class="tech-summary-title">Hours by Technician (across all jobs)</div>' +
+    techs.map(t =>
+      '<div class="tech-summary-row">' +
+        '<span class="tech-summary-name">' + escapeHtml(t.name) +
+          (t.market ? ' <span style="font-size:10px;color:var(--muted);">· ' + escapeHtml(t.market) + '</span>' : '') +
+        '</span>' +
+        '<span class="tech-summary-hours">' + fmtDecimalHours(t.total_minutes) + ' hrs ' +
+          '<span style="font-size:10px;color:var(--muted);font-weight:400;">(' + t.entry_count + ' entries · ' + t.jobs.size + ' jobs)</span>' +
+        '</span>' +
+      '</div>'
+    ).join('') +
+    '</div>';
+
+  // Per-job rows: name, hours, entries, top tech
+  const jobRows = jobs.map(j => {
+    const topTech = Object.entries(j.techs).sort((a,b) => b[1]-a[1])[0];
+    const topTechLabel = topTech ? escapeHtml(topTech[0]) + ' (' + fmtDecimalHours(topTech[1]) + 'h)' : '—';
+    return '<tr>' +
+      '<td>' +
+        '<div class="tech-name">' + escapeHtml(j.name) + '</div>' +
+        '<div class="tech-market" style="font-size:10px;color:var(--muted);">ID: ' + escapeHtml(j.job_id) + '</div>' +
+      '</td>' +
+      '<td class="duration-cell">' + fmtDecimalHours(j.total_minutes) + 'h</td>' +
+      '<td>' + j.entry_count + '</td>' +
+      '<td>' + Object.keys(j.techs).length + '</td>' +
+      '<td style="font-size:11px;">' + topTechLabel + '</td>' +
+    '</tr>';
+  }).join('');
+
+  const tableHtml = '<div style="padding:18px 22px;">' + techSummary + '</div>' +
+    '<table class="report-table">' +
+      '<thead><tr>' +
+        '<th>Job</th>' +
+        '<th>Hours</th>' +
+        '<th>Entries</th>' +
+        '<th>Techs</th>' +
+        '<th>Top Tech</th>' +
+      '</tr></thead>' +
+      '<tbody>' + jobRows + '</tbody>' +
+    '</table>';
+
+  document.getElementById('rpt-body').innerHTML = tableHtml;
 }
 
 function renderReport() {
@@ -998,6 +1160,11 @@ function renderReport() {
 
 // ── PDF EXPORT ─────────────────────────────────────────────────────────────
 async function exportPDF() {
+  // All-jobs mode: PDF not yet supported (different layout). Direct user to Print.
+  if (STATE.allJobsMode) {
+    showToast('Use the Print button for All Jobs reports');
+    return;
+  }
   if (!STATE.selectedJob || !STATE.entries) {
     showToast('Run a report first');
     return;
