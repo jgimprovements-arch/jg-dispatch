@@ -474,14 +474,25 @@ body {
   <img src="https://jgimprovements-arch.github.io/jg-dispatch/logo.png" alt="JG Restoration" style="width:200px;height:200px;object-fit:contain;border-radius:32px;margin-bottom:16px;filter:drop-shadow(0 4px 20px rgba(0,0,0,.3));">
   <div class="login-title">JG Time Clock</div>
 
-  <!-- Google sign-in only -->
-  <div style="width:100%;max-width:280px;display:flex;flex-direction:column;align-items:center;">
+  <!-- Email/password form (default) -->
+  <div id="login-email-form" style="width:100%;max-width:280px;">
+    <input id="login-email-input" type="email" placeholder="Your email address"
+      style="width:100%;padding:13px 16px;border-radius:12px;border:1.5px solid rgba(255,255,255,.2);background:rgba(255,255,255,.1);color:#fff;font-size:15px;font-family:'DM Sans',sans-serif;outline:none;margin-bottom:10px;box-sizing:border-box;"
+      oninput="document.getElementById('login-err').textContent=''">
+    <input id="login-pass-input" type="password" placeholder="Password"
+      style="width:100%;padding:13px 16px;border-radius:12px;border:1.5px solid rgba(255,255,255,.2);background:rgba(255,255,255,.1);color:#fff;font-size:15px;font-family:'DM Sans',sans-serif;outline:none;margin-bottom:14px;box-sizing:border-box;"
+      onkeydown="if(event.key==='Enter')emailSignIn()">
+    <button onclick="emailSignIn()"
+      style="width:100%;padding:14px;border-radius:12px;border:none;background:var(--orange);color:#fff;font-size:15px;font-weight:700;cursor:pointer;font-family:'DM Sans',sans-serif;margin-bottom:14px;">
+      Sign In
+    </button>
+    <div style="text-align:center;font-size:12px;color:rgba(255,255,255,.5);margin-bottom:12px;">— or —</div>
     <div id="g_id_onload" data-client_id="209231675110-6id8vr3ehcocg4df7tvpc89jsmrvhogk.apps.googleusercontent.com" data-ux_mode="popup" data-callback="tcGoogleCb" data-auto_prompt="false"></div>
     <div class="g_id_signin" data-type="standard" data-size="large" data-theme="outline" data-text="sign_in_with" data-shape="pill" data-logo_alignment="left" data-width="280"></div>
   </div>
 
   <div class="login-err" id="login-err"></div>
-  <div class="login-note">Sign in with your @jg-restoration.com Google account</div>
+  <div class="login-note">Sign in with your invite email or Google account</div>
 </div>
 
 <!-- APP -->
@@ -574,6 +585,16 @@ body {
           <button id="filter-app" onclick="setJobMarket('Appleton')" style="padding:4px 10px;border-radius:20px;border:1.5px solid var(--border);font-size:11px;font-weight:600;cursor:pointer;background:transparent;color:var(--muted);">Appleton</button>
           <button id="filter-sp" onclick="setJobMarket('Stevens Point')" style="padding:4px 10px;border-radius:20px;border:1.5px solid var(--border);font-size:11px;font-weight:600;cursor:pointer;background:transparent;color:var(--muted);">Stevens Pt</button>
         </div>
+      </div>
+      <!-- Morning Meeting quick-clock (visible to all — for when schedule isn't ready) -->
+      <div id="morning-meeting-option" style="margin-bottom:10px;">
+        <button onclick="selectMorningMeeting()" id="morning-meeting-btn" style="width:100%;padding:12px 14px;border-radius:10px;border:1.5px dashed #e85d04;background:rgba(232,93,4,.04);color:#e85d04;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:space-between;transition:all .15s;">
+          <span style="display:flex;align-items:center;gap:8px;">
+            <span style="font-size:16px;">☕</span>
+            <span>Morning Meeting (no job yet)</span>
+          </span>
+          <span id="morning-meeting-check" style="font-size:14px;opacity:0;">✓</span>
+        </button>
       </div>
       <!-- Office Hours quick-clock (only shown for non-technician roles) -->
       <div id="office-hours-option" style="display:none;margin-bottom:10px;">
@@ -938,9 +959,54 @@ var TC = {
 };
 
 // AUTH -
-// Email + password sign-in removed 2026-05-01. Google sign-in is the only path now.
-// All employees use @jg-restoration.com OR have a Google account matched to their
-// personal_email field on the employees row.
+// Email + password sign-in via Supabase Auth
+async function emailSignIn() {
+  var email = (document.getElementById('login-email-input') || {}).value || '';
+  var pass  = (document.getElementById('login-pass-input')  || {}).value || '';
+  var errEl = document.getElementById('login-err');
+  if (!email || !pass) { if(errEl) errEl.textContent = 'Enter your email and password.'; return; }
+
+  var btn = document.querySelector('#login-email-form button');
+  if (btn) { btn.textContent = 'Signing in...'; btn.disabled = true; }
+
+  try {
+    var r = await fetch('https://nuykvchgecpiuikoerze.supabase.co/auth/v1/token?grant_type=password', {
+      method: 'POST',
+      headers: { 'apikey': 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im51eWt2Y2hnZWNwaXVpa29lcnplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYyNjM3ODYsImV4cCI6MjA5MTgzOTc4Nn0.39hZ8DdjT_0iFJXPeAL2FXUSLw8FZBirDVzxZTO1W9s', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: email.trim().toLowerCase(), password: pass })
+    });
+    var data = await r.json();
+    if (!r.ok || !data.user) throw new Error(data.error_description || data.msg || 'Invalid email or password');
+
+    // Gate on employees table — Supabase Auth pass alone isn't enough
+    // Check either `email` or `personal_email` column
+    var emailLow = email.trim().toLowerCase();
+    var e = encodeURIComponent(emailLow);
+    var filter = 'or=(email.eq.' + e + ',personal_email.eq.' + e + ')';
+    var empR = await fetch(SB_URL + '/rest/v1/employees?' + filter + '&select=active,pending_approval,name,email,personal_email', {
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+    });
+    var empRows = await empR.json();
+    var emp = empRows && empRows[0] ? empRows[0] : null;
+    if (!emp) throw new Error('Your account is not in the employee roster. Contact the office.');
+    if (emp.active === false && !emp.pending_approval) throw new Error('Your account has been disabled. Contact the office.');
+
+    var u = {
+      name: data.user.user_metadata?.name || emp.name || email.split('@')[0],
+      email: emailLow,
+      picture: '',
+      access_token: data.access_token,
+      auth_method: 'email'
+    };
+    localStorage.setItem(TC_KEY, JSON.stringify(u));
+    localStorage.setItem(TC_EXP, String(Date.now() + 43200000));
+    initApp(u);
+  } catch(e) {
+    if (errEl) errEl.textContent = e.message;
+  }
+
+  if (btn) { btn.textContent = 'Sign In'; btn.disabled = false; }
+}
 
 window.tcGoogleCb = async function(r) {
   try {
@@ -1148,7 +1214,7 @@ async function initApp(u) {
         var createR = await fetch(SB_URL + '/rest/v1/employees', {
           method: 'POST',
           headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=representation' },
-          body: JSON.stringify({ name: u.name, email: u.email, role: 'Technician', market: 'appleton', active: true })
+          body: JSON.stringify({ name: u.name, email: u.email, role: 'Technician', market: 'Appleton', active: true })
         });
         if (createR.ok) {
           var created = await createR.json();
@@ -1210,19 +1276,6 @@ async function salaryBackfill() {
     var today = new Date(); today.setHours(0,0,0,0);
     if (end > today) end = today;
 
-    // Helper: normalize any timestamp to its Central-time YYYY-MM-DD.
-    // Earlier the code used .toISOString().split('T')[0] which silently
-    // converts UTC midnight crossings to the wrong day. Now uses
-    // Intl.DateTimeFormat with explicit America/Chicago timezone.
-    var _ctDateFmt = new Intl.DateTimeFormat('en-CA', {
-      timeZone: 'America/Chicago',
-      year: 'numeric', month: '2-digit', day: '2-digit'
-    });
-    function _ctDateKey(d) {
-      var dt = (d instanceof Date) ? d : new Date(d);
-      return _ctDateFmt.format(dt); // en-CA returns YYYY-MM-DD
-    }
-
     var existingR = await fetch(SB_URL + '/rest/v1/time_entries?employee_id=eq.' + TC.employee.id +
       '&clock_in=gte.' + start.toISOString() + '&clock_in=lte.' + end.toISOString() + '&select=clock_in', {
       headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
@@ -1231,11 +1284,11 @@ async function salaryBackfill() {
     var existing = await existingR.json();
     var coveredDates = {};
     (existing || []).forEach(function(e) {
-      coveredDates[_ctDateKey(e.clock_in)] = true;
+      coveredDates[new Date(e.clock_in).toISOString().split('T')[0]] = true;
     });
 
     var absR = await fetch(SB_URL + '/rest/v1/absence_records?employee_name=eq.' + encodeURIComponent(TC.employee.name) +
-      '&date=gte.' + _ctDateKey(start) + '&date=lte.' + _ctDateKey(end) + '&select=date', {
+      '&date=gte.' + start.toISOString().split('T')[0] + '&date=lte.' + end.toISOString().split('T')[0] + '&select=date', {
       headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
     });
     if (absR.ok) {
@@ -1247,7 +1300,7 @@ async function salaryBackfill() {
     var cursor = new Date(start);
     while (cursor <= end) {
       var dow = cursor.getDay();
-      var dateStr = _ctDateKey(cursor);
+      var dateStr = cursor.toISOString().split('T')[0];
       if (dow !== 0 && dow !== 6 && !coveredDates[dateStr]) {
         missing.push(dateStr);
       }
@@ -1261,7 +1314,7 @@ async function salaryBackfill() {
         employee_name: TC.employee.name,
         employee_email: TC.employee.email || null,
         job_id: null, job_name: 'Salary',
-        market: TC.employee.market || 'appleton',
+        market: TC.employee.market || 'Appleton',
         clock_in: dateStr + 'T08:00:00-06:00',
         clock_out: dateStr + 'T16:00:00-06:00',
         duration_minutes: 480,
@@ -1270,17 +1323,9 @@ async function salaryBackfill() {
       };
     });
 
-    // DB constraint uq_salary_auto_per_day prevents duplicates regardless of
-    // what we send. ignore-duplicates suppresses 409 noise when our existing
-    // check is racing against another tab's insert.
     await fetch(SB_URL + '/rest/v1/time_entries', {
       method: 'POST',
-      headers: {
-        'apikey': SB_KEY,
-        'Authorization': 'Bearer ' + SB_KEY,
-        'Content-Type': 'application/json',
-        'Prefer': 'return=minimal,resolution=ignore-duplicates'
-      },
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
       body: JSON.stringify(entries)
     });
     await loadAll();
@@ -1646,8 +1691,11 @@ function renderStatus() {
     durationEl.style.display = 'block';
     if (TC.selectedJobName) {
       jobBadge.style.display = 'block';
-      var isOffice = TC.selectedJobName === 'Office Hours' || (TC.activeEntry && !TC.activeEntry.job_id);
-      jobBadge.textContent = (isOffice ? '🏢 ' : '📋 ') + (isOffice ? 'Office Hours' : TC.selectedJobName);
+      var isMM = TC.selectedJobName === 'Morning Meeting';
+      var isOffice = !isMM && (TC.selectedJobName === 'Office Hours' || (TC.activeEntry && !TC.activeEntry.job_id));
+      var icon = isMM ? '☕ ' : (isOffice ? '🏢 ' : '📋 ');
+      var label2 = isMM ? 'Morning Meeting' : (isOffice ? 'Office Hours' : TC.selectedJobName);
+      jobBadge.textContent = icon + label2;
     }
     if (TC.onBreak) {
       document.getElementById('break-btn').textContent = '▶ End Break';
@@ -1818,6 +1866,26 @@ function selectOfficeHours() {
   document.querySelectorAll('.job-row.selected').forEach(function(r){ r.classList.remove('selected'); });
   // Open the same action sheet as a job selection so the clock-in flow is identical
   openJobSheet('', 'Office Hours', TC.clockedIn && TC.activeEntry);
+}
+
+// Select Morning Meeting (non-job clock-in available to all employees —
+// used when schedule isn't ready yet and tech needs something to clock into).
+// Saved as job_name='Morning Meeting' with no job_id, status='active'.
+// Tech can use Switch Job to move from Morning Meeting → real job once it's ready.
+function selectMorningMeeting() {
+  TC.selectedJobId = '';
+  TC.selectedJobName = 'Morning Meeting';
+  var btn = document.getElementById('morning-meeting-btn');
+  var chk = document.getElementById('morning-meeting-check');
+  if (btn) { btn.style.background = '#e85d04'; btn.style.color = '#fff'; }
+  if (chk) chk.style.opacity = '1';
+  // Clear other selections (job rows + Office Hours button if visible)
+  document.querySelectorAll('.job-row.selected').forEach(function(r){ r.classList.remove('selected'); });
+  var oBtn = document.getElementById('office-hours-btn');
+  var oChk = document.getElementById('office-hours-check');
+  if (oBtn) { oBtn.style.background = 'rgba(106,27,154,.04)'; oBtn.style.color = '#6a1b9a'; }
+  if (oChk) oChk.style.opacity = '0';
+  openJobSheet('', 'Morning Meeting', TC.clockedIn && TC.activeEntry);
 }
 
 // Show/hide the Office Hours button based on role
@@ -2070,9 +2138,11 @@ async function clockIn() {
   if (!TC.employee || !TC.employee.id) { toast('Employee record not found'); return; }
   var role = TC.employee.role || 'Technician';
   var jobOptional = ['Office','Admin','Project Manager','Sales','Estimator'].indexOf(role) !== -1;
-  if (!TC.selectedJobId && !jobOptional) { toast('Select a job number to clock in'); return; }
-  // If clocking in without a job, treat as Office Hours
-  var isOfficeHours = !TC.selectedJobId;
+  // Morning Meeting is a non-job clock-in available to ALL employees (including techs)
+  // for use when the schedule isn't ready first thing in the morning.
+  var isMorningMeeting = TC.selectedJobName === 'Morning Meeting';
+  var isOfficeHours = !TC.selectedJobId && !isMorningMeeting;
+  if (!TC.selectedJobId && !jobOptional && !isMorningMeeting) { toast('Select a job number to clock in'); return; }
   var btn = document.getElementById('main-btn');
   if (btn) { btn.style.opacity = '.6'; btn.style.pointerEvents = 'none'; }
   toast('Getting location...');
@@ -2083,12 +2153,17 @@ async function clockIn() {
 
   var pendingNote = TC._pendingNote || null;
   TC._pendingNote = null;
+  // Resolve job_name. Morning Meeting and Office Hours both have no job_id.
+  var resolvedJobName;
+  if (isMorningMeeting) resolvedJobName = 'Morning Meeting';
+  else if (isOfficeHours) resolvedJobName = 'Office Hours';
+  else resolvedJobName = TC.selectedJobName || null;
   var payload = {
     employee_id: TC.employee.id,
     employee_name: TC.employee.name,
     employee_email: TC.user.email,
     job_id: TC.selectedJobId || null,
-    job_name: isOfficeHours ? 'Office Hours' : (TC.selectedJobName || null),
+    job_name: resolvedJobName,
     market: TC.employee.market || 'appleton',
     clock_in: now,
     clock_in_lat: loc ? loc.lat : null,
@@ -2097,72 +2172,20 @@ async function clockIn() {
     status: 'active'
   };
 
-  var resp = await fetch(SB_URL + '/rest/v1/time_entries', {
+  var result = await sb('/rest/v1/time_entries', {
     method: 'POST',
     headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=representation' },
     body: JSON.stringify(payload)
   });
 
-  // ── 409: open session conflict — offer to close orphan and retry ────
-  // The DB constraint uq_one_open_session_per_employee blocks a second
-  // open session. Most common cause: tech walked away, phone died, or app
-  // closed without clocking out. We find the orphan, ask the user, close
-  // it, and retry the original clock-in.
-  if (resp.status === 409) {
-    var openR = await fetch(SB_URL + '/rest/v1/time_entries?employee_id=eq.' + TC.employee.id +
-      '&clock_out=is.null&select=id,job_name,clock_in&order=clock_in.desc&limit=1', {
-      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
-    });
-    var openRows = openR.ok ? await openR.json() : [];
-    var orphan = openRows[0];
-    if (orphan) {
-      var openedAt = new Date(orphan.clock_in);
-      var hoursAgo = Math.round((Date.now() - openedAt.getTime()) / 3600000);
-      var when = openedAt.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZone: 'America/Chicago' });
-      var msg = 'You still have an open session from ' + hoursAgo + ' hour' + (hoursAgo === 1 ? '' : 's') + ' ago:\n\n' +
-                '• ' + (orphan.job_name || 'Unknown job') + '\n' +
-                '• Started ' + when + '\n\n' +
-                'Close it now and clock in fresh? The unclosed session will be flagged for admin review.';
-      if (confirm(msg)) {
-        // Close orphan with current time as clock_out (so admin can review and adjust)
-        var closeIso = new Date().toISOString();
-        var closeMin = Math.max(0, Math.floor((Date.now() - openedAt.getTime()) / 60000));
-        var closeR = await fetch(SB_URL + '/rest/v1/time_entries?id=eq.' + orphan.id, {
-          method: 'PATCH',
-          headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            clock_out: closeIso,
-            duration_minutes: closeMin,
-            status: 'auto_closed',
-            notes: 'Auto-closed by employee on next clock-in — session was left open from ' + when
-          })
-        });
-        if (!closeR.ok) {
-          toast('Couldn\'t close the open session — please ask office to fix it');
-          if (btn) { btn.style.opacity = '1'; btn.style.pointerEvents = ''; }
-          return;
-        }
-        // Retry the clock-in
-        resp = await fetch(SB_URL + '/rest/v1/time_entries', {
-          method: 'POST',
-          headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=representation' },
-          body: JSON.stringify(payload)
-        });
-      } else {
-        toast('Clock-in cancelled — fix the open session first');
-        if (btn) { btn.style.opacity = '1'; btn.style.pointerEvents = ''; }
-        return;
-      }
-    }
-  }
-
-  var result = resp.ok ? await resp.json() : null;
-
   if (result && result[0]) {
     TC.activeEntry = result[0];
     TC.clockedIn = true;
     TC.clockInTime = Date.now();
-    if (isOfficeHours) {
+    if (isMorningMeeting) {
+      TC.selectedJobId = '';
+      TC.selectedJobName = 'Morning Meeting';
+    } else if (isOfficeHours) {
       TC.selectedJobId = '';
       TC.selectedJobName = 'Office Hours';
     }
@@ -2185,7 +2208,11 @@ async function clockIn() {
     }
 
     startPinging();
-    logActivity('Clock In', 'Clocked in — ' + (isOfficeHours ? 'Office Hours (non-job)' : 'Job: ' + (TC.selectedJob ? TC.selectedJob.name : 'None')), 'time_clock');
+    var clockInLabel;
+    if (isMorningMeeting) clockInLabel = 'Morning Meeting (non-job)';
+    else if (isOfficeHours) clockInLabel = 'Office Hours (non-job)';
+    else clockInLabel = 'Job: ' + (TC.selectedJob ? TC.selectedJob.name : 'None');
+    logActivity('Clock In', 'Clocked in — ' + clockInLabel, 'time_clock');
     // Birthday & anniversary — fire on first clock-in on or after the date
     checkClockInCelebration(TC.user);
 
@@ -2335,7 +2362,10 @@ function closeCorrectionSheet() {
 }
 
 async function submitCorrectionRequest() {
-  if (!_corrEntryId || !TC.employee) return;
+  if (!_corrEntryId || !TC.employee) {
+    toast('Missing entry or employee info — try again');
+    return;
+  }
   var type = (document.getElementById('corr-type') || {}).value || 'other';
   var note = ((document.getElementById('corr-note') || {}).value || '').trim();
   if (!note) { toast('Please describe what needs to be corrected'); return; }
@@ -2344,7 +2374,7 @@ async function submitCorrectionRequest() {
   if (btn) { btn.textContent = 'Submitting...'; btn.disabled = true; }
 
   try {
-    await fetch(SB_URL + '/rest/v1/time_corrections', {
+    var r = await fetch(SB_URL + '/rest/v1/time_corrections', {
       method: 'POST',
       headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
       body: JSON.stringify({
@@ -2356,6 +2386,14 @@ async function submitCorrectionRequest() {
         status: 'pending'
       })
     });
+    if (!r.ok) {
+      var errText = '';
+      try { errText = await r.text(); } catch(e) {}
+      console.error('correction request failed', r.status, errText);
+      toast('Error ' + r.status + ' — ' + (errText.substring(0,80) || 'unknown'));
+      if (btn) { btn.textContent = 'Submit Correction Request'; btn.disabled = false; }
+      return;
+    }
     closeCorrectionSheet();
     if (isAppAdmin()) {
       toast('✓ Note saved');
@@ -2363,7 +2401,8 @@ async function submitCorrectionRequest() {
       toast('✓ Correction request submitted — your manager will review it');
     }
   } catch(err) {
-    toast('Error submitting request — try again');
+    console.error('correction request error', err);
+    toast('Network error — check connection and try again');
   }
 
   if (btn) { btn.textContent = 'Submit Correction Request'; btn.disabled = false; }
@@ -2422,7 +2461,7 @@ async function loadOCApp() {
   var myName = TC.employee ? TC.employee.name : '';
   // Initialize market toggle to user's home market on first call
   if (_ocAppMarket === null) {
-    _ocAppMarket = TC.employee ? (TC.employee.market || 'appleton') : 'appleton';
+    _ocAppMarket = TC.employee ? (TC.employee.market || 'Appleton') : 'Appleton';
   }
   _paintOCMarketToggle();
   var market = _ocAppMarket;
@@ -2549,7 +2588,7 @@ async function openSwapRequest() {
     withEl.innerHTML = '<option value="">— Select team member —</option>';
     try {
       var myName = TC.employee ? TC.employee.name : '';
-      var market = TC.employee ? (TC.employee.market || 'appleton') : 'appleton';
+      var market = TC.employee ? (TC.employee.market || 'Appleton') : 'Appleton';
       var r = await fetch(SB_URL + '/rest/v1/employees?active=eq.true&order=name.asc&select=name,market', {
         headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
       });
@@ -2602,7 +2641,7 @@ async function submitSwapRequest() {
       body: JSON.stringify({
         requester_name: TC.employee.name,
         requester_email: TC.user ? TC.user.email : '',
-        market: TC.employee.market || 'appleton',
+        market: TC.employee.market || 'Appleton',
         my_date: myDate,
         my_end_date: myEnd || null,
         my_role: myRole,
@@ -2866,7 +2905,7 @@ async function checkOnCallToday() {
 
   var today = new Date().toISOString().split('T')[0];
   var myName = TC.employee.name;
-  var market = TC.employee.market || 'appleton';
+  var market = TC.employee.market || 'Appleton';
   var locKey = market.toLowerCase().includes('point') ? 'stevens' : 'appleton';
   var mKey = today.slice(0, 7); // YYYY-MM
 
@@ -2935,7 +2974,7 @@ async function openSwitchJob() {
 
   try {
     var techName = TC.employee ? TC.employee.name : '';
-    var market   = TC.employee ? (TC.employee.market || 'appleton') : 'appleton';
+    var market   = TC.employee ? (TC.employee.market || 'Appleton') : 'Appleton';
     var locId    = market.toLowerCase().includes('point') ? 1477 : 222;
 
     // Pull today's dispatch board state to get assigned jobs
@@ -3075,20 +3114,31 @@ async function submitSwitchJob() {
   var btn = document.querySelector('#switch-job-sheet button');
   if (btn) { btn.textContent = 'Switching...'; btn.disabled = true; }
 
-  // 1. Clock out current job
   var loc = await getLocation();
   var now = new Date().toISOString();
   var duration = Math.floor((Date.now() - TC.clockInTime) / 60000);
+  var prevJobName = TC.selectedJobName || TC.selectedJobId;
 
-  await fetch(SB_URL + '/rest/v1/time_entries?id=eq.' + TC.activeEntry.id, {
+  // 1. Close current entry — AWAIT and CHECK SUCCESS before opening new one.
+  // The unique-open-session constraint (uq_one_open_session_per_employee)
+  // requires the close to land in DB before the new POST, otherwise the
+  // POST sees two open rows and PostgreSQL rejects it with 409.
+  var patchR = await fetch(SB_URL + '/rest/v1/time_entries?id=eq.' + TC.activeEntry.id, {
     method: 'PATCH',
-    headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+    headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=representation' },
     body: JSON.stringify({ clock_out: now, duration_minutes: duration, clock_out_lat: loc ? loc.lat : null, clock_out_lng: loc ? loc.lng : null, status: 'complete', notes: 'Job switch → ' + _switchJobName })
   });
 
-  logActivity('Job Switch', 'Switched from ' + (TC.selectedJobName||TC.selectedJobId) + ' to ' + _switchJobName, 'time_clock');
+  if (!patchR.ok) {
+    console.error('switch: close failed', patchR.status);
+    toast('Couldn\'t close current job — try again');
+    if (btn) { btn.textContent = 'Switch Job'; btn.disabled = false; }
+    return;
+  }
 
-  // 2. Clock into new job — keep same day link
+  logActivity('Job Switch', 'Switched from ' + prevJobName + ' to ' + _switchJobName, 'time_clock');
+
+  // 2. Open new entry. Now safe — the constraint sees zero open rows.
   var newEntry = {
     employee_id:   TC.employee ? TC.employee.id : null,
     employee_name: TC.employee ? TC.employee.name : '',
@@ -3099,7 +3149,7 @@ async function submitSwitchJob() {
     clock_in_lng:  loc ? loc.lng : null,
     status:        'active',
     market:        TC.employee ? (TC.employee.market || 'appleton') : 'appleton',
-    notes:         'Switched from ' + (TC.selectedJobName || TC.selectedJobId)
+    notes:         'Switched from ' + prevJobName
   };
 
   var cr = await fetch(SB_URL + '/rest/v1/time_entries', {
@@ -3119,7 +3169,25 @@ async function submitSwitchJob() {
     toast('✓ Switched to ' + _switchJobName);
     renderStatus();
     renderEntries();
+  } else if (cr.status === 409) {
+    // Unique constraint violation — old session somehow still open.
+    // Roll back the close so user isn't left with no active entry.
+    console.error('switch: new POST got 409 even after close succeeded');
+    await fetch(SB_URL + '/rest/v1/time_entries?id=eq.' + TC.activeEntry.id, {
+      method: 'PATCH',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clock_out: null, status: 'active' })
+    });
+    toast('Switch failed — still on previous job. Try again or refresh.');
+    if (btn) { btn.textContent = 'Switch Job'; btn.disabled = false; }
   } else {
+    console.error('switch: new POST failed', cr.status);
+    // Roll back the close so user has a clock-in to clock out from
+    await fetch(SB_URL + '/rest/v1/time_entries?id=eq.' + TC.activeEntry.id, {
+      method: 'PATCH',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clock_out: null, status: 'active' })
+    });
     toast('Error switching job — try again');
     if (btn) { btn.textContent = 'Switch Job'; btn.disabled = false; }
   }
