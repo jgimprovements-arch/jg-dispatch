@@ -10886,6 +10886,20 @@ function _openDayDetailModal(empName, dayKey) {
     var rowBg = (early && !e.approved_early) ? 'background:rgba(198,40,40,.04);' : '';
 
     var tcApproved = getApprovalStatus(periodLabelFor(e.clock_in), e.employee_name) === 'approved';
+    // Verified status cell — green check if verified, Approve button if not
+    var verifiedCellM;
+    if (e.self_verified) {
+      verifiedCellM = '<span title="Verified — click to unverify" style="color:#2e7d32;font-size:18px;font-weight:700;cursor:pointer;" onclick="toggleVerified(\''+e.id+'\',false);_refreshDayDetailModal(\''+escAttr(empName)+'\',\''+dayKey+'\')">✓</span>';
+    } else if (active) {
+      verifiedCellM = '<span style="color:var(--muted);font-size:11px;">—</span>';
+    } else if (tcApproved) {
+      verifiedCellM = '<span style="font-size:10px;color:var(--muted);">🔒</span>';
+    } else if (isAdmin()) {
+      verifiedCellM = '<button class="btn btn-sm" onclick="toggleVerified(\''+e.id+'\',true);_refreshDayDetailModal(\''+escAttr(empName)+'\',\''+dayKey+'\')" style="background:#2e7d32;color:#fff;border-color:#2e7d32;font-size:11px;" title="Approve / mark verified">✓ Approve</button>';
+    } else {
+      verifiedCellM = '<span style="color:#c62828;font-size:11px;">unverified</span>';
+    }
+
     var actions;
     if (tcApproved) {
       actions = '<span style="font-size:10px;color:var(--muted);">🔒 Locked</span>';
@@ -10904,18 +10918,55 @@ function _openDayDetailModal(empName, dayKey) {
       '<td>'+fmtDur(actual)+'</td>' +
       '<td>'+fmtDur(bill)+'</td>' +
       '<td>'+(bkMins?fmtDur(bkMins):'-')+'</td>' +
-      '<td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+(e.job_name||'-')+'</td>' +
+      '<td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+(e.job_name||'-')+'</td>' +
+      '<td style="text-align:center;">'+verifiedCellM+'</td>' +
       '<td>'+actions+'</td>' +
     '</tr>';
   }).join('');
 
+  // Footer with bulk Approve All button if there are unverified non-active entries
+  var unverifiedClosedCount = entries.filter(function(e){ return e.clock_out && !e.self_verified && !tcApprovedAny(e); }).length;
+  var bulkApproveBtn = '';
+  if (unverifiedClosedCount > 0 && isAdmin()) {
+    bulkApproveBtn = '<div style="padding:12px 0 4px;text-align:right;">' +
+      '<button class="btn btn-sm" onclick="_approveAllInDay(\''+escAttr(empName)+'\',\''+dayKey+'\')" style="background:#2e7d32;color:#fff;border-color:#2e7d32;">✓ Approve All ('+unverifiedClosedCount+')</button>' +
+    '</div>';
+  }
+
   var bodyHtml = summary + breakNote +
     '<table class="tc-table" style="margin:0;">' +
-      '<thead><tr><th>Clock In</th><th>Clock Out</th><th>Actual</th><th>Billable</th><th>Break</th><th>Job</th><th>Actions</th></tr></thead>' +
+      '<thead><tr><th>Clock In</th><th>Clock Out</th><th>Actual</th><th>Billable</th><th>Break</th><th>Job</th><th>Verified</th><th>Actions</th></tr></thead>' +
       '<tbody>' + tableRows + '</tbody>' +
-    '</table>';
+    '</table>' + bulkApproveBtn;
 
   showWideModal(title, bodyHtml);
+}
+
+// Helper for the bulk-approve count check (locked timecards skip)
+function tcApprovedAny(entry) {
+  return getApprovalStatus(periodLabelFor(entry.clock_in), entry.employee_name) === 'approved';
+}
+
+// Approve all unverified closed entries for this employee+day at once
+async function _approveAllInDay(empName, dayKey) {
+  if (!isAdmin()) { toast('Admin access required'); return; }
+  var entries = (ST.entries || []).filter(function(e){
+    return e.employee_name === empName && _dayKey(e.clock_in) === dayKey && e.clock_out && !e.self_verified && !tcApprovedAny(e);
+  });
+  if (!entries.length) { toast('Nothing to approve'); return; }
+  for (var i = 0; i < entries.length; i++) {
+    await toggleVerified(entries[i].id, true);
+  }
+  _refreshDayDetailModal(empName, dayKey);
+}
+
+// Re-render the day-detail modal in place after a state change (e.g., verify)
+function _refreshDayDetailModal(empName, dayKey) {
+  // Tiny delay so optimistic update has flushed to ST.entries
+  setTimeout(function(){
+    var existing = document.getElementById('tc-modal');
+    if (existing) _openDayDetailModal(empName, dayKey);
+  }, 50);
 }
 // ── ON-CALL BONUS ─────────────────────────────────────────────────────────
 // Admin clicks "+ $50 Bonus" on an on-call entry. Creates a commission row of
