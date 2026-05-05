@@ -4857,13 +4857,46 @@ function signOut() {
 }
 
 function showInstallHelp() {
-  var isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
-  var isSafari = /Safari/.test(navigator.userAgent) && !/Chrome/.test(navigator.userAgent);
-  var msg = '';
-  if (isIOS || isSafari) {
-    msg = 'To install:\n1. Tap Share (Safari) or 3-dot menu (Chrome)\n2. Tap "Add to Home Screen"\n3. Tap "Add" or "Install"';
+  // If already running in standalone PWA mode, just acknowledge
+  if (window.matchMedia('(display-mode: standalone)').matches ||
+      window.navigator.standalone === true) {
+    alert('✓ Already installed!\n\nYou\'re running the app from your home screen.');
+    return;
+  }
+
+  // If we have the cached prompt event from `beforeinstallprompt`, fire
+  // the real native install dialog instead of showing static text.
+  // Chrome on Android stores this once per session.
+  if (_deferredInstallPrompt) {
+    _deferredInstallPrompt.prompt();
+    _deferredInstallPrompt.userChoice.then(function(r) {
+      if (r.outcome === 'accepted') {
+        var b = document.getElementById('install-banner');
+        if (b) b.style.display = 'none';
+        localStorage.setItem('jg_install_dismissed', '1');
+        toast('✓ Installing...');
+      }
+      _deferredInstallPrompt = null;
+    });
+    return;
+  }
+
+  // No cached prompt — fall back to platform-specific instructions.
+  // iOS Safari never fires beforeinstallprompt; user must do it manually.
+  // Android Chrome may have already used the prompt (only fires once).
+  var ua = navigator.userAgent;
+  var isIOS = /iPad|iPhone|iPod/.test(ua);
+  var isAndroid = /Android/.test(ua);
+  var isChrome = /Chrome/.test(ua) && !/Edg|OPR/.test(ua);
+  var msg;
+  if (isIOS) {
+    msg = 'To install on iPhone:\n\n1. Tap the Share button (square with up arrow) at the bottom of Safari\n2. Scroll down and tap "Add to Home Screen"\n3. Tap "Add" in the top right';
+  } else if (isAndroid && isChrome) {
+    msg = 'To install on Android:\n\n1. Tap the ⋮ menu (top right of Chrome)\n2. Tap "Install app" or "Add to Home Screen"\n3. Tap "Install"';
+  } else if (isAndroid) {
+    msg = 'To install on Android:\n\n1. Open this page in Chrome\n2. Tap the ⋮ menu (top right)\n3. Tap "Install app" or "Add to Home Screen"';
   } else {
-    msg = 'To install on Android:\n1. Tap the 3-dot menu in Chrome\n2. Tap "Add to Home Screen"\n3. Tap "Install"';
+    msg = 'To install:\n\n• On iPhone: Safari → Share → "Add to Home Screen"\n• On Android: Chrome → ⋮ menu → "Install app"\n• On Desktop: Chrome address bar → install icon';
   }
   alert(msg);
 }
