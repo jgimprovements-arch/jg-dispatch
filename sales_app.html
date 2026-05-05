@@ -597,7 +597,7 @@
   .contacts-loading { text-align: center; padding: 50px 24px; color: var(--muted); font-size: 14px; }
 </style>
 <!-- Shared constants/permissions/market — keep ?v= in sync with sales-shared.js VERSION -->
-<script src="sales-shared.js?v=2026-04-20-1"></script>
+<script src="sales-shared.js?v=2026-05-04-geo"></script>
 <!-- Auto-update: service worker forces fresh fetch on every deploy -->
 <script>
 var APP_VERSION = '2026-04-20-v1'; // bump this to force cache clear
@@ -710,9 +710,12 @@ if ('serviceWorker' in navigator) {
 
   <!-- ROUTES -->
   <div class="screen" id="screen-routes">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;gap:8px;">
       <div style="font-size:16px;font-weight:700;color:var(--navy);">My Routes</div>
-      <button onclick="openPlanRoute()" style="background:var(--orange);color:#fff;border:none;border-radius:10px;padding:8px 16px;font-size:13px;font-weight:700;cursor:pointer;font-family:DM Sans,sans-serif;">+ Plan Route</button>
+      <div style="display:flex;gap:6px;">
+        <button onclick="openSmartRouteSheet()" style="background:linear-gradient(135deg, #8b5cf6 0%, #6d28d9 100%);color:#fff;border:none;border-radius:10px;padding:8px 14px;font-size:12px;font-weight:700;cursor:pointer;font-family:DM Sans,sans-serif;box-shadow:0 2px 8px rgba(109,40,217,.25);display:flex;align-items:center;gap:4px;">✨ Smart Route</button>
+        <button onclick="openPlanRoute()" style="background:var(--orange);color:#fff;border:none;border-radius:10px;padding:8px 14px;font-size:12px;font-weight:700;cursor:pointer;font-family:DM Sans,sans-serif;">+ Plan</button>
+      </div>
     </div>
     <!-- View toggle: List vs Week. Same pill pattern as desktop's calendar toggle. -->
     <div style="display:flex;gap:4px;background:rgba(13,45,94,.06);border-radius:18px;padding:3px;margin-bottom:12px;width:fit-content;">
@@ -925,6 +928,95 @@ if ('serviceWorker' in navigator) {
       </div>
     </div>
     <button class="submit-btn" onclick="submitPlanRoute()">Save Route</button>
+  </div>
+</div>
+
+<!-- SMART ROUTE SHEET — auto-builds a route from partner data -->
+<div class="sheet-overlay" id="smart-route-overlay" onclick="if(event.target===this)closeSmartRoute()">
+  <div class="sheet" onclick="event.stopPropagation()" style="max-height:95dvh;">
+    <div class="sheet-handle"></div>
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
+      <div class="sheet-title" style="margin:0;">✨ Smart Route</div>
+      <button onclick="closeSmartRoute()" style="border:none;background:transparent;font-size:22px;cursor:pointer;color:var(--muted);padding:0;width:32px;height:32px;">✕</button>
+    </div>
+
+    <!-- Filters / settings panel — shown until rep hits Generate -->
+    <div id="sr-settings">
+      <div style="font-size:12px;color:var(--muted);margin-bottom:12px;">
+        Builds a route based on partner location, last-touch date, and tier.
+      </div>
+
+      <!-- Partner type filter -->
+      <div style="margin-bottom:12px;">
+        <label style="display:block;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px;">Partner Type</label>
+        <select id="sr-type" style="width:100%;padding:10px 12px;border-radius:8px;border:1.5px solid var(--border);font-size:14px;font-family:inherit;background:var(--card);">
+          <option value="">All types</option>
+          <option value="Plumber">Plumbers only</option>
+          <option value="Realtor">Realtors only</option>
+          <option value="Insurance Agent">Insurance Agents only</option>
+          <option value="Property Manager">Property Managers only</option>
+          <option value="GC">GCs only</option>
+        </select>
+      </div>
+
+      <!-- Tier focus -->
+      <div style="margin-bottom:12px;">
+        <label style="display:block;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px;">Tier Focus</label>
+        <select id="sr-tier" style="width:100%;padding:10px 12px;border-radius:8px;border:1.5px solid var(--border);font-size:14px;font-family:inherit;background:var(--card);">
+          <option value="">All tiers</option>
+          <option value="A">A-tier only (top partners)</option>
+          <option value="AB">A or B (no C-tier cold)</option>
+        </select>
+      </div>
+
+      <!-- Number of stops -->
+      <div style="margin-bottom:12px;">
+        <label style="display:block;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px;">Stops</label>
+        <div style="display:flex;gap:6px;">
+          <button onclick="srSetStops(4)" id="sr-stops-4" class="sr-stop-btn" style="flex:1;padding:10px;border:1.5px solid var(--border);background:var(--card);color:var(--navy);border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;">4</button>
+          <button onclick="srSetStops(6)" id="sr-stops-6" class="sr-stop-btn" style="flex:1;padding:10px;border:1.5px solid var(--orange);background:rgba(232,93,4,.08);color:var(--orange);border-radius:8px;font-size:14px;font-weight:700;cursor:pointer;">6</button>
+          <button onclick="srSetStops(8)" id="sr-stops-8" class="sr-stop-btn" style="flex:1;padding:10px;border:1.5px solid var(--border);background:var(--card);color:var(--navy);border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;">8</button>
+          <button onclick="srSetStops(10)" id="sr-stops-10" class="sr-stop-btn" style="flex:1;padding:10px;border:1.5px solid var(--border);background:var(--card);color:var(--navy);border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;">10</button>
+        </div>
+      </div>
+
+      <!-- Skip recently touched -->
+      <div style="margin-bottom:12px;">
+        <label style="display:block;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px;">Skip if Touched in Last</label>
+        <select id="sr-skip-days" style="width:100%;padding:10px 12px;border-radius:8px;border:1.5px solid var(--border);font-size:14px;font-family:inherit;background:var(--card);">
+          <option value="0">No filter (include everyone)</option>
+          <option value="7">7 days</option>
+          <option value="14" selected>14 days</option>
+          <option value="30">30 days</option>
+        </select>
+      </div>
+
+      <!-- Starting point -->
+      <div style="margin-bottom:16px;">
+        <label style="display:block;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px;">Starting From</label>
+        <select id="sr-start" style="width:100%;padding:10px 12px;border-radius:8px;border:1.5px solid var(--border);font-size:14px;font-family:inherit;background:var(--card);">
+          <option value="market" selected>Market center (default)</option>
+          <option value="location">My current location (GPS)</option>
+        </select>
+      </div>
+
+      <button id="sr-generate-btn" onclick="generateSmartRoute()" style="width:100%;padding:14px;border-radius:12px;border:none;background:linear-gradient(135deg, #8b5cf6 0%, #6d28d9 100%);color:#fff;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit;box-shadow:0 4px 12px rgba(109,40,217,.3);">✨ Generate Route</button>
+    </div>
+
+    <!-- Loading / progress panel -->
+    <div id="sr-progress" style="display:none;text-align:center;padding:30px 20px;">
+      <div style="font-size:36px;margin-bottom:14px;">🗺️</div>
+      <div style="font-size:14px;font-weight:700;color:var(--navy);margin-bottom:6px;" id="sr-progress-title">Building your route…</div>
+      <div style="font-size:12px;color:var(--muted);" id="sr-progress-msg">Looking up partner addresses</div>
+      <div style="background:rgba(13,45,94,.06);border-radius:8px;height:8px;margin:14px 0;overflow:hidden;">
+        <div id="sr-progress-bar" style="height:100%;background:linear-gradient(90deg, #8b5cf6 0%, #6d28d9 100%);width:0%;transition:width .3s;"></div>
+      </div>
+    </div>
+
+    <!-- Results panel -->
+    <div id="sr-results" style="display:none;">
+      <!-- populated by JS -->
+    </div>
   </div>
 </div>
 
@@ -2400,6 +2492,316 @@ function closePlanRoute() {
   _navPopOverlay('plan-route-overlay');
   _prStops = [];
   APP._editingRouteId = null;
+}
+
+// ── SMART ROUTE BUILDER ────────────────────────────────────────────────────
+// Auto-builds a route from the rep's partner data using geocoding + nearest-
+// neighbor traversal. The rep configures filters (type, tier, stop count,
+// staleness) and hits Generate; we geocode any uncached addresses, score
+// each partner, and propose an ordered list of stops. Rep can accept (saves
+// as a real route) or tweak by reopening Plan Route with these stops
+// pre-filled.
+
+var SR_STATE = {
+  stopCount: 6,
+  proposedRoute: null,  // { stops: [...], total_miles: N }
+  startPoint: null
+};
+
+function openSmartRouteSheet() {
+  // Reset to settings view every time
+  document.getElementById('sr-settings').style.display = 'block';
+  document.getElementById('sr-progress').style.display = 'none';
+  document.getElementById('sr-results').style.display = 'none';
+  document.getElementById('sr-progress-bar').style.width = '0%';
+  SR_STATE.proposedRoute = null;
+  document.getElementById('smart-route-overlay').classList.add('open');
+  _navPushOverlay('smart-route-overlay', closeSmartRoute);
+}
+
+function closeSmartRoute() {
+  document.getElementById('smart-route-overlay').classList.remove('open');
+  _navPopOverlay('smart-route-overlay');
+}
+
+function srSetStops(n) {
+  SR_STATE.stopCount = n;
+  // Update active state on the 4 stop buttons
+  [4, 6, 8, 10].forEach(function(v){
+    var btn = document.getElementById('sr-stops-' + v);
+    if (!btn) return;
+    if (v === n) {
+      btn.style.borderColor = 'var(--orange)';
+      btn.style.background = 'rgba(232,93,4,.08)';
+      btn.style.color = 'var(--orange)';
+      btn.style.fontWeight = '700';
+    } else {
+      btn.style.borderColor = 'var(--border)';
+      btn.style.background = 'var(--card)';
+      btn.style.color = 'var(--navy)';
+      btn.style.fontWeight = '600';
+    }
+  });
+}
+
+// Get current GPS location as a Promise. Times out after 10s and falls
+// back to market center if denied or unavailable.
+function srGetGPS(timeoutMs) {
+  return new Promise(function(resolve){
+    if (!navigator.geolocation) return resolve(null);
+    var done = false;
+    var timer = setTimeout(function(){
+      if (!done) { done = true; resolve(null); }
+    }, timeoutMs || 10000);
+    navigator.geolocation.getCurrentPosition(function(pos){
+      if (done) return;
+      done = true; clearTimeout(timer);
+      resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude });
+    }, function(){
+      if (done) return;
+      done = true; clearTimeout(timer);
+      resolve(null);
+    }, { timeout: timeoutMs || 10000, maximumAge: 60000 });
+  });
+}
+
+// The main flow — runs when rep taps Generate
+async function generateSmartRoute() {
+  var typeFilter = document.getElementById('sr-type').value;
+  var tierFilter = document.getElementById('sr-tier').value;
+  var skipDays = parseInt(document.getElementById('sr-skip-days').value, 10) || 0;
+  var startMode = document.getElementById('sr-start').value;
+  var market = APP.repMarket || 'Appleton';
+
+  // Switch to progress view
+  document.getElementById('sr-settings').style.display = 'none';
+  document.getElementById('sr-progress').style.display = 'block';
+  var setProgress = function(pct, msg) {
+    document.getElementById('sr-progress-bar').style.width = pct + '%';
+    if (msg) document.getElementById('sr-progress-msg').textContent = msg;
+  };
+
+  try {
+    setProgress(5, 'Finding eligible partners…');
+
+    // Step 1: filter the rep's partners
+    var myName = APP.repName;
+    var candidates = (APP.partners || []).filter(function(p){
+      // Only the rep's own partners (or if admin, all)
+      if (myName && p.assigned_to !== myName) {
+        // Allow admin to use smart route across all
+        var isAdmin = window.JG_SHARED && window.JG_SHARED.permissions && window.JG_SHARED.permissions.isAdmin();
+        if (!isAdmin) return false;
+      }
+      // Market filter via shared helper
+      if (window.JG_SHARED && window.JG_SHARED.repMatchesMarket && p.assigned_to) {
+        if (!window.JG_SHARED.repMatchesMarket(p.assigned_to, market)) return false;
+      }
+      // Has an address (otherwise can't geocode)
+      if (!p.address || String(p.address).trim().length < 5) return false;
+      // Type filter
+      if (typeFilter && p.type !== typeFilter) return false;
+      // Tier filter
+      if (tierFilter === 'A' && p.tier !== 'A') return false;
+      if (tierFilter === 'AB' && p.tier !== 'A' && p.tier !== 'B') return false;
+      return true;
+    });
+
+    if (candidates.length === 0) {
+      throw new Error('No partners match those filters. Loosen filters or add partner addresses.');
+    }
+
+    // Step 2: filter by recency (skip recently touched)
+    if (skipDays > 0) {
+      var cutoff = Date.now() - (skipDays * 86400000);
+      candidates = candidates.filter(function(p){
+        // Find latest touch for this partner
+        var latest = null;
+        (APP.touches || []).forEach(function(t){
+          if (t.partner_id !== p.id) return;
+          var d = new Date(t.touch_date || t.logged_at || 0).getTime();
+          if (!latest || d > latest) latest = d;
+        });
+        return !latest || latest < cutoff;
+      });
+    }
+
+    if (candidates.length === 0) {
+      throw new Error('All your partners were touched recently. Reduce the "skip if touched" setting.');
+    }
+
+    setProgress(15, 'Looking up addresses (' + candidates.length + ' partners)…');
+
+    // Step 3: geocode their addresses
+    var addresses = candidates.map(function(p){ return p.address; });
+    var geo = await window.JG_SHARED.geo.geocodeBatch(addresses, function(idx, total){
+      // Reflect live geocoding progress
+      var pct = 15 + Math.round((idx / total) * 65);
+      setProgress(pct, 'Locating partner ' + idx + ' of ' + total + '…');
+    });
+
+    setProgress(82, 'Scoring partners…');
+
+    // Step 4: attach lat/lng + score to candidates, drop ones we couldn't locate
+    var stops = candidates.map(function(p){
+      var n = window.JG_SHARED.geo._norm(p.address);
+      var g = geo[n];
+      if (!g || g.lat == null) return null;
+      // Find latest touch date for scoring
+      var latest = null;
+      (APP.touches || []).forEach(function(t){
+        if (t.partner_id !== p.id) return;
+        var d = t.touch_date || t.logged_at;
+        if (!latest || d > latest) latest = d;
+      });
+      var score = window.JG_SHARED.geo.scorePartner(p, latest);
+      return {
+        id: p.id,
+        partner_id: p.id,
+        name: p.name,
+        partner_name: p.name,
+        address: p.address,
+        lat: g.lat,
+        lng: g.lng,
+        score: score,
+        tier: p.tier,
+        type: p.type,
+        last_touch: latest
+      };
+    }).filter(function(x){ return x !== null; });
+
+    if (stops.length === 0) {
+      throw new Error('Could not locate any partner addresses. Check that addresses include city + state.');
+    }
+
+    setProgress(88, 'Determining starting point…');
+
+    // Step 5: starting point
+    var start;
+    if (startMode === 'location') {
+      var gps = await srGetGPS(8000);
+      start = gps || window.JG_SHARED.geo.getMarketCenter(market);
+    } else {
+      start = window.JG_SHARED.geo.getMarketCenter(market);
+    }
+    SR_STATE.startPoint = start;
+
+    setProgress(94, 'Building route…');
+
+    // Step 6: nearest-neighbor traversal
+    var route = window.JG_SHARED.geo.buildRoute(start, stops, SR_STATE.stopCount);
+
+    if (route.stops.length === 0) {
+      throw new Error('Route builder produced no stops. Try widening filters.');
+    }
+
+    SR_STATE.proposedRoute = route;
+    setProgress(100, 'Done!');
+    setTimeout(function(){
+      renderSmartRouteResults(route, candidates.length, stops.length);
+    }, 300);
+
+  } catch(err) {
+    document.getElementById('sr-progress').style.display = 'none';
+    document.getElementById('sr-settings').style.display = 'block';
+    alert('Smart route failed: ' + err.message);
+  }
+}
+
+function renderSmartRouteResults(route, totalCandidates, locatableCount) {
+  var el = document.getElementById('sr-results');
+  document.getElementById('sr-progress').style.display = 'none';
+  el.style.display = 'block';
+
+  var totalMins = Math.round(route.total_miles * 2 + route.stops.length * 15); // rough: 2min/mile drive + 15min/stop
+  var hrs = Math.floor(totalMins / 60);
+  var mins = totalMins % 60;
+  var timeStr = hrs > 0 ? hrs + 'h ' + mins + 'm' : mins + 'm';
+
+  var html = '';
+  html += '<div style="background:rgba(139,92,246,.08);border:1px solid rgba(139,92,246,.3);border-radius:10px;padding:12px;margin-bottom:14px;">';
+  html += '<div style="font-size:13px;font-weight:700;color:#6d28d9;margin-bottom:4px;">✨ Suggested Route</div>';
+  html += '<div style="font-size:11px;color:var(--muted);">' + route.stops.length + ' stops · ' + route.total_miles.toFixed(1) + ' mi · ~' + timeStr + ' total</div>';
+  if (totalCandidates > locatableCount) {
+    html += '<div style="font-size:10px;color:var(--muted);margin-top:4px;font-style:italic;">' + (totalCandidates - locatableCount) + ' partner address' + ((totalCandidates - locatableCount) === 1 ? '' : 'es') + ' couldn\'t be located.</div>';
+  }
+  html += '</div>';
+
+  // Stop list
+  route.stops.forEach(function(s, idx){
+    var lastTouchStr = '';
+    if (s.last_touch) {
+      var days = Math.floor((Date.now() - new Date(s.last_touch).getTime()) / 86400000);
+      lastTouchStr = days === 0 ? 'Today' : days + 'd ago';
+    } else {
+      lastTouchStr = 'Never touched';
+    }
+    var tierBadge = s.tier ? '<span style="font-size:9px;font-weight:700;padding:2px 6px;border-radius:4px;background:' + (s.tier === 'A' ? 'rgba(31,139,76,.15)' : s.tier === 'B' ? 'rgba(13,45,94,.1)' : 'rgba(13,45,94,.05)') + ';color:' + (s.tier === 'A' ? 'var(--ok)' : 'var(--navy)') + ';margin-left:5px;">Tier ' + s.tier + '</span>' : '';
+
+    html += '<div style="display:flex;align-items:center;gap:10px;padding:10px 12px;background:var(--card);border:1px solid var(--border);border-radius:10px;margin-bottom:6px;">';
+    html += '<div style="width:26px;height:26px;border-radius:50%;background:linear-gradient(135deg, #8b5cf6 0%, #6d28d9 100%);color:#fff;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;flex-shrink:0;">' + (idx+1) + '</div>';
+    html += '<div style="flex:1;min-width:0;">';
+    html += '<div style="font-size:13px;font-weight:700;color:var(--navy);">' + (s.name || '(Unknown)') + tierBadge + '</div>';
+    html += '<div style="font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + s.address + '</div>';
+    html += '<div style="font-size:10px;color:var(--muted);margin-top:2px;">' + s.leg_miles.toFixed(1) + ' mi · ' + lastTouchStr + '</div>';
+    html += '</div>';
+    html += '</div>';
+  });
+
+  // Action buttons
+  html += '<div style="display:flex;gap:8px;margin-top:14px;">';
+  html += '<button onclick="document.getElementById(\'sr-settings\').style.display=\'block\';document.getElementById(\'sr-results\').style.display=\'none\';" style="flex:1;padding:14px;border-radius:12px;border:1.5px solid var(--border);background:var(--card);color:var(--navy);font-size:13px;font-weight:700;cursor:pointer;font-family:inherit;">↻ Adjust</button>';
+  html += '<button onclick="acceptSmartRoute()" style="flex:2;padding:14px;border-radius:12px;border:none;background:linear-gradient(135deg, #8b5cf6 0%, #6d28d9 100%);color:#fff;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit;box-shadow:0 4px 12px rgba(109,40,217,.3);">✓ Save Route</button>';
+  html += '</div>';
+
+  el.innerHTML = html;
+}
+
+async function acceptSmartRoute() {
+  if (!SR_STATE.proposedRoute || !SR_STATE.proposedRoute.stops.length) return;
+
+  // Build the route record matching the existing sales_routes schema
+  var todayStr = new Date().toISOString().split('T')[0];
+  var market = APP.repMarket || 'Appleton';
+  var stops = SR_STATE.proposedRoute.stops.map(function(s){
+    return {
+      partner_id: s.partner_id,
+      partner_name: s.partner_name,
+      address: s.address,
+      completed: false
+    };
+  });
+
+  var routeName = '✨ Smart Route ' + new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+
+  try {
+    var resp = await fetch(SB_URL + '/rest/v1/sales_routes', {
+      method: 'POST',
+      headers: {
+        'apikey': SB_KEY,
+        'Authorization': 'Bearer ' + SB_KEY,
+        'Content-Type': 'application/json',
+        'Prefer': 'return=representation'
+      },
+      body: JSON.stringify({
+        route_date: todayStr,
+        rep_name: APP.repName,
+        market: market,
+        name: routeName,
+        status: 'Planned',
+        stops: stops,
+        notes: 'Auto-generated via Smart Route. ' + SR_STATE.proposedRoute.total_miles.toFixed(1) + ' mi total.'
+      })
+    });
+    if (!resp.ok) throw new Error(await resp.text());
+    toast('✓ Route saved');
+    closeSmartRoute();
+    await loadAll();
+    showScreen('routes');
+  } catch(err) {
+    console.error('Save route failed:', err);
+    alert('Save failed: ' + err.message);
+  }
 }
 
 function prSearch() {

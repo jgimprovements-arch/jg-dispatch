@@ -339,7 +339,229 @@
       resolveMarketForTouch: resolveMarketForTouch,
       resolveMarketForRoute: resolveMarketForRoute,
       resolveMarketForNewPartner: resolveMarketForNewPartner
-    }
+    },
+    geo: (function(){
+      // ── GEOCODING + ROUTE BUILDING ─────────────────────────────────────
+      // Caches geocoded addresses in Supabase so we only hit Nominatim once
+      // per unique address. Provides distance math + nearest-neighbor route
+      // construction.
+      //
+      // Nominatim usage policy: max 1 request/second/IP, must include a
+      // User-Agent. We respect this by serializing geocode calls through a
+      // queue with 1100ms spacing.
+
+      var SB_URL = 'https://nuykvchgecpiuikoerze.supabase.co';
+      var SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im51eWt2Y2hnZWNwaXVpa29lcnplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYyNjM3ODYsImV4cCI6MjA5MTgzOTc4Nn0.39hZ8DdjT_0iFJXPeAL2FXUSLw8FZBirDVzxZTO1W9s';
+
+      function _norm(addr) {
+        if (!addr) return '';
+        return String(addr).toLowerCase().trim().replace(/\s+/g,' ');
+      }
+
+      function _sleep(ms) {
+        return new Promise(function(r){ setTimeout(r, ms); });
+      }
+
+      // Fetch any existing cache rows for a list of normalized addresses
+      function getCached(addresses) {
+        if (!addresses || !addresses.length) return Promise.resolve({});
+        var unique = Array.from(new Set(addresses.map(_norm).filter(Boolean)));
+        if (!unique.length) return Promise.resolve({});
+        // Supabase 'in' filter — escape commas in addresses by URL-encoding
+        var inList = '(' + unique.map(function(a){
+          return '"' + a.replace(/"/g, '\\"') + '"';
+        }).join(',') + ')';
+        var url = SB_URL + '/rest/v1/geocoded_addresses?address_normalized=in.' + encodeURIComponent(inList) + '&select=*';
+        return fetch(url, {
+          headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+        }).then(function(r){ return r.ok ? r.json() : []; }).then(function(rows){
+          var byAddr = {};
+          rows.forEach(function(row){ byAddr[row.address_normalized] = row; });
+          return byAddr;
+        }).catch(function(){ return {}; });
+      }
+
+      // Save a geocoded result to the cache (upsert by address_normalized)
+      function _saveCache(normalized, original, lat, lng, displayName, confidence) {
+        var url = SB_URL + '/rest/v1/geocoded_addresses?on_conflict=address_normalized';
+        return fetch(url, {
+          method: 'POST',
+          headers: {
+            'apikey': SB_KEY,
+            'Authorization': 'Bearer ' + SB_KEY,
+            'Content-Type': 'application/json',
+            'Prefer': 'resolution=merge-duplicates'
+          },
+          body: JSON.stringify({
+            address_normalized: normalized,
+            address_original: original,
+            latitude: lat,
+            longitude: lng,
+            display_name: displayName,
+            confidence: confidence,
+            source: 'nominatim'
+          })
+        }).catch(function(err){ console.warn('cache save failed:', err); });
+      }
+
+      // Geocode a single address via Nominatim
+      function _geocodeOne(address) {
+        var url = 'https://nominatim.openstreetmap.org/search?format=json&limit=1&q=' + encodeURIComponent(address);
+        return fetch(url, {
+          headers: {
+            // Nominatim policy requires a real User-Agent. Browsers don't
+            // let us set User-Agent header from JS, but the Referer is
+            // automatically set to our origin which is policy-acceptable.
+            'Accept': 'application/json'
+          }
+        }).then(function(r){ return r.ok ? r.json() : []; });
+      }
+
+      // Geocode a batch with caching + 1.1s rate limit between live calls.
+      // Returns map: { normalized_address: { lat, lng, confidence } | null }
+      function geocodeBatch(addresses, onProgress) {
+        return getCached(addresses).then(function(cache){
+          var results = {};
+          var toFetch = [];
+          addresses.forEach(function(a){
+            var n = _norm(a);
+            if (!n) return;
+            if (cache[n]) {
+              results[n] = {
+                lat: cache[n].latitude,
+                lng: cache[n].longitude,
+                confidence: cache[n].confidence
+              };
+            } else {
+              toFetch.push({ original: a, normalized: n });
+            }
+          });
+          if (!toFetch.length) return results;
+
+          // Sequential with rate limit
+          var idx = 0;
+          function next() {
+            if (idx >= toFetch.length) return Promise.resolve();
+            var item = toFetch[idx++];
+            if (onProgress) onProgress(idx, toFetch.length);
+            return _geocodeOne(item.original).then(function(arr){
+              if (arr && arr.length > 0) {
+                var hit = arr[0];
+                var lat = parseFloat(hit.lat);
+                var lng = parseFloat(hit.lon);
+                var conf = hit.importance > 0.5 ? 'exact' : 'approximate';
+                results[item.normalized] = { lat: lat, lng: lng, confidence: conf };
+                _saveCache(item.normalized, item.original, lat, lng, hit.display_name, conf);
+              } else {
+                results[item.normalized] = null;
+                _saveCache(item.normalized, item.original, null, null, null, 'failed');
+              }
+            }).catch(function(){
+              results[item.normalized] = null;
+            }).then(function(){
+              return _sleep(1100).then(next);
+            });
+          }
+
+          return next().then(function(){ return results; });
+        });
+      }
+
+      // Haversine distance in miles between two lat/lng pairs
+      function distanceMiles(lat1, lng1, lat2, lng2) {
+        var R = 3958.8; // earth radius in miles
+        var toRad = function(d){ return d * Math.PI / 180; };
+        var dLat = toRad(lat2 - lat1);
+        var dLng = toRad(lng2 - lng1);
+        var a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+                Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+                Math.sin(dLng/2) * Math.sin(dLng/2);
+        var c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+        return R * c;
+      }
+
+      // Build a route via nearest-neighbor traversal.
+      // Inputs:
+      //   start: { lat, lng } — starting point
+      //   stops: array of { id, name, address, lat, lng, score (optional) }
+      //   maxStops: integer
+      // Returns: ordered array of stops with cumulative distance
+      function buildRoute(start, stops, maxStops) {
+        var unvisited = stops.slice();
+        var route = [];
+        var current = { lat: start.lat, lng: start.lng };
+        var totalMiles = 0;
+
+        while (route.length < maxStops && unvisited.length > 0) {
+          // Find nearest unvisited stop, with optional score weighting
+          var bestIdx = -1;
+          var bestScore = Infinity;
+          for (var i = 0; i < unvisited.length; i++) {
+            var s = unvisited[i];
+            if (s.lat == null || s.lng == null) continue;
+            var d = distanceMiles(current.lat, current.lng, s.lat, s.lng);
+            // Score: distance penalty minus stop's own score (higher = better)
+            // Higher score (e.g., A-tier, stale partner) reduces effective distance.
+            var weighted = d - (s.score || 0) * 0.5;
+            if (weighted < bestScore) {
+              bestScore = weighted;
+              bestIdx = i;
+            }
+          }
+          if (bestIdx === -1) break;
+          var picked = unvisited.splice(bestIdx, 1)[0];
+          var leg = distanceMiles(current.lat, current.lng, picked.lat, picked.lng);
+          totalMiles += leg;
+          route.push(Object.assign({}, picked, { leg_miles: leg, cum_miles: totalMiles }));
+          current = { lat: picked.lat, lng: picked.lng };
+        }
+
+        return { stops: route, total_miles: totalMiles };
+      }
+
+      // Score a partner for route inclusion. Higher = more desirable to visit.
+      // Factors: tier (A=3, B=2, C=1), staleness (more days since touch = higher),
+      // partner has phone (small bonus, easier to call ahead).
+      function scorePartner(partner, lastTouchDate) {
+        var score = 0;
+        if (partner.tier === 'A') score += 6;
+        else if (partner.tier === 'B') score += 3;
+        else if (partner.tier === 'C') score += 1;
+
+        if (lastTouchDate) {
+          var daysSince = (Date.now() - new Date(lastTouchDate).getTime()) / 86400000;
+          // Cap staleness bonus at 60 days (no extra credit for ancient relationships)
+          score += Math.min(daysSince / 7, 8);
+        } else {
+          // Never touched — high priority
+          score += 10;
+        }
+
+        if (partner.phone) score += 0.5;
+        return score;
+      }
+
+      // Pick a default start point for a market (geographic centroid of
+      // existing partners, fallback to known city centers)
+      var MARKET_CENTERS = {
+        'Appleton':       { lat: 44.2619, lng: -88.4154, name: 'Appleton, WI' },
+        'Stevens Point':  { lat: 44.5238, lng: -89.5746, name: 'Stevens Point, WI' }
+      };
+
+      function getMarketCenter(market) {
+        return MARKET_CENTERS[market] || MARKET_CENTERS['Appleton'];
+      }
+
+      return {
+        geocodeBatch: geocodeBatch,
+        getCached: getCached,
+        distanceMiles: distanceMiles,
+        buildRoute: buildRoute,
+        scorePartner: scorePartner,
+        getMarketCenter: getMarketCenter,
+        _norm: _norm  // exported for testing
+      };
+    })()
   };
 
 })(typeof window !== 'undefined' ? window : this);
