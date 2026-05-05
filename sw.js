@@ -1,18 +1,43 @@
 // JG Sales PWA Service Worker
-const VERSION = '2026-04-22-v37';
+//
+// Lives at /jg-dispatch/sw.js. Default registration scope is /jg-dispatch/.
+// On GitHub Pages we can't narrow the scope (no Service-Worker-Allowed
+// header support), so this SW MUST be defensive and only intercept URLs
+// that belong to the sales app — not timeclock, dispatch, hub, etc.
+//
+// Fixed May 2026:
+//   1. Removed timeclock.html from precache (was hijacking the timeclock
+//      app — installing sales would cache the timeclock page in the
+//      sales SW).
+//   2. Narrowed fetch handler to an explicit allow-list of sales paths.
+//      All other requests pass through with no SW involvement.
+
+const VERSION = '2026-05-04-v1';
 const CACHE = 'jg-sales-' + VERSION;
 
-const PRECACHE = [
+// Strict allow-list. Only these paths are precached AND only these are
+// served from cache by the fetch handler. Adding new files here is a
+// deliberate decision — never add another app's pages.
+const SALES_PATHS = [
   '/jg-dispatch/sales_app.html',
-  '/jg-dispatch/timeclock.html',
+  '/jg-dispatch/sales-shared.js',
+  '/jg-dispatch/manifest.json',
   '/jg-dispatch/logo.png'
 ];
+
+function isSalesPath(url) {
+  try {
+    return SALES_PATHS.indexOf(new URL(url).pathname) !== -1;
+  } catch(e) {
+    return false;
+  }
+}
 
 self.addEventListener('install', function(e) {
   self.skipWaiting();
   e.waitUntil(
     caches.open(CACHE).then(function(cache) {
-      return cache.addAll(PRECACHE).catch(function(){});
+      return cache.addAll(SALES_PATHS).catch(function(){});
     })
   );
 });
@@ -20,9 +45,14 @@ self.addEventListener('install', function(e) {
 self.addEventListener('activate', function(e) {
   e.waitUntil(
     caches.keys().then(function(keys) {
+      // Only purge OUR old sales caches. Leave caches owned by other
+      // apps (timeclock, dispatch, etc.) untouched.
       return Promise.all(
-        keys.filter(function(key) { return key !== CACHE; })
-            .map(function(key) { return caches.delete(key); })
+        keys.filter(function(key) {
+          return key.indexOf('jg-sales-') === 0 && key !== CACHE;
+        }).map(function(key) {
+          return caches.delete(key);
+        })
       );
     }).then(function() {
       return self.clients.matchAll({ type: 'window' }).then(function(clients) {
@@ -34,19 +64,14 @@ self.addEventListener('activate', function(e) {
 });
 
 self.addEventListener('fetch', function(e) {
-  var url = e.request.url;
-
-  // Pass through everything except same-origin static assets
-  // This ensures API calls (Supabase, Google, Albi, etc.) are never intercepted
   if (e.request.method !== 'GET') return;
-  if (url.indexOf(self.location.origin) !== 0) return;
 
-  // Only cache html, js, css, png, jpg, svg, json files
-  var ext = url.split('?')[0].split('.').pop().toLowerCase();
-  var cacheable = ['html','js','css','png','jpg','jpeg','svg','json','ico','woff','woff2'];
-  if (cacheable.indexOf(ext) === -1) return;
+  // Only intercept URLs in our allow-list. Everything else (timeclock,
+  // dispatch, hub, API calls, etc.) passes through to the network with
+  // no SW involvement.
+  if (!isSalesPath(e.request.url)) return;
 
-  // Network first, cache fallback for static assets only
+  // Network-first with cache fallback for the sales-app assets only
   e.respondWith(
     fetch(e.request, { credentials: 'same-origin' }).then(function(response) {
       if (response && response.status === 200 && response.type !== 'opaque') {
