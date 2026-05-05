@@ -602,8 +602,14 @@
 <script>
 var APP_VERSION = '2026-04-20-v1'; // bump this to force cache clear
 if ('serviceWorker' in navigator) {
+  // Note: we can't narrow scope below /jg-dispatch/ on GitHub Pages
+  // (no Service-Worker-Allowed header support). The sw.js itself is
+  // responsible for ONLY intercepting sales_app.html-related URLs and
+  // letting everything else (timeclock, dispatch, hub) pass through.
   navigator.serviceWorker.register('sw.js').then(function(reg) {
     reg.update(); // check for updates on every load
+  }).catch(function(err) {
+    console.error('SW register failed:', err);
   });
   // If SW sends update message, reload the page
   navigator.serviceWorker.addEventListener('message', function(e) {
@@ -4902,16 +4908,26 @@ function showInstallHelp() {
 }
 
 function triggerInstall() {
+  // First try the native prompt — Chrome only fires this once per session
+  // for un-installed PWAs.
   if (_deferredInstallPrompt) {
     _deferredInstallPrompt.prompt();
     _deferredInstallPrompt.userChoice.then(function(r) {
       if (r.outcome === 'accepted') {
-        document.getElementById('install-banner').style.display = 'none';
+        var b = document.getElementById('install-banner');
+        if (b) b.style.display = 'none';
         localStorage.setItem('jg_install_dismissed', '1');
       }
       _deferredInstallPrompt = null;
     });
+    return;
   }
+
+  // No native prompt available — could mean: iOS Safari (never fires it),
+  // already-dismissed prompt, or Chrome thinks the app is installed.
+  // Either way, fall back to the same instructions the dropdown shows so
+  // the button always does SOMETHING when tapped.
+  showInstallHelp();
 }
 
 document.addEventListener('DOMContentLoaded', function() {
