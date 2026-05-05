@@ -3262,32 +3262,76 @@ function renderTimesheets() {
   // (Swap requests moved to dedicated 🔄 Swaps tab)
 
   // Correction requests
+  // Now supports: structured edit requests (entry_id + requested_clock_in/out/job)
+  // and missed-punch requests (is_new_entry=true). Display shows current vs requested.
   var corrList = (ST.corrections||[]).filter(function(c){
     return ST.filterEmp === 'All' || c.employee_name === ST.filterEmp;
   });
   if (corrList.length) {
     h += '<div class="card" id="corrections-card" style="margin-top:16px;"><div class="card-hdr" style="display:flex;align-items:center;justify-content:space-between;">';
     h += '<div class="card-title">✏️ Correction Requests</div></div>';
-    h += '<table class="tc-table"><thead><tr><th>Employee</th><th>Date</th><th>Type</th><th>Note</th><th>Status</th><th></th></tr></thead><tbody>';
+    h += '<div style="overflow-x:auto;"><table class="tc-table"><thead><tr><th>Employee</th><th>Date</th><th>Type</th><th>Current → Requested</th><th>Note</th><th>Status</th><th></th></tr></thead><tbody>';
     corrList.forEach(function(c){
-      var entry = ST.entries.find(function(e){ return e.id === c.entry_id; });
-      var dateStr = entry ? fmtD(new Date(entry.clock_in)) : '-';
-      var typeLabel = {wrong_time:'Wrong Time',missed_punch:'Missed Punch',wrong_job:'Wrong Job',break:'Break Issue',other:'Other'}[c.correction_type]||c.correction_type;
-      var statusBadge = c.status==='pending' ? '<span class="badge badge-warn">Pending</span>' : c.status==='approved' ? '<span class="badge badge-green">Approved</span>' : '<span class="badge badge-gray">Dismissed</span>';
+      var entry = c.entry_id ? ST.entries.find(function(e){ return e.id === c.entry_id; }) : null;
+      var fmtT = function(iso){ if(!iso)return '-'; var d=new Date(iso); var h=d.getHours()%12||12; var m=d.getMinutes(); return h+':'+(m<10?'0':'')+m+(d.getHours()>=12?'p':'a'); };
+      var fmtDt = function(iso){ if(!iso)return '-'; var d=new Date(iso); return (d.getMonth()+1)+'/'+d.getDate()+' '+fmtT(iso); };
+
+      var dateStr;
+      if (c.is_new_entry) {
+        dateStr = c.requested_clock_in ? fmtD(new Date(c.requested_clock_in)) : '-';
+      } else if (entry) {
+        dateStr = fmtD(new Date(entry.clock_in));
+      } else {
+        dateStr = '-';
+      }
+
+      var typeLabel;
+      if (c.is_new_entry) typeLabel = '＋ Missed Punch';
+      else if (c.correction_type === 'edit') typeLabel = 'Edit';
+      else typeLabel = ({wrong_time:'Wrong Time',missed_punch:'Missed Punch',wrong_job:'Wrong Job',break:'Break Issue',other:'Other'}[c.correction_type]||c.correction_type||'Edit');
+
+      // Build current → requested diff column
+      var diffHtml = '';
+      if (c.is_new_entry) {
+        diffHtml = '<div style="font-size:11px;line-height:1.5;">' +
+          '<div style="color:#2e7d32;"><strong>NEW:</strong> ' + fmtT(c.requested_clock_in) + ' → ' + fmtT(c.requested_clock_out) + '</div>' +
+          '<div style="color:var(--muted);">Job: ' + (c.requested_job_name || c.requested_job_id || '-') + '</div>' +
+          '</div>';
+      } else if (entry) {
+        var rows = [];
+        var oldIn = fmtT(entry.clock_in), oldOut = entry.clock_out ? fmtT(entry.clock_out) : 'active';
+        var newIn = c.requested_clock_in ? fmtT(c.requested_clock_in) : oldIn;
+        var newOut = c.requested_clock_out ? fmtT(c.requested_clock_out) : oldOut;
+        var oldJob = entry.job_name || 'No job';
+        var newJob = c.requested_job_name || c.requested_job_id || oldJob;
+        if (newIn !== oldIn) rows.push('<div>In: <s>' + oldIn + '</s> → <strong style="color:#2e7d32;">' + newIn + '</strong></div>');
+        if (newOut !== oldOut) rows.push('<div>Out: <s>' + oldOut + '</s> → <strong style="color:#2e7d32;">' + newOut + '</strong></div>');
+        if (newJob !== oldJob) rows.push('<div>Job: <s>' + oldJob + '</s> → <strong style="color:#2e7d32;">' + newJob + '</strong></div>');
+        diffHtml = rows.length ? '<div style="font-size:11px;line-height:1.5;">' + rows.join('') + '</div>' : '<span style="color:var(--muted);font-size:11px;">No change</span>';
+      } else {
+        diffHtml = '<span style="color:var(--muted);font-size:11px;">Entry not found</span>';
+      }
+
+      var statusBadge = c.status==='pending' ? '<span class="badge badge-warn">Pending</span>'
+        : c.status==='approved' ? '<span class="badge badge-green">Approved</span>'
+        : c.status==='rejected' ? '<span class="badge badge-red">Rejected</span>'
+        : '<span class="badge badge-gray">Dismissed</span>';
+
       h += '<tr>';
       h += '<td><strong>'+c.employee_name+'</strong></td>';
       h += '<td>'+dateStr+'</td>';
       h += '<td>'+typeLabel+'</td>';
-      h += '<td style="font-size:11px;max-width:200px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'+c.notes+'</td>';
+      h += '<td>'+diffHtml+'</td>';
+      h += '<td style="font-size:11px;max-width:200px;">'+(c.notes||'')+'</td>';
       h += '<td>'+statusBadge+'</td>';
       h += '<td style="display:flex;gap:4px;">';
       if (c.status==='pending' && isAdmin()) {
-        h += '<button class="btn btn-sm" style="background:#2e7d32;color:#fff;border-color:#2e7d32;" onclick="resolveCorrection(\''+c.id+'\',\'approved\',\''+c.entry_id+'\')">✓ Approve</button>';
-        h += '<button class="btn btn-sm btn-danger" onclick="resolveCorrection(\''+c.id+'\',\'dismissed\',null)">✕</button>';
+        h += '<button class="btn btn-sm" style="background:#2e7d32;color:#fff;border-color:#2e7d32;" onclick="resolveCorrection(\''+c.id+'\',\'approved\')">✓ Approve</button>';
+        h += '<button class="btn btn-sm btn-danger" onclick="resolveCorrection(\''+c.id+'\',\'rejected\')">✕ Reject</button>';
       }
       h += '</td></tr>';
     });
-    h += '</tbody></table></div>';
+    h += '</tbody></table></div></div>';
   }
 
   // Safety: if the summary wasn't computed (e.g., no entries in period), strip the placeholder
@@ -3766,30 +3810,141 @@ async function resolveSwap(id, status) {
   return _swapDismiss(id);
 }
 
-async function resolveCorrection(corrId, status, entryId) {
+// Resolve a time correction request.
+//   status='approved' → applies the requested change to time_entries:
+//     - is_new_entry=true → INSERT a new time_entries row
+//     - is_new_entry=false → PATCH the existing row referenced by entry_id
+//   status='rejected' → marks the request rejected, no DB write to time_entries
+//   status='dismissed' → soft archive, no DB write
+async function resolveCorrection(corrId, status) {
   var correction = ST.corrections.find(function(c){ return c.id === corrId; });
+  if (!correction) { toast('Correction not found'); return; }
+
+  var adminEmail = (ST.user && ST.user.email) || 'admin';
+  var nowIso = new Date().toISOString();
+
+  if (status === 'approved') {
+    var ok = false;
+    try {
+      if (correction.is_new_entry) {
+        // Create a new time_entries row from the requested values
+        if (!correction.requested_clock_in || !correction.requested_clock_out) {
+          toast('Cannot apply — missing requested times');
+          return;
+        }
+        // Find the employee record for employee_id + market
+        var emp = (ST.employees||[]).find(function(e){ return e.name === correction.employee_name; });
+        var dur = Math.floor((new Date(correction.requested_clock_out) - new Date(correction.requested_clock_in))/60000);
+        var newRow = {
+          employee_id:   emp ? emp.id : null,
+          employee_name: correction.employee_name,
+          employee_email: correction.employee_email || (emp ? emp.email : null),
+          job_id:        correction.requested_job_id || null,
+          job_name:      correction.requested_job_name || 'No job',
+          market:        emp ? (emp.market || 'appleton') : 'appleton',
+          clock_in:      correction.requested_clock_in,
+          clock_out:     correction.requested_clock_out,
+          duration_minutes: dur,
+          status:        'complete',
+          notes:         'Created from approved correction request: ' + (correction.notes || '')
+        };
+        var ir = await fetch(SB_URL + '/rest/v1/time_entries', {
+          method: 'POST',
+          headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
+          body: JSON.stringify(newRow)
+        });
+        if (!ir.ok) {
+          var et = await ir.text();
+          console.error('insert new entry failed', ir.status, et);
+          toast('Insert failed: ' + ir.status);
+          return;
+        }
+        ok = true;
+      } else if (correction.entry_id) {
+        // Patch the existing entry
+        var patch = {};
+        if (correction.requested_clock_in)  patch.clock_in  = correction.requested_clock_in;
+        if (correction.requested_clock_out) patch.clock_out = correction.requested_clock_out;
+        if (correction.requested_job_id !== null && correction.requested_job_id !== undefined) {
+          patch.job_id   = correction.requested_job_id;
+          patch.job_name = correction.requested_job_name || patch.job_name;
+        }
+        // Recompute duration if both times are now set
+        var entry = ST.entries.find(function(e){ return e.id === correction.entry_id; });
+        var finalIn  = patch.clock_in  || (entry && entry.clock_in);
+        var finalOut = patch.clock_out || (entry && entry.clock_out);
+        if (finalIn && finalOut) {
+          patch.duration_minutes = Math.floor((new Date(finalOut) - new Date(finalIn))/60000);
+        }
+        // If status was 'active' and we now have a clock_out, mark complete
+        if (entry && entry.status === 'active' && finalOut) patch.status = 'complete';
+
+        if (Object.keys(patch).length === 0) {
+          toast('Nothing to apply');
+        } else {
+          var pr = await fetch(SB_URL + '/rest/v1/time_entries?id=eq.' + correction.entry_id, {
+            method: 'PATCH',
+            headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+            body: JSON.stringify(patch)
+          });
+          if (!pr.ok) {
+            var pt = await pr.text();
+            console.error('patch entry failed', pr.status, pt);
+            toast('Apply failed: ' + pr.status);
+            return;
+          }
+          ok = true;
+        }
+      } else {
+        toast('Correction has no target entry — cannot apply');
+        return;
+      }
+    } catch (err) {
+      console.error('apply correction error', err);
+      toast('Network error — try again');
+      return;
+    }
+
+    if (!ok) return;
+  }
+
+  // Mark the correction itself with the resolution
+  var corrPatch = { status: status };
+  if (status === 'approved') {
+    corrPatch.approved_at = nowIso;
+    corrPatch.approved_by = adminEmail;
+  } else if (status === 'rejected') {
+    corrPatch.rejected_at = nowIso;
+    corrPatch.rejected_by = adminEmail;
+  }
   await fetch(SB_URL + '/rest/v1/time_corrections?id=eq.' + corrId, {
     method: 'PATCH',
     headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ status: status })
+    body: JSON.stringify(corrPatch)
   });
-  // Fire SMS to employee notifying of the resolution
-  if (correction) {
+
+  // Notify the employee via SMS if available
+  try {
     var noteMsg = status === 'approved'
-      ? 'Thanks — updating your timecard now.'
-      : 'Please see your supervisor if you need to discuss.';
-    smsCorrectionUpdate(correction, status, noteMsg);
-  }
-  if (status === 'approved' && entryId) {
-    toast('Correction approved — edit the entry to apply the fix');
-    logActivity('Correction Approved', 'Time correction approved for ' + (correction||{}).employee_name, 'corrections');
-    await loadAll();
-    editEntry(entryId);
+      ? 'Approved — your timecard has been updated.'
+      : status === 'rejected' ? 'Not approved — see your supervisor if needed.'
+      : 'Dismissed — see your supervisor if needed.';
+    if (typeof smsCorrectionUpdate === 'function') {
+      smsCorrectionUpdate(correction, status, noteMsg);
+    }
+  } catch (e) { /* non-fatal */ }
+
+  if (status === 'approved') {
+    toast('✓ Approved & applied');
+    logActivity('Correction Approved', 'Time correction approved & applied for ' + correction.employee_name, 'corrections');
+  } else if (status === 'rejected') {
+    toast('Rejected');
+    logActivity('Correction Rejected', 'Time correction rejected for ' + correction.employee_name, 'corrections');
   } else {
-    toast(status === 'approved' ? '✓ Approved' : 'Dismissed');
-    await loadAll();
-    renderTimesheets();
+    toast('Dismissed');
   }
+  await loadAll();
+  renderTimesheets();
 }
 
 // ── EMPLOYEES TAB ─────────────────────────────────────────────────────────

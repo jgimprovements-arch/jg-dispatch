@@ -775,20 +775,39 @@ body {
 <div class="sheet-overlay" id="correction-sheet" onclick="if(event.target===this)closeCorrectionSheet()">
   <div class="sheet" onclick="event.stopPropagation()">
     <div class="sheet-handle"></div>
-    <div class="sheet-title">✏️ Request Time Correction</div>
-    <p style="font-size:12px;color:var(--muted);margin-bottom:14px;line-height:1.5;">Describe what needs to be corrected. Your manager will review and approve.</p>
+    <div class="sheet-title" id="corr-sheet-title">✏️ Request Time Correction</div>
+    <p style="font-size:12px;color:var(--muted);margin-bottom:14px;line-height:1.5;" id="corr-sheet-sub">Adjust the clock times or job. Your manager will review and approve.</p>
     <div id="corr-entry-info" style="background:rgba(13,45,94,.04);border-radius:10px;padding:12px;margin-bottom:14px;font-size:12px;color:var(--navy);"></div>
-    <div style="margin-bottom:12px;">
-      <label style="display:block;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:5px;">What needs fixing?</label>
-      <select id="corr-type" style="width:100%;padding:10px 12px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;font-family:DM Sans,sans-serif;outline:none;background:#fff;margin-bottom:8px;">
-        <option value="wrong_time">Wrong clock-in or clock-out time</option>
-        <option value="missed_punch">Forgot to clock in/out</option>
-        <option value="wrong_job">Wrong job number</option>
-        <option value="break">Break time issue</option>
-        <option value="other">Other</option>
-      </select>
-      <textarea id="corr-note" rows="3" placeholder="Describe the correct time, job, or situation..." style="width:100%;padding:10px 12px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;font-family:DM Sans,sans-serif;outline:none;resize:none;box-sizing:border-box;"></textarea>
+
+    <!-- Date (only shown for missed-punch / new entry) -->
+    <div id="corr-date-row" style="margin-bottom:12px;display:none;">
+      <label style="display:block;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:5px;">Date</label>
+      <input type="date" id="corr-date" style="width:100%;padding:10px 12px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;font-family:DM Sans,sans-serif;outline:none;box-sizing:border-box;">
     </div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px;">
+      <div>
+        <label style="display:block;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:5px;">Clock In</label>
+        <input type="time" id="corr-clock-in" style="width:100%;padding:10px 12px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;font-family:DM Sans,sans-serif;outline:none;box-sizing:border-box;">
+      </div>
+      <div>
+        <label style="display:block;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:5px;">Clock Out</label>
+        <input type="time" id="corr-clock-out" style="width:100%;padding:10px 12px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;font-family:DM Sans,sans-serif;outline:none;box-sizing:border-box;">
+      </div>
+    </div>
+
+    <div style="margin-bottom:12px;">
+      <label style="display:block;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:5px;">Job</label>
+      <input type="text" id="corr-job-search" placeholder="Search job by name or number..." oninput="corrJobSearch()" autocomplete="off" style="width:100%;padding:10px 12px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;font-family:DM Sans,sans-serif;outline:none;box-sizing:border-box;margin-bottom:6px;">
+      <div id="corr-job-selected" style="font-size:12px;color:var(--navy);font-weight:600;padding:6px 10px;background:rgba(13,45,94,.04);border-radius:6px;display:none;"></div>
+      <div id="corr-job-results" style="max-height:160px;overflow:auto;border:1px solid var(--border);border-radius:8px;display:none;background:#fff;"></div>
+    </div>
+
+    <div style="margin-bottom:12px;">
+      <label style="display:block;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:5px;">Reason / Notes</label>
+      <textarea id="corr-note" rows="2" placeholder="Why is this correction needed?" style="width:100%;padding:10px 12px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;font-family:DM Sans,sans-serif;outline:none;resize:none;box-sizing:border-box;"></textarea>
+    </div>
+
     <button onclick="submitCorrectionRequest()" style="width:100%;padding:15px;background:var(--orange);border:none;border-radius:12px;color:#fff;font-size:15px;font-weight:700;cursor:pointer;font-family:DM Sans,sans-serif;margin-bottom:8px;">Submit Correction Request</button>
     <button onclick="closeCorrectionSheet()" style="width:100%;padding:12px;background:transparent;border:1.5px solid var(--border);border-radius:12px;font-size:14px;font-weight:600;color:var(--muted);cursor:pointer;font-family:DM Sans,sans-serif;">Cancel</button>
   </div>
@@ -2355,14 +2374,137 @@ async function handleBreak() {
 }
 
 // ── CORRECTION REQUESTS ──────────────────────────────────────────────────
-var _corrEntryId = null;
+// Tech can submit two kinds of correction requests:
+//   1. Fix existing punch — edit clock_in/clock_out/job on a row that exists
+//   2. Missed punch — create a new entry for a day they forgot
+// Both go to time_corrections with status='pending' for admin approval.
+// On admin approve, the change is auto-applied to time_entries.
+// ──────────────────────────────────────────────────────────────────────────
+var _corrEntryId = null;       // entry being corrected (null for missed-punch)
+var _corrIsNewEntry = false;   // true = missed-punch flow
+var _corrJobId = null;
+var _corrJobName = null;
+var _corrOriginalDate = null;  // original date string YYYY-MM-DD
 
-function openCorrectionRequest(entryId, clockIn, clockOut, jobName) {
-  _corrEntryId = entryId;
+function _todayDateKey() {
+  // YYYY-MM-DD in Central time
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Chicago', year:'numeric', month:'2-digit', day:'2-digit' }).format(new Date());
+}
+
+// Given an ISO timestamp, return "HH:MM" 24h string in Central time for input fields
+function _isoToTimeInput(iso) {
+  if (!iso) return '';
+  var d = new Date(iso);
+  var s = new Intl.DateTimeFormat('en-GB', { timeZone: 'America/Chicago', hour:'2-digit', minute:'2-digit', hour12:false }).format(d);
+  return s; // "HH:MM"
+}
+
+// Given an ISO timestamp, return "YYYY-MM-DD" in Central time
+function _isoToDateInput(iso) {
+  if (!iso) return '';
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Chicago', year:'numeric', month:'2-digit', day:'2-digit' }).format(new Date(iso));
+}
+
+// Combine date YYYY-MM-DD + time HH:MM (Central time) into an ISO timestamp.
+function _combineCentral(dateStr, timeStr) {
+  if (!dateStr || !timeStr) return null;
+  // Build with Central offset. May = CDT = -05:00. Nov-Mar = CST = -06:00.
+  // Use a probe date to determine current offset for that date.
+  var probe = new Date(dateStr + 'T12:00:00Z');
+  // Compute Central offset for that date: get the same wall time interpreted in Chicago
+  // and compare to UTC. Easier: build a Date at noon UTC, format in Chicago, take diff.
+  var utcNoon = new Date(dateStr + 'T12:00:00Z');
+  var chicagoHour = parseInt(new Intl.DateTimeFormat('en-US', { timeZone: 'America/Chicago', hour:'2-digit', hour12:false }).format(utcNoon), 10);
+  var offsetHours = chicagoHour - 12;  // negative
+  var offset = (offsetHours < 0 ? '-' : '+') + String(Math.abs(offsetHours)).padStart(2,'0') + ':00';
+  return dateStr + 'T' + timeStr + ':00' + offset;
+}
+
+// Open the correction sheet to FIX an existing entry
+function openFixPunch(entryId) {
+  var entry = (TC.entries || []).find(function(e){ return e.id === entryId; });
+  if (!entry) {
+    // Try fetching directly — might be older than what's loaded
+    sb('/rest/v1/time_entries?id=eq.' + entryId + '&select=*').then(function(rows){
+      if (rows && rows[0]) { _populateCorrectionFromEntry(rows[0]); }
+      else toast('Entry not found');
+    });
+    return;
+  }
+  _populateCorrectionFromEntry(entry);
+}
+
+function _populateCorrectionFromEntry(e) {
+  _corrEntryId = e.id;
+  _corrIsNewEntry = false;
+  _corrJobId = e.job_id || null;
+  _corrJobName = e.job_name || null;
+  _corrOriginalDate = _isoToDateInput(e.clock_in);
+
+  // Title and subtitle
+  var title = document.getElementById('corr-sheet-title');
+  var sub = document.getElementById('corr-sheet-sub');
+  if (title) title.textContent = '✏️ Request Time Correction';
+  if (sub) sub.textContent = 'Adjust the clock times or job. Your manager will review and approve.';
+
   var info = document.getElementById('corr-entry-info');
+  if (info) info.innerHTML = '<strong>Date:</strong> ' + _corrOriginalDate + '<br><strong>Current:</strong> ' + _isoToTimeInput(e.clock_in) + (e.clock_out ? ' → ' + _isoToTimeInput(e.clock_out) : ' → still active');
+
+  // Hide date row (date can't change for an edit — only times/job)
+  var dateRow = document.getElementById('corr-date-row');
+  if (dateRow) dateRow.style.display = 'none';
+
+  // Prefill times
+  var inEl = document.getElementById('corr-clock-in');
+  var outEl = document.getElementById('corr-clock-out');
+  if (inEl) inEl.value = _isoToTimeInput(e.clock_in);
+  if (outEl) outEl.value = e.clock_out ? _isoToTimeInput(e.clock_out) : '';
+
+  // Prefill job
+  _setCorrJob(e.job_id || null, e.job_name || '');
+
+  // Clear note
   var note = document.getElementById('corr-note');
-  if (info) info.innerHTML = '<strong>Entry:</strong> ' + clockIn + ' → ' + clockOut + '<br><strong>Job:</strong> ' + (jobName || 'No job');
   if (note) note.value = '';
+
+  // Show
+  var sheet = document.getElementById('correction-sheet');
+  if (sheet) sheet.classList.add('open');
+}
+
+// Open the correction sheet for a MISSED PUNCH (new entry)
+function openMissedPunch() {
+  _corrEntryId = null;
+  _corrIsNewEntry = true;
+  _corrJobId = null;
+  _corrJobName = null;
+  _corrOriginalDate = _todayDateKey();
+
+  var title = document.getElementById('corr-sheet-title');
+  var sub = document.getElementById('corr-sheet-sub');
+  if (title) title.textContent = '＋ Add Missed Punch';
+  if (sub) sub.textContent = 'Submit a missed punch for admin approval. Be specific about which job and times.';
+
+  var info = document.getElementById('corr-entry-info');
+  if (info) info.innerHTML = '<strong>New entry</strong> — pick the date, times, and job for the punch you missed.';
+
+  // Show date row
+  var dateRow = document.getElementById('corr-date-row');
+  if (dateRow) dateRow.style.display = '';
+  var dateEl = document.getElementById('corr-date');
+  if (dateEl) dateEl.value = _todayDateKey();
+
+  // Clear times
+  var inEl = document.getElementById('corr-clock-in');
+  var outEl = document.getElementById('corr-clock-out');
+  if (inEl) inEl.value = '';
+  if (outEl) outEl.value = '';
+
+  _setCorrJob(null, '');
+
+  var note = document.getElementById('corr-note');
+  if (note) note.value = '';
+
   var sheet = document.getElementById('correction-sheet');
   if (sheet) sheet.classList.add('open');
 }
@@ -2371,32 +2513,100 @@ function closeCorrectionSheet() {
   var sheet = document.getElementById('correction-sheet');
   if (sheet) sheet.classList.remove('open');
   _corrEntryId = null;
+  _corrIsNewEntry = false;
+  _corrJobId = null;
+  _corrJobName = null;
+}
+
+function _setCorrJob(jobId, jobName) {
+  _corrJobId = jobId || null;
+  _corrJobName = jobName || null;
+  var sel = document.getElementById('corr-job-selected');
+  var search = document.getElementById('corr-job-search');
+  var results = document.getElementById('corr-job-results');
+  if (jobId || jobName) {
+    if (sel) {
+      sel.style.display = 'block';
+      sel.innerHTML = '✓ ' + (jobName || jobId) + ' <button onclick="_setCorrJob(null,\'\')" style="margin-left:8px;border:none;background:transparent;color:var(--muted);font-size:11px;cursor:pointer;text-decoration:underline;">change</button>';
+    }
+    if (search) search.value = '';
+    if (results) { results.style.display = 'none'; results.innerHTML = ''; }
+  } else {
+    if (sel) { sel.style.display = 'none'; sel.innerHTML = ''; }
+  }
+}
+
+function corrJobSearch() {
+  var q = (document.getElementById('corr-job-search') || {}).value || '';
+  q = q.trim().toLowerCase();
+  var results = document.getElementById('corr-job-results');
+  if (!results) return;
+  if (q.length < 2) { results.style.display = 'none'; results.innerHTML = ''; return; }
+  // Search the loaded jobs map
+  var matches = [];
+  if (TC.jobs && TC.jobs.length) {
+    for (var i=0; i<TC.jobs.length && matches.length < 20; i++) {
+      var j = TC.jobs[i];
+      var hay = ((j.name||'') + ' ' + (j.id||'')).toLowerCase();
+      if (hay.indexOf(q) !== -1) matches.push(j);
+    }
+  }
+  if (!matches.length) { results.style.display = 'block'; results.innerHTML = '<div style="padding:10px;color:var(--muted);font-size:12px;">No jobs match</div>'; return; }
+  results.style.display = 'block';
+  results.innerHTML = matches.map(function(j){
+    var safeId = String(j.id || '').replace(/'/g, '\\\'');
+    var safeName = String(j.name || '').replace(/'/g, '\\\'');
+    return '<div onclick="_setCorrJob(\''+safeId+'\',\''+safeName+'\')" style="padding:10px 12px;border-bottom:1px solid var(--border);cursor:pointer;font-size:13px;">' +
+           '<div style="font-weight:600;color:var(--navy);">' + (j.name || j.id) + '</div>' +
+           '</div>';
+  }).join('');
 }
 
 async function submitCorrectionRequest() {
-  if (!_corrEntryId || !TC.employee) {
-    toast('Missing entry or employee info — try again');
-    return;
-  }
-  var type = (document.getElementById('corr-type') || {}).value || 'other';
+  if (!TC.employee) { toast('Employee not loaded'); return; }
+  var inVal = (document.getElementById('corr-clock-in') || {}).value || '';
+  var outVal = (document.getElementById('corr-clock-out') || {}).value || '';
   var note = ((document.getElementById('corr-note') || {}).value || '').trim();
-  if (!note) { toast('Please describe what needs to be corrected'); return; }
+
+  var dateStr;
+  if (_corrIsNewEntry) {
+    dateStr = (document.getElementById('corr-date') || {}).value || '';
+    if (!dateStr) { toast('Pick a date for the missed punch'); return; }
+    if (!inVal || !outVal) { toast('Both clock-in and clock-out times are required'); return; }
+    if (!_corrJobId && !_corrJobName) { toast('Pick a job (or pick a recent job from the search)'); return; }
+    if (!note) { toast('Please add a reason / note'); return; }
+  } else {
+    dateStr = _corrOriginalDate;
+    if (!inVal && !outVal && _corrJobId === null) { toast('Change at least one field, or cancel'); return; }
+  }
+
+  var requestedIn  = inVal  ? _combineCentral(dateStr, inVal)  : null;
+  var requestedOut = outVal ? _combineCentral(dateStr, outVal) : null;
+  if (requestedIn && requestedOut && new Date(requestedOut) <= new Date(requestedIn)) {
+    toast('Clock-out must be AFTER clock-in'); return;
+  }
 
   var btn = document.querySelector('#correction-sheet button');
   if (btn) { btn.textContent = 'Submitting...'; btn.disabled = true; }
 
   try {
+    var payload = {
+      entry_id: _corrEntryId,                  // null for missed-punch
+      employee_name: TC.employee.name,
+      employee_email: TC.user ? TC.user.email : '',
+      correction_type: _corrIsNewEntry ? 'missed_punch' : 'edit',
+      is_new_entry: _corrIsNewEntry,
+      requested_clock_in:  requestedIn,
+      requested_clock_out: requestedOut,
+      requested_job_id:    _corrJobId,
+      requested_job_name:  _corrJobName,
+      notes: note || null,
+      status: 'pending'
+    };
     var r = await fetch(SB_URL + '/rest/v1/time_corrections', {
       method: 'POST',
       headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
-      body: JSON.stringify({
-        entry_id: _corrEntryId,
-        employee_name: TC.employee.name,
-        employee_email: TC.user ? TC.user.email : '',
-        correction_type: type,
-        notes: note,
-        status: 'pending'
-      })
+      body: JSON.stringify(payload)
     });
     if (!r.ok) {
       var errText = '';
@@ -2407,11 +2617,7 @@ async function submitCorrectionRequest() {
       return;
     }
     closeCorrectionSheet();
-    if (isAppAdmin()) {
-      toast('✓ Note saved');
-    } else {
-      toast('✓ Correction request submitted — your manager will review it');
-    }
+    toast('✓ Submitted — your manager will review it');
   } catch(err) {
     console.error('correction request error', err);
     toast('Network error — check connection and try again');
@@ -4314,8 +4520,14 @@ async function loadMyHours() {
 
   var el=document.getElementById('hours-entry-list');
   if (!el) return;
-  if (!entries.length) { el.innerHTML='<div class="empty">No entries in this pay period ('+periodLabel+')</div>'; return; }
-  el.innerHTML = entries.map(function(e){
+  // "Add missed punch" button — for days the tech forgot to clock in
+  var addMissedBtn = '<div style="margin-bottom:10px;">' +
+    '<button onclick="openMissedPunch()" style="width:100%;padding:11px;background:rgba(232,93,4,.06);border:1.5px dashed var(--orange);border-radius:10px;color:var(--orange);font-size:13px;font-weight:700;cursor:pointer;font-family:DM Sans,sans-serif;display:flex;align-items:center;justify-content:center;gap:6px;">' +
+      '<span style="font-size:14px;">＋</span><span>Add Missed Punch</span>' +
+    '</button>' +
+  '</div>';
+  if (!entries.length) { el.innerHTML = addMissedBtn + '<div class="empty">No entries in this pay period ('+periodLabel+')</div>'; return; }
+  el.innerHTML = addMissedBtn + entries.map(function(e){
     var mins = e.duration_minutes || Math.floor(((e.clock_out?new Date(e.clock_out):new Date())-new Date(e.clock_in))/60000);
     var active = !e.clock_out;
     var fixBtnLabel = active ? '✏️ Fix Punch' : '✏️ Fix';
@@ -4330,7 +4542,7 @@ async function loadMyHours() {
       '</div>'+
       '<div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px;">'+
         '<div class="team-dur" style="color:'+(active?'var(--green)':'var(--navy)')+';">'+fmtDur(mins)+'</div>'+
-        '<button onclick="openCorrectionRequest(\''+e.id+'\',\''+fmtDate(e.clock_in)+' '+fmtTime(e.clock_in)+'\',\''+(e.clock_out?fmtTime(e.clock_out):'(still clocked in)')+'\',\''+(e.job_name||'No job')+'\')" style="'+fixBtnStyle+'">'+fixBtnLabel+'</button>'+
+        '<button onclick="openFixPunch(\''+e.id+'\')" style="'+fixBtnStyle+'">'+fixBtnLabel+'</button>'+
       '</div>'+
     '</div>';
   }).join('');
@@ -4509,16 +4721,11 @@ function _closeSingleEntryModal() {
 function _handleSingleFixPunch(entryId) {
   var entry = TC.entries.find(function(e){ return e.id === entryId; });
   if (!entry) { toast('Entry not found'); return; }
-  // Close the single-entry modal and open the existing correction request flow
+  // Close the single-entry modal and open the correction request flow
   _closeSingleEntryModal();
-  var cIn = new Date(entry.clock_in);
-  var cOut = entry.clock_out ? new Date(entry.clock_out) : null;
   setTimeout(function(){
-    if (typeof openCorrectionRequest === 'function') {
-      openCorrectionRequest(entry.id,
-        cIn.toLocaleDateString('en-US') + ' ' + cIn.toLocaleTimeString('en-US', {hour:'numeric',minute:'2-digit'}),
-        cOut ? cOut.toLocaleTimeString('en-US', {hour:'numeric',minute:'2-digit'}) : '(still clocked in)',
-        entry.job_name || 'No job');
+    if (typeof openFixPunch === 'function') {
+      openFixPunch(entry.id);
     }
   }, 200);
 }
