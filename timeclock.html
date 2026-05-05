@@ -4527,25 +4527,114 @@ async function loadMyHours() {
     '</button>' +
   '</div>';
   if (!entries.length) { el.innerHTML = addMissedBtn + '<div class="empty">No entries in this pay period ('+periodLabel+')</div>'; return; }
-  el.innerHTML = addMissedBtn + entries.map(function(e){
-    var mins = e.duration_minutes || Math.floor(((e.clock_out?new Date(e.clock_out):new Date())-new Date(e.clock_in))/60000);
-    var active = !e.clock_out;
+
+  // Group entries by day. Show one row per day (collapsed view).
+  // Click row → modal with all punches for that day.
+  // Cache the entries on TC so the modal can find them later.
+  TC._hoursEntries = entries;
+  var dayKey = function(iso){ var d=new Date(iso); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); };
+  var dayGroups = {};
+  entries.forEach(function(e){
+    var k = dayKey(e.clock_in);
+    if (!dayGroups[k]) dayGroups[k] = [];
+    dayGroups[k].push(e);
+  });
+  // Sort days descending (newest first)
+  var sortedDays = Object.keys(dayGroups).sort(function(a,b){ return b.localeCompare(a); });
+
+  el.innerHTML = addMissedBtn + sortedDays.map(function(dk){
+    var dayEntries = dayGroups[dk].slice().sort(function(a,b){ return new Date(a.clock_in) - new Date(b.clock_in); });
+    var first = dayEntries[0];
+    var lastE = dayEntries[dayEntries.length-1];
+    var active = !lastE.clock_out;
+
+    // Span calc
+    var bStart = new Date(first.clock_in);
+    var bEnd = active ? new Date() : new Date(lastE.clock_out);
+    var spanMins = Math.max(0, Math.floor((bEnd - bStart) / 60000));
+
+    // Distinct jobs for the day
+    var jobs = Array.from(new Set(dayEntries.map(function(e){ return e.job_name||'No job'; })));
+    var jobLabel = jobs.length === 1 ? jobs[0] : jobs[0] + ' +' + (jobs.length-1) + ' more';
+
+    var punchCount = dayEntries.length;
+    var clickAttr = punchCount > 1 ? ' style="cursor:pointer;flex-wrap:wrap;gap:6px;transition:background .3s;" onclick="openDayDetailHours(\''+dk+'\')"' : ' style="flex-wrap:wrap;gap:6px;transition:background .3s;"';
+
     var fixBtnLabel = active ? '✏️ Fix Punch' : '✏️ Fix';
     var fixBtnStyle = active
       ? 'font-size:11px;padding:4px 10px;border-radius:6px;border:1px solid var(--orange);background:var(--orange);color:#fff;cursor:pointer;font-family:DM Sans,sans-serif;font-weight:700;'
       : 'font-size:10px;padding:2px 8px;border-radius:6px;border:1px solid var(--border);background:transparent;cursor:pointer;color:var(--muted);font-family:DM Sans,sans-serif;';
-    return '<div class="team-member" data-entry-id="'+e.id+'" id="entry-'+e.id+'" style="flex-wrap:wrap;gap:6px;transition:background .3s;">'+
-      '<div style="font-size:10px;font-weight:700;color:var(--muted);min-width:44px;text-align:center;">'+fmtDate(e.clock_in)+'</div>'+
+
+    return '<div class="team-member"'+clickAttr+'>'+
+      '<div style="font-size:10px;font-weight:700;color:var(--muted);min-width:44px;text-align:center;">'+fmtDate(first.clock_in)+'</div>'+
       '<div class="team-info">'+
-        '<div class="team-name">'+(e.job_name||'No job')+'</div>'+
-        '<div class="team-job">'+fmtTime(e.clock_in)+(e.clock_out?' - '+fmtTime(e.clock_out):' Active')+'</div>'+
+        '<div class="team-name">'+jobLabel+(punchCount>1?' <span style="background:rgba(13,45,94,.08);padding:1px 6px;border-radius:8px;font-size:10px;color:var(--navy);font-weight:700;margin-left:4px;">'+punchCount+' punches</span>':'')+'</div>'+
+        '<div class="team-job">'+fmtTime(first.clock_in)+(active?' - Active':' - '+fmtTime(lastE.clock_out))+'</div>'+
       '</div>'+
       '<div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px;">'+
-        '<div class="team-dur" style="color:'+(active?'var(--green)':'var(--navy)')+';">'+fmtDur(mins)+'</div>'+
-        '<button onclick="openFixPunch(\''+e.id+'\')" style="'+fixBtnStyle+'">'+fixBtnLabel+'</button>'+
+        '<div class="team-dur" style="color:'+(active?'var(--green)':'var(--navy)')+';">'+fmtDur(spanMins)+'</div>'+
+        (punchCount === 1
+          ? '<button onclick="event.stopPropagation();openFixPunch(\''+first.id+'\')" style="'+fixBtnStyle+'">'+fixBtnLabel+'</button>'
+          : '<span style="font-size:10px;color:var(--muted);">tap for details</span>')+
       '</div>'+
     '</div>';
   }).join('');
+}
+
+// Open a modal showing all punches for a single day on tech's My Hours.
+function openDayDetailHours(dayKey) {
+  var entries = (TC._hoursEntries || []).filter(function(e){
+    var d = new Date(e.clock_in);
+    var dk = d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+    return dk === dayKey;
+  }).sort(function(a,b){ return new Date(a.clock_in) - new Date(b.clock_in); });
+
+  if (!entries.length) { toast('No entries for that day'); return; }
+
+  var dateLabel = fmtDate(entries[0].clock_in);
+  var fmtT = function(iso){ var d=new Date(iso); var h=d.getHours()%12||12; var m=d.getMinutes(); return h+':'+(m<10?'0':'')+m+(d.getHours()>=12?' PM':' AM'); };
+
+  // Span totals
+  var first = entries[0];
+  var lastE = entries[entries.length-1];
+  var active = !lastE.clock_out;
+  var bStart = new Date(first.clock_in);
+  var bEnd = active ? new Date() : new Date(lastE.clock_out);
+  var spanMins = Math.max(0, Math.floor((bEnd - bStart) / 60000));
+
+  // Build modal content
+  var rows = entries.map(function(e){
+    var dur = e.duration_minutes || Math.floor(((e.clock_out?new Date(e.clock_out):new Date())-new Date(e.clock_in))/60000);
+    var act = !e.clock_out;
+    return '<div style="display:flex;align-items:center;gap:10px;padding:10px;border:1px solid var(--border);border-radius:8px;margin-bottom:8px;">' +
+      '<div style="flex:1;">' +
+        '<div style="font-weight:700;color:var(--navy);font-size:13px;">'+(e.job_name||'No job')+'</div>' +
+        '<div style="font-size:11px;color:var(--muted);font-family:DM Mono,monospace;">'+fmtT(e.clock_in)+' - '+(act?'Active':fmtT(e.clock_out))+'</div>' +
+      '</div>' +
+      '<div style="font-weight:700;color:var(--navy);font-size:13px;font-family:DM Mono,monospace;">'+fmtDur(dur)+'</div>' +
+      '<button onclick="closeHoursDayModal();openFixPunch(\''+e.id+'\')" style="font-size:11px;padding:4px 10px;border-radius:6px;border:1px solid var(--orange);background:var(--orange);color:#fff;cursor:pointer;font-weight:700;font-family:DM Sans,sans-serif;">✏️ Fix</button>' +
+    '</div>';
+  }).join('');
+
+  var html =
+    '<div id="hours-day-modal" style="position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:2200;display:flex;align-items:center;justify-content:center;padding:20px;" onclick="if(event.target===this)closeHoursDayModal()">' +
+      '<div style="background:#fff;border-radius:14px;padding:20px;width:100%;max-width:480px;max-height:80vh;overflow-y:auto;box-shadow:0 20px 60px rgba(0,0,0,.3);">' +
+        '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">' +
+          '<div><div style="font-weight:700;color:var(--navy);font-size:15px;">'+dateLabel+'</div>' +
+            '<div style="font-size:11px;color:var(--muted);">Total: '+fmtDur(spanMins)+' · '+entries.length+' punches</div>' +
+          '</div>' +
+          '<button onclick="closeHoursDayModal()" style="background:transparent;border:none;font-size:20px;cursor:pointer;color:var(--muted);">✕</button>' +
+        '</div>' +
+        rows +
+      '</div>' +
+    '</div>';
+  var existing = document.getElementById('hours-day-modal');
+  if (existing) existing.remove();
+  document.body.insertAdjacentHTML('beforeend', html);
+}
+function closeHoursDayModal() {
+  var m = document.getElementById('hours-day-modal');
+  if (m) m.remove();
 }
 
 // ── NOTIFICATION DEEP-LINK / SINGLE-ENTRY MODAL ──────────────────────────

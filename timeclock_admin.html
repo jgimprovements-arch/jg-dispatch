@@ -297,12 +297,130 @@ function billableStart(clockInISO, approvedEarly) {
   return dt < cutoff ? cutoff.toISOString() : clockInISO;
 }
 
+// billableMins now returns this entry's share of the day's billable total.
+// The day total uses span (first in → last out) and applies the auto-break
+// rule (>6.5h day adds 30m break unless manual break already covers it).
+// Each entry gets its proportional share based on its raw duration.
+// This way every aggregation site (summaries, payroll, exports) gets a
+// consistent answer that matches the day-row totals.
 function billableMins(entry, breaks) {
-  var bStart = new Date(billableStart(entry.clock_in, entry.approved_early));
-  var bEnd = entry.clock_out ? new Date(entry.clock_out) : new Date();
-  var raw = Math.max(0, Math.floor((bEnd - bStart) / 60000));
-  var bkMins = (breaks||[]).reduce(function(s,b){ return s+(b.duration_minutes||0); }, 0);
-  return Math.max(0, raw - bkMins);
+  if (!entry || !entry.clock_in) return 0;
+
+  // Find day-mates (same employee, same day)
+  var dayK = _dayKey(entry.clock_in);
+  var dayMates = (typeof ST !== 'undefined' && ST.entries)
+    ? ST.entries.filter(function(x){
+        return x.employee_name === entry.employee_name && _dayKey(x.clock_in) === dayK;
+      })
+    : [entry];
+
+  // If we somehow have no day-mates, fall back to single-entry calc
+  if (!dayMates.length) dayMates = [entry];
+
+  var dm = dayMetrics(dayMates, ST.breaks || []);
+  if (dm.billableMins <= 0) return 0;
+
+  // Compute this entry's share of the day's actual minutes
+  var sumActual = 0;
+  var thisActual = 0;
+  dayMates.forEach(function(e){
+    var bStart = new Date(billableStart(e.clock_in, e.approved_early));
+    var bEnd = e.clock_out ? new Date(e.clock_out) : new Date();
+    var raw = Math.max(0, Math.floor((bEnd - bStart) / 60000));
+    sumActual += raw;
+    if (e.id === entry.id) thisActual = raw;
+  });
+
+  if (sumActual <= 0) return 0;
+
+  // Edge case: if this is a single-entry day, just return the day's billable
+  if (dayMates.length === 1) return dm.billableMins;
+
+  // Multi-entry day: apportion
+  var share = thisActual / sumActual;
+  return Math.round(dm.billableMins * share);
+}
+
+// ── DAY-LEVEL AGGREGATION ─────────────────────────────────────────────────
+// Group multi-punch days into a single line. Day totals use SPAN method
+// (first clock-in to last clock-out), then deduct existing breaks, then
+// apply the auto-break rule: if span > 6.5h AND total existing breaks < 30m,
+// auto-deduct an additional 30m to bring break to 30m. If existing breaks
+// already >= 30m, no auto-break.
+// ──────────────────────────────────────────────────────────────────────────
+
+// Returns YYYY-MM-DD in local time for grouping by day.
+function _dayKey(iso) {
+  if (!iso) return '';
+  var d = new Date(iso);
+  return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
+}
+
+// Group entries by employee+day. Returns { "empName|YYYY-MM-DD": [entry, ...] }
+function groupEntriesByDay(entries) {
+  var groups = {};
+  (entries||[]).forEach(function(e){
+    var key = (e.employee_name||'') + '|' + _dayKey(e.clock_in);
+    if (!groups[key]) groups[key] = [];
+    groups[key].push(e);
+  });
+  // Sort each day's entries chronologically
+  Object.keys(groups).forEach(function(k){
+    groups[k].sort(function(a,b){ return new Date(a.clock_in) - new Date(b.clock_in); });
+  });
+  return groups;
+}
+
+// Compute day-level metrics: span actual, span billable, breaks, auto-break flag.
+// dayEntries: array of time_entries rows for ONE day for ONE employee
+// allBreaks: full ST.breaks array (will filter to entries in this day)
+// Returns: { actualMins, billableMins, manualBreakMins, autoBreakMins, totalBreakMins, firstIn, lastOut, hasOpen, anyEarly, anyApprovedEarly }
+function dayMetrics(dayEntries, allBreaks) {
+  var ents = dayEntries || [];
+  if (!ents.length) return { actualMins:0, billableMins:0, manualBreakMins:0, autoBreakMins:0, totalBreakMins:0, firstIn:null, lastOut:null, hasOpen:false, anyEarly:false, anyApprovedEarly:false };
+
+  var firstIn = ents[0].clock_in;
+  var lastOutEnt = ents[ents.length - 1];
+  var lastOut = lastOutEnt.clock_out;
+  var hasOpen = ents.some(function(e){ return !e.clock_out; });
+
+  // Effective billable start (apply 7:30 rule on FIRST punch of day)
+  var bStart = new Date(billableStart(firstIn, lastOutEnt.approved_early || ents[0].approved_early));
+  var bEnd = hasOpen ? new Date() : new Date(lastOut);
+
+  // Span = first in → last out
+  var spanMins = Math.max(0, Math.floor((bEnd - bStart) / 60000));
+
+  // Sum existing breaks across all entries in the day
+  var entryIds = ents.map(function(e){ return e.id; });
+  var dayBreaks = (allBreaks||[]).filter(function(b){ return entryIds.indexOf(b.entry_id) !== -1; });
+  var manualBreakMins = dayBreaks.reduce(function(s,b){ return s+(b.duration_minutes||0); }, 0);
+
+  // Auto-break rule: if day span > 6.5h AND existing break < 30m, add auto-break
+  // up to 30m. If existing break is already >= 30m, no auto-break.
+  var autoBreakMins = 0;
+  if (spanMins > 390 && manualBreakMins < 30) {
+    autoBreakMins = 30 - manualBreakMins;
+  }
+  var totalBreakMins = manualBreakMins + autoBreakMins;
+  var billableMins = Math.max(0, spanMins - totalBreakMins);
+
+  // Actual = same as span for the daily row (span - any time clocked out)
+  // Note: this differs from sum-of-individual-durations. Per Josh's preference 2026-05-05.
+  var actualMins = spanMins;
+
+  return {
+    actualMins: actualMins,
+    billableMins: billableMins,
+    manualBreakMins: manualBreakMins,
+    autoBreakMins: autoBreakMins,
+    totalBreakMins: totalBreakMins,
+    firstIn: firstIn,
+    lastOut: lastOut,
+    hasOpen: hasOpen,
+    anyEarly: ents.some(function(e){ return isEarlyClockIn(e.clock_in); }),
+    anyApprovedEarly: ents.some(function(e){ return e.approved_early; })
+  };
 }
 
 // After-hours detection (admin-side mirror of timeclock.html's isAfterHours).
@@ -3168,71 +3286,104 @@ function renderTimesheets() {
     });
     if (pendingFiltered.length) {
       h += '<div class="card"><div class="card-hdr"><div class="card-title">Time Entries — '+selPeriod+' <span style="font-size:11px;font-weight:400;color:var(--muted);">(approved entries hidden above)</span></div></div>';
-      h += '<table class="tc-table"><thead><tr><th>Employee</th><th>Date</th><th>Clock In</th><th>Clock Out</th><th>Actual</th><th>Billable</th><th>Break</th><th>Job</th><th>Verified</th><th>Flags</th><th></th></tr></thead><tbody>';
+      h += '<table class="tc-table"><thead><tr><th>Employee</th><th>Date</th><th>Clock In</th><th>Clock Out</th><th>Actual</th><th>Billable</th><th>Break</th><th>Punches</th><th>Verified</th><th>Flags</th><th></th></tr></thead><tbody>';
       pendingFiltered.sort(function(a,b){return new Date(a.clock_in)-new Date(b.clock_in);});
-      pendingFiltered.forEach(function(e){
-      var breaks=ST.breaks.filter(function(b){return b.entry_id===e.id;});
-      var actual=e.duration_minutes||durMins(e);
-      var bill=billableMins(e,breaks);
-      var bkMins=breaks.reduce(function(s,b){return s+(b.duration_minutes||0);},0);
-      var early=isEarlyClockIn(e.clock_in);
-      var active=!e.clock_out;
-      // Missed clock-out: active entry over 12 hours old
-      var missedCO = active && ((Date.now() - new Date(e.clock_in).getTime()) > 12*60*60*1000);
-      var flagCell='';
-      if(missedCO) {
-        flagCell='<span style="color:#c62828;font-size:11px;font-weight:700;">&#9888; Missed clock-out<br><button class="btn btn-sm" onclick="editEntry(\''+e.id+'\')">Fix</button> <button class="btn btn-sm" onclick="notifyMissedCO(\''+e.id+'\')" style="background:#6a1b9a;color:#fff;border-color:#6a1b9a;">🔔 Notify</button></span>';
-      }
-      else if(early&&!e.approved_early) flagCell='<span style="color:#c62828;font-size:11px;font-weight:700;">Early<br><button class="btn btn-sm" onclick="approveEarly(\''+e.id+'\')">Approve</button> <button class="btn btn-sm" onclick="fixEarlyTo730(\''+e.id+'\')" style="background:#e85d04;color:#fff;border-color:#e85d04;" title="Move clock-in to 7:30 AM">→ 7:30</button></span>';
-      // After-hours / on-call flag — append (independent of other flags)
-      if (isAfterHoursAdmin(e.clock_in)) {
-        var ocStatus_t = e.on_call_status || 'na';
-        var ocChip_t = '';
-        if (ocStatus_t === 'yes') {
-          if (e.on_call_bonus_id) {
-            ocChip_t = '<div style="color:#2e7d32;font-size:11px;font-weight:700;margin-top:4px;">🌙 ✓ $50 bonus paid</div>';
-          } else {
-            ocChip_t = '<div style="margin-top:4px;"><div style="color:#e65100;font-size:11px;font-weight:700;margin-bottom:2px;">🌙 On-call</div><button class="btn btn-sm" onclick="addOnCallBonus(\''+e.id+'\')" style="background:#2e7d32;color:#fff;border-color:#2e7d32;">+ $50 Bonus</button></div>';
-          }
-        } else if (ocStatus_t === 'no') {
-          ocChip_t = '<div style="color:var(--muted);font-size:11px;margin-top:4px;">🌙 After-hrs (not on-call)</div>';
-        } else {
-          ocChip_t = '<div style="color:#e65100;font-size:11px;font-weight:700;margin-top:4px;">🌙 Awaiting tech confirm</div>';
+
+      // Group by employee + day for consolidated rows. Click row → modal.
+      var dayGroups = groupEntriesByDay(pendingFiltered);
+      var dayKeys = Object.keys(dayGroups).sort(function(a,b){
+        var ea = dayGroups[a][0], eb = dayGroups[b][0];
+        return new Date(ea.clock_in) - new Date(eb.clock_in);
+      });
+
+      dayKeys.forEach(function(dk){
+        var dayEntries = dayGroups[dk];
+        var first = dayEntries[0];
+        var dm = dayMetrics(dayEntries, ST.breaks);
+        var active = dm.hasOpen;
+        var lastEntry = dayEntries[dayEntries.length-1];
+        var missedCO = active && ((Date.now() - new Date(lastEntry.clock_in).getTime()) > 12*60*60*1000);
+
+        // Flags aggregated across the day
+        var needsApproval = dayEntries.some(function(e){ return isEarlyClockIn(e.clock_in) && !e.approved_early; });
+        var anyAfterHours = dayEntries.some(function(e){ return isAfterHoursAdmin(e.clock_in); });
+        var anyOnCallNeedsBonus = dayEntries.some(function(e){ return e.on_call_status === 'yes' && !e.on_call_bonus_id; });
+        var anyOnCallPaid = dayEntries.some(function(e){ return e.on_call_status === 'yes' && e.on_call_bonus_id; });
+        var anyAwaitingTechConfirm = dayEntries.some(function(e){ return isAfterHoursAdmin(e.clock_in) && (!e.on_call_status || e.on_call_status === 'unconfirmed'); });
+
+        var flagCell = '';
+        if (missedCO) {
+          flagCell = '<span style="color:#c62828;font-size:11px;font-weight:700;">&#9888; Missed clock-out</span>';
+        } else if (needsApproval) {
+          // Surface approval at day level — find first early entry
+          var earlyE = dayEntries.find(function(e){ return isEarlyClockIn(e.clock_in) && !e.approved_early; });
+          flagCell = '<span style="color:#c62828;font-size:11px;font-weight:700;">Early<br><button class="btn btn-sm" onclick="event.stopPropagation();approveEarly(\''+earlyE.id+'\')">Approve</button> <button class="btn btn-sm" onclick="event.stopPropagation();fixEarlyTo730(\''+earlyE.id+'\')" style="background:#e85d04;color:#fff;border-color:#e85d04;">→ 7:30</button></span>';
+        } else if (dm.anyEarly && dm.anyApprovedEarly) {
+          flagCell = '<span style="color:#2e7d32;font-size:11px;">Early OK</span>';
         }
-        flagCell = (flagCell || '') + ocChip_t;
-      }
-      else if(early&&e.approved_early) flagCell='<span style="color:#2e7d32;font-size:11px;">Early OK</span>';
-      // Verified indicator — admin can manually toggle for cleanup of legacy data
-      var verifiedCell;
-      if (e.self_verified) {
-        verifiedCell = '<span title="Verified — click to unverify" style="color:#2e7d32;font-size:16px;font-weight:700;cursor:pointer;" onclick="toggleVerified(\''+e.id+'\',false)">&#10003;</span>';
-      } else if (active) {
-        verifiedCell = '<span style="color:var(--muted);font-size:11px;">—</span>';
-      } else {
-        verifiedCell = isAdmin()
-          ? '<button title="Mark as verified" onclick="toggleVerified(\''+e.id+'\',true)" style="padding:2px 8px;border:1px solid #c62828;background:transparent;color:#c62828;border-radius:4px;font-size:10px;font-weight:700;cursor:pointer;font-family:inherit;">unverified</button>'
-          : '<span title="Not self-verified" style="color:#c62828;font-size:11px;">unverified</span>';
-      }
-      var rowBg = missedCO ? 'background:rgba(198,40,40,.08);' : (early&&!e.approved_early?'background:rgba(198,40,40,.04);':'');
-      h += '<tr style="'+rowBg+'">';
-      h += '<td><strong>'+e.employee_name+'</strong></td>';
-      h += '<td>'+fmtD(new Date(e.clock_in))+'</td>';
-      h += '<td class="mono"'+(early&&!e.approved_early?' style="color:#c62828;font-weight:700;"':'')+'>'+fmt(e.clock_in)+'</td>';
-      h += '<td class="mono">'+(active?(missedCO?'<span class="badge" style="background:#c62828;color:#fff;">MISSED</span>':'<span class="badge badge-green">Active</span>'):fmt(e.clock_out))+'</td>';
-      h += '<td>'+fmtDur(actual)+'</td>';
-      h += '<td><strong>'+fmtDur(bill)+'</strong></td>';
-      h += '<td>'+(bkMins?fmtDur(bkMins):'-')+'</td>';
-      h += '<td style="max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+(e.job_name||'-')+'</td>';
-      h += '<td style="text-align:center;">'+verifiedCell+'</td>';
-      h += '<td>'+flagCell+'</td>';
-      var tcApproved = getApprovalStatus(selPeriod, e.employee_name) === 'approved';
-      if (tcApproved) {
-        h += '<td><span style="font-size:10px;color:var(--muted);">🔒 Locked</span></td>';
-      } else {
-        h += '<td>'+(isAdmin()?'<button class="btn btn-sm" onclick="editEntry(\''+e.id+'\')">Edit</button> <button class="btn btn-sm" onclick="openBreakEditor(\''+e.id+'\')" style="background:#f5a623;color:#fff;border-color:#f5a623;font-size:14px;" title="Edit breaks">🥪</button> <button class="btn btn-sm" onclick="openSplitEntry(\''+e.id+'\')" style="background:#0d2d5e;color:#fff;border-color:#0d2d5e;" title="Split into two entries">✂️</button> <button class="btn btn-sm" onclick="deleteEntry(\''+e.id+'\')" style="background:#c62828;color:#fff;border-color:#c62828;" title="Delete entry">🗑</button>':'<button class="btn btn-sm" onclick="viewEntry(\''+e.id+'\')">View</button>')+'</td>';
-      }
-      h += '</tr>';
-    });
+        if (anyAfterHours) {
+          var afterHrsChip = '';
+          if (anyOnCallPaid) {
+            afterHrsChip = '<div style="color:#2e7d32;font-size:11px;font-weight:700;margin-top:4px;">🌙 ✓ $50 bonus paid</div>';
+          } else if (anyOnCallNeedsBonus) {
+            var ocE = dayEntries.find(function(e){ return e.on_call_status === 'yes' && !e.on_call_bonus_id; });
+            afterHrsChip = '<div style="margin-top:4px;"><div style="color:#e65100;font-size:11px;font-weight:700;margin-bottom:2px;">🌙 On-call</div><button class="btn btn-sm" onclick="event.stopPropagation();addOnCallBonus(\''+ocE.id+'\')" style="background:#2e7d32;color:#fff;border-color:#2e7d32;">+ $50 Bonus</button></div>';
+          } else if (anyAwaitingTechConfirm) {
+            afterHrsChip = '<div style="color:#e65100;font-size:11px;font-weight:700;margin-top:4px;">🌙 Awaiting tech confirm</div>';
+          } else {
+            afterHrsChip = '<div style="color:var(--muted);font-size:11px;margin-top:4px;">🌙 After-hrs (not on-call)</div>';
+          }
+          flagCell = (flagCell || '') + afterHrsChip;
+        }
+
+        // Verified — day is verified iff ALL non-active entries are verified
+        var allVerified = dayEntries.every(function(e){ return e.self_verified || !e.clock_out; });
+        var anyClosedUnverified = dayEntries.some(function(e){ return e.clock_out && !e.self_verified; });
+        var verifiedCell;
+        if (allVerified && !active) {
+          verifiedCell = '<span title="All verified" style="color:#2e7d32;font-size:16px;font-weight:700;">&#10003;</span>';
+        } else if (active) {
+          verifiedCell = '<span style="color:var(--muted);font-size:11px;">—</span>';
+        } else {
+          verifiedCell = '<span title="One or more entries unverified" style="color:#c62828;font-size:11px;">unverified</span>';
+        }
+
+        // Show distinct jobs in the day (truncated)
+        var jobs = Array.from(new Set(dayEntries.map(function(e){ return e.job_name||'-'; })));
+        var jobLabel = jobs.length === 1 ? jobs[0] : jobs[0] + ' +' + (jobs.length-1);
+
+        // Auto-break visual indicator
+        var breakDisplay;
+        if (dm.totalBreakMins === 0) {
+          breakDisplay = '-';
+        } else if (dm.autoBreakMins > 0) {
+          breakDisplay = '<span title="Includes ' + dm.autoBreakMins + 'm auto-break (>6.5h day)">' + fmtDur(dm.totalBreakMins) + ' <span style="font-size:9px;color:#e85d04;font-weight:700;">AUTO</span></span>';
+        } else {
+          breakDisplay = fmtDur(dm.totalBreakMins);
+        }
+
+        var rowBg = missedCO ? 'background:rgba(198,40,40,.08);'
+                  : (needsApproval ? 'background:rgba(198,40,40,.04);' : '');
+        var clickAttr = ' style="cursor:pointer;'+rowBg+'" onclick="_openDayDetailModal(\''+escAttr(first.employee_name)+'\',\''+_dayKey(first.clock_in)+'\')"';
+        h += '<tr'+clickAttr+'>';
+        h += '<td><strong>'+first.employee_name+'</strong></td>';
+        h += '<td>'+fmtD(new Date(first.clock_in))+'</td>';
+        h += '<td class="mono"'+(dm.anyEarly && !dm.anyApprovedEarly?' style="color:#c62828;font-weight:700;"':'')+'>'+fmt(dm.firstIn)+'</td>';
+        h += '<td class="mono">'+(active?(missedCO?'<span class="badge" style="background:#c62828;color:#fff;">MISSED</span>':'<span class="badge badge-green">Active</span>'):fmt(dm.lastOut))+'</td>';
+        h += '<td>'+fmtDur(dm.actualMins)+'</td>';
+        h += '<td><strong>'+fmtDur(dm.billableMins)+'</strong></td>';
+        h += '<td>'+breakDisplay+'</td>';
+        h += '<td style="font-size:11px;"><span style="background:rgba(13,45,94,.06);padding:2px 8px;border-radius:10px;color:var(--navy);font-weight:700;">'+dayEntries.length+(dayEntries.length===1?' punch':' punches')+'</span></td>';
+        h += '<td style="text-align:center;">'+verifiedCell+'</td>';
+        h += '<td>'+flagCell+'</td>';
+        var tcApproved = getApprovalStatus(selPeriod, first.employee_name) === 'approved';
+        if (tcApproved) {
+          h += '<td><span style="font-size:10px;color:var(--muted);">🔒 Locked</span></td>';
+        } else {
+          h += '<td><button class="btn btn-sm" onclick="event.stopPropagation();_openDayDetailModal(\''+escAttr(first.employee_name)+'\',\''+_dayKey(first.clock_in)+'\')">Open</button></td>';
+        }
+        h += '</tr>';
+      });
       h += '</tbody></table></div>';
     } // end if pendingFiltered.length
 
@@ -10659,6 +10810,106 @@ function showModal(title, bodyHtml, saveCall) {
     '</div></div>';
   m.addEventListener('click', function(e){ if(e.target===m) closeModal(); });
   document.body.appendChild(m);
+}
+
+// HTML attribute-safe escape (single quote, double quote, ampersand)
+function escAttr(s){
+  if (s === null || s === undefined) return '';
+  return String(s).replace(/&/g,'&amp;').replace(/'/g,'&#39;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// Open a wider modal (for the day-detail view which has a table)
+function showWideModal(title, bodyHtml) {
+  var existing = document.getElementById('tc-modal');
+  if (existing) existing.remove();
+  var m = document.createElement('div');
+  m.id = 'tc-modal';
+  m.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:2200;display:flex;align-items:center;justify-content:center;padding:20px;';
+  m.innerHTML = '<div style="background:#fff;border-radius:12px;padding:24px;width:100%;max-width:900px;max-height:90vh;overflow-y:auto;box-shadow:0 20px 60px rgba(0,0,0,.3);" onclick="event.stopPropagation()">' +
+    '<div style="font-size:15px;font-weight:700;color:var(--navy);margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;gap:12px;">' +
+      '<span>'+title+'</span>' +
+      '<button class="btn" onclick="closeModal()" style="font-size:11px;padding:4px 12px;">✕ Close</button>' +
+    '</div>' +
+    bodyHtml +
+    '</div>';
+  m.addEventListener('click', function(e){ if(e.target===m) closeModal(); });
+  document.body.appendChild(m);
+}
+
+// Open the day-detail modal showing all individual punches for one employee+day.
+// Re-uses Edit / Break / Split / Delete buttons that already exist for individual entries.
+function _openDayDetailModal(empName, dayKey) {
+  // Find all entries matching this employee + day
+  var entries = (ST.entries || []).filter(function(e){
+    return e.employee_name === empName && _dayKey(e.clock_in) === dayKey;
+  }).sort(function(a,b){ return new Date(a.clock_in) - new Date(b.clock_in); });
+
+  if (!entries.length) { toast('No entries found for that day'); return; }
+
+  var dm = dayMetrics(entries, ST.breaks);
+  var dateLabel = fmtD(new Date(entries[0].clock_in));
+  var title = empName + ' — ' + dateLabel;
+
+  // Day summary
+  var summary =
+    '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px;margin-bottom:16px;background:rgba(13,45,94,.04);padding:12px;border-radius:10px;">' +
+      '<div><div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;">First In</div><div style="font-weight:700;color:var(--navy);">'+fmt(dm.firstIn)+'</div></div>' +
+      '<div><div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;">Last Out</div><div style="font-weight:700;color:var(--navy);">'+(dm.hasOpen?'Active':fmt(dm.lastOut))+'</div></div>' +
+      '<div><div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;">Span</div><div style="font-weight:700;color:var(--navy);">'+fmtDur(dm.actualMins)+'</div></div>' +
+      '<div><div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;">Break</div><div style="font-weight:700;color:'+(dm.autoBreakMins>0?'#e85d04':'var(--navy)')+';">'+fmtDur(dm.totalBreakMins)+(dm.autoBreakMins>0?' <span style="font-size:9px;">AUTO</span>':'')+'</div></div>' +
+      '<div><div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;">Billable</div><div style="font-weight:700;color:#2e7d32;font-size:15px;">'+fmtDur(dm.billableMins)+'</div></div>' +
+    '</div>';
+
+  // Auto-break explainer
+  var breakNote = '';
+  if (dm.autoBreakMins > 0) {
+    breakNote = '<div style="font-size:11px;color:#e85d04;margin-bottom:12px;padding:8px 12px;background:rgba(232,93,4,.06);border-left:3px solid #e85d04;border-radius:4px;">' +
+      '⏱ Day span exceeds 6.5h — '+dm.autoBreakMins+'m auto-break applied to billable.' +
+      (dm.manualBreakMins > 0 ? ' (Existing manual break: '+dm.manualBreakMins+'m)' : '') +
+    '</div>';
+  }
+
+  // Punches table
+  var tableRows = entries.map(function(e){
+    var breaks = ST.breaks.filter(function(b){ return b.entry_id === e.id; });
+    var actual = e.duration_minutes || durMins(e);
+    var bill = billableMins(e, breaks);
+    var bkMins = breaks.reduce(function(s,b){ return s+(b.duration_minutes||0); }, 0);
+    var early = isEarlyClockIn(e.clock_in);
+    var active = !e.clock_out;
+    var rowBg = (early && !e.approved_early) ? 'background:rgba(198,40,40,.04);' : '';
+
+    var tcApproved = getApprovalStatus(periodLabelFor(e.clock_in), e.employee_name) === 'approved';
+    var actions;
+    if (tcApproved) {
+      actions = '<span style="font-size:10px;color:var(--muted);">🔒 Locked</span>';
+    } else if (isAdmin()) {
+      actions = '<button class="btn btn-sm" onclick="closeModal();editEntry(\''+e.id+'\')">Edit</button> ' +
+                '<button class="btn btn-sm" onclick="closeModal();openBreakEditor(\''+e.id+'\')" style="background:#f5a623;color:#fff;border-color:#f5a623;font-size:14px;" title="Edit breaks">🥪</button> ' +
+                '<button class="btn btn-sm" onclick="closeModal();openSplitEntry(\''+e.id+'\')" style="background:#0d2d5e;color:#fff;border-color:#0d2d5e;" title="Split">✂️</button> ' +
+                '<button class="btn btn-sm" onclick="closeModal();deleteEntry(\''+e.id+'\')" style="background:#c62828;color:#fff;border-color:#c62828;" title="Delete">🗑</button>';
+    } else {
+      actions = '<button class="btn btn-sm" onclick="closeModal();viewEntry(\''+e.id+'\')">View</button>';
+    }
+
+    return '<tr style="'+rowBg+'">' +
+      '<td class="mono"'+(early && !e.approved_early?' style="color:#c62828;font-weight:700;"':'')+'>'+fmt(e.clock_in)+'</td>' +
+      '<td class="mono">'+(active?'<span class="badge badge-green">Active</span>':fmt(e.clock_out))+'</td>' +
+      '<td>'+fmtDur(actual)+'</td>' +
+      '<td>'+fmtDur(bill)+'</td>' +
+      '<td>'+(bkMins?fmtDur(bkMins):'-')+'</td>' +
+      '<td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+(e.job_name||'-')+'</td>' +
+      '<td>'+actions+'</td>' +
+    '</tr>';
+  }).join('');
+
+  var bodyHtml = summary + breakNote +
+    '<table class="tc-table" style="margin:0;">' +
+      '<thead><tr><th>Clock In</th><th>Clock Out</th><th>Actual</th><th>Billable</th><th>Break</th><th>Job</th><th>Actions</th></tr></thead>' +
+      '<tbody>' + tableRows + '</tbody>' +
+    '</table>';
+
+  showWideModal(title, bodyHtml);
 }
 // ── ON-CALL BONUS ─────────────────────────────────────────────────────────
 // Admin clicks "+ $50 Bonus" on an on-call entry. Creates a commission row of
