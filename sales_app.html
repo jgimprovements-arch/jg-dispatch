@@ -4863,16 +4863,27 @@ function signOut() {
 }
 
 function showInstallHelp() {
-  // If already running in standalone PWA mode, just acknowledge
-  if (window.matchMedia('(display-mode: standalone)').matches ||
-      window.navigator.standalone === true) {
+  // Detect ACTUAL standalone mode. The display-mode media query can return
+  // true incorrectly when Chrome's PWA registration gets stuck — saw this
+  // happen when the previous sw.js was caching the timeclock app. So we
+  // also cross-check with window dimensions: a real installed PWA has no
+  // browser chrome, so outer and inner height should match closely. If
+  // they differ significantly (browser address bar visible), we're in a
+  // regular tab regardless of what the media query says.
+  var displayModeStandalone = window.matchMedia('(display-mode: standalone)').matches;
+  var iOSStandalone = (window.navigator.standalone === true);
+  var heightDiff = Math.abs((window.outerHeight || 0) - (window.innerHeight || 0));
+  // If outerHeight is 0 (some webviews don't expose it), don't trust the
+  // dimension check; fall back to display-mode result.
+  var dimensionsLookStandalone = (window.outerHeight === 0) ? displayModeStandalone : (heightDiff < 100);
+  var trulyStandalone = (displayModeStandalone || iOSStandalone) && dimensionsLookStandalone;
+
+  if (trulyStandalone) {
     alert('✓ Already installed!\n\nYou\'re running the app from your home screen.');
     return;
   }
 
-  // If we have the cached prompt event from `beforeinstallprompt`, fire
-  // the real native install dialog instead of showing static text.
-  // Chrome on Android stores this once per session.
+  // Fire native install prompt if Chrome cached one
   if (_deferredInstallPrompt) {
     _deferredInstallPrompt.prompt();
     _deferredInstallPrompt.userChoice.then(function(r) {
@@ -4887,9 +4898,7 @@ function showInstallHelp() {
     return;
   }
 
-  // No cached prompt — fall back to platform-specific instructions.
-  // iOS Safari never fires beforeinstallprompt; user must do it manually.
-  // Android Chrome may have already used the prompt (only fires once).
+  // No cached prompt — show manual instructions
   var ua = navigator.userAgent;
   var isIOS = /iPad|iPhone|iPod/.test(ua);
   var isAndroid = /Android/.test(ua);
@@ -4898,7 +4907,7 @@ function showInstallHelp() {
   if (isIOS) {
     msg = 'To install on iPhone:\n\n1. Tap the Share button (square with up arrow) at the bottom of Safari\n2. Scroll down and tap "Add to Home Screen"\n3. Tap "Add" in the top right';
   } else if (isAndroid && isChrome) {
-    msg = 'To install on Android:\n\n1. Tap the ⋮ menu (top right of Chrome)\n2. Tap "Install app" or "Add to Home Screen"\n3. Tap "Install"';
+    msg = 'To install on Android:\n\n1. Tap the ⋮ menu (top right of Chrome)\n2. Tap "Install app" or "Add to Home Screen"\n3. Tap "Install"\n\nIf Chrome says it\'s already installed but it\'s not on your home screen:\n• Settings → Apps → Chrome → Storage → Clear storage\n• Then come back here and try again';
   } else if (isAndroid) {
     msg = 'To install on Android:\n\n1. Open this page in Chrome\n2. Tap the ⋮ menu (top right)\n3. Tap "Install app" or "Add to Home Screen"';
   } else {
