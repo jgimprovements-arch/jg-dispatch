@@ -371,10 +371,14 @@ function groupEntriesByDay(entries) {
   return groups;
 }
 
-// Compute day-level metrics: span actual, span billable, breaks, auto-break flag.
-// dayEntries: array of time_entries rows for ONE day for ONE employee
-// allBreaks: full ST.breaks array (will filter to entries in this day)
-// Returns: { actualMins, billableMins, manualBreakMins, autoBreakMins, totalBreakMins, firstIn, lastOut, hasOpen, anyEarly, anyApprovedEarly }
+// ──────────────────────────────────────────────────────────────────────────
+// DAY METRICS — DO NOT REMOVE OR SIMPLIFY.
+// This function computes day-level totals using SPAN method (first in →
+// last out) and applies the auto-break rule: if span > 6.5h AND existing
+// manual break < 30m, deduct (30 - existing) minutes automatically.
+// billableMins() depends on this function for correct day-aware totals.
+// All aggregation sites (payroll, exports, summaries) flow through here.
+// ──────────────────────────────────────────────────────────────────────────
 function dayMetrics(dayEntries, allBreaks) {
   var ents = dayEntries || [];
   if (!ents.length) return { actualMins:0, billableMins:0, manualBreakMins:0, autoBreakMins:0, totalBreakMins:0, firstIn:null, lastOut:null, hasOpen:false, anyEarly:false, anyApprovedEarly:false };
@@ -3312,8 +3316,20 @@ function renderTimesheets() {
         var anyAwaitingTechConfirm = dayEntries.some(function(e){ return isAfterHoursAdmin(e.clock_in) && (!e.on_call_status || e.on_call_status === 'unconfirmed'); });
 
         var flagCell = '';
+        // ──────────────────────────────────────────────────────────────
+        // MISSED CLOCK-OUT FLAGS — DO NOT REMOVE Fix + 🔔 Notify buttons.
+        // These are the admin's primary way to (1) open the day-detail
+        // modal to manually fix the entry, and (2) send an in-app
+        // notification to the tech asking them to clean up their punch.
+        // The "Notify All" bulk button at the top of the missed-CO card
+        // is a separate feature and also must be preserved.
+        // ──────────────────────────────────────────────────────────────
         if (missedCO) {
-          flagCell = '<span style="color:#c62828;font-size:11px;font-weight:700;">&#9888; Missed clock-out</span>';
+          var missedEntry = dayEntries.find(function(e){ return !e.clock_out && ((Date.now() - new Date(e.clock_in).getTime()) > 12*60*60*1000); });
+          flagCell = '<span style="color:#c62828;font-size:11px;font-weight:700;">&#9888; Missed clock-out<br>' +
+            '<button class="btn btn-sm" onclick="event.stopPropagation();_openDayDetailModal(\''+escAttr(first.employee_name)+'\',\''+_dayKey(first.clock_in)+'\')">Fix</button> ' +
+            (missedEntry ? '<button class="btn btn-sm" onclick="event.stopPropagation();notifyMissedCO(\''+missedEntry.id+'\')" style="background:#6a1b9a;color:#fff;border-color:#6a1b9a;">🔔 Notify</button>' : '') +
+          '</span>';
         } else if (needsApproval) {
           // Surface approval at day level — find first early entry
           var earlyE = dayEntries.find(function(e){ return isEarlyClockIn(e.clock_in) && !e.approved_early; });
@@ -11729,8 +11745,16 @@ function openTimecardDetail(empName) {
       var anyAwaitingTechConfirmD = dayEntriesD.some(function(e){ return isAfterHoursAdmin(e.clock_in) && (!e.on_call_status || e.on_call_status === 'unconfirmed'); });
 
       var flagCellD = '';
+      // ──────────────────────────────────────────────────────────────
+      // MISSED CLOCK-OUT FLAGS (per-employee detail) — DO NOT REMOVE
+      // Fix + 🔔 Notify buttons. Same pattern as main Timesheets table.
+      // ──────────────────────────────────────────────────────────────
       if (missedCOD) {
-        flagCellD = '<span style="color:#c62828;font-size:11px;font-weight:700;">⚠ Missed CO</span>';
+        var missedEntryD = dayEntriesD.find(function(e){ return !e.clock_out && ((Date.now() - new Date(e.clock_in).getTime()) > 12*60*60*1000); });
+        flagCellD = '<span style="color:#c62828;font-size:11px;font-weight:700;">⚠ Missed CO<br>' +
+          '<button class="btn btn-sm" onclick="event.stopPropagation();_openDayDetailModal(\''+escAttr(firstD.employee_name)+'\',\''+_dayKey(firstD.clock_in)+'\')">Fix</button> ' +
+          (missedEntryD ? '<button class="btn btn-sm" onclick="event.stopPropagation();notifyMissedCO(\''+missedEntryD.id+'\')" style="background:#6a1b9a;color:#fff;border-color:#6a1b9a;">🔔 Notify</button>' : '') +
+        '</span>';
       } else if (needsApprovalD) {
         var earlyED = dayEntriesD.find(function(e){ return isEarlyClockIn(e.clock_in) && !e.approved_early; });
         flagCellD = '<span style="color:#c62828;font-size:11px;font-weight:700;">Early<br><button class="btn btn-sm" onclick="event.stopPropagation();approveEarly(\''+earlyED.id+'\')">Approve</button> <button class="btn btn-sm" onclick="event.stopPropagation();fixEarlyTo730(\''+earlyED.id+'\')" style="background:#e85d04;color:#fff;border-color:#e85d04;">→ 7:30</button></span>';
