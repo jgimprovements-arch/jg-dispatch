@@ -11124,6 +11124,32 @@ async function fixEarlyTo730(entryId) {
   var entry = ST.entries.find(function(e){ return e.id === entryId; });
   if (!entry) { toast('Entry not found'); return; }
 
+  // If this entry is a micro-punch (< 2 min), it's probably a mis-tap.
+  // Look for a substantive early entry on the same day for the same employee instead.
+  var entryDurSec = entry.clock_out ? (new Date(entry.clock_out) - new Date(entry.clock_in)) / 1000 : 9999;
+  if (entryDurSec < 120 && entry.clock_out) {
+    var dk = _dayKey(entry.clock_in);
+    var betterEntry = ST.entries.find(function(e){
+      return e.employee_name === entry.employee_name &&
+             _dayKey(e.clock_in) === dk &&
+             e.id !== entry.id &&
+             isEarlyClockIn(e.clock_in) &&
+             !e.approved_early &&
+             (!e.clock_out || (new Date(e.clock_out) - new Date(e.clock_in)) >= 120000);
+    });
+    if (betterEntry) {
+      entry = betterEntry;
+      entryId = betterEntry.id;
+    } else {
+      // No substantive early entry — offer to delete the mis-tap instead
+      if (confirm('This looks like a mis-tap (' + Math.round(entryDurSec) + ' seconds). Delete it instead?')) {
+        deleteEntry(entryId);
+        return;
+      }
+      return;
+    }
+  }
+
   var oldClockIn = new Date(entry.clock_in);
   var newClockIn = new Date(oldClockIn);
   newClockIn.setHours(7, 30, 0, 0);
