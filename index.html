@@ -4240,35 +4240,37 @@ let _lastKnownDispatchDay = _getDispatchToday();
 
 // On page load, stamp any leftover NULL assignments from previous days.
 // This handles the case where nobody had dispatch open at 5AM rollover.
-(async function _startupRollover(){
+// Deferred to DOMContentLoaded so Supabase constants are available.
+document.addEventListener('DOMContentLoaded', async function _startupRollover(){
   try {
+    const _SB = 'https://nuykvchgecpiuikoerze.supabase.co';
+    const _SK = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im51eWt2Y2hnZWNwaXVpa29lcnplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYyNjM3ODYsImV4cCI6MjA5MTgzOTc4Nn0.39hZ8DdjT_0iFJXPeAL2FXUSLw8FZBirDVzxZTO1W9s';
     const today = _getDispatchToday();
-    // Check if there are NULL-dated assignments that aren't from today
-    const r = await fetch(SB + '/rest/v1/dispatch_assignments_v2?scheduled_date=is.null&select=id,created_at&limit=1', {
-      headers: { 'apikey': K, 'Authorization': 'Bearer ' + K }
+    // Check if there are NULL-dated assignments
+    const r = await fetch(_SB + '/rest/v1/dispatch_assignments_v2?scheduled_date=is.null&select=id&limit=1', {
+      headers: { 'apikey': _SK, 'Authorization': 'Bearer ' + _SK }
     });
     const rows = await r.json();
     if (rows && rows.length > 0) {
-      // There are NULL rows. We can't know what day they're from without
-      // checking created_at, but the safe assumption is: if the board was
-      // last used yesterday (no fresh dispatch today yet), stamp them as
-      // yesterday. The snapshot from yesterday's date is the reference.
-      const snapR = await fetch(SB + '/rest/v1/dispatch_snapshots?select=snapshot_date&order=snapshot_date.desc&limit=1', {
-        headers: { 'apikey': K, 'Authorization': 'Bearer ' + K }
+      // There are NULL rows. Check the last snapshot date.
+      const snapR = await fetch(_SB + '/rest/v1/dispatch_snapshots?select=snapshot_date&order=snapshot_date.desc&limit=1', {
+        headers: { 'apikey': _SK, 'Authorization': 'Bearer ' + _SK }
       });
       const snaps = await snapR.json();
       if (snaps && snaps[0] && snaps[0].snapshot_date && snaps[0].snapshot_date < today) {
         const lastSnapDate = snaps[0].snapshot_date;
-        await fetch(SB + '/rest/v1/dispatch_assignments_v2?scheduled_date=is.null', {
+        await fetch(_SB + '/rest/v1/dispatch_assignments_v2?scheduled_date=is.null', {
           method: 'PATCH',
-          headers: { 'apikey': K, 'Authorization': 'Bearer ' + K, 'Content-Type': 'application/json' },
+          headers: { 'apikey': _SK, 'Authorization': 'Bearer ' + _SK, 'Content-Type': 'application/json' },
           body: JSON.stringify({ scheduled_date: lastSnapDate })
         });
         console.log('[rollover] startup: stamped NULL assignments →', lastSnapDate);
+        // Reload the board to reflect the cleared state
+        if (typeof loadFromV2 === 'function') loadFromV2();
       }
     }
   } catch(e) { console.error('[rollover] startup check failed', e); }
-})();
+});
 
 setInterval(async function(){
   try {
@@ -4287,9 +4289,11 @@ setInterval(async function(){
       // ────────────────────────────────────────────────────────────────
       if (yesterdayDay) {
         try {
-          await fetch(SB + '/rest/v1/dispatch_assignments_v2?scheduled_date=is.null', {
+          const _SB = 'https://nuykvchgecpiuikoerze.supabase.co';
+          const _SK = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im51eWt2Y2hnZWNwaXVpa29lcnplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYyNjM3ODYsImV4cCI6MjA5MTgzOTc4Nn0.39hZ8DdjT_0iFJXPeAL2FXUSLw8FZBirDVzxZTO1W9s';
+          await fetch(_SB + '/rest/v1/dispatch_assignments_v2?scheduled_date=is.null', {
             method: 'PATCH',
-            headers: { 'apikey': K, 'Authorization': 'Bearer ' + K, 'Content-Type': 'application/json' },
+            headers: { 'apikey': _SK, 'Authorization': 'Bearer ' + _SK, 'Content-Type': 'application/json' },
             body: JSON.stringify({ scheduled_date: yesterdayDay })
           });
           console.log('[rollover] stamped NULL assignments →', yesterdayDay);
