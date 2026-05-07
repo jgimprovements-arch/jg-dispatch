@@ -4236,26 +4236,73 @@ async function clearBoardState(){
 // If this tab stays open across the 5am dispatch day boundary, the in-memory
 // `sick` Set and jobOverrides from yesterday would persist and pollute today.
 // Check every 2 minutes whether the dispatch day has rolled; if so, clean up.
-let _lastKnownDispatchDay = (()=>{
-  const n = new Date(); const d = new Date(n);
-  if(n.getHours() < 5) d.setDate(d.getDate()-1);
-  return d.toISOString().split('T')[0];
-})();
-setInterval(function(){
+let _lastKnownDispatchDay = _getDispatchToday();
+
+// On page load, stamp any leftover NULL assignments from previous days.
+// This handles the case where nobody had dispatch open at 5AM rollover.
+(async function _startupRollover(){
   try {
-    const n = new Date(); const d = new Date(n);
-    if(n.getHours() < 5) d.setDate(d.getDate()-1);
-    const nowDay = d.toISOString().split('T')[0];
+    const today = _getDispatchToday();
+    // Check if there are NULL-dated assignments that aren't from today
+    const r = await fetch(SB + '/rest/v1/dispatch_assignments_v2?scheduled_date=is.null&select=id,created_at&limit=1', {
+      headers: { 'apikey': K, 'Authorization': 'Bearer ' + K }
+    });
+    const rows = await r.json();
+    if (rows && rows.length > 0) {
+      // There are NULL rows. We can't know what day they're from without
+      // checking created_at, but the safe assumption is: if the board was
+      // last used yesterday (no fresh dispatch today yet), stamp them as
+      // yesterday. The snapshot from yesterday's date is the reference.
+      const snapR = await fetch(SB + '/rest/v1/dispatch_snapshots?select=snapshot_date&order=snapshot_date.desc&limit=1', {
+        headers: { 'apikey': K, 'Authorization': 'Bearer ' + K }
+      });
+      const snaps = await snapR.json();
+      if (snaps && snaps[0] && snaps[0].snapshot_date && snaps[0].snapshot_date < today) {
+        const lastSnapDate = snaps[0].snapshot_date;
+        await fetch(SB + '/rest/v1/dispatch_assignments_v2?scheduled_date=is.null', {
+          method: 'PATCH',
+          headers: { 'apikey': K, 'Authorization': 'Bearer ' + K, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ scheduled_date: lastSnapDate })
+        });
+        console.log('[rollover] startup: stamped NULL assignments →', lastSnapDate);
+      }
+    }
+  } catch(e) { console.error('[rollover] startup check failed', e); }
+})();
+
+setInterval(async function(){
+  try {
+    const nowDay = _getDispatchToday();
     if(nowDay !== _lastKnownDispatchDay){
       console.log('[rollover] dispatch day changed', _lastKnownDispatchDay, '→', nowDay);
+      const yesterdayDay = _lastKnownDispatchDay; // the day that just ended
       _lastKnownDispatchDay = nowDay;
+
+      // ────────────────────────────────────────────────────────────────
+      // ROLLOVER — DO NOT REMOVE. Stamps all NULL-dated assignments with
+      // yesterday's date so they stop showing on today's board. Without
+      // this, yesterday's schedule persists forever because NULL means
+      // "show on today's view". The 5AM Central rollover is the only
+      // thing that archives the previous day's work.
+      // ────────────────────────────────────────────────────────────────
+      if (yesterdayDay) {
+        try {
+          await fetch(SB + '/rest/v1/dispatch_assignments_v2?scheduled_date=is.null', {
+            method: 'PATCH',
+            headers: { 'apikey': K, 'Authorization': 'Bearer ' + K, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ scheduled_date: yesterdayDay })
+          });
+          console.log('[rollover] stamped NULL assignments →', yesterdayDay);
+        } catch(e) { console.error('[rollover] stamp failed', e); }
+      }
+
       // Fresh day — clear transient per-day state
       if(sick.size > 0){
         sick.clear();
-        render();
-        try { saveBoardState(); } catch(e) {}
         showToast('New dispatch day — out list cleared');
       }
+      render();
+      loadFromV2();
     }
   } catch(e) {}
 }, 120000);
