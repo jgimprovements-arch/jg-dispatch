@@ -7861,10 +7861,11 @@ function buildWoScopeText(sub) {
   if (subPhases.length) {
     lines.push('Phases / Labor:');
     subPhases.forEach(ph => {
+      const phName = ph.phase_name || ph.name || '(unnamed phase)';
       const dates = (ph.start_date || ph.end_date)
         ? ` (${ph.start_date || '?'} → ${ph.end_date || '?'})`
         : '';
-      lines.push(`  • ${ph.name}${dates}`);
+      lines.push(`  • ${phName}${dates}`);
       if (ph.notes) lines.push(`      ${ph.notes}`);
     });
     lines.push('');
@@ -7958,6 +7959,8 @@ function openWoEditModal(woId) {
 
     <label>Agreed Amount ($)</label>
     <input type="number" step="0.01" id="wo_amount" value="${wo.total_amount || ''}" ${isReadOnly ? 'disabled' : ''} placeholder="0.00">
+    <label>Sub Email ${wo.sub?.email ? '<span style="font-size:11px;font-weight:500;color:var(--muted);text-transform:none;">(from sub profile — override if needed)</span>' : '<span style="font-size:11px;font-weight:500;color:var(--red);text-transform:none;">(not on file — add to send)</span>'}</label>
+    <input type="email" id="wo_email" value="${esc(wo.sent_to_email || wo.sub?.email || '')}" ${isReadOnly ? 'disabled' : ''} placeholder="sub@example.com">
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px;">
       <div>
         <label>Start Date</label>
@@ -8046,6 +8049,7 @@ async function handleWoModalAction(act, wo, woUrl) {
     end_date: $('#wo_end').value || null,
     scope_text: $('#wo_scope').value,
     payment_terms: $('#wo_terms').value,
+    sent_to_email: $('#wo_email').value.trim() || null,
   };
   if (act === 'save') {
     await sb.from('rebuild_work_orders').update(updates).eq('id', wo.id);
@@ -8081,12 +8085,14 @@ async function handleWoModalAction(act, wo, woUrl) {
 
 async function sendWorkOrderToSub(wo, woUrl) {
   const sub = wo.sub || state.subs.find(s => s.id === wo.sub_id);
-  if (!sub || !sub.email) { toast('No email on file for this sub'); return; }
+  // Prefer override email entered in modal, fall back to sub profile email
+  const toEmail = wo.sent_to_email || sub?.email;
+  if (!toEmail) { toast('No email on file — add one in the WO before sending'); return; }
   const p = state.activeProject;
   const body = buildBrandedEmail({
     preheader: `Work Order for ${p.albi_job_number || 'project'} — please review and sign`,
     headline: `New Work Order — ${p.albi_job_number || 'Project'}`,
-    intro: `Hi ${sub.primary_contact || sub.company_name}, please review the work order below and accept to confirm scope, pricing, and terms before starting work.`,
+    intro: `Hi ${sub?.primary_contact || sub?.company_name || 'there'}, please review the work order below and accept to confirm scope, pricing, and terms before starting work.`,
     bodyHtml: `<p style="margin:0 0 12px;font-size:14px;color:#1a2540;line-height:1.5;"><b>Customer:</b> ${esc(p.customer_name || '')}<br><b>Address:</b> ${esc(p.property_address || '')}<br><b>Agreed amount:</b> ${wo.total_amount ? '$' + Number(wo.total_amount).toLocaleString() : 'TBD'}</p>`,
     ctaLabel: 'Review & Sign Work Order',
     ctaUrl: woUrl,
@@ -8099,10 +8105,10 @@ async function sendWorkOrderToSub(wo, woUrl) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         channel: 'email',
-        to_email: sub.email,
+        to_email: toEmail,
         from_email: p.albi_pm_email || state.pmEmail || 'josh@jg-restoration.com',
         from_name: 'JG Restoration',
-        recipient_name: sub.primary_contact || sub.company_name,
+        recipient_name: sub?.primary_contact || sub?.company_name || toEmail,
         recipient_type: 'sub',
         subject: `Work Order — ${p.albi_job_number || 'Project'} (please sign)`,
         body,
