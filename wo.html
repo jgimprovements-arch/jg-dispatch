@@ -183,10 +183,12 @@
   Or email <a href="mailto:info@jg-restoration.com">info@jg-restoration.com</a>
 </div>
 
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script type="module">
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 const SB_URL = 'https://nuykvchgecpiuikoerze.supabase.co';
 const SB_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im51eWt2Y2hnZWNwaXVpa29lcnplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYyNjM3ODYsImV4cCI6MjA5MTgzOTc4Nn0.39hZ8DdjT_0iFJXPeAL2FXUSLw8FZBirDVzxZTO1W9s';
+const ALBI_DOC_HOOK = 'https://hooks.zapier.com/hooks/catch/12653197/uves4j9/';
 const sb = createClient(SB_URL, SB_ANON);
 const params = new URLSearchParams(window.location.search);
 const token = params.get('t');
@@ -424,6 +426,25 @@ function wireAcceptance(wo) {
         } catch (e) { console.warn('notif insert failed', e); }
       }
 
+      // Generate signed PDF, upload to Documents, push to Albi
+      btn.textContent = 'Generating signed PDF…';
+      try {
+        const signedWo = Object.assign({}, wo, {
+          signed_at: new Date().toISOString(),
+          signed_by_name: name,
+          signed_by_title: title,
+          signed_ip: ip,
+          signed_notes: notes,
+        });
+        const pdfBlob = await generateSignedPdf(signedWo);
+        if (pdfBlob) {
+          await uploadAndPushPdf(signedWo, pdfBlob);
+        }
+      } catch (e) {
+        console.error('PDF generation/upload failed:', e);
+        // Non-fatal — sub still sees signed confirmation
+      }
+
       // Reload to signed view
       await render();
     } catch (e) {
@@ -431,6 +452,254 @@ function wireAcceptance(wo) {
       alert('Unexpected error: ' + e.message);
     }
   });
+}
+
+// ─────────── PDF GENERATION ───────────
+async function generateSignedPdf(wo) {
+  if (!window.jspdf) { console.warn('jsPDF not loaded'); return null; }
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ unit: 'pt', format: 'letter' });
+  const pageW = doc.internal.pageSize.getWidth();
+  const pageH = doc.internal.pageSize.getHeight();
+  const margin = 48;
+  let y = margin;
+
+  const p = wo.project || {};
+  const s = wo.sub || {};
+
+  // Header band
+  doc.setFillColor(13, 45, 94);
+  doc.rect(0, 0, pageW, 70, 'F');
+  doc.setTextColor(255, 255, 255);
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(18);
+  doc.text('JG Restoration', margin, 36);
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(9);
+  doc.setTextColor(245, 166, 35);
+  doc.text('FIRE · WATER · MOLD · RECONSTRUCTION', margin, 52);
+  doc.setTextColor(255, 255, 255);
+  doc.setFontSize(10);
+  doc.text('SIGNED WORK ORDER', pageW - margin, 36, { align: 'right' });
+  doc.setFontSize(8);
+  doc.text(`WO-${wo.id.slice(0, 8)} · v${wo.version}`, pageW - margin, 52, { align: 'right' });
+  y = 92;
+
+  // Project info
+  doc.setTextColor(13, 45, 94);
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(11);
+  doc.text('PROJECT', margin, y); y += 14;
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(10);
+  doc.setTextColor(40, 40, 40);
+  const projLines = [
+    ['Job:', p.albi_job_number || '—'],
+    ['Customer:', p.customer_name || '—'],
+    ['Address:', p.property_address || '—'],
+    ['Market:', p.market === 'stevens_point' ? 'Stevens Point' : 'Appleton'],
+  ];
+  projLines.forEach(([label, val]) => {
+    doc.setFont('helvetica', 'bold'); doc.text(label, margin, y);
+    doc.setFont('helvetica', 'normal'); doc.text(String(val).slice(0, 80), margin + 80, y);
+    y += 14;
+  });
+  y += 8;
+
+  // Sub info
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(11); doc.setTextColor(13, 45, 94);
+  doc.text('CONTRACTOR', margin, y); y += 14;
+  doc.setFontSize(10); doc.setTextColor(40, 40, 40);
+  const subLines = [
+    ['Company:', s.company_name || '—'],
+    ['Contact:', s.primary_contact || '—'],
+    ['Email:', s.email || '—'],
+    ['Phone:', s.phone || '—'],
+  ];
+  subLines.forEach(([label, val]) => {
+    doc.setFont('helvetica', 'bold'); doc.text(label, margin, y);
+    doc.setFont('helvetica', 'normal'); doc.text(String(val).slice(0, 80), margin + 80, y);
+    y += 14;
+  });
+  y += 8;
+
+  // Money + dates highlight
+  doc.setFillColor(255, 248, 240);
+  doc.setDrawColor(232, 93, 4);
+  doc.roundedRect(margin, y, pageW - margin * 2, 50, 6, 6, 'FD');
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(9); doc.setTextColor(120, 132, 160);
+  doc.text('AGREED AMOUNT', margin + 16, y + 18);
+  doc.text('START DATE', margin + 220, y + 18);
+  doc.text('COMPLETION TARGET', margin + 340, y + 18);
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(16); doc.setTextColor(232, 93, 4);
+  doc.text(fmtMoney(wo.total_amount), margin + 16, y + 38);
+  doc.setFontSize(13); doc.setTextColor(13, 45, 94);
+  doc.text(fmtDate(wo.start_date), margin + 220, y + 38);
+  doc.text(fmtDate(wo.end_date), margin + 340, y + 38);
+  y += 66;
+
+  // Scope
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(11); doc.setTextColor(13, 45, 94);
+  doc.text('SCOPE OF WORK', margin, y); y += 14;
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(40, 40, 40);
+  const scopeText = wo.scope_text || '(no scope provided)';
+  const scopeLines = doc.splitTextToSize(scopeText, pageW - margin * 2);
+  scopeLines.forEach(line => {
+    if (y > pageH - margin - 80) { doc.addPage(); y = margin; }
+    doc.text(line, margin, y);
+    y += 12;
+  });
+  y += 10;
+
+  // Payment terms
+  if (y > pageH - margin - 80) { doc.addPage(); y = margin; }
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(11); doc.setTextColor(13, 45, 94);
+  doc.text('PAYMENT TERMS', margin, y); y += 14;
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(40, 40, 40);
+  const ptLines = doc.splitTextToSize(wo.payment_terms || '', pageW - margin * 2);
+  ptLines.forEach(line => {
+    if (y > pageH - margin - 80) { doc.addPage(); y = margin; }
+    doc.text(line, margin, y); y += 12;
+  });
+  y += 16;
+
+  // Signature block
+  if (y > pageH - margin - 120) { doc.addPage(); y = margin; }
+  doc.setFillColor(244, 250, 246);
+  doc.setDrawColor(45, 156, 95);
+  doc.roundedRect(margin, y, pageW - margin * 2, 100, 6, 6, 'FD');
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(10); doc.setTextColor(45, 156, 95);
+  doc.text('ELECTRONICALLY SIGNED', margin + 14, y + 18);
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(9); doc.setTextColor(13, 45, 94);
+  doc.text('Signed by:', margin + 14, y + 36);
+  doc.text('Title:', margin + 14, y + 50);
+  doc.text('Date:', margin + 14, y + 64);
+  doc.text('IP Address:', margin + 14, y + 78);
+  doc.setFont('helvetica', 'normal'); doc.setTextColor(40, 40, 40);
+  doc.text(wo.signed_by_name || '—', margin + 90, y + 36);
+  doc.text(wo.signed_by_title || '—', margin + 90, y + 50);
+  doc.text(new Date(wo.signed_at).toLocaleString(), margin + 90, y + 64);
+  doc.text(wo.signed_ip || 'not captured', margin + 90, y + 78);
+  y += 110;
+  if (wo.signed_notes) {
+    if (y > pageH - margin - 40) { doc.addPage(); y = margin; }
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(9); doc.setTextColor(13, 45, 94);
+    doc.text('Sub Notes:', margin, y); y += 12;
+    doc.setFont('helvetica', 'normal'); doc.setTextColor(40, 40, 40);
+    const noteLines = doc.splitTextToSize(wo.signed_notes, pageW - margin * 2);
+    noteLines.forEach(line => { doc.text(line, margin, y); y += 12; });
+  }
+
+  // T&C page
+  doc.addPage();
+  y = margin;
+  doc.setFillColor(13, 45, 94);
+  doc.rect(0, 0, pageW, 36, 'F');
+  doc.setTextColor(255, 255, 255);
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(12);
+  doc.text('Work Order Terms & Conditions', margin, 22);
+  doc.setFontSize(8); doc.setTextColor(245, 166, 35);
+  doc.text(`WO-${wo.id.slice(0,8)}`, pageW - margin, 22, { align: 'right' });
+  y = 52;
+  doc.setTextColor(40, 40, 40);
+  const tcSections = [
+    ['1. Scope of Work', 'This Work Order ("WO") defines the tasks, deliverables, and services to be performed by the Contractor/Vendor. All work must adhere to the specifications, timelines, and quality standards provided by JG Restoration.'],
+    ['2. Acceptance of Terms', 'By commencing work under this WO, the Contractor agrees to the terms and conditions stated herein. Any additional terms provided by the Contractor are not binding unless explicitly agreed upon in writing by JG Restoration.'],
+    ['3. Performance Standards', 'All work shall be performed professionally and in compliance with industry standards. Any materials or equipment used must meet the quality requirements specified in the WO. Any deviations from the agreed scope must be approved in writing.'],
+    ['4. Pricing and Payment', 'The agreed-upon compensation is outlined in the WO and is not subject to change without prior written consent. Payment will be made within 30 days upon receipt of an accurate invoice and confirmation that work has been completed to the satisfaction of JG Restoration. Payment may be withheld for incomplete or non-conforming work until issues are resolved.'],
+    ['5. Timeline and Deadlines', 'Time is of the essence. The Contractor must complete all work by the deadlines specified in the WO unless an extension is agreed upon in writing. Delays may result in penalties or termination of the WO.'],
+    ['6. Inspection and Approval', 'All completed work is subject to inspection by JG Restoration. If the work does not meet the specifications or quality standards, the Contractor will be required to correct deficiencies at their own expense. Final acceptance will occur only after all issues are resolved.'],
+    ['7. Change Orders', 'Any changes to the scope of work, schedule, or budget must be documented in a written change order and approved by both parties before implementation.'],
+    ['8. Warranties', 'The Contractor warrants that all work performed and materials provided will be free of defects and conform to the specifications of the WO. The warranty period is 1 year, during which the Contractor agrees to repair or replace defective work or materials at no additional cost.'],
+    ['9. Indemnification', "The Contractor shall indemnify and hold harmless JG Restoration, its employees, and agents from any claims, damages, or liabilities arising from the Contractor's performance of this WO, including any injury to persons or damage to property."],
+    ['10. Safety and Compliance', 'The Contractor must comply with all applicable safety laws, regulations, and standards. The Contractor is responsible for ensuring that all workers are properly trained and equipped to perform their tasks safely.'],
+    ['11. Insurance Requirements', 'The Contractor shall maintain adequate insurance coverage, including general liability, workers compensation, and any other insurance required by law or specified in the WO. Proof of insurance must be provided upon request.'],
+    ['12. Confidentiality', 'Any information shared by JG Restoration for the purpose of this WO shall remain confidential and not be disclosed to third parties without written consent.'],
+    ['13. Termination', 'JG Restoration reserves the right to terminate this WO for convenience or cause upon written notice. Upon termination, the Contractor will be compensated for work satisfactorily completed up to the termination date.'],
+    ['14. Force Majeure', 'Neither party shall be held liable for delays or non-performance caused by circumstances beyond their reasonable control, including natural disasters, acts of government, or labor disputes.'],
+    ['15. Ownership of Work', 'All completed work, including any intellectual property created as part of the WO, becomes the sole property of JG Restoration upon acceptance and payment.'],
+    ['16. Governing Law', 'This WO shall be governed by and construed in accordance with the laws of the State of Wisconsin.'],
+    ['17. Dispute Resolution', 'In the event of a dispute, both parties agree to attempt resolution through good-faith negotiations. If unresolved, disputes may be submitted to arbitration or court proceedings, as appropriate.'],
+    ['18. Entire Agreement', 'This WO, together with any referenced documents, constitutes the entire agreement between the parties and supersedes any prior understandings.'],
+    ['19. Amendments', 'Any modifications to this WO must be agreed upon in writing by both parties.'],
+  ];
+  tcSections.forEach(([heading, text]) => {
+    if (y > pageH - margin - 40) { doc.addPage(); y = margin; }
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(9); doc.setTextColor(13, 45, 94);
+    doc.text(heading, margin, y); y += 12;
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(60, 60, 60);
+    const lines = doc.splitTextToSize(text, pageW - margin * 2);
+    lines.forEach(line => {
+      if (y > pageH - margin - 30) { doc.addPage(); y = margin; }
+      doc.text(line, margin, y); y += 11;
+    });
+    y += 6;
+  });
+
+  // Footer on every page
+  const pageCount = doc.internal.getNumberOfPages();
+  for (let i = 1; i <= pageCount; i++) {
+    doc.setPage(i);
+    doc.setFontSize(7); doc.setTextColor(120, 132, 160);
+    doc.text('JG Restoration · Appleton (920) 428-4200 · Stevens Point (715) 600-3883 · info@jg-restoration.com', pageW / 2, pageH - 24, { align: 'center' });
+    doc.text(`Page ${i} of ${pageCount}`, pageW - margin, pageH - 24, { align: 'right' });
+  }
+
+  return doc.output('blob');
+}
+
+async function uploadAndPushPdf(wo, pdfBlob) {
+  const p = wo.project || {};
+  const s = wo.sub || {};
+  const safeSubName = (s.company_name || 'sub').replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 40);
+  const filename = `WO_${safeSubName}_${p.albi_job_number || wo.id.slice(0,8)}_signed.pdf`;
+  const path = `projects/${wo.project_id}/${Date.now()}-${filename}`;
+  const { error: upErr } = await sb.storage.from('rebuild-documents').upload(path, pdfBlob, {
+    contentType: 'application/pdf',
+    upsert: false,
+  });
+  if (upErr) { console.error('Storage upload failed:', upErr); return; }
+  const { data: urlData } = sb.storage.from('rebuild-documents').getPublicUrl(path);
+  const fileUrl = urlData.publicUrl;
+  const { data: docRow, error: insErr } = await sb.from('rebuild_documents').insert({
+    project_id: wo.project_id,
+    category: 'Subcontractor Documents',
+    filename,
+    file_url: fileUrl,
+    file_size_bytes: pdfBlob.size,
+    mime_type: 'application/pdf',
+    uploaded_by_email: 'wo-system@jg-restoration.com',
+    push_status: 'pending',
+  }).select();
+  if (insErr) { console.error('Doc insert failed:', insErr); return; }
+  const docId = docRow?.[0]?.id;
+  if (docId && p.albi_project_id) {
+    try {
+      await fetch(ALBI_DOC_HOOK, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          document_id: docId,
+          project_id: wo.project_id,
+          albi_project_id: p.albi_project_id,
+          albi_job_number: p.albi_job_number,
+          category: 'Subcontractor Documents',
+          filename,
+          file_url: fileUrl,
+          mime_type: 'application/pdf',
+          notes: `Signed Work Order — ${s.company_name || ''}, signed by ${wo.signed_by_name} on ${new Date(wo.signed_at).toLocaleDateString()}`,
+        }),
+        mode: 'no-cors',
+      });
+      await sb.from('rebuild_documents').update({
+        push_status: 'sent',
+        pushed_to_albi_at: new Date().toISOString(),
+      }).eq('id', docId);
+    } catch (e) {
+      console.error('Albi push failed:', e);
+      await sb.from('rebuild_documents').update({ push_status: 'failed' }).eq('id', docId);
+    }
+  }
 }
 </script>
 </body>
