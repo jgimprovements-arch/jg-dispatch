@@ -883,13 +883,13 @@
     padding: 8px 12px;
     font-size: 12px;
     display: grid;
-    grid-template-columns: 130px 80px 1fr 110px;
+    grid-template-columns: 130px 80px 90px 1fr 110px;
     gap: 10px;
     align-items: center;
   }
   .audit-row .when { color: var(--muted); font-size: 11px; }
-  .audit-row .actor { font-weight: 700; color: var(--navy); }
-  .audit-row .what { color: var(--text); }
+  .audit-row .actor { font-weight: 700; color: var(--navy); font-size: 11px; }
+  .audit-row .what { color: var(--text); overflow: hidden; text-overflow: ellipsis; }
   .audit-row .what b { color: var(--orange); }
   .audit-row .action-tag {
     font-size: 10px;
@@ -899,9 +899,21 @@
     font-weight: 700;
     text-transform: uppercase;
   }
-  .action-tag.INSERT { background: #e6f4ec; color: var(--green); }
-  .action-tag.UPDATE { background: #fdf3e0; color: var(--amber); }
-  .action-tag.DELETE { background: #fbe5e5; color: var(--red); }
+  .audit-source-pill {
+    font-size: 10px;
+    padding: 3px 8px;
+    border-radius: 999px;
+    text-align: center;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .3px;
+  }
+  .action-tag.INSERT, .action-tag.insert, .action-tag.created { background: #e6f4ec; color: var(--green); }
+  .action-tag.UPDATE, .action-tag.update, .action-tag.edited, .action-tag.reassigned, .action-tag.status_change, .action-tag.reminded { background: #fdf3e0; color: var(--amber); }
+  .action-tag.DELETE, .action-tag.delete, .action-tag.cancelled, .action-tag.deleted { background: #fbe5e5; color: var(--red); }
+  .action-tag.signed, .action-tag.completed, .action-tag.approved { background: #e6f4ec; color: var(--green); }
+  .action-tag.sent { background: #fff2e0; color: var(--orange); }
+  .action-tag.unsigned, .action-tag.reopened, .action-tag.superseded { background: #ebeef7; color: var(--navy); }
 
   /* ──── Calendar / Gantt timeline ──── */
   .cal-wrap {
@@ -3796,11 +3808,107 @@ async function loadMessages() {
 }
 
 async function loadHistory() {
-  if (!sb) { state.history = []; return; }
-  const { data } = await sb.from('rebuild_phases_history')
-    .select('*').eq('project_id', state.activeProjectId)
-    .order('changed_at', { ascending: false }).limit(50);
-  state.history = data || [];
+  if (!sb || !state.activeProjectId) { state.history = []; return; }
+  const projectId = state.activeProjectId;
+
+  // Pull from all five history tables in parallel.
+  // Each source is normalized to the same shape: { changed_at, action, what, actor, source }
+  const [phases, wos, todos, sels, journal] = await Promise.all([
+    sb.from('rebuild_phases_history').select('*').eq('project_id', projectId).order('changed_at', { ascending: false }).limit(100),
+    // WO history doesn't have project_id directly; join via wo → project_id
+    sb.from('rebuild_work_order_history').select('*, work_order:rebuild_work_orders!inner(project_id, sub:rebuild_subs(company_name), version)').eq('work_order.project_id', projectId).order('created_at', { ascending: false }).limit(50),
+    sb.from('rebuild_todo_history').select('*, todo:rebuild_todos!inner(project_id, title)').eq('todo.project_id', projectId).order('created_at', { ascending: false }).limit(50),
+    sb.from('rebuild_selections_history').select('*, selection:rebuild_selections!inner(project_id, category)').eq('selection.project_id', projectId).order('created_at', { ascending: false }).limit(50),
+    sb.from('rebuild_journal_entries').select('id, body, author_email, author_name, created_at, edited_at, deleted_at, phase_name').eq('project_id', projectId).order('created_at', { ascending: false }).limit(50),
+  ]);
+
+  const merged = [];
+
+  // 1. Phases
+  (phases.data || []).forEach(h => {
+    const cols = (h.changed_columns || []).slice(0, 4).join(', ');
+    const phaseName = h.after_data?.phase_name || h.before_data?.phase_name || 'Phase';
+    merged.push({
+      when: h.changed_at,
+      action: h.action || 'update',
+      source: 'phase',
+      what: `<b>${esc(phaseName)}</b>${cols ? ' · changed: ' + esc(cols) : ''}`,
+      actor: h.actor || 'system',
+    });
+  });
+
+  // 2. Work Orders
+  (wos.data || []).forEach(h => {
+    const subName = h.work_order?.sub?.company_name || 'Sub';
+    const v = h.work_order?.version ? ` v${h.work_order.version}` : '';
+    merged.push({
+      when: h.created_at,
+      action: h.action || 'update',
+      source: 'wo',
+      what: `<b>WO${v} · ${esc(subName)}</b>${h.details ? ' · ' + esc(h.details) : ''}`,
+      actor: h.actor || 'system',
+    });
+  });
+
+  // 3. To-Dos
+  (todos.data || []).forEach(h => {
+    const title = h.todo?.title || 'To-do';
+    merged.push({
+      when: h.created_at,
+      action: h.action || 'update',
+      source: 'todo',
+      what: `<b>To-Do: ${esc(title)}</b>${h.details ? ' · ' + esc(h.details) : ''}`,
+      actor: h.actor || 'system',
+    });
+  });
+
+  // 4. Selections
+  (sels.data || []).forEach(h => {
+    const cat = h.selection?.category || 'Selection';
+    merged.push({
+      when: h.created_at,
+      action: h.action || 'update',
+      source: 'selection',
+      what: `<b>Selection: ${esc(cat)}</b>${h.details ? ' · ' + esc(h.details) : ''}`,
+      actor: h.actor || 'system',
+    });
+  });
+
+  // 5. Journal entries (synthesize events for create / edit / delete)
+  (journal.data || []).forEach(e => {
+    const author = e.author_name || e.author_email || 'unknown';
+    const snippet = (e.body || '').replace(/\s+/g, ' ').trim().slice(0, 60);
+    const phaseTag = e.phase_name ? ` (${esc(e.phase_name)})` : '';
+    if (e.deleted_at) {
+      merged.push({
+        when: e.deleted_at,
+        action: 'delete',
+        source: 'journal',
+        what: `<b>Journal entry deleted</b>${phaseTag}${snippet ? ' · "' + esc(snippet) + '…"' : ''}`,
+        actor: author,
+      });
+    }
+    if (e.edited_at && e.edited_at !== e.created_at) {
+      merged.push({
+        when: e.edited_at,
+        action: 'update',
+        source: 'journal',
+        what: `<b>Journal entry edited</b>${phaseTag}${snippet ? ' · "' + esc(snippet) + '…"' : ''}`,
+        actor: author,
+      });
+    }
+    merged.push({
+      when: e.created_at,
+      action: 'insert',
+      source: 'journal',
+      what: `<b>Journal entry posted</b>${phaseTag}${snippet ? ' · "' + esc(snippet) + '…"' : ''}`,
+      actor: author,
+    });
+  });
+
+  // Sort newest-first across all sources, cap at 50
+  merged.sort((a, b) => new Date(b.when) - new Date(a.when));
+  state.history = merged.slice(0, 100);
 }
 
 async function loadDocuments() {
@@ -8955,11 +9063,18 @@ async function sendMessage() {
 
 function renderAuditTab() {
   if (!state.history.length) return `<div class="empty" style="padding:30px;">
-    <p>No phase history yet. Every phase change (assignment, schedule, status, delay) lands here automatically.</p>
+    <p>No history yet. Every change to phases, work orders, selections, to-dos, and journal entries lands here automatically.</p>
   </div>`;
+  const sourceMeta = {
+    phase:     { label: 'Phase',     color: '#0d2d5e' },
+    wo:        { label: 'Work Order', color: '#e85d04' },
+    todo:      { label: 'To-Do',     color: '#4a90e2' },
+    selection: { label: 'Selection', color: '#2d9c5f' },
+    journal:   { label: 'Journal',   color: '#f5a623' },
+  };
   return `
     <div class="section-head">
-      <h3>Audit Trail (last 50 events)</h3>
+      <h3>Audit Trail (last ${state.history.length} events)</h3>
       <div style="display:flex;gap:6px;">
         <button class="btn" id="btnAuditCsv">Export CSV</button>
         <button class="btn" id="btnAuditPdf">Export PDF</button>
@@ -8967,17 +9082,14 @@ function renderAuditTab() {
     </div>
     <div class="audit-list">
       ${state.history.map(h => {
-        const cols = (h.changed_columns || []).slice(0, 4).join(', ');
-        const phaseName = (h.after_data?.phase_name) || (h.before_data?.phase_name) || '—';
+        const sm = sourceMeta[h.source] || { label: h.source, color: '#7884a0' };
         return `
           <div class="audit-row">
-            <div class="when">${fmtDateTime(h.changed_at)}</div>
+            <div class="when">${fmtDateTime(h.when)}</div>
             <div class="action-tag ${h.action}">${h.action}</div>
-            <div class="what">
-              <b>${phaseName}</b>
-              ${cols ? ` · changed: ${cols}` : ''}
-            </div>
-            <div class="actor">${h.actor || 'system'}</div>
+            <div class="audit-source-pill" style="background:${sm.color}20;color:${sm.color};border:1px solid ${sm.color}40;">${sm.label}</div>
+            <div class="what">${h.what}</div>
+            <div class="actor">${esc(h.actor || 'system')}</div>
           </div>`;
       }).join('')}
     </div>`;
@@ -9338,15 +9450,16 @@ function exportProjectPdf() {
 function exportAuditCsv() {
   const p = state.activeProject;
   if (!state.history.length || !window.JGExport) { toast('Nothing to export'); return; }
+  const stripTags = s => String(s || '').replace(/<[^>]+>/g, '');
   JGExport.csv({
     title: 'Audit Trail · ' + (p?.albi_job_number || p?.albi_project_id || ''),
     filename: `audit-${(p?.albi_job_number||p?.albi_project_id||'project').replace(/[^A-Za-z0-9_-]/g,'_')}.csv`,
-    headers: ['When','Action','Phase','Changed Columns','Actor'],
+    headers: ['When','Source','Action','Details','Actor'],
     rows: state.history.map(h => [
-      new Date(h.changed_at).toISOString(),
-      h.action,
-      (h.after_data?.phase_name) || (h.before_data?.phase_name) || '',
-      (h.changed_columns || []).join('; '),
+      new Date(h.when).toISOString(),
+      h.source || '',
+      h.action || '',
+      stripTags(h.what),
       h.actor || 'system',
     ])
   });
@@ -9356,19 +9469,20 @@ function exportAuditCsv() {
 function exportAuditPdf() {
   const p = state.activeProject;
   if (!state.history.length || !window.JGExport) { toast('Nothing to export'); return; }
+  const stripTags = s => String(s || '').replace(/<[^>]+>/g, '');
   JGExport.pdf({
     title: 'Audit Trail · ' + (p?.albi_job_number || p?.albi_project_id || ''),
     subtitle: state.history.length + ' events · ' + new Date().toLocaleDateString('en-US'),
     filename: `audit-${(p?.albi_job_number||p?.albi_project_id||'project').replace(/[^A-Za-z0-9_-]/g,'_')}.pdf`,
     sections: [{
-      heading: 'Phase Change History',
+      heading: 'Project History',
       table: {
-        headers: ['When','Action','Phase','Changed','Actor'],
+        headers: ['When','Source','Action','Details','Actor'],
         rows: state.history.map(h => [
-          fmtDateTime(h.changed_at),
-          h.action,
-          (h.after_data?.phase_name) || (h.before_data?.phase_name) || '',
-          (h.changed_columns || []).slice(0,4).join(', '),
+          fmtDateTime(h.when),
+          h.source || '',
+          h.action || '',
+          stripTags(h.what),
           h.actor || 'system',
         ])
       }
