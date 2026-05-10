@@ -230,21 +230,23 @@ LABOR MINIMUMS ARE NEVER BILLABLE — do NOT flag missing minimum-hour charges, 
 UNDERBILLING — flag aggressively:
 - Equipment days: if Encircle shows equipment onsite N days but estimate bills < N days
 - Equipment count: if Encircle photos show more units than billed
-- Monitoring: 1.5 hrs/day × calendar days equipment onsite (WTR EQ)
+- Monitoring: JG bills monitoring labor based on ACTUAL VISIT DAYS, not calendar days equipment was onsite. Count the distinct dates in Encircle moisture_readings (and physical-visit photos). Multiply by 1.5 hrs/day × WTR EQ. If Encircle shows readings on 3 distinct dates, monitoring = 4.5 hrs. Do NOT use placement-to-removal calendar span — JG techs frequently skip non-visit days and bill only when onsite.
 - Anti-microbial (WTR GRMB): required on ALL surfaces in Cat 2+ rooms
 - Drying holes: 2 per LF of affected wall (covered by WTR DRYWLS flood cuts)
-- After-hours: if any Encircle timestamp shows work outside 8am-4pm M-F, that visit's labor must be WTR LABA $90.84 not WTR LAB $60.50. Flag the rate diff.
-- Emergency service call: if date_of_loss_after_hours=true OR after_hours_evidence present, flag missing emergency call fee (HIGH severity)
+- After-hours: ONLY flag missing WTR LABA rate when the INITIAL response on the date of loss happened outside business hours. Business hours: Mon-Fri 7:30 AM - 4:00 PM Central. Do NOT flag mid-job timestamps (techs finishing a job at 4:30 PM is not after-hours dispatch). Only flag when (a) date_of_loss falls on Saturday or Sunday, OR (b) the EARLIEST timestamp on the day-of-loss is before 7:30 AM or after 4:00 PM.
+- Emergency service call: ONLY flag if date_of_loss_after_hours=true AND no emergency call line item exists. Do NOT flag if any emergency-call line item is already billed (regardless of rate).
 - Containment: if WTR BARR billed, must also have WTR BARRZ+ zippers (1 per access point) and poles
 - HEPA filters: 1 per WTR NAFAN (air scrubber) per loss — ONLY if NAFAN line items exist
-- Content manipulation: 0.5-1.5 hrs WTR LAB per room with content_manipulation_photos. Note: customer may have moved own contents — add verification reminder.
+- Content manipulation: ONLY flag when Encircle photos clearly show JG TECHNICIANS moving contents (e.g. photos of techs lifting/blocking, time-stamped during JG visits). The first sentence of the gap description MUST be: "ONLY bill if JG technicians moved contents. If customer or another company moved contents, justify and skip." Set recommended_qty to 0 (estimator fills in if applicable). This forces a yes/no decision before the estimator engages with the dollar value.
 - Weighted extraction: heavy saturation/pad removal in Encircle = additional WTR LAB
 
-EQUIPMENT-ROOM ALIGNMENT — only flag when it causes revenue loss:
-For each room in equipment_by_room, check if the estimate has line items billed to that room. If a room has documented equipment but no line items at all in that room, that's a HIGH severity gap — likely missing monitoring labor (1.5 hrs/day × days_onsite for that room with WTR EQ), antimicrobial (WTR GRMB on affected SF), and any drying-related work. Calculate the missed revenue. If a room has equipment but only partial room-level work (e.g., has antimicrobial but no monitoring labor), flag MEDIUM with the specific missing item. DO NOT flag pure billing-room mismatches where the count and days match overall and all room-level work is present somewhere — those are sloppy but not revenue-losing.
+EQUIPMENT-ROOM ALIGNMENT — only flag when there is actual revenue loss:
+Compare TOTAL expected room-level work dollars across the whole job vs total billed. Equipment can be physically in Room A but billed under Room B — that is documentation drift, not revenue loss. Only flag when: (a) the room-level work (monitoring, antimicrobial in Cat 2+, drying) for a documented room is COMPLETELY MISSING from the entire estimate, not just billed elsewhere; OR (b) the total billed monitoring hours is materially less than (distinct visit dates × 1.5 hrs). Do NOT flag a gap just because Room A has equipment in Encircle but no line items billed under "Room A" — check whether the same scope might be billed under any other room name first. The JG rules engine will further filter these; flag conservatively and let the code-level audit catch the rest.
 
 ORPHAN EQUIPMENT SCANNER — scan photo_notes for unlogged equipment:
 Watch for these trigger phrases in caption_text or photo_description: "not in system", "extra", "added", "borrowed", "replaced", "swapped", "additional unit", "new unit", "from another job", "third [air mover/dehu]", "swapped out", "second [unit]", "brought in". When you find these, check if the corresponding equipment is in the estimate's line items. If not, flag as HIGH severity UNDERBILLED with the photo page number, the caption text quoted, and a PM verification note. Use category "MISSING_ITEM". Always include the verification reminder: "Verify with PM — confirm equipment was actually onsite per field tech notes before billing."
+
+RECONSTRUCTION SUPPRESSION — these are mitigation reviews. The estimate type is mitigation (water, mold, fire, contents, board-up). NEVER flag missing reconstruction items: drywall hang/finish, paint, texture, flooring install, trim install, cabinet install, door rehang, fixture install, final cleaning, permits, HVAC bid, electrical bid, plumbing bid. These belong in a SEPARATE rebuild estimate handled by Anthony Alvarez. If the estimate shows demolition without rebuild line items, that is correct — do not flag it as missing rebuild scope.
 
 OVERBILLING — flag with severity:OVERBILLED:
 - Equipment count billed > Encircle count
@@ -378,6 +380,20 @@ function applyBillingRules(extracted, audit) {
       drop = 'Suppressed: foam blocks not a JG billing item';
     }
 
+    // FIX v6: Reconstruction items never flagged on mitigation reviews.
+    // QA Review tool reviews MITIGATION estimates. Rebuild scope is generated separately.
+    if (!drop) {
+      const code = (g.xact_code || '').toUpperCase();
+      const cat = (g.category || '').toUpperCase();
+      // Codes that are clearly reconstruction (not mitigation)
+      const isRebuildCode = /^(PNT|FNH|FRM|FNC|FCH|FCD|RFG|RWC|SDG|CLN FINALR|FEE AGP|ELE COSM|ELE BIDITM|HVC BIDITM|PLM BIDITM|LAB SUPERR|DRY TEX|FNH DORH|FNH DBX|FRM UL|FCV UL|DRY 1<|INS!<)/i.test(code);
+      const rebuildKeywords = /\b(reconstruct|rebuild|reset fixture|reinstall|drywall hang|drywall finish|texture (to|match)|paint (one|two|primer|coat)|final clean|cleaning final|permit|building permit|hvac bid|electrical (bid|inspection)|plumbing bid|move.back|carpet (install|replace)|trim (install|replace)|baseboard (install|replace)|cabinet (install|replace)|door rehang|door (install|replace)|tile (install|replace))/i;
+      const isRebuildCategory = cat.includes('RECONSTRUCT') || cat.includes('REBUILD');
+      if (isRebuildCode || rebuildKeywords.test(desc) || isRebuildCategory) {
+        drop = 'Suppressed: reconstruction item not billed on mitigation review (belongs in Rebuild Scope)';
+      }
+    }
+
     // Labor minimum rule — JG does not bill minimum/min-charge labor lines.
     // If AI flags a minimum-hours, min-charge, trip-charge, or 1-hour-minimum gap, suppress.
     if (!drop) {
@@ -457,6 +473,18 @@ function auditEquipmentAlignment(extracted, auditResult) {
   const isCat2Plus = cat === '2' || cat === '3' || cat === 'II' || cat === 'III' ||
                      cat.toLowerCase().includes('2') || cat.toLowerCase().includes('3');
 
+  // FIX v6: Calculate distinct visit dates from moisture readings, not calendar days.
+  // JG bills monitoring per actual visit, not per day equipment was onsite.
+  const moistureReadings = extracted.encircle?.moisture_readings || [];
+  const distinctVisitDates = new Set();
+  for (const r of moistureReadings) {
+    if (r.date) {
+      const d = String(r.date).trim().slice(0, 10); // YYYY-MM-DD or similar
+      if (d) distinctVisitDates.add(d);
+    }
+  }
+  const actualVisitDays = distinctVisitDates.size || 0; // 0 means we couldn't determine; fall back to days_onsite below
+
   // Build a map: room name (lowercased, trimmed) → set of code categories billed to that room
   const roomBilling = {};
   for (const li of lineItems) {
@@ -471,19 +499,42 @@ function auditEquipmentAlignment(extracted, auditResult) {
   const RATE_EQ = 60.50; // WTR EQ monitoring rate per hour
   const RATE_GRMB = 0.38; // WTR GRMB anti-microbial per SF (used as fallback)
 
+  // FIX v6: Compute job-wide totals so we can suppress documentation drift.
+  // If total monitoring billed across the entire estimate covers the expected
+  // hours (visit days × 1.5), then any "room-with-no-line-items" gaps are
+  // billing-room mismatches, NOT revenue loss — suppress them.
+  let totalMonitoringHrsBilled = 0;
+  let totalGRMBBilledSF = 0;
+  for (const li of lineItems) {
+    const code = (li.code || '').toUpperCase().trim();
+    if (code === 'WTR EQ') totalMonitoringHrsBilled += Number(li.qty) || 0;
+    if (code.includes('GRMB')) totalGRMBBilledSF += Number(li.qty) || 0;
+  }
+  const expectedMonitoringHrs = actualVisitDays > 0 ? actualVisitDays * 1.5 : 0;
+  // Tolerance: 90% — if billed monitoring covers 90%+ of expected, treat as fully covered
+  const monitoringFullyCovered = expectedMonitoringHrs > 0 && totalMonitoringHrsBilled >= expectedMonitoringHrs * 0.9;
+
   for (const eq of eqByRoom) {
     const roomName = (eq.room || '').trim();
     if (!roomName) continue;
     const roomKey = roomName.toLowerCase();
     const billed = roomBilling[roomKey];
     const totalUnits = (eq.air_movers || 0) + (eq.dehus || 0) + (eq.scrubbers || 0);
-    const days = eq.days_onsite || extracted.encircle?.drying_days || 3;
+    // FIX v6: prefer actual visit days from moisture readings over calendar days onsite
+    const calendarDays = eq.days_onsite || extracted.encircle?.drying_days || 3;
+    const days = actualVisitDays > 0 ? actualVisitDays : calendarDays;
     const evidencePage = (eq.page_evidence && eq.page_evidence[0]) || 0;
 
     if (totalUnits === 0) continue;
 
     // CASE 1: Room has documented equipment but ZERO line items billed there → HIGH
     if (!billed || billed.codes.size === 0) {
+      // FIX v6: Suppress if total job-wide monitoring is fully covered.
+      // The room-name mismatch is documentation drift, not revenue loss.
+      if (monitoringFullyCovered) {
+        console.log('[alignment] Suppressed CASE 1 for "' + roomName + '" — total monitoring covered job-wide');
+        continue;
+      }
       // Estimate missed revenue: monitoring (1.5 hr/day × WTR EQ) + likely antimicrobial
       const monitoringHours = 1.5 * days;
       const monitoringValue = +(monitoringHours * RATE_EQ).toFixed(2);
@@ -517,6 +568,13 @@ function auditEquipmentAlignment(extracted, auditResult) {
     if (!hasMonitoring) missing.push('monitoring labor (WTR EQ — 1.5 hrs/day × ' + days + ' days = $' + (1.5 * days * RATE_EQ).toFixed(2) + ')');
     if (isCat2Plus && !hasAntimicrobial) missing.push('antimicrobial (WTR GRMB — required for Cat 2+ in affected rooms)');
     if (!hasAnyDryingWork) missing.push('drying-related work (no drying, demo, or floor coverage line items)');
+
+    // FIX v6: If monitoring is the only missing thing AND it's covered job-wide, suppress.
+    const onlyMissingMonitoring = missing.length === 1 && missing[0].startsWith('monitoring labor');
+    if (onlyMissingMonitoring && monitoringFullyCovered) {
+      console.log('[alignment] Suppressed CASE 2 monitoring-only for "' + roomName + '" — covered job-wide');
+      continue;
+    }
 
     if (missing.length > 0) {
       const monitoringValue = !hasMonitoring ? +(1.5 * days * RATE_EQ).toFixed(2) : 0;
@@ -695,7 +753,10 @@ function extractJSON(text){
 function sc(s){return{HIGH:'#E53935',MEDIUM:'#FB8C00',LOW:'#1E88E5'}[s]||'#708194'}
 function gc(g){return{A:'#43A047',B:'#66BB6A',C:'#FB8C00',D:'#EF6C00',F:'#E53935'}[g]||'#708194'}
 function cl(c){return{MISSING_ITEM:'Missing',UNDERBILLED:'Underbilled',MISSING_ROOM:'Missing room',MISSING_STANDARD:'Standard',SUPPLEMENT:'Supplement'}[c]||c}
-function gapStats(){const g=S.result?.gaps||[];let res=0,cor=0,jus=0;g.forEach(x=>{const r=S.resp[x.id];if(r&&r.a&&(r.a==='C'||(r.a==='J'&&r.j?.trim()))){res++;if(r.a==='C')cor++;else jus++}});return{t:g.length,res,cor,jus,ok:res===g.length&&g.length>0,rv:!S.reb||(S.ec.length===7&&/^\d+$/.test(S.ec))}}
+// FIX v6 Process #1: Require minimum 15-char justification so estimators
+// stop dismissing gaps with "OK" / "Pass" / "Done". Forces real engagement.
+const MIN_JUSTIFICATION_CHARS = 15;
+function gapStats(){const g=S.result?.gaps||[];let res=0,cor=0,jus=0,weakJust=0;g.forEach(x=>{const r=S.resp[x.id];if(r&&r.a){if(r.a==='C'){res++;cor++}else if(r.a==='J'){const jt=(r.j||'').trim();if(jt.length>=MIN_JUSTIFICATION_CHARS){res++;jus++}else if(jt.length>0){weakJust++}}}});return{t:g.length,res,cor,jus,weakJust,ok:res===g.length&&g.length>0,rv:!S.reb||(S.ec.length===7&&/^\d+$/.test(S.ec))}}
 
 // ══ ALBI via Webhooks ══
 async function runAlbiAutomation(){
@@ -1965,7 +2026,7 @@ function draw(){
   // ══ PHASE: REVIEW (Pass 1 results) ══
   else if(S.phase==='review'){
     const r=S.result;
-    h+=`<div style="background:var(--s1);border-radius:10px;padding:16px 20px;border:1px solid var(--brd);margin-bottom:16px"><div style="display:flex;justify-content:space-between;align-items:center"><div><span class="mono" style="font-size:14px;font-weight:700">${gs.res} / ${gs.t}</span><span style="font-size:12px;color:var(--dim);margin-left:8px">gaps addressed</span></div><div style="display:flex;gap:12px;font-size:12px;font-family:'DM Mono',monospace"><span style="color:var(--grn)">${gs.cor} corrections</span><span style="color:var(--wrn)">${gs.jus} justified</span><span style="color:var(--dim)">${gs.t-gs.res} remaining</span></div></div><div style="height:6px;background:var(--s3);border-radius:3px;overflow:hidden;margin-top:10px"><div style="height:100%;border-radius:3px;transition:width .3s;width:${gs.t?gs.res/gs.t*100:0}%;background:${gs.ok?'var(--grn)':'linear-gradient(90deg,var(--acc),#C97A08)'}"></div></div></div>`;
+    h+=`<div style="background:var(--s1);border-radius:10px;padding:16px 20px;border:1px solid var(--brd);margin-bottom:16px"><div style="display:flex;justify-content:space-between;align-items:center"><div><span class="mono" style="font-size:14px;font-weight:700">${gs.res} / ${gs.t}</span><span style="font-size:12px;color:var(--dim);margin-left:8px">gaps addressed</span></div><div style="display:flex;gap:12px;font-size:12px;font-family:'DM Mono',monospace;flex-wrap:wrap"><span style="color:var(--grn)">${gs.cor} corrections</span><span style="color:var(--wrn)">${gs.jus} justified</span>${gs.weakJust>0?`<span style="color:var(--red)">${gs.weakJust} thin (need 15+ chars)</span>`:''}<span style="color:var(--dim)">${gs.t-gs.res} remaining</span></div></div><div style="height:6px;background:var(--s3);border-radius:3px;overflow:hidden;margin-top:10px"><div style="height:100%;border-radius:3px;transition:width .3s;width:${gs.t?gs.res/gs.t*100:0}%;background:${gs.ok?'var(--grn)':'linear-gradient(90deg,var(--acc),#C97A08)'}"></div></div></div>`;
 
     h+=`<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;margin-bottom:16px"><div style="background:var(--s1);border-radius:8px;padding:12px 14px;border:1px solid var(--brd)"><div style="font-size:9px;color:var(--dim);text-transform:uppercase;letter-spacing:.05em;font-family:'DM Mono',monospace;margin-bottom:4px">Grade</div><div style="font-size:18px;font-weight:700;font-family:'DM Mono',monospace;color:${gc(r.score?.grade)}">${r.score?.grade||'—'}</div></div><div style="background:var(--s1);border-radius:8px;padding:12px 14px;border:1px solid var(--brd)"><div style="font-size:9px;color:var(--dim);text-transform:uppercase;letter-spacing:.05em;font-family:'DM Mono',monospace;margin-bottom:4px">Billed</div><div style="font-size:18px;font-weight:700;font-family:'DM Mono',monospace">$${(r.estimate_submitted?.total_billed||0).toLocaleString()}</div></div><div style="background:var(--s1);border-radius:8px;padding:12px 14px;border:1px solid var(--brd)"><div style="font-size:9px;color:var(--dim);text-transform:uppercase;letter-spacing:.05em;font-family:'DM Mono',monospace;margin-bottom:4px">Gaps</div><div style="font-size:18px;font-weight:700;font-family:'DM Mono',monospace;color:var(--red)">${gs.t}</div></div><div style="background:var(--s1);border-radius:8px;padding:12px 14px;border:1px solid var(--brd)"><div style="font-size:9px;color:var(--dim);text-transform:uppercase;letter-spacing:.05em;font-family:'DM Mono',monospace;margin-bottom:4px">Missed $</div><div style="font-size:18px;font-weight:700;font-family:'DM Mono',monospace;color:var(--acc)">${r.score?.estimated_missed_revenue||'—'}</div></div></div>`;
 
@@ -1982,7 +2043,7 @@ function draw(){
     h+=`<div class="qa-filter-bar">`;['ALL','HIGH','MEDIUM','LOW'].forEach(sv=>{const ct=sv==='ALL'?gaps.length:gaps.filter(g=>g.severity===sv).length;h+=`<button class="qa-filter-btn ${S.sev===sv?'on':''}" onclick="S.sev='${sv}';draw()">${sv} <span style="opacity:.7">(${ct})</span></button>`});h+=`</div>`;
 
     filt.forEach(g=>{const rr=S.resp[g.id]||{};const dn=rr.a&&(rr.a==='C'||(rr.a==='J'&&rr.j?.trim()));
-    h+=`<div style="background:var(--s1);border:1px solid ${dn?'rgba(67,160,71,0.4)':'var(--brd)'};border-radius:10px;overflow:hidden;margin-bottom:10px;border-left:4px solid ${dn?'var(--grn)':sc(g.severity)}"><div style="padding:14px 16px"><div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px"><div style="flex:1"><div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap"><span class="mono" style="font-size:11px;color:var(--dim);font-weight:600">${g.id}</span><span class="badge" style="color:${sc(g.severity)};background:${sc(g.severity)}15;border:1px solid ${sc(g.severity)}30">${g.severity}</span><span class="badge" style="color:var(--dim);background:#70819415;border:1px solid #70819430">${cl(g.category)}</span><span class="mono" style="font-size:13px;color:var(--blu);font-weight:700">${g.xact_code}</span>${dn?`<span class="badge" style="color:${rr.a==='C'?'var(--grn)':'var(--wrn)'};background:${rr.a==='C'?'var(--grn)':'var(--wrn)'}15;border:1px solid ${rr.a==='C'?'var(--grn)':'var(--wrn)'}30">${rr.a==='C'?'Will correct':'Justified'}</span>`:''}</div><p style="font-size:14px;font-weight:600">${g.description}</p></div><div style="text-align:right;margin-left:12px;flex-shrink:0"><div style="font-size:16px;font-weight:700;color:var(--acc);font-family:'DM Mono',monospace">${g.estimated_value}</div><div style="font-size:11px;color:var(--dim)">${g.recommended_qty||''} ${g.unit||''}</div></div></div><div style="display:grid;grid-template-columns:${g.encircle_page?'160px 1fr 1fr':'1fr 1fr'};gap:12px;font-size:12px;color:var(--dim);margin-bottom:4px;align-items:start">${g.encircle_page?`<div id="thumb_${g.id}" style="min-height:80px;background:var(--s2);border-radius:4px;display:flex;align-items:center;justify-content:center;color:var(--dim);font-size:10px;font-family:'DM Mono',monospace">Loading p.${g.encircle_page}…</div>`:''}<div><strong style="color:var(--grn)">Encircle${g.encircle_page?' (p.'+g.encircle_page+')':''}: </strong>${g.encircle_evidence||''}</div><div><strong style="color:var(--wrn)">Estimate: </strong>${g.xactimate_current||''}</div></div>${g.standard_reference?`<div style="font-size:11px;background:rgba(30,136,229,0.06);border:1px solid rgba(30,136,229,0.15);border-radius:6px;padding:8px 10px;margin-bottom:4px"><div style="font-family:'DM Mono',monospace;color:#64B5F6;font-weight:700;margin-bottom:4px">⚖ ${g.standard_reference}</div>${g.standard_text?`<div style="color:#90CAF9;line-height:1.5">${g.standard_text}</div>`:''}</div>`:''}<div style="background:var(--s2);border-radius:8px;padding:12px 14px;margin-top:12px;border:1px solid ${dn?'rgba(67,160,71,0.3)':'rgba(251,140,0,0.4)'}"><div style="font-size:11px;font-weight:700;font-family:'DM Mono',monospace;margin-bottom:8px;text-transform:uppercase;letter-spacing:.06em;color:${dn?'var(--grn)':'var(--wrn)'}">${dn?'✓ Addressed':'⚠ Response required'}</div><div><button class="act-btn ${rr.a==='C'?'sc':''}" onclick="setResp('${g.id}','C')">✓ Will correct</button><button class="act-btn ${rr.a==='J'?'sj':''}" onclick="setResp('${g.id}','J')">Justify variance</button><button class="act-btn" style="${rr.fp_reported?'background:rgba(229,57,53,0.12);border-color:rgba(229,57,53,0.5);color:#E53935':'opacity:.7'}" onclick="reportFalsePositive('${g.id}')" title="${rr.fp_reported?'Reported: '+(rr.fp_reason||'').replace(/\"/g,'&quot;'):'Flag this as a false positive — copies a report to clipboard for the rule maintainer'}">${rr.fp_reported?'🚩 Reported':'🚩 False positive'}</button></div>${rr.a==='J'?`<textarea id="just_${g.id}" oninput="setJust('${g.id}',this.value)" placeholder="Required: Explain why..." style="margin-top:10px;border-color:${rr.j?.trim()?'rgba(67,160,71,0.4)':'var(--wrn)'}">${rr.j||''}</textarea>`:''}</div></div></div>`});
+    h+=`<div style="background:var(--s1);border:1px solid ${dn?'rgba(67,160,71,0.4)':'var(--brd)'};border-radius:10px;overflow:hidden;margin-bottom:10px;border-left:4px solid ${dn?'var(--grn)':sc(g.severity)}"><div style="padding:14px 16px"><div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px"><div style="flex:1"><div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap"><span class="mono" style="font-size:11px;color:var(--dim);font-weight:600">${g.id}</span><span class="badge" style="color:${sc(g.severity)};background:${sc(g.severity)}15;border:1px solid ${sc(g.severity)}30">${g.severity}</span><span class="badge" style="color:var(--dim);background:#70819415;border:1px solid #70819430">${cl(g.category)}</span><span class="mono" style="font-size:13px;color:var(--blu);font-weight:700">${g.xact_code}</span>${dn?`<span class="badge" style="color:${rr.a==='C'?'var(--grn)':'var(--wrn)'};background:${rr.a==='C'?'var(--grn)':'var(--wrn)'}15;border:1px solid ${rr.a==='C'?'var(--grn)':'var(--wrn)'}30">${rr.a==='C'?'Will correct':'Justified'}</span>`:''}</div><p style="font-size:14px;font-weight:600">${g.description}</p></div><div style="text-align:right;margin-left:12px;flex-shrink:0"><div style="font-size:16px;font-weight:700;color:var(--acc);font-family:'DM Mono',monospace">${g.estimated_value}</div><div style="font-size:11px;color:var(--dim)">${g.recommended_qty||''} ${g.unit||''}</div></div></div><div style="display:grid;grid-template-columns:${g.encircle_page?'160px 1fr 1fr':'1fr 1fr'};gap:12px;font-size:12px;color:var(--dim);margin-bottom:4px;align-items:start">${g.encircle_page?`<div id="thumb_${g.id}" style="min-height:80px;background:var(--s2);border-radius:4px;display:flex;align-items:center;justify-content:center;color:var(--dim);font-size:10px;font-family:'DM Mono',monospace">Loading p.${g.encircle_page}…</div>`:''}<div><strong style="color:var(--grn)">Encircle${g.encircle_page?' (p.'+g.encircle_page+')':''}: </strong>${g.encircle_evidence||''}</div><div><strong style="color:var(--wrn)">Estimate: </strong>${g.xactimate_current||''}</div></div>${g.standard_reference?`<div style="font-size:11px;background:rgba(30,136,229,0.06);border:1px solid rgba(30,136,229,0.15);border-radius:6px;padding:8px 10px;margin-bottom:4px"><div style="font-family:'DM Mono',monospace;color:#64B5F6;font-weight:700;margin-bottom:4px">⚖ ${g.standard_reference}</div>${g.standard_text?`<div style="color:#90CAF9;line-height:1.5">${g.standard_text}</div>`:''}</div>`:''}<div style="background:var(--s2);border-radius:8px;padding:12px 14px;margin-top:12px;border:1px solid ${dn?'rgba(67,160,71,0.3)':'rgba(251,140,0,0.4)'}"><div style="font-size:11px;font-weight:700;font-family:'DM Mono',monospace;margin-bottom:8px;text-transform:uppercase;letter-spacing:.06em;color:${dn?'var(--grn)':'var(--wrn)'}">${dn?'✓ Addressed':'⚠ Response required'}</div><div><button class="act-btn ${rr.a==='C'?'sc':''}" onclick="setResp('${g.id}','C')">✓ Will correct</button><button class="act-btn ${rr.a==='J'?'sj':''}" onclick="setResp('${g.id}','J')">Justify variance</button><button class="act-btn" style="${rr.fp_reported?'background:rgba(229,57,53,0.12);border-color:rgba(229,57,53,0.5);color:#E53935':'opacity:.7'}" onclick="reportFalsePositive('${g.id}')" title="${rr.fp_reported?'Reported: '+(rr.fp_reason||'').replace(/\"/g,'&quot;'):'Flag this as a false positive — copies a report to clipboard for the rule maintainer'}">${rr.fp_reported?'🚩 Reported':'🚩 False positive'}</button></div>${rr.a==='J'?`<textarea id="just_${g.id}" oninput="setJust('${g.id}',this.value);const c=this.value.trim().length;const fb=document.getElementById('jc_${g.id}');if(fb){fb.textContent=c+' / ${MIN_JUSTIFICATION_CHARS}+ chars'+(c>=${MIN_JUSTIFICATION_CHARS}?' ✓':' — needs more detail');fb.style.color=c>=${MIN_JUSTIFICATION_CHARS}?'var(--grn)':'var(--wrn)'}" placeholder="Required: Explain WHY in 15+ chars. 'OK'/'Pass'/'Done' won't count. Be specific: 'Customer moved contents before we arrived' / 'Eq was only onsite 3 days, photo dates confirm'" style="margin-top:10px;border-color:${(rr.j||'').trim().length>=MIN_JUSTIFICATION_CHARS?'rgba(67,160,71,0.4)':'var(--wrn)'}">${rr.j||''}</textarea><div id="jc_${g.id}" style="font-family:'DM Mono',monospace;font-size:10px;margin-top:4px;color:${(rr.j||'').trim().length>=MIN_JUSTIFICATION_CHARS?'var(--grn)':'var(--wrn)'}">${(rr.j||'').trim().length} / ${MIN_JUSTIFICATION_CHARS}+ chars${(rr.j||'').trim().length>=MIN_JUSTIFICATION_CHARS?' ✓':' — needs more detail'}</div>`:''}</div></div></div>`});
 
     // Rebuild
 
