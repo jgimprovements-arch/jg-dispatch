@@ -7983,11 +7983,12 @@ function openWoEditModal(woId) {
       </div>
     ` : ''}
 
-    <div style="display:flex;justify-content:space-between;gap:6px;margin-top:14px;">
-      <div>
-        ${wo.status === 'draft' ? `<button class="btn ghost-red" data-wo-modal-act="cancel">Cancel Draft</button>` : ''}
+    <div style="display:flex;justify-content:space-between;gap:6px;margin-top:14px;flex-wrap:wrap;">
+      <div style="display:flex;gap:6px;flex-wrap:wrap;">
+        ${wo.status !== 'cancelled' && wo.status !== 'superseded' ? `<button class="btn ghost-red" data-wo-modal-act="cancel">✕ Cancel ${wo.status === 'draft' ? 'Draft' : wo.status === 'sent' ? 'and Recall' : 'Work Order'}</button>` : ''}
         ${wo.status === 'sent' ? `<button class="btn ghost" data-wo-modal-act="resend">📧 Resend</button>` : ''}
-        ${wo.status === 'signed' ? `<button class="btn ghost" data-wo-modal-act="new-version">⚡ Generate New Version</button>` : ''}
+        ${wo.status === 'signed' ? `<button class="btn ghost" data-wo-modal-act="unsign">↺ Unsign &amp; Revise</button>` : ''}
+        ${wo.status === 'signed' ? `<button class="btn ghost" data-wo-modal-act="new-version">⚡ New Version</button>` : ''}
       </div>
       <div style="display:flex;gap:6px;">
         <button class="btn" data-wo-modal-act="close">Close</button>
@@ -8013,11 +8014,47 @@ async function handleWoModalAction(act, wo, woUrl) {
     return;
   }
   if (act === 'cancel') {
-    if (!confirm('Cancel this draft? This cannot be undone.')) return;
-    await sb.from('rebuild_work_orders').update({ status: 'cancelled' }).eq('id', wo.id);
-    await sb.from('rebuild_work_order_history').insert({ work_order_id: wo.id, action: 'cancelled', actor: state.pmEmail });
+    const verb = wo.status === 'signed' ? 'cancel this SIGNED work order' : wo.status === 'sent' ? 'recall this sent work order' : 'cancel this draft';
+    if (!confirm(`Are you sure you want to ${verb}? The audit trail is preserved but the WO becomes inactive. The sub link will stop working.`)) return;
+    const newToken = crypto.randomUUID();
+    await sb.from('rebuild_work_orders').update({
+      status: 'cancelled',
+      accept_token: newToken, // invalidates the old link
+    }).eq('id', wo.id);
+    await sb.from('rebuild_work_order_history').insert({
+      work_order_id: wo.id, action: 'cancelled', actor: state.pmEmail,
+      details: `Cancelled from status: ${wo.status}`,
+    });
     modal.classList.remove('on');
     toast('Cancelled');
+    await loadWorkOrders();
+    renderDetail();
+    return;
+  }
+  if (act === 'unsign') {
+    if (!confirm('Unsign this work order? The signature data will be wiped and the WO returned to DRAFT so you can edit and resend. The audit trail keeps a record of who originally signed.')) return;
+    // Preserve a snapshot in history before wiping
+    const sigSnapshot = `Original signature wiped — was signed by ${wo.signed_by_name || 'unknown'}${wo.signed_by_title ? ' (' + wo.signed_by_title + ')' : ''} at ${wo.signed_at}${wo.signed_ip ? ' from ' + wo.signed_ip : ''}`;
+    await sb.from('rebuild_work_orders').update({
+      status: 'draft',
+      signed_at: null,
+      signed_by_name: null,
+      signed_by_title: null,
+      signed_ip: null,
+      signed_user_agent: null,
+      signed_notes: null,
+      // Rotate token so old sub link no longer works
+      accept_token: crypto.randomUUID(),
+      sent_at: null,
+      reminder_count: 0,
+      last_reminder_at: null,
+    }).eq('id', wo.id);
+    await sb.from('rebuild_work_order_history').insert({
+      work_order_id: wo.id, action: 'unsigned', actor: state.pmEmail,
+      details: sigSnapshot,
+    });
+    modal.classList.remove('on');
+    toast('Unsigned — now a draft');
     await loadWorkOrders();
     renderDetail();
     return;
