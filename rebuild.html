@@ -1744,6 +1744,66 @@
   }
   .albi-ctrl-item:hover { background: var(--bg); color: var(--orange); }
 
+  /* ─── WORK ORDERS TAB ─── */
+  .wo-wrap { padding: 4px 0; }
+  .wo-header { margin-bottom: 14px; }
+  .wo-header h3 {
+    margin: 0 0 4px;
+    color: var(--navy);
+    font-size: 16px;
+    font-weight: 800;
+  }
+  .wo-header p { margin: 0; color: var(--muted); font-size: 13px; }
+
+  .wo-empty {
+    background: var(--card);
+    border: 1px dashed var(--line);
+    border-radius: 12px;
+    padding: 60px 20px;
+    text-align: center;
+    color: var(--muted);
+  }
+  .wo-empty h3 { color: var(--navy); margin: 0 0 6px; font-size: 16px; }
+  .wo-empty p { margin: 0; font-size: 13px; }
+
+  .wo-list { display: flex; flex-direction: column; gap: 10px; }
+  .wo-sub-row {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 14px 18px;
+    display: grid;
+    grid-template-columns: 1.6fr auto auto;
+    gap: 14px;
+    align-items: center;
+    transition: border-color .15s, box-shadow .15s;
+  }
+  .wo-sub-row:hover { border-color: var(--orange); box-shadow: 0 2px 8px rgba(232,93,4,.08); }
+  .wo-sub-info { min-width: 0; }
+  .wo-sub-name {
+    font-weight: 700;
+    color: var(--navy);
+    font-size: 14px;
+    margin-bottom: 2px;
+  }
+  .wo-sub-contact { font-size: 12px; color: var(--muted); }
+  .wo-status-pill {
+    display: inline-block;
+    padding: 5px 12px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: .3px;
+    white-space: nowrap;
+  }
+  .wo-sub-actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+  .wo-sub-actions .btn { padding: 7px 14px; font-size: 12px; }
+
+  @media (max-width: 700px) {
+    .wo-sub-row { grid-template-columns: 1fr; }
+    .wo-sub-actions { justify-content: flex-start; }
+  }
+
   /* ─── TO-DOS TAB ─── */
   .todo-tab { padding: 4px 0; }
   .todo-composer {
@@ -2781,6 +2841,7 @@ const state = {
   })(),
   journalEntries: [],
   todos: [],
+  workOrders: [],
   allStaff: [],
   tab: 'phases',
 };
@@ -3605,7 +3666,7 @@ async function selectProject(id) {
   if (!state.activeProject) return;
   pushRecentProject(id);
   updateUrlHash();
-  await Promise.all([loadPhases(), loadSelections(), loadMessages(), loadHistory(), loadDocuments(), loadJournalEntries(), loadTodos()]);
+  await Promise.all([loadPhases(), loadSelections(), loadMessages(), loadHistory(), loadDocuments(), loadJournalEntries(), loadTodos(), loadWorkOrders()]);
   renderDetail();
 }
 
@@ -5519,6 +5580,7 @@ function renderDetail() {
     <div class="tabs" id="tabs">
       <button class="${state.tab==='phases'?'on':''}" data-tab="phases">Phases <span class="badge">${state.phases.length}</span></button>
       <button class="${state.tab==='selections'?'on':''}" data-tab="selections">Selections ${overdueSelections ? `<span class="badge">${overdueSelections}</span>` : ''}</button>
+      <button class="${state.tab==='workorders'?'on':''}" data-tab="workorders">Work Orders ${(state.workOrders||[]).filter(w => w.status === 'sent').length ? `<span class="badge">${state.workOrders.filter(w => w.status === 'sent').length}</span>` : ''}</button>
       <button class="${state.tab==='messages'?'on':''}" data-tab="messages">Messages</button>
       <button class="${state.tab==='journal'?'on':''}" data-tab="journal">Journal ${(state.journalEntries||[]).filter(e => !e.deleted_at).length ? `<span class="badge">${state.journalEntries.filter(e=>!e.deleted_at).length}</span>` : ''}</button>
       <button class="${state.tab==='todos'?'on':''}" data-tab="todos">To-Dos ${(state.todos||[]).filter(t => t.status === 'open' || t.status === 'in_progress').length ? `<span class="badge">${state.todos.filter(t => t.status === 'open' || t.status === 'in_progress').length}</span>` : ''}</button>
@@ -5579,6 +5641,7 @@ function renderTabContent() {
   else if (state.tab === 'messages') c.innerHTML = renderMessagesTab();
   else if (state.tab === 'journal') c.innerHTML = renderJournalTab();
   else if (state.tab === 'todos') c.innerHTML = renderTodosTab();
+  else if (state.tab === 'workorders') c.innerHTML = renderWorkOrdersTab();
   else if (state.tab === 'audit')   c.innerHTML = renderAuditTab();
   else if (state.tab === 'documents') c.innerHTML = renderDocumentsTab();
   else c.innerHTML = `<div class="empty" style="padding:40px 20px;">
@@ -5671,6 +5734,11 @@ function renderTabContent() {
   // Wire todos tab
   if (state.tab === 'todos') {
     wireTodosTab();
+  }
+
+  // Wire workorders tab
+  if (state.tab === 'workorders') {
+    wireWorkOrdersTab();
   }
 
   // Wire documents tab
@@ -7678,6 +7746,390 @@ function wireTodosTab() {
   });
 }
 
+async function loadWorkOrders() {
+  if (!sb || !state.activeProjectId) { state.workOrders = []; return; }
+  const { data } = await sb.from('rebuild_work_orders')
+    .select('*, sub:rebuild_subs(id, company_name, primary_contact, email, phone)')
+    .eq('project_id', state.activeProjectId)
+    .order('created_at', { ascending: false });
+  state.workOrders = data || [];
+}
+
+// ═══════════════════ WORK ORDERS TAB ═══════════════════
+
+const WO_STATUS_META = {
+  draft:      { label: 'Draft',      color: '#7884a0', bg: 'rgba(120,132,160,.12)' },
+  sent:       { label: 'Awaiting Signature', color: '#e85d04', bg: 'rgba(232,93,4,.15)' },
+  signed:     { label: 'Signed',     color: '#2d9c5f', bg: 'rgba(45,156,95,.15)' },
+  superseded: { label: 'Superseded', color: '#7884a0', bg: 'rgba(120,132,160,.10)' },
+  cancelled:  { label: 'Cancelled',  color: '#d64545', bg: 'rgba(214,69,69,.12)' },
+};
+
+function renderWorkOrdersTab() {
+  const wos = state.workOrders || [];
+  // Group by sub
+  const subsOnProject = new Map();
+  state.phases.forEach(ph => (ph.assignees || []).forEach(a => {
+    if (a.assignee_type === 'sub' && a.sub_id) {
+      const sub = state.subs.find(s => s.id === a.sub_id);
+      if (sub) subsOnProject.set(sub.id, sub);
+    }
+  }));
+  state.selections.forEach(s => {
+    if (s.sub_id) {
+      const sub = state.subs.find(x => x.id === s.sub_id);
+      if (sub) subsOnProject.set(sub.id, sub);
+    }
+  });
+
+  // Subs that have WOs but maybe not on phases/selections anymore — still show
+  wos.forEach(wo => {
+    if (wo.sub && !subsOnProject.has(wo.sub.id)) subsOnProject.set(wo.sub.id, wo.sub);
+  });
+
+  if (!subsOnProject.size) {
+    return `
+      <div class="wo-empty">
+        <div style="font-size:48px;margin-bottom:10px;opacity:.4;">📋</div>
+        <h3>No subcontractors yet</h3>
+        <p>Assign subs to phases or selections, then come back here to issue Work Orders.</p>
+      </div>
+    `;
+  }
+
+  const rows = Array.from(subsOnProject.values()).map(sub => {
+    const subWos = wos.filter(w => w.sub_id === sub.id);
+    const active = subWos.find(w => w.status === 'sent' || w.status === 'signed' || w.status === 'draft');
+    const sm = WO_STATUS_META[active?.status] || null;
+    return `
+      <div class="wo-sub-row">
+        <div class="wo-sub-info">
+          <div class="wo-sub-name">${esc(sub.company_name)}</div>
+          ${sub.primary_contact ? `<div class="wo-sub-contact">${esc(sub.primary_contact)}${sub.email ? ' · ' + esc(sub.email) : ''}</div>` : ''}
+        </div>
+        <div class="wo-sub-status">
+          ${active
+            ? `<span class="wo-status-pill" style="background:${sm.bg};color:${sm.color};">${sm.label}${active.signed_at ? ' · ' + new Date(active.signed_at).toLocaleDateString() : ''}</span>`
+            : `<span class="wo-status-pill" style="background:rgba(214,69,69,.10);color:var(--red);">⚠ No Work Order</span>`}
+        </div>
+        <div class="wo-sub-actions">
+          ${active
+            ? `<button class="btn" data-wo-act="open" data-wo-id="${active.id}">${active.status === 'draft' ? '✎ Continue' : 'View'}</button>`
+            : `<button class="btn primary" data-wo-act="create" data-sub-id="${sub.id}">+ Create WO</button>`}
+          ${subWos.length > 1 ? `<button class="btn ghost" data-wo-act="history" data-sub-id="${sub.id}">History (${subWos.length})</button>` : ''}
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  return `
+    <div class="wo-wrap">
+      <div class="wo-header">
+        <div>
+          <h3>Work Orders by Subcontractor</h3>
+          <p>One master Work Order per sub. Auto-built from approved selections and assigned phases.</p>
+        </div>
+      </div>
+      <div class="wo-list">
+        ${rows}
+      </div>
+    </div>
+  `;
+}
+
+function buildWoScopeText(sub) {
+  const p = state.activeProject;
+  const lines = [];
+  lines.push(`PROJECT: ${p.albi_job_number || ''} · ${p.customer_name || ''}`);
+  if (p.property_address) lines.push(`ADDRESS: ${p.property_address}`);
+  lines.push('');
+  lines.push('SCOPE OF WORK:');
+  lines.push('');
+
+  // Selections assigned to this sub
+  const subSelections = state.selections.filter(s => s.sub_id === sub.id);
+  if (subSelections.length) {
+    lines.push('Material Selections:');
+    subSelections.forEach(s => {
+      lines.push(`  • ${s.category}${s.description ? ' — ' + s.description : ''}${s.sku ? ' (SKU ' + s.sku + ')' : ''}${s.quantity ? ' · Qty ' + s.quantity + (s.unit ? ' ' + s.unit : '') : ''}`);
+    });
+    lines.push('');
+  }
+
+  // Phases this sub is on
+  const subPhases = state.phases.filter(ph => (ph.assignees || []).some(a => a.assignee_type === 'sub' && a.sub_id === sub.id));
+  if (subPhases.length) {
+    lines.push('Phases / Labor:');
+    subPhases.forEach(ph => {
+      const dates = (ph.start_date || ph.end_date)
+        ? ` (${ph.start_date || '?'} → ${ph.end_date || '?'})`
+        : '';
+      lines.push(`  • ${ph.name}${dates}`);
+      if (ph.notes) lines.push(`      ${ph.notes}`);
+    });
+    lines.push('');
+  }
+
+  lines.push('Contractor is responsible for materials, labor, transportation, disposal of debris, and final cleanup of work area unless specified otherwise.');
+  return lines.join('\n');
+}
+
+function suggestedWoAmount(sub) {
+  // Sum of total_cost on selections assigned to this sub (PM can override)
+  return state.selections
+    .filter(s => s.sub_id === sub.id && s.total_cost)
+    .reduce((sum, s) => sum + Number(s.total_cost), 0) || null;
+}
+
+async function createOrOpenWorkOrder(subId, existingWoId) {
+  let wo = null;
+  if (existingWoId) {
+    wo = state.workOrders.find(w => w.id === existingWoId);
+  } else {
+    const sub = state.subs.find(s => s.id === subId);
+    if (!sub) { toast('Sub not found'); return; }
+    // If there's an existing non-superseded WO for this sub, open it
+    const existing = state.workOrders.find(w => w.sub_id === subId && w.status !== 'superseded' && w.status !== 'cancelled');
+    if (existing) { wo = existing; }
+    else {
+      // Create draft
+      const scope = buildWoScopeText(sub);
+      const suggestedAmount = suggestedWoAmount(sub);
+      const { data, error } = await sb.from('rebuild_work_orders').insert({
+        project_id: state.activeProjectId,
+        sub_id: subId,
+        version: 1,
+        status: 'draft',
+        scope_text: scope,
+        total_amount: suggestedAmount,
+        amount_source: suggestedAmount ? 'sum_of_selections' : null,
+        payment_terms: 'Net 30 from invoice receipt, subject to satisfactory completion.',
+        created_by_email: state.pmEmail,
+        created_by_name: state.pmName,
+        sent_to_email: sub.email || null,
+        sent_to_phone: sub.phone || null,
+      }).select('*, sub:rebuild_subs(id, company_name, primary_contact, email, phone)');
+      if (error) { toast('Save failed: ' + error.message); return; }
+      wo = data?.[0];
+      await sb.from('rebuild_work_order_history').insert({
+        work_order_id: wo.id, action: 'created', actor: state.pmEmail,
+        details: `Draft created from ${subSelectionCount(subId)} selection(s) + ${subPhaseCount(subId)} phase(s)`,
+      });
+      await loadWorkOrders();
+    }
+  }
+  openWoEditModal(wo.id);
+}
+
+function subSelectionCount(subId) { return state.selections.filter(s => s.sub_id === subId).length; }
+function subPhaseCount(subId) { return state.phases.filter(ph => (ph.assignees||[]).some(a => a.assignee_type === 'sub' && a.sub_id === subId)).length; }
+
+function openWoEditModal(woId) {
+  const wo = state.workOrders.find(w => w.id === woId);
+  if (!wo) return;
+  let modal = document.getElementById('modalWoEdit');
+  if (!modal) {
+    modal = document.createElement('div');
+    modal.id = 'modalWoEdit';
+    modal.className = 'modal-back';
+    modal.innerHTML = `<div class="modal" style="max-width:720px;"><h3>Work Order — <span id="woModalSubName"></span> <button class="close" data-close>×</button></h3><div class="modal-body" id="woEditBody"></div></div>`;
+    document.body.appendChild(modal);
+    modal.querySelector('[data-close]').addEventListener('click', () => modal.classList.remove('on'));
+  }
+  $('#woModalSubName').textContent = wo.sub?.company_name || '';
+
+  const isReadOnly = wo.status === 'signed' || wo.status === 'superseded' || wo.status === 'cancelled';
+  const woUrl = `${location.origin}${location.pathname.replace(/[^/]*$/, '')}wo.html?t=${wo.accept_token}`;
+
+  $('#woEditBody').innerHTML = `
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:14px;">
+      <span class="wo-status-pill" style="background:${WO_STATUS_META[wo.status].bg};color:${WO_STATUS_META[wo.status].color};">${WO_STATUS_META[wo.status].label}</span>
+      <span style="font-size:11px;color:var(--muted);">v${wo.version} · created ${new Date(wo.created_at).toLocaleDateString()}</span>
+    </div>
+
+    ${wo.status === 'signed' ? `
+      <div style="background:#f4faf6;border:1px solid #c8e6d4;border-radius:8px;padding:12px 14px;margin-bottom:14px;font-size:13px;">
+        <b>✓ Signed by:</b> ${esc(wo.signed_by_name)}${wo.signed_by_title ? ' · ' + esc(wo.signed_by_title) : ''}<br>
+        <b>At:</b> ${new Date(wo.signed_at).toLocaleString()}<br>
+        ${wo.signed_ip ? `<b>IP:</b> ${esc(wo.signed_ip)}<br>` : ''}
+        ${wo.signed_notes ? `<b>Notes:</b> ${esc(wo.signed_notes)}` : ''}
+      </div>
+    ` : ''}
+
+    <label>Agreed Amount ($)</label>
+    <input type="number" step="0.01" id="wo_amount" value="${wo.total_amount || ''}" ${isReadOnly ? 'disabled' : ''} placeholder="0.00">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px;">
+      <div>
+        <label>Start Date</label>
+        <input type="date" id="wo_start" value="${wo.start_date || ''}" ${isReadOnly ? 'disabled' : ''}>
+      </div>
+      <div>
+        <label>Completion Target</label>
+        <input type="date" id="wo_end" value="${wo.end_date || ''}" ${isReadOnly ? 'disabled' : ''}>
+      </div>
+    </div>
+    <label>Scope of Work</label>
+    <textarea id="wo_scope" rows="12" ${isReadOnly ? 'disabled' : ''} style="font-family:monospace;font-size:12px;">${esc(wo.scope_text || '')}</textarea>
+    <label>Payment Terms</label>
+    <textarea id="wo_terms" rows="2" ${isReadOnly ? 'disabled' : ''}>${esc(wo.payment_terms || '')}</textarea>
+
+    ${wo.status === 'sent' || wo.status === 'signed' ? `
+      <div style="margin-top:14px;padding:10px 12px;background:var(--bg);border:1px solid var(--line);border-radius:8px;font-size:12px;">
+        <b>Sub link:</b> <a href="${woUrl}" target="_blank" style="word-break:break-all;color:var(--orange);">${woUrl}</a>
+        <button class="btn ghost" data-wo-modal-act="copy-link" style="margin-left:8px;font-size:11px;padding:4px 10px;">Copy</button>
+      </div>
+    ` : ''}
+
+    <div style="display:flex;justify-content:space-between;gap:6px;margin-top:14px;">
+      <div>
+        ${wo.status === 'draft' ? `<button class="btn ghost-red" data-wo-modal-act="cancel">Cancel Draft</button>` : ''}
+        ${wo.status === 'sent' ? `<button class="btn ghost" data-wo-modal-act="resend">📧 Resend</button>` : ''}
+        ${wo.status === 'signed' ? `<button class="btn ghost" data-wo-modal-act="new-version">⚡ Generate New Version</button>` : ''}
+      </div>
+      <div style="display:flex;gap:6px;">
+        <button class="btn" data-wo-modal-act="close">Close</button>
+        ${!isReadOnly ? `<button class="btn primary" data-wo-modal-act="save">Save</button>` : ''}
+        ${wo.status === 'draft' ? `<button class="btn primary" data-wo-modal-act="save-and-send">Save & Send to Sub</button>` : ''}
+      </div>
+    </div>
+  `;
+
+  modal.classList.add('on');
+
+  // Wire buttons
+  modal.querySelectorAll('[data-wo-modal-act]').forEach(btn => {
+    btn.addEventListener('click', () => handleWoModalAction(btn.dataset.woModalAct, wo, woUrl));
+  });
+}
+
+async function handleWoModalAction(act, wo, woUrl) {
+  const modal = document.getElementById('modalWoEdit');
+  if (act === 'close') { modal.classList.remove('on'); return; }
+  if (act === 'copy-link') {
+    navigator.clipboard.writeText(woUrl).then(() => toast('Link copied'));
+    return;
+  }
+  if (act === 'cancel') {
+    if (!confirm('Cancel this draft? This cannot be undone.')) return;
+    await sb.from('rebuild_work_orders').update({ status: 'cancelled' }).eq('id', wo.id);
+    await sb.from('rebuild_work_order_history').insert({ work_order_id: wo.id, action: 'cancelled', actor: state.pmEmail });
+    modal.classList.remove('on');
+    toast('Cancelled');
+    await loadWorkOrders();
+    renderDetail();
+    return;
+  }
+  if (act === 'new-version') {
+    if (!confirm('Mark this signed WO as superseded and create a new draft v' + (wo.version + 1) + '?')) return;
+    await sb.from('rebuild_work_orders').update({ status: 'superseded' }).eq('id', wo.id);
+    await sb.from('rebuild_work_order_history').insert({ work_order_id: wo.id, action: 'superseded', actor: state.pmEmail });
+    const { data } = await sb.from('rebuild_work_orders').insert({
+      project_id: wo.project_id, sub_id: wo.sub_id, version: wo.version + 1, status: 'draft',
+      scope_text: wo.scope_text, total_amount: wo.total_amount, payment_terms: wo.payment_terms,
+      start_date: wo.start_date, end_date: wo.end_date,
+      created_by_email: state.pmEmail, created_by_name: state.pmName,
+      sent_to_email: wo.sent_to_email, sent_to_phone: wo.sent_to_phone,
+    }).select('*, sub:rebuild_subs(id, company_name, primary_contact, email, phone)');
+    if (data?.[0]) {
+      await sb.from('rebuild_work_order_history').insert({ work_order_id: data[0].id, action: 'created', actor: state.pmEmail, details: 'Cloned from v' + wo.version });
+      modal.classList.remove('on');
+      await loadWorkOrders();
+      openWoEditModal(data[0].id);
+    }
+    return;
+  }
+  // Save or save-and-send: collect updates
+  const updates = {
+    total_amount: $('#wo_amount').value ? Number($('#wo_amount').value) : null,
+    amount_source: 'pm_entered',
+    start_date: $('#wo_start').value || null,
+    end_date: $('#wo_end').value || null,
+    scope_text: $('#wo_scope').value,
+    payment_terms: $('#wo_terms').value,
+  };
+  if (act === 'save') {
+    await sb.from('rebuild_work_orders').update(updates).eq('id', wo.id);
+    await sb.from('rebuild_work_order_history').insert({ work_order_id: wo.id, action: 'edited', actor: state.pmEmail });
+    toast('Saved');
+    modal.classList.remove('on');
+    await loadWorkOrders();
+    renderDetail();
+    return;
+  }
+  if (act === 'save-and-send' || act === 'resend') {
+    if (act === 'save-and-send') {
+      updates.status = 'sent';
+      updates.sent_at = new Date().toISOString();
+      updates.sent_via = 'email';
+    }
+    await sb.from('rebuild_work_orders').update(updates).eq('id', wo.id);
+    await sendWorkOrderToSub(wo, woUrl);
+    await sb.from('rebuild_work_order_history').insert({ work_order_id: wo.id, action: act === 'resend' ? 'reminded' : 'sent', actor: state.pmEmail });
+    if (act === 'resend') {
+      await sb.from('rebuild_work_orders').update({
+        reminder_count: (wo.reminder_count || 0) + 1,
+        last_reminder_at: new Date().toISOString(),
+      }).eq('id', wo.id);
+    }
+    toast(act === 'resend' ? 'Reminder sent' : 'Sent to sub');
+    modal.classList.remove('on');
+    await loadWorkOrders();
+    renderDetail();
+    return;
+  }
+}
+
+async function sendWorkOrderToSub(wo, woUrl) {
+  const sub = wo.sub || state.subs.find(s => s.id === wo.sub_id);
+  if (!sub || !sub.email) { toast('No email on file for this sub'); return; }
+  const p = state.activeProject;
+  const body = buildBrandedEmail({
+    preheader: `Work Order for ${p.albi_job_number || 'project'} — please review and sign`,
+    headline: `New Work Order — ${p.albi_job_number || 'Project'}`,
+    intro: `Hi ${sub.primary_contact || sub.company_name}, please review the work order below and accept to confirm scope, pricing, and terms before starting work.`,
+    bodyHtml: `<p style="margin:0 0 12px;font-size:14px;color:#1a2540;line-height:1.5;"><b>Customer:</b> ${esc(p.customer_name || '')}<br><b>Address:</b> ${esc(p.property_address || '')}<br><b>Agreed amount:</b> ${wo.total_amount ? '$' + Number(wo.total_amount).toLocaleString() : 'TBD'}</p>`,
+    ctaLabel: 'Review & Sign Work Order',
+    ctaUrl: woUrl,
+    signoffName: state.pmName || 'JG Restoration',
+    signoffPhone: p.albi_pm_phone || '(920) 428-4200',
+  });
+  try {
+    await fetch(MESSAGE_HOOK, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        channel: 'email',
+        to_email: sub.email,
+        from_email: p.albi_pm_email || state.pmEmail || 'josh@jg-restoration.com',
+        from_name: 'JG Restoration',
+        recipient_name: sub.primary_contact || sub.company_name,
+        recipient_type: 'sub',
+        subject: `Work Order — ${p.albi_job_number || 'Project'} (please sign)`,
+        body,
+        attachment_count: 0, attachment_urls: '',
+      }),
+      mode: 'no-cors',
+    });
+  } catch (e) { console.error('WO email send failed:', e); }
+}
+
+function wireWorkOrdersTab() {
+  if (state.tab !== 'workorders') return;
+  document.querySelectorAll('[data-wo-act]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const act = btn.dataset.woAct;
+      if (act === 'create') createOrOpenWorkOrder(btn.dataset.subId);
+      else if (act === 'open') createOrOpenWorkOrder(null, btn.dataset.woId);
+      else if (act === 'history') {
+        // Future: history modal. For now, just open the most recent.
+        const subId = btn.dataset.subId;
+        const recent = state.workOrders.filter(w => w.sub_id === subId).sort((a,b) => new Date(b.created_at) - new Date(a.created_at))[0];
+        if (recent) createOrOpenWorkOrder(null, recent.id);
+      }
+    });
+  });
+}
+
 // ═══════════════════ JOURNAL TAB ═══════════════════
 const JOURNAL_BUCKET = 'rebuild-journal-attachments';
 
@@ -8891,6 +9343,8 @@ function setupRealtime() {
         () => { if (state.activeProjectId) { loadSelections().then(() => renderDetail()); } })
     .on('postgres_changes', { event: '*', schema: 'public', table: 'rebuild_todos' },
         () => { if (state.activeProjectId) { loadTodos().then(() => renderDetail()); } })
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'rebuild_work_orders' },
+        () => { if (state.activeProjectId) { loadWorkOrders().then(() => renderDetail()); } })
     .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'rebuild_notifications' },
         async (payload) => {
           const n = payload.new;
@@ -8924,6 +9378,7 @@ function setupRealtime() {
               customer_journal: 'journal',
               todo_assigned: 'todos',
               todo_completed: 'todos',
+              wo_signed: 'workorders',
             };
             const targetTab = tabForEvent[n.event_type] || 'phases';
             const ctaUrl = n.project_id
@@ -8993,6 +9448,7 @@ async function loadNotifications() {
         customer_journal: 'journal',
         todo_assigned: 'todos',
         todo_completed: 'todos',
+        wo_signed: 'workorders',
       };
       const targetTab = tabForEvent[n.event_type] || 'phases';
       const ctaUrl = n.project_id
@@ -9058,6 +9514,7 @@ function renderNotifList() {
       customer_journal: '🧑',
       todo_assigned: '✅',
       todo_completed: '✔',
+      wo_signed: '✍',
     }[n.event_type] || '🔔';
     return `
       <div class="notif-item ${n.read_at ? '' : 'unread'}" data-id="${n.id}" data-project="${n.project_id || ''}">
@@ -9092,6 +9549,7 @@ function renderNotifList() {
         customer_journal: 'journal',
         todo_assigned: 'todos',
         todo_completed: 'todos',
+        wo_signed: 'workorders',
       };
       const targetTab = tabForEvent[n?.event_type] || 'selections';
 
