@@ -753,6 +753,32 @@
     white-space: nowrap;
   }
   .phase .unassigned-label { font-style: italic; color: var(--muted); }
+  .wo-warn-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    background: rgba(214,69,69,.10);
+    color: var(--red);
+    border: 1px solid rgba(214,69,69,.3);
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 10px;
+    font-weight: 700;
+    white-space: nowrap;
+    cursor: pointer;
+    margin-left: 4px;
+    text-transform: uppercase;
+    letter-spacing: .3px;
+    font-family: inherit;
+    transition: background .15s, transform .15s;
+  }
+  .wo-warn-chip:hover { background: var(--red); color: #fff; transform: translateY(-1px); }
+  .wo-warn-chip.warning {
+    background: rgba(245,166,35,.12);
+    color: #b87900;
+    border-color: rgba(245,166,35,.4);
+  }
+  .wo-warn-chip.warning:hover { background: var(--gold); color: #fff; }
   .assignee-checklist {
     border: 1px solid var(--line);
     border-radius: 6px;
@@ -5767,6 +5793,21 @@ function renderTabContent() {
       row.addEventListener('click', () => openPhaseEditor(id));
       const editBtn = row.querySelector('[data-act="edit"]');
       if (editBtn) editBtn.addEventListener('click', e => { e.stopPropagation(); openPhaseEditor(id); });
+      // WO warning chip clicks: stop bubbling, jump to Work Orders tab and open/create
+      row.querySelectorAll('.wo-warn-chip').forEach(chip => {
+        chip.addEventListener('click', e => {
+          e.stopPropagation();
+          const subIdToCreate = chip.dataset.woQuick;
+          const woIdToOpen = chip.dataset.woQuickOpen;
+          state.tab = 'workorders';
+          renderDetail();
+          // Wait a tick so the tab is rendered, then act
+          setTimeout(() => {
+            if (subIdToCreate) createOrOpenWorkOrder(subIdToCreate);
+            else if (woIdToOpen) createOrOpenWorkOrder(null, woIdToOpen);
+          }, 50);
+        });
+      });
       const advBtn = row.querySelector('[data-act="advance"]');
       if (advBtn) advBtn.addEventListener('click', e => { e.stopPropagation(); advancePhaseStatus(id); });
       const delayBtn = row.querySelector('[data-act="delay"]');
@@ -6395,13 +6436,37 @@ function renderCalendarView() {
   `;
 }
 
+// Returns the most recent non-superseded/non-cancelled WO for a sub on the active project, or null
+function activeSubWo(subId) {
+  return (state.workOrders || []).find(w =>
+    w.sub_id === subId &&
+    w.status !== 'superseded' &&
+    w.status !== 'cancelled'
+  );
+}
+
+function woWarningChipFor(subId) {
+  const wo = activeSubWo(subId);
+  if (!wo) {
+    return `<button class="wo-warn-chip" data-wo-quick="${subId}" title="No Work Order yet — click to generate">⚠ No WO</button>`;
+  }
+  if (wo.status === 'draft') {
+    return `<button class="wo-warn-chip warning" data-wo-quick-open="${wo.id}" title="WO is still a draft — click to open">📝 Draft</button>`;
+  }
+  if (wo.status === 'sent') {
+    return `<button class="wo-warn-chip warning" data-wo-quick-open="${wo.id}" title="WO sent but not signed — click to open">⏳ Awaiting Sig</button>`;
+  }
+  // signed / converted_to_po / invoice_received — no warning needed
+  return '';
+}
+
 function phaseRowHtml(ph) {
   const assignees = ph.assignees || [];
   const labels = assignees.map(a => a.assignee_type === 'sub'
-    ? (a.sub?.company_name || 'Sub')
-    : `🏠 ${a.employee?.name || 'Carpenter'}`);
+    ? `<span class="assignee-chip">${a.sub?.company_name || 'Sub'}</span>${woWarningChipFor(a.sub_id)}`
+    : `<span class="assignee-chip">🏠 ${a.employee?.name || 'Carpenter'}</span>`);
   const assigneeHtml = labels.length
-    ? labels.map(l => `<span class="assignee-chip">${l}</span>`).join('')
+    ? labels.join('')
     : '<span class="unassigned-label">Unassigned</span>';
 
   const isLate = ph.status === 'in_progress' && ph.scheduled_end && new Date() > new Date(ph.scheduled_end);
@@ -8260,7 +8325,63 @@ async function handleWoModalAction(act, wo, woUrl) {
   }
 }
 
-async function convertWoToPo(wo) {
+async function maybeAutoDraftWoForApprovedSelection(selection) {
+  // Skip if sub already has any non-superseded/non-cancelled WO
+  await loadWorkOrders();
+  const existing = (state.workOrders || []).find(w =>
+    w.sub_id === selection.sub_id &&
+    w.status !== 'superseded' &&
+    w.status !== 'cancelled'
+  );
+  if (existing) return; // PM can manually trigger a new version if needed
+
+  const sub = state.subs.find(s => s.id === selection.sub_id);
+  if (!sub) return;
+
+  // Build the draft using existing scope builder
+  const scope = buildWoScopeText(sub);
+  const suggestedAmount = suggestedWoAmount(sub);
+  const { data, error } = await sb.from('rebuild_work_orders').insert({
+    project_id: state.activeProjectId,
+    sub_id: selection.sub_id,
+    version: 1,
+    status: 'draft',
+    scope_text: scope,
+    total_amount: suggestedAmount,
+    amount_source: suggestedAmount ? 'sum_of_selections' : null,
+    payment_terms: 'Net 30 from invoice receipt, subject to satisfactory completion.',
+    created_by_email: 'auto-draft@jg-platform',
+    created_by_name: 'JG Platform (Auto)',
+    sent_to_email: sub.email || null,
+    sent_to_phone: sub.phone || null,
+  }).select();
+  if (error) { console.warn('Auto-draft WO failed:', error); return; }
+  const wo = data?.[0];
+  if (!wo) return;
+
+  await sb.from('rebuild_work_order_history').insert({
+    work_order_id: wo.id, action: 'created', actor: 'auto-draft',
+    details: `Auto-drafted after customer approved selection: ${selection.category}`,
+  });
+
+  // Notify the project PM to review and send
+  const p = state.activeProject;
+  const pmEmail = p?.albi_pm_email;
+  if (pmEmail) {
+    try {
+      await sb.from('rebuild_notifications').insert({
+        project_id: state.activeProjectId,
+        recipient_email: pmEmail.toLowerCase(),
+        event_type: 'wo_auto_drafted',
+        title: `Draft WO created for ${sub.company_name}`,
+        body: `Customer approved "${selection.category}" — a draft Work Order was auto-created for ${sub.company_name}. Review the scope and amount, then send it for signature.`,
+      });
+    } catch (e) { console.warn('auto-draft notif failed', e); }
+  }
+  toast(`Draft WO auto-created for ${sub.company_name}`);
+}
+
+
   if (!confirm(`Convert this signed Work Order to a Purchase Order?\n\nThis will:\n• Generate a PO number\n• Email ${wo.sub?.company_name || 'the sub'} a link to upload their invoice\n• When the sub uploads their invoice, an Albi "Write Note" task auto-fires for Lisa Greil\n\nProceed?`)) return;
 
   // Generate PO number: PO-{jobnum}-{yymmdd}-{4 chars}
@@ -9605,7 +9726,18 @@ function setupRealtime() {
     .on('postgres_changes', { event: '*', schema: 'public', table: 'rebuild_phases' },
         () => { if (state.activeProjectId) { loadPhases().then(() => renderDetail()); } })
     .on('postgres_changes', { event: '*', schema: 'public', table: 'rebuild_selections' },
-        () => { if (state.activeProjectId) { loadSelections().then(() => renderDetail()); } })
+        async (payload) => {
+          if (state.activeProjectId) {
+            await loadSelections();
+            // Auto-draft WO if a selection just became 'approved' and the sub has no active WO
+            const newRow = payload.new;
+            const oldRow = payload.old;
+            if (newRow && newRow.status === 'approved' && (!oldRow || oldRow.status !== 'approved') && newRow.sub_id) {
+              await maybeAutoDraftWoForApprovedSelection(newRow);
+            }
+            renderDetail();
+          }
+        })
     .on('postgres_changes', { event: '*', schema: 'public', table: 'rebuild_todos' },
         () => { if (state.activeProjectId) { loadTodos().then(() => renderDetail()); } })
     .on('postgres_changes', { event: '*', schema: 'public', table: 'rebuild_work_orders' },
@@ -9644,6 +9776,7 @@ function setupRealtime() {
               todo_assigned: 'todos',
               todo_completed: 'todos',
               wo_signed: 'workorders',
+        wo_auto_drafted: 'workorders',
         invoice_received: 'workorders',
             };
             const targetTab = tabForEvent[n.event_type] || 'phases';
@@ -9715,6 +9848,7 @@ async function loadNotifications() {
         todo_assigned: 'todos',
         todo_completed: 'todos',
         wo_signed: 'workorders',
+        wo_auto_drafted: 'workorders',
         invoice_received: 'workorders',
       };
       const targetTab = tabForEvent[n.event_type] || 'phases';
@@ -9782,6 +9916,7 @@ function renderNotifList() {
       todo_assigned: '✅',
       todo_completed: '✔',
       wo_signed: '✍',
+      wo_auto_drafted: '📝',
       invoice_received: '📥',
     }[n.event_type] || '🔔';
     return `
@@ -9818,6 +9953,7 @@ function renderNotifList() {
         todo_assigned: 'todos',
         todo_completed: 'todos',
         wo_signed: 'workorders',
+        wo_auto_drafted: 'workorders',
         invoice_received: 'workorders',
       };
       const targetTab = tabForEvent[n?.event_type] || 'selections';
