@@ -744,13 +744,22 @@
 
       return {
         TIER_CADENCE: TIER_CADENCE,
+        DAILY_TOUCH_GOAL: 12,
         getCadenceDays: getCadenceDays,
         getLastTouchDate: getLastTouchDate,
         getDaysOverdue: getDaysOverdue,
         getLapsedPartners: getLapsedPartners,
         daysUntilAnnual: daysUntilAnnual,
         formatAnnualDate: formatAnnualDate,
-        getUpcomingDates: getUpcomingDates
+        getUpcomingDates: getUpcomingDates,
+        // Count today's touches for a rep — used by the home-screen
+        // progress widget. todayStr is "YYYY-MM-DD" (in rep's local TZ).
+        countTouchesToday: function(touches, repName, todayStr) {
+          if (!touches || !repName) return 0;
+          return touches.filter(function(t){
+            return t.logged_by === repName && t.touch_date === todayStr;
+          }).length;
+        }
       };
     })()
   };

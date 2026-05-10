@@ -597,7 +597,7 @@
   .contacts-loading { text-align: center; padding: 50px 24px; color: var(--muted); font-size: 14px; }
 </style>
 <!-- Shared constants/permissions/market — keep ?v= in sync with sales-shared.js VERSION -->
-<script src="sales-shared.js?v=2026-05-04-nurture"></script>
+<script src="sales-shared.js?v=2026-05-04-goal"></script>
 <!-- Auto-update: service worker forces fresh fetch on every deploy -->
 <script>
 var APP_VERSION = '2026-04-20-v1'; // bump this to force cache clear
@@ -679,6 +679,23 @@ if ('serviceWorker' in navigator) {
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M19 8v6M22 11h-6"/></svg>
         Partner
       </button>
+    </div>
+
+    <!-- Daily touch goal — updates whenever renderHome runs (after touch logs).
+         Tapping jumps to the Touches tab so the rep can see what they've done. -->
+    <div id="daily-goal-card" onclick="showScreen('touches')" style="background:var(--card);border:1.5px solid var(--border);border-radius:14px;padding:14px 16px;margin-bottom:16px;cursor:pointer;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+        <div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;">🎯 Today's Goal</div>
+        <div style="font-size:11px;color:var(--orange);font-weight:700;">View →</div>
+      </div>
+      <div style="display:flex;align-items:baseline;gap:6px;margin-bottom:8px;">
+        <span id="dg-count" style="font-size:30px;font-weight:800;color:var(--navy);">0</span>
+        <span style="font-size:14px;color:var(--muted);font-weight:600;">/ <span id="dg-goal">12</span> touches</span>
+        <span id="dg-status" style="margin-left:auto;font-size:12px;font-weight:700;color:var(--muted);">Let's go</span>
+      </div>
+      <div style="background:rgba(13,45,94,.08);border-radius:6px;height:8px;overflow:hidden;">
+        <div id="dg-bar" style="height:100%;background:linear-gradient(90deg, var(--orange) 0%, #d05303 100%);width:0%;transition:width .4s ease;border-radius:6px;"></div>
+      </div>
     </div>
 
     <div class="section-title">Today's Route</div>
@@ -1432,6 +1449,55 @@ async function loadAll() {
 // ── HOME ──────────────────────────────────────────────────────────────────
 function renderHome() {
   var today = new Date().toISOString().split('T')[0];
+
+  // ── Daily touch goal widget ──
+  // Counts touches logged TODAY by this rep. Goal lives in shared module
+  // (currently 12). Bar fills proportionally; status text shifts at
+  // 50%, 100%, and "stretch" tiers.
+  if (window.JG_SHARED && window.JG_SHARED.nurture) {
+    var goal = window.JG_SHARED.nurture.DAILY_TOUCH_GOAL || 12;
+    var todayCount = window.JG_SHARED.nurture.countTouchesToday(APP.touches || [], APP.repName, today);
+    var pct = Math.min(100, Math.round((todayCount / goal) * 100));
+    var countEl = document.getElementById('dg-count');
+    var goalEl = document.getElementById('dg-goal');
+    var barEl = document.getElementById('dg-bar');
+    var statusEl = document.getElementById('dg-status');
+    var cardEl = document.getElementById('daily-goal-card');
+    if (countEl) countEl.textContent = todayCount;
+    if (goalEl) goalEl.textContent = goal;
+    if (barEl) barEl.style.width = pct + '%';
+
+    if (statusEl) {
+      if (todayCount === 0) {
+        statusEl.textContent = "Let's go";
+        statusEl.style.color = 'var(--muted)';
+      } else if (todayCount < goal / 2) {
+        statusEl.textContent = (goal - todayCount) + ' to go';
+        statusEl.style.color = 'var(--muted)';
+      } else if (todayCount < goal) {
+        statusEl.textContent = (goal - todayCount) + ' to go 💪';
+        statusEl.style.color = 'var(--orange)';
+      } else if (todayCount === goal) {
+        statusEl.textContent = '✓ Goal hit!';
+        statusEl.style.color = 'var(--ok)';
+      } else {
+        statusEl.textContent = '🔥 +' + (todayCount - goal) + ' over';
+        statusEl.style.color = 'var(--ok)';
+      }
+    }
+    // Card border shifts to green on goal-hit, gold on stretch
+    if (cardEl) {
+      if (todayCount >= goal) {
+        cardEl.style.borderColor = 'var(--ok)';
+        cardEl.style.background = 'linear-gradient(135deg, #f0fdf4 0%, var(--card) 100%)';
+        if (barEl) barEl.style.background = 'linear-gradient(90deg, var(--ok) 0%, #176e3c 100%)';
+      } else {
+        cardEl.style.borderColor = 'var(--border)';
+        cardEl.style.background = 'var(--card)';
+        if (barEl) barEl.style.background = 'linear-gradient(90deg, var(--orange) 0%, #d05303 100%)';
+      }
+    }
+  }
 
   // Stats
   var myPartners = APP.partners.filter(function(p){ return p.assigned_to === APP.repName; });
