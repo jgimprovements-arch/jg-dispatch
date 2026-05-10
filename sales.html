@@ -8,7 +8,7 @@
 <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script src="auth.js?v=20260419-1"></script>
 <!-- Shared constants/permissions/market — keep ?v= in sync with sales-shared.js VERSION -->
-<script src="sales-shared.js?v=2026-04-20-1"></script>
+<script src="sales-shared.js?v=2026-05-04-nurture"></script>
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <style>
@@ -866,6 +866,19 @@ async function savePartner(data) {
     await sb('/rest/v1/sales_partners', {method:'POST',headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json','Prefer':'return=minimal'},body:JSON.stringify(data)});
   }
   await loadAll();
+}
+
+// ── Nurture widget click handlers ──
+// Both open dedicated modals (lapsed-list, upcoming-list) defined in
+// the modal render block. Kept as separate functions because they may
+// later need to do pre-work like ensuring fresh data.
+function openLapsedView() {
+  ST.modal = 'lapsed-list';
+  render();
+}
+function openUpcomingView() {
+  ST.modal = 'upcoming-list';
+  render();
 }
 
 async function logTouch(data) {
@@ -2446,6 +2459,61 @@ function _renderNow() {
     h += '<div class="sales-stat"><div class="sales-stat-val" style="color:var(--muted);">' + tierC + '</div><div class="sales-stat-lbl">C-Tier (Cold)</div></div>';
     h += '<div class="sales-stat"><div class="sales-stat-val" style="color:var(--orange);">' + totalRefs + '</div><div class="sales-stat-lbl">Total Referrals</div></div>';
     h += '</div>';
+
+    // ── NURTURE WIDGETS: Lapsed + Upcoming Birthdays ──────────────────
+    // Side-by-side cards that surface the two most actionable nurture
+    // signals: partners overdue for a touch, and birthdays/anniversaries
+    // coming up. Click → drill into details.
+    if (window.JG_SHARED && window.JG_SHARED.nurture) {
+      var lapseRepFilter = (isAdmin() && ST.filterRep !== 'All') ? ST.filterRep : (!isAdmin() ? currentRepName() : null);
+      var lapsed = window.JG_SHARED.nurture.getLapsedPartners(nonCust, ST.touches || [], {
+        repName: lapseRepFilter
+      });
+      var upcoming = window.JG_SHARED.nurture.getUpcomingDates(nonCust, {
+        windowDays: 30,
+        repName: lapseRepFilter
+      });
+      var lapsedA = lapsed.filter(function(x){ return x.partner.tier === 'A'; }).length;
+      var nextBday = upcoming.find(function(x){ return x.type === 'birthday'; });
+
+      h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px;">';
+
+      // Lapsed widget — red/amber if any A-tier overdue, neutral otherwise
+      var lapsedHasAlert = lapsedA > 0;
+      h += '<div onclick="openLapsedView()" style="background:' + (lapsedHasAlert ? 'linear-gradient(135deg, #fff5f0 0%, #fff 100%)' : 'var(--card)') + ';border:1px solid ' + (lapsedHasAlert ? 'rgba(196,43,43,.3)' : 'var(--line)') + ';border-radius:10px;padding:14px 16px;cursor:pointer;transition:transform .12s;" onmouseover="this.style.transform=\'translateY(-1px)\'" onmouseout="this.style.transform=\'\'">';
+      h += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">';
+      h += '<div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;">' + (lapsedHasAlert ? '⚠️ Lapsed Partners' : 'Lapsed Partners') + '</div>';
+      h += '<div style="font-size:10px;color:var(--orange);font-weight:700;">View →</div>';
+      h += '</div>';
+      h += '<div style="font-size:24px;font-weight:800;color:' + (lapsedHasAlert ? 'var(--red)' : 'var(--navy)') + ';">' + lapsed.length + '</div>';
+      if (lapsedA > 0) {
+        h += '<div style="font-size:11px;color:var(--red);font-weight:700;margin-top:2px;">' + lapsedA + ' A-tier overdue</div>';
+      } else if (lapsed.length > 0) {
+        h += '<div style="font-size:11px;color:var(--muted);margin-top:2px;">need a touch by tier cadence</div>';
+      } else {
+        h += '<div style="font-size:11px;color:var(--ok);margin-top:2px;font-weight:700;">✓ All caught up</div>';
+      }
+      h += '</div>';
+
+      // Upcoming birthdays widget
+      var bdayCount = upcoming.filter(function(x){ return x.type === 'birthday'; }).length;
+      var annivCount = upcoming.filter(function(x){ return x.type === 'anniversary'; }).length;
+      h += '<div onclick="openUpcomingView()" style="background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px;cursor:pointer;transition:transform .12s;" onmouseover="this.style.transform=\'translateY(-1px)\'" onmouseout="this.style.transform=\'\'">';
+      h += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">';
+      h += '<div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;">🎂 Next 30 Days</div>';
+      h += '<div style="font-size:10px;color:var(--orange);font-weight:700;">View →</div>';
+      h += '</div>';
+      h += '<div style="font-size:24px;font-weight:800;color:var(--navy);">' + upcoming.length + '</div>';
+      if (upcoming.length > 0) {
+        var nextLabel = nextBday ? ('Next: ' + nextBday.partner.name + ' on ' + nextBday.date_label) : (annivCount + ' anniversaries');
+        h += '<div style="font-size:11px;color:var(--muted);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + _ve(nextLabel) + '</div>';
+      } else {
+        h += '<div style="font-size:11px;color:var(--muted);margin-top:2px;">no birthdays or anniversaries</div>';
+      }
+      h += '</div>';
+
+      h += '</div>';
+    }
 
     h += '<div style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;align-items:center;">';
     h += '<input id="partner-search" style="padding:7px 12px;border-radius:6px;border:1.5px solid var(--border);font-size:12px;font-family:DM Sans,sans-serif;outline:none;width:200px;" placeholder="Search partners..." value="' + ST.searchQ + '" oninput="ST.searchQ=this.value;ST.partnerPageSize=200;renderPartnerList()">';
@@ -4050,6 +4118,106 @@ function _buildModalHtml() {
     mh += '<div class="modal-overlay" onclick="if(event.target===this){ST.modal=null;render();}">';
     mh += '<div class="modal-box">';
 
+    // ── LAPSED PARTNERS MODAL ──
+    // Click on Lapsed widget — shows a sortable list of partners overdue
+    // for a touch based on tier cadence rules. Each row links to the
+    // partner detail.
+    if (ST.modal === 'lapsed-list') {
+      var lvRepFilter = (isAdmin() && ST.filterRep !== 'All') ? ST.filterRep : (!isAdmin() ? currentRepName() : null);
+      var lvAll = window.JG_SHARED.nurture.getLapsedPartners(
+        ST.partners.filter(function(p){ return p.type !== 'Customer'; }),
+        ST.touches || [],
+        { repName: lvRepFilter }
+      );
+      mh += '<div class="modal-title">⚠️ Lapsed Partners — ' + ST.market + '</div>';
+      mh += '<div style="font-size:12px;color:var(--muted);margin-bottom:14px;">Partners overdue for a touch based on their tier cadence rule. A-tier = 14d, B-tier = 30d, C-tier = 60d (or custom).</div>';
+
+      if (lvAll.length === 0) {
+        mh += '<div style="text-align:center;padding:30px 20px;color:var(--ok);font-weight:700;">✓ All your tiered partners are within cadence. Nice work.</div>';
+      } else {
+        // Group by tier so reps see A's first (most important)
+        var byTier = { A: [], B: [], C: [], other: [] };
+        lvAll.forEach(function(x){
+          var t = x.partner.tier;
+          if (byTier[t]) byTier[t].push(x);
+          else byTier.other.push(x);
+        });
+        ['A','B','C','other'].forEach(function(tier){
+          var rows = byTier[tier];
+          if (!rows.length) return;
+          var tierLabel = tier === 'other' ? 'Untiered' : 'Tier ' + tier;
+          var tierColor = tier === 'A' ? 'var(--red)' : tier === 'B' ? 'var(--navy)' : 'var(--muted)';
+          mh += '<div style="font-size:11px;font-weight:700;color:' + tierColor + ';text-transform:uppercase;letter-spacing:.04em;margin:14px 0 6px;">' + tierLabel + ' (' + rows.length + ')</div>';
+          rows.forEach(function(item){
+            var p = item.partner;
+            mh += '<div onclick="ST.modal=null;ST.selected=\'' + p.id + '\';render()" style="padding:10px 12px;background:var(--card);border:1px solid var(--line);border-radius:8px;margin-bottom:6px;cursor:pointer;transition:background .12s;display:flex;align-items:center;gap:12px;" onmouseover="this.style.background=\'rgba(232,93,4,.04)\'" onmouseout="this.style.background=\'var(--card)\'">';
+            mh += '<div style="flex:1;min-width:0;">';
+            mh += '<div style="font-size:13px;font-weight:700;color:var(--navy);">' + _ve(p.name) + (p.company ? ' <span style="font-weight:500;color:var(--muted);font-size:11px;">— ' + _ve(p.company) + '</span>' : '') + '</div>';
+            mh += '<div style="font-size:11px;color:var(--muted);margin-top:2px;">';
+            mh += _ve(p.type || '') + ' · ';
+            if (item.last_touch_date) {
+              var d = new Date(item.last_touch_date);
+              mh += 'Last touch ' + d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+            } else {
+              mh += 'Never touched';
+            }
+            mh += ' · cadence ' + item.cadence_days + 'd';
+            if (p.assigned_to) mh += ' · ' + _ve(p.assigned_to);
+            mh += '</div>';
+            mh += '</div>';
+            mh += '<div style="background:var(--red);color:#fff;font-size:11px;font-weight:700;padding:4px 10px;border-radius:12px;flex-shrink:0;">' + item.days_overdue + 'd over</div>';
+            mh += '</div>';
+          });
+        });
+      }
+
+      mh += '<div style="display:flex;justify-content:flex-end;margin-top:14px;">';
+      mh += '<button onclick="ST.modal=null;render()" style="padding:8px 18px;border-radius:6px;border:none;background:var(--orange);color:#fff;font-size:12px;font-weight:700;cursor:pointer;">Close</button>';
+      mh += '</div>';
+    }
+
+    // ── UPCOMING BIRTHDAYS / ANNIVERSARIES MODAL ──
+    if (ST.modal === 'upcoming-list') {
+      var uvRepFilter = (isAdmin() && ST.filterRep !== 'All') ? ST.filterRep : (!isAdmin() ? currentRepName() : null);
+      var uvAll = window.JG_SHARED.nurture.getUpcomingDates(
+        ST.partners.filter(function(p){ return p.type !== 'Customer'; }),
+        { windowDays: 60, repName: uvRepFilter }
+      );
+      mh += '<div class="modal-title">🎂 Upcoming Birthdays & Anniversaries</div>';
+      mh += '<div style="font-size:12px;color:var(--muted);margin-bottom:14px;">Next 60 days. Send a card or drop off something small the week before — partners remember.</div>';
+
+      if (uvAll.length === 0) {
+        mh += '<div style="text-align:center;padding:30px 20px;color:var(--muted);font-style:italic;">No birthdays or anniversaries on file for the next 60 days.</div>';
+        mh += '<div style="background:rgba(13,45,94,.04);border-radius:8px;padding:12px 14px;margin-top:10px;font-size:12px;color:var(--muted);">';
+        mh += '💡 To capture this data, ask partners on your next visit. Add it on their partner card under Birthday and Work Anniversary.';
+        mh += '</div>';
+      } else {
+        uvAll.forEach(function(item){
+          var p = item.partner;
+          var isThisWeek = item.days_until <= 7;
+          var icon = item.type === 'birthday' ? '🎂' : '📅';
+          var typeLabel = item.type === 'birthday' ? 'Birthday' : (item.years_at ? item.years_at + '-yr Anniversary' : 'Work Anniversary');
+          var daysLabel = item.days_until === 0 ? 'TODAY' :
+                          item.days_until === 1 ? 'Tomorrow' :
+                          'in ' + item.days_until + ' days';
+
+          mh += '<div onclick="ST.modal=null;ST.selected=\'' + p.id + '\';render()" style="padding:12px;background:' + (isThisWeek ? 'linear-gradient(135deg, #fff8f0 0%, var(--card) 100%)' : 'var(--card)') + ';border:1px solid ' + (isThisWeek ? 'rgba(232,93,4,.3)' : 'var(--line)') + ';border-radius:10px;margin-bottom:6px;cursor:pointer;display:flex;align-items:center;gap:12px;" onmouseover="this.style.transform=\'translateY(-1px)\'" onmouseout="this.style.transform=\'\'">';
+          mh += '<div style="font-size:24px;">' + icon + '</div>';
+          mh += '<div style="flex:1;min-width:0;">';
+          mh += '<div style="font-size:13px;font-weight:700;color:var(--navy);">' + _ve(p.name) + (p.company ? ' <span style="font-weight:500;color:var(--muted);font-size:11px;">— ' + _ve(p.company) + '</span>' : '') + '</div>';
+          mh += '<div style="font-size:11px;color:var(--muted);margin-top:2px;">' + typeLabel + ' · ' + item.date_label;
+          if (p.assigned_to) mh += ' · ' + _ve(p.assigned_to);
+          mh += '</div></div>';
+          mh += '<div style="background:' + (isThisWeek ? 'var(--orange)' : 'rgba(13,45,94,.08)') + ';color:' + (isThisWeek ? '#fff' : 'var(--navy)') + ';font-size:11px;font-weight:700;padding:5px 10px;border-radius:12px;flex-shrink:0;white-space:nowrap;">' + daysLabel + '</div>';
+          mh += '</div>';
+        });
+      }
+
+      mh += '<div style="display:flex;justify-content:flex-end;margin-top:14px;">';
+      mh += '<button onclick="ST.modal=null;render()" style="padding:8px 18px;border-radius:6px;border:none;background:var(--orange);color:#fff;font-size:12px;font-weight:700;cursor:pointer;">Close</button>';
+      mh += '</div>';
+    }
+
     if (ST.modal === 'add-partner') {
       // Detect edit mode — if ST.selected is set AND partner exists, prefill the form
       var editP = ST.selected ? ST.partners.find(function(x){ return x.id === ST.selected; }) : null;
@@ -4091,6 +4259,22 @@ function _buildModalHtml() {
           .replace(/>/g,'&gt;');
       };
       mh += '<div class="form-group"><label class="form-label">Notes</label><textarea class="form-input" id="pNotes" rows="2" style="resize:vertical;">' + _te(editP && editP.notes) + '</textarea></div>';
+
+      // ── Nurture fields: birthdays + cadence rules ──
+      // Birthday and work anniversary drive the dashboard birthday widget
+      // and auto-create reminder follow-ups one week prior. Stored as DATE
+      // type so the year doesn't really matter — we project to next
+      // occurrence regardless of stored year.
+      mh += '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;">';
+      mh += '<div class="form-group"><label class="form-label">🎂 Birthday</label><input class="form-input" id="pBirthday" type="date" value="' + _ve(editP && editP.birthday) + '"></div>';
+      mh += '<div class="form-group"><label class="form-label">📅 Work Anniversary</label><input class="form-input" id="pAnniversary" type="date" value="' + _ve(editP && editP.work_anniversary) + '"></div>';
+      // Cadence override — blank means "use tier default" (A=14d, B=30d,
+      // C=60d). Useful for partners who deviate from their tier's norm.
+      var defCadence = (window.JG_SHARED && window.JG_SHARED.nurture)
+        ? window.JG_SHARED.nurture.getCadenceDays({ tier: (editP && editP.tier) || 'B' })
+        : 30;
+      mh += '<div class="form-group"><label class="form-label">⏱ Touch Cadence (days)</label><input class="form-input" id="pCadence" type="number" min="1" max="365" placeholder="' + defCadence + ' (tier default)" value="' + _ve(editP && editP.target_cadence_days) + '"></div>';
+      mh += '</div>';
       // Assigned Sales Rep — admins get a dropdown, non-admins see read-only
       // text so they can't reassign partners from the edit form. Mirrors the
       // mobile partner edit sheet and the canReassign() check enforced
@@ -4131,6 +4315,9 @@ function _buildModalHtml() {
         "city:document.getElementById('pCity').value," +
         "tier:document.getElementById('pTier').value," +
         "notes:document.getElementById('pNotes').value" +
+        ",birthday:(document.getElementById('pBirthday').value||null)" +
+        ",work_anniversary:(document.getElementById('pAnniversary').value||null)" +
+        ",target_cadence_days:(parseInt(document.getElementById('pCadence').value,10)||null)" +
         ",assigned_to:(document.getElementById('pAssignedTo').value||null)" +
         (isEdit ? '' : ",status:'Active'") +
         "});ST.modal=null;" + (isEdit ? '' : 'ST.selected=null;');

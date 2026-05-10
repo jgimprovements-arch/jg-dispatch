@@ -597,7 +597,7 @@
   .contacts-loading { text-align: center; padding: 50px 24px; color: var(--muted); font-size: 14px; }
 </style>
 <!-- Shared constants/permissions/market — keep ?v= in sync with sales-shared.js VERSION -->
-<script src="sales-shared.js?v=2026-05-04-geo"></script>
+<script src="sales-shared.js?v=2026-05-04-nurture"></script>
 <!-- Auto-update: service worker forces fresh fetch on every deploy -->
 <script>
 var APP_VERSION = '2026-04-20-v1'; // bump this to force cache clear
@@ -692,6 +692,23 @@ if ('serviceWorker' in navigator) {
       <div class="stat-card" onclick="showScreen('touches')" style="cursor:pointer;border:1.5px solid rgba(232,93,4,.2);position:relative;"><div class="stat-val" id="stat-touches">—</div><div class="stat-lbl">Touches This Week</div><div style="position:absolute;bottom:8px;right:10px;font-size:9px;color:var(--orange);font-weight:700;">View →</div></div>
       <div class="stat-card" onclick="showMyReferrals()" style="cursor:pointer;border:1.5px solid rgba(232,93,4,.2);position:relative;"><div class="stat-val" id="stat-referrals" style="color:var(--orange);">—</div><div class="stat-lbl">My Referrals YTD</div><div style="position:absolute;bottom:8px;right:10px;font-size:9px;color:var(--orange);font-weight:700;">View →</div></div>
       <div class="stat-card" onclick="showMyReferrals()" style="cursor:pointer;border:1.5px solid rgba(232,93,4,.2);position:relative;"><div class="stat-val" id="stat-referral-rev" style="color:var(--ok);font-size:18px;">—</div><div class="stat-lbl">Referral $ YTD</div><div style="position:absolute;bottom:8px;right:10px;font-size:9px;color:var(--orange);font-weight:700;">View →</div></div>
+    </div>
+
+    <!-- Nurture widgets — surface partners who need attention and upcoming birthdays -->
+    <div class="section-title">Nurture</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:16px;">
+      <div id="nurture-lapsed" onclick="openLapsedMobile()" style="background:var(--card);border:1.5px solid var(--border);border-radius:12px;padding:12px;cursor:pointer;position:relative;">
+        <div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px;" id="nurture-lapsed-title">Lapsed</div>
+        <div style="font-size:24px;font-weight:800;color:var(--navy);" id="nurture-lapsed-count">—</div>
+        <div style="font-size:10px;color:var(--muted);margin-top:2px;" id="nurture-lapsed-sub">overdue partners</div>
+        <div style="position:absolute;bottom:8px;right:10px;font-size:9px;color:var(--orange);font-weight:700;">View →</div>
+      </div>
+      <div id="nurture-bdays" onclick="openUpcomingMobile()" style="background:var(--card);border:1.5px solid var(--border);border-radius:12px;padding:12px;cursor:pointer;position:relative;">
+        <div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px;">🎂 Next 30 Days</div>
+        <div style="font-size:24px;font-weight:800;color:var(--navy);" id="nurture-bdays-count">—</div>
+        <div style="font-size:10px;color:var(--muted);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" id="nurture-bdays-sub">no upcoming</div>
+        <div style="position:absolute;bottom:8px;right:10px;font-size:9px;color:var(--orange);font-weight:700;">View →</div>
+      </div>
     </div>
 
     <div class="section-title">Overdue Follow-ups</div>
@@ -1447,6 +1464,65 @@ function renderHome() {
   document.getElementById('stat-referral-rev').textContent = myYtdRevenue >= 1000
     ? '$' + Math.round(myYtdRevenue/1000) + 'k'
     : '$' + Math.round(myYtdRevenue);
+
+  // ── Nurture widgets: Lapsed + Upcoming birthdays/anniversaries ──
+  // Surface the two most actionable nurture signals on the home screen so
+  // reps see them every time they open the app.
+  if (window.JG_SHARED && window.JG_SHARED.nurture) {
+    var nonCustPartners = APP.partners.filter(function(p){ return p.type !== 'Customer'; });
+    var lapsed = window.JG_SHARED.nurture.getLapsedPartners(nonCustPartners, APP.touches || [], {
+      repName: APP.repName
+    });
+    var upcoming = window.JG_SHARED.nurture.getUpcomingDates(nonCustPartners, {
+      windowDays: 30, repName: APP.repName
+    });
+    var lapsedA = lapsed.filter(function(x){ return x.partner.tier === 'A'; }).length;
+
+    var lapsedEl = document.getElementById('nurture-lapsed-count');
+    var lapsedSubEl = document.getElementById('nurture-lapsed-sub');
+    var lapsedTitleEl = document.getElementById('nurture-lapsed-title');
+    var lapsedCard = document.getElementById('nurture-lapsed');
+    if (lapsedEl) {
+      lapsedEl.textContent = lapsed.length;
+      if (lapsedA > 0) {
+        lapsedEl.style.color = 'var(--danger)';
+        lapsedSubEl.textContent = lapsedA + ' A-tier overdue';
+        lapsedSubEl.style.color = 'var(--danger)';
+        lapsedSubEl.style.fontWeight = '700';
+        lapsedTitleEl.textContent = '⚠️ LAPSED';
+        if (lapsedCard) {
+          lapsedCard.style.borderColor = 'rgba(196,43,43,.3)';
+          lapsedCard.style.background = 'linear-gradient(135deg, #fff5f0 0%, var(--card) 100%)';
+        }
+      } else if (lapsed.length > 0) {
+        lapsedEl.style.color = 'var(--navy)';
+        lapsedSubEl.textContent = 'need a touch';
+        lapsedSubEl.style.color = 'var(--muted)';
+        lapsedSubEl.style.fontWeight = '500';
+        lapsedTitleEl.textContent = 'LAPSED';
+      } else {
+        lapsedEl.style.color = 'var(--ok)';
+        lapsedSubEl.textContent = '✓ caught up';
+        lapsedSubEl.style.color = 'var(--ok)';
+        lapsedSubEl.style.fontWeight = '700';
+        lapsedTitleEl.textContent = 'LAPSED';
+      }
+    }
+
+    var bdayCountEl = document.getElementById('nurture-bdays-count');
+    var bdaySubEl = document.getElementById('nurture-bdays-sub');
+    if (bdayCountEl) {
+      bdayCountEl.textContent = upcoming.length;
+      var nextBday = upcoming.find(function(x){ return x.type === 'birthday'; });
+      if (nextBday) {
+        bdaySubEl.textContent = nextBday.partner.name + ' on ' + nextBday.date_label;
+      } else if (upcoming.length > 0) {
+        bdaySubEl.textContent = upcoming.length + ' anniversaries';
+      } else {
+        bdaySubEl.textContent = 'no upcoming';
+      }
+    }
+  }
 
   // Today's route
   var todayRoute = APP.routes.find(function(r){ return r.route_date === today; });
@@ -3041,6 +3117,18 @@ function openPartnerEdit(pid) {
     '</div>' +
     '<div class="field-label">Email</div><input id="pe-email" type="text" style="' + INP + '" value="' + (p.email||'') + '">' +
     '<div class="field-label">Address</div><input id="pe-address" type="text" style="' + INP + '" value="' + (p.address||'').replace(/"/g,'&quot;') + '">' +
+    // ── Nurture fields ──
+    '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">' +
+      '<div><div class="field-label">🎂 Birthday</div><input id="pe-birthday" type="date" style="' + INP + '" value="' + (p.birthday||'') + '"></div>' +
+      '<div><div class="field-label">📅 Work Anniversary</div><input id="pe-anniversary" type="date" style="' + INP + '" value="' + (p.work_anniversary||'') + '"></div>' +
+    '</div>' +
+    // Cadence override — blank = use tier default
+    '<div class="field-label">⏱ Touch Cadence (days)</div>' +
+    '<input id="pe-cadence" type="number" min="1" max="365" style="' + INP + '" placeholder="' +
+      ((window.JG_SHARED && window.JG_SHARED.nurture)
+        ? window.JG_SHARED.nurture.getCadenceDays({ tier: p.tier || 'B' })
+        : 30) +
+      ' (tier default)" value="' + (p.target_cadence_days || '') + '">' +
     '<div class="field-label">Favorite Treats</div><input id="pe-treats" type="text" style="' + INP + '" value="' + (p.favorite_treats||'').replace(/"/g,'&quot;') + '" placeholder="Coffee, donuts...">' +
     '<div class="field-label">Family / Kids / Pets</div><input id="pe-family" type="text" style="' + INP + '" value="' + (p.family_members||'').replace(/"/g,'&quot;') + '" placeholder="Wife Sarah, 2 kids...">' +
     '<div class="field-label">Last Conversation</div><textarea id="pe-convo" style="' + INP + 'height:70px;resize:none;">' + (p.last_convo_note||'') + '</textarea>' +
@@ -3091,6 +3179,9 @@ async function submitPartnerEdit() {
     family_members:  g('pe-family'),
     last_convo_note: g('pe-convo'),
     notes:           g('pe-notes'),
+    birthday:        g('pe-birthday') || null,
+    work_anniversary: g('pe-anniversary') || null,
+    target_cadence_days: parseInt(g('pe-cadence'), 10) || null,
     updated_at:      new Date().toISOString()
   };
   // Reassignment is fully open per _canReassign() — any rep can change the
@@ -4220,6 +4311,118 @@ function closeTouchDayDetailMobile() {
   document.getElementById('partner-detail-overlay').classList.remove('open');
   _navPopOverlay('partner-detail-overlay');
   APP._touchDayDate = null;
+}
+
+// ── NURTURE: lapsed & upcoming views (mobile) ────────────────────────────
+// Same data as desktop, rendered into the partner-detail-overlay sheet
+// because it's already wired with back-button handling.
+
+function openLapsedMobile() {
+  if (!window.JG_SHARED || !window.JG_SHARED.nurture) { toast('Nurture module not loaded'); return; }
+  var nonCust = APP.partners.filter(function(p){ return p.type !== 'Customer'; });
+  var lapsed = window.JG_SHARED.nurture.getLapsedPartners(nonCust, APP.touches || [], {
+    repName: APP.repName
+  });
+
+  var html = '';
+  html += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">';
+  html += '<div style="font-size:16px;font-weight:700;color:var(--navy);">⚠️ Lapsed Partners</div>';
+  html += '<button onclick="closeLapsedMobile()" style="border:none;background:transparent;font-size:22px;cursor:pointer;color:var(--muted);padding:0;width:32px;height:32px;">✕</button>';
+  html += '</div>';
+  html += '<div style="font-size:12px;color:var(--muted);margin-bottom:14px;">Partners overdue based on their tier cadence. A=14d · B=30d · C=60d (or custom).</div>';
+
+  if (lapsed.length === 0) {
+    html += '<div style="text-align:center;padding:30px 20px;color:var(--ok);font-weight:700;">✓ All your tiered partners are within cadence.</div>';
+  } else {
+    // Group by tier — A first so reps see priority
+    var byTier = { A: [], B: [], C: [], other: [] };
+    lapsed.forEach(function(x){
+      var t = x.partner.tier;
+      if (byTier[t]) byTier[t].push(x);
+      else byTier.other.push(x);
+    });
+    ['A','B','C','other'].forEach(function(tier){
+      var rows = byTier[tier];
+      if (!rows.length) return;
+      var tierLabel = tier === 'other' ? 'Untiered' : 'Tier ' + tier;
+      var tierColor = tier === 'A' ? 'var(--danger)' : tier === 'B' ? 'var(--navy)' : 'var(--muted)';
+      html += '<div style="font-size:11px;font-weight:700;color:' + tierColor + ';text-transform:uppercase;letter-spacing:.04em;margin:14px 0 6px;">' + tierLabel + ' (' + rows.length + ')</div>';
+      rows.forEach(function(item){
+        var p = item.partner;
+        html += '<div onclick="closeLapsedMobile();openPartnerDetail(\'' + p.id + '\')" style="padding:10px 12px;background:var(--card);border:1px solid var(--border);border-radius:10px;margin-bottom:6px;cursor:pointer;display:flex;align-items:center;gap:10px;">';
+        html += '<div style="flex:1;min-width:0;">';
+        html += '<div style="font-size:13px;font-weight:700;color:var(--navy);">' + (p.name || '') + '</div>';
+        html += '<div style="font-size:11px;color:var(--muted);margin-top:2px;">';
+        if (item.last_touch_date) {
+          var d = new Date(item.last_touch_date);
+          html += 'Last ' + d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+        } else {
+          html += 'Never touched';
+        }
+        html += ' · cadence ' + item.cadence_days + 'd';
+        html += '</div></div>';
+        html += '<div style="background:var(--danger);color:#fff;font-size:11px;font-weight:700;padding:4px 10px;border-radius:12px;flex-shrink:0;white-space:nowrap;">' + item.days_overdue + 'd over</div>';
+        html += '</div>';
+      });
+    });
+  }
+
+  document.getElementById('partner-detail-body').innerHTML = html;
+  document.getElementById('partner-detail-overlay').classList.add('open');
+  _navPushOverlay('partner-detail-overlay', closeLapsedMobile);
+}
+function closeLapsedMobile() {
+  document.getElementById('partner-detail-overlay').classList.remove('open');
+  _navPopOverlay('partner-detail-overlay');
+}
+
+function openUpcomingMobile() {
+  if (!window.JG_SHARED || !window.JG_SHARED.nurture) { toast('Nurture module not loaded'); return; }
+  var nonCust = APP.partners.filter(function(p){ return p.type !== 'Customer'; });
+  var upcoming = window.JG_SHARED.nurture.getUpcomingDates(nonCust, {
+    windowDays: 60, repName: APP.repName
+  });
+
+  var html = '';
+  html += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">';
+  html += '<div style="font-size:16px;font-weight:700;color:var(--navy);">🎂 Upcoming Dates</div>';
+  html += '<button onclick="closeUpcomingMobile()" style="border:none;background:transparent;font-size:22px;cursor:pointer;color:var(--muted);padding:0;width:32px;height:32px;">✕</button>';
+  html += '</div>';
+  html += '<div style="font-size:12px;color:var(--muted);margin-bottom:14px;">Next 60 days. Drop a card or small gift the week before.</div>';
+
+  if (upcoming.length === 0) {
+    html += '<div style="text-align:center;padding:30px 20px;color:var(--muted);font-style:italic;">No birthdays or anniversaries on file.</div>';
+    html += '<div style="background:rgba(13,45,94,.04);border-radius:8px;padding:12px 14px;margin-top:10px;font-size:12px;color:var(--muted);">';
+    html += '💡 Ask partners on your next visit. Add it on their partner card.';
+    html += '</div>';
+  } else {
+    upcoming.forEach(function(item){
+      var p = item.partner;
+      var isThisWeek = item.days_until <= 7;
+      var icon = item.type === 'birthday' ? '🎂' : '📅';
+      var typeLabel = item.type === 'birthday' ? 'Birthday' : (item.years_at ? item.years_at + '-yr Anniv.' : 'Anniversary');
+      var daysLabel = item.days_until === 0 ? 'TODAY' :
+                      item.days_until === 1 ? 'Tomorrow' :
+                      'in ' + item.days_until + 'd';
+
+      html += '<div onclick="closeUpcomingMobile();openPartnerDetail(\'' + p.id + '\')" style="padding:12px;background:' + (isThisWeek ? 'linear-gradient(135deg, #fff8f0 0%, var(--card) 100%)' : 'var(--card)') + ';border:1px solid ' + (isThisWeek ? 'rgba(232,93,4,.3)' : 'var(--border)') + ';border-radius:10px;margin-bottom:6px;cursor:pointer;display:flex;align-items:center;gap:10px;">';
+      html += '<div style="font-size:22px;">' + icon + '</div>';
+      html += '<div style="flex:1;min-width:0;">';
+      html += '<div style="font-size:13px;font-weight:700;color:var(--navy);">' + (p.name || '') + '</div>';
+      html += '<div style="font-size:11px;color:var(--muted);margin-top:2px;">' + typeLabel + ' · ' + item.date_label + '</div>';
+      html += '</div>';
+      html += '<div style="background:' + (isThisWeek ? 'var(--orange)' : 'rgba(13,45,94,.08)') + ';color:' + (isThisWeek ? '#fff' : 'var(--navy)') + ';font-size:11px;font-weight:700;padding:4px 10px;border-radius:12px;flex-shrink:0;white-space:nowrap;">' + daysLabel + '</div>';
+      html += '</div>';
+    });
+  }
+
+  document.getElementById('partner-detail-body').innerHTML = html;
+  document.getElementById('partner-detail-overlay').classList.add('open');
+  _navPushOverlay('partner-detail-overlay', closeUpcomingMobile);
+}
+function closeUpcomingMobile() {
+  document.getElementById('partner-detail-overlay').classList.remove('open');
+  _navPopOverlay('partner-detail-overlay');
 }
 
 function setRoutesViewMobile(view) {

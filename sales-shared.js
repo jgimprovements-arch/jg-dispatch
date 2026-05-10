@@ -561,6 +561,197 @@
         getMarketCenter: getMarketCenter,
         _norm: _norm  // exported for testing
       };
+    })(),
+    nurture: (function(){
+      // ── NURTURE: cadence rules + birthdays/anniversaries ───────────────
+      // Single source of truth for "is this partner overdue" and "whose
+      // birthday is coming up." Used by both desktop and mobile to keep
+      // logic consistent across platforms.
+
+      // Default cadence in days per tier. Override per partner via
+      // sales_partners.target_cadence_days.
+      var TIER_CADENCE = { A: 14, B: 30, C: 60 };
+      var DEFAULT_CADENCE = 60; // unknown / untiered partner falls back to 60d
+
+      function getCadenceDays(partner) {
+        if (!partner) return DEFAULT_CADENCE;
+        // Per-partner override takes precedence
+        if (partner.target_cadence_days && partner.target_cadence_days > 0) {
+          return partner.target_cadence_days;
+        }
+        if (partner.tier && TIER_CADENCE[partner.tier]) {
+          return TIER_CADENCE[partner.tier];
+        }
+        return DEFAULT_CADENCE;
+      }
+
+      // Find latest touch for this partner from a touches array.
+      // Returns ISO date string or null.
+      function getLastTouchDate(partnerId, touches) {
+        if (!touches || !touches.length) return null;
+        var latest = null;
+        for (var i = 0; i < touches.length; i++) {
+          var t = touches[i];
+          if (t.partner_id !== partnerId) continue;
+          var d = t.touch_date || t.logged_at;
+          if (!d) continue;
+          if (!latest || d > latest) latest = d;
+        }
+        return latest;
+      }
+
+      // Returns days overdue (positive = overdue, 0 = due today, negative
+      // = not yet due). null if partner has no tier and no override AND
+      // never touched (can't meaningfully compute).
+      function getDaysOverdue(partner, touches) {
+        var cadence = getCadenceDays(partner);
+        var last = getLastTouchDate(partner.id, touches);
+        if (!last) {
+          // Never touched — overdue by definition. Use cadence as "how
+          // overdue" so newer partners aren't ranked above genuinely
+          // ignored ones.
+          return cadence;
+        }
+        var daysSince = Math.floor((Date.now() - new Date(last).getTime()) / 86400000);
+        return daysSince - cadence;
+      }
+
+      // Returns array of lapsed partners (overdue > 0), sorted by how
+      // overdue. Most overdue first. Filtered to a market + optionally
+      // to a rep's own.
+      function getLapsedPartners(partners, touches, opts) {
+        opts = opts || {};
+        var market = opts.market;
+        var repName = opts.repName; // null = include all reps
+        var includeNeverTouched = opts.includeNeverTouched !== false;
+
+        var results = [];
+        partners.forEach(function(p){
+          if (repName && p.assigned_to !== repName) return;
+          if (market && p.market && p.market !== market) return;
+          // For partners without a tier AND no cadence override AND not
+          // tier-specific filtered, skip — we don't have signal.
+          if (!p.tier && !p.target_cadence_days) return;
+
+          var last = getLastTouchDate(p.id, touches);
+          if (!last && !includeNeverTouched) return;
+
+          var overdue = getDaysOverdue(p, touches);
+          if (overdue > 0) {
+            results.push({
+              partner: p,
+              days_overdue: overdue,
+              last_touch_date: last,
+              cadence_days: getCadenceDays(p)
+            });
+          }
+        });
+
+        results.sort(function(a, b){ return b.days_overdue - a.days_overdue; });
+        return results;
+      }
+
+      // ── BIRTHDAYS + ANNIVERSARIES ───────────────────────────────────
+      // Returns days until the next occurrence of a MM-DD date.
+      // 0 = today, 1 = tomorrow, etc.
+      function daysUntilAnnual(dateStr) {
+        if (!dateStr) return null;
+        try {
+          var d = new Date(dateStr + 'T00:00:00');
+          if (isNaN(d.getTime())) return null;
+          var now = new Date();
+          now.setHours(0,0,0,0);
+          // Build "this year's" version of the date
+          var thisYear = new Date(now.getFullYear(), d.getMonth(), d.getDate());
+          if (thisYear < now) {
+            // Already passed this year — next occurrence is next year
+            thisYear = new Date(now.getFullYear() + 1, d.getMonth(), d.getDate());
+          }
+          return Math.round((thisYear - now) / 86400000);
+        } catch(e) {
+          return null;
+        }
+      }
+
+      // Format an annual date for display ("Mar 15" — no year).
+      function formatAnnualDate(dateStr) {
+        if (!dateStr) return '';
+        try {
+          var d = new Date(dateStr + 'T00:00:00');
+          return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+        } catch(e) {
+          return dateStr;
+        }
+      }
+
+      // Returns upcoming birthdays + anniversaries within N days, sorted
+      // by how soon. Each item: { partner, type: 'birthday'|'anniversary',
+      // date_str, days_until }
+      function getUpcomingDates(partners, opts) {
+        opts = opts || {};
+        var windowDays = opts.windowDays || 30;
+        var market = opts.market;
+        var repName = opts.repName;
+
+        var results = [];
+        partners.forEach(function(p){
+          if (repName && p.assigned_to !== repName) return;
+          if (market && p.market && p.market !== market) return;
+
+          if (p.birthday) {
+            var d = daysUntilAnnual(p.birthday);
+            if (d != null && d >= 0 && d <= windowDays) {
+              results.push({
+                partner: p,
+                type: 'birthday',
+                date_str: p.birthday,
+                date_label: formatAnnualDate(p.birthday),
+                days_until: d
+              });
+            }
+          }
+          if (p.work_anniversary) {
+            var d2 = daysUntilAnnual(p.work_anniversary);
+            if (d2 != null && d2 >= 0 && d2 <= windowDays) {
+              // Compute "years at company" if we have the full original date
+              var yearsAt = null;
+              try {
+                var orig = new Date(p.work_anniversary + 'T00:00:00');
+                var now = new Date();
+                yearsAt = now.getFullYear() - orig.getFullYear();
+                // If anniversary hasn't passed this year, subtract 1
+                if (now < new Date(now.getFullYear(), orig.getMonth(), orig.getDate())) {
+                  yearsAt -= 1;
+                }
+                // What years will it be ON the upcoming anniversary?
+                yearsAt = yearsAt + 1;
+              } catch(e) {}
+              results.push({
+                partner: p,
+                type: 'anniversary',
+                date_str: p.work_anniversary,
+                date_label: formatAnnualDate(p.work_anniversary),
+                days_until: d2,
+                years_at: yearsAt
+              });
+            }
+          }
+        });
+
+        results.sort(function(a, b){ return a.days_until - b.days_until; });
+        return results;
+      }
+
+      return {
+        TIER_CADENCE: TIER_CADENCE,
+        getCadenceDays: getCadenceDays,
+        getLastTouchDate: getLastTouchDate,
+        getDaysOverdue: getDaysOverdue,
+        getLapsedPartners: getLapsedPartners,
+        daysUntilAnnual: daysUntilAnnual,
+        formatAnnualDate: formatAnnualDate,
+        getUpcomingDates: getUpcomingDates
+      };
     })()
   };
 
