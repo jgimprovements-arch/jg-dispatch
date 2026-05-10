@@ -7866,11 +7866,13 @@ async function loadWorkOrders() {
 // ═══════════════════ WORK ORDERS TAB ═══════════════════
 
 const WO_STATUS_META = {
-  draft:      { label: 'Draft',      color: '#7884a0', bg: 'rgba(120,132,160,.12)' },
-  sent:       { label: 'Awaiting Signature', color: '#e85d04', bg: 'rgba(232,93,4,.15)' },
-  signed:     { label: 'Signed',     color: '#2d9c5f', bg: 'rgba(45,156,95,.15)' },
-  superseded: { label: 'Superseded', color: '#7884a0', bg: 'rgba(120,132,160,.10)' },
-  cancelled:  { label: 'Cancelled',  color: '#d64545', bg: 'rgba(214,69,69,.12)' },
+  draft:             { label: 'Draft',                 color: '#7884a0', bg: 'rgba(120,132,160,.12)' },
+  sent:              { label: 'Awaiting Signature',    color: '#e85d04', bg: 'rgba(232,93,4,.15)' },
+  signed:            { label: 'Signed',                color: '#2d9c5f', bg: 'rgba(45,156,95,.15)' },
+  converted_to_po:   { label: 'PO Issued · Awaiting Invoice', color: '#4a90e2', bg: 'rgba(74,144,226,.15)' },
+  invoice_received:  { label: 'Invoice Received',      color: '#2d9c5f', bg: 'rgba(45,156,95,.18)' },
+  superseded:        { label: 'Superseded',            color: '#7884a0', bg: 'rgba(120,132,160,.10)' },
+  cancelled:         { label: 'Cancelled',             color: '#d64545', bg: 'rgba(214,69,69,.12)' },
 };
 
 function renderWorkOrdersTab() {
@@ -7907,7 +7909,7 @@ function renderWorkOrdersTab() {
 
   const rows = Array.from(subsOnProject.values()).map(sub => {
     const subWos = wos.filter(w => w.sub_id === sub.id);
-    const active = subWos.find(w => w.status === 'sent' || w.status === 'signed' || w.status === 'draft');
+    const active = subWos.find(w => ['sent','signed','draft','converted_to_po','invoice_received'].includes(w.status));
     const sm = WO_STATUS_META[active?.status] || null;
     return `
       <div class="wo-sub-row">
@@ -8047,7 +8049,7 @@ function openWoEditModal(woId) {
   }
   $('#woModalSubName').textContent = wo.sub?.company_name || '';
 
-  const isReadOnly = wo.status === 'signed' || wo.status === 'superseded' || wo.status === 'cancelled';
+  const isReadOnly = wo.status === 'signed' || wo.status === 'superseded' || wo.status === 'cancelled' || wo.status === 'converted_to_po' || wo.status === 'invoice_received';
   const woUrl = `${location.origin}${location.pathname.replace(/[^/]*$/, '')}wo.html?t=${wo.accept_token}`;
 
   $('#woEditBody').innerHTML = `
@@ -8056,12 +8058,29 @@ function openWoEditModal(woId) {
       <span style="font-size:11px;color:var(--muted);">v${wo.version} · created ${new Date(wo.created_at).toLocaleDateString()}</span>
     </div>
 
-    ${wo.status === 'signed' ? `
+    ${wo.status === 'signed' || wo.status === 'converted_to_po' || wo.status === 'invoice_received' ? `
       <div style="background:#f4faf6;border:1px solid #c8e6d4;border-radius:8px;padding:12px 14px;margin-bottom:14px;font-size:13px;">
         <b>✓ Signed by:</b> ${esc(wo.signed_by_name)}${wo.signed_by_title ? ' · ' + esc(wo.signed_by_title) : ''}<br>
         <b>At:</b> ${new Date(wo.signed_at).toLocaleString()}<br>
         ${wo.signed_ip ? `<b>IP:</b> ${esc(wo.signed_ip)}<br>` : ''}
         ${wo.signed_notes ? `<b>Notes:</b> ${esc(wo.signed_notes)}` : ''}
+      </div>
+    ` : ''}
+
+    ${wo.po_number ? `
+      <div style="background:#eef4fc;border:1px solid #b3d4f3;border-radius:8px;padding:12px 14px;margin-bottom:14px;font-size:13px;">
+        <b>📋 PO ${esc(wo.po_number)}</b> · issued ${new Date(wo.po_created_at).toLocaleDateString()} by ${esc(wo.po_created_by_email || '')}<br>
+        ${wo.invoice_received_at ? `
+          <div style="margin-top:8px;padding-top:8px;border-top:1px solid #b3d4f3;">
+            <b>✓ Invoice received</b> ${new Date(wo.invoice_received_at).toLocaleString()}<br>
+            ${wo.invoice_uploaded_by_name ? `Uploaded by: ${esc(wo.invoice_uploaded_by_name)}<br>` : ''}
+            ${wo.invoice_amount ? `Amount: $${Number(wo.invoice_amount).toLocaleString()}<br>` : ''}
+            ${wo.invoice_filename ? `File: ${esc(wo.invoice_filename)}<br>` : ''}
+            ${wo.albi_payment_task_created_at ? `<span style="color:var(--green);"><b>✓ Albi "Write Note" task created for Lisa Greil</b></span>` : '<span style="color:var(--muted);">Albi task pending</span>'}
+          </div>
+        ` : `
+          <div style="margin-top:6px;color:var(--muted);font-size:12px;">Waiting on sub to upload invoice…</div>
+        `}
       </div>
     ` : ''}
 
@@ -8095,8 +8114,10 @@ function openWoEditModal(woId) {
       <div style="display:flex;gap:6px;flex-wrap:wrap;">
         ${wo.status !== 'cancelled' && wo.status !== 'superseded' ? `<button class="btn ghost-red" data-wo-modal-act="cancel">✕ Cancel ${wo.status === 'draft' ? 'Draft' : wo.status === 'sent' ? 'and Recall' : 'Work Order'}</button>` : ''}
         ${wo.status === 'sent' ? `<button class="btn ghost" data-wo-modal-act="resend">📧 Resend</button>` : ''}
-        ${wo.status === 'signed' ? `<button class="btn ghost" data-wo-modal-act="unsign">↺ Unsign &amp; Revise</button>` : ''}
-        ${wo.status === 'signed' ? `<button class="btn ghost" data-wo-modal-act="new-version">⚡ New Version</button>` : ''}
+        ${wo.status === 'signed' ? `<button class="btn primary" data-wo-modal-act="convert-to-po">→ Convert to PO</button>` : ''}
+        ${wo.status === 'converted_to_po' ? `<button class="btn ghost" data-wo-modal-act="resend-po">📧 Resend PO to Sub</button>` : ''}
+        ${wo.status === 'signed' || wo.status === 'converted_to_po' || wo.status === 'invoice_received' ? `<button class="btn ghost" data-wo-modal-act="unsign">↺ Unsign &amp; Revise</button>` : ''}
+        ${wo.status === 'signed' || wo.status === 'converted_to_po' || wo.status === 'invoice_received' ? `<button class="btn ghost" data-wo-modal-act="new-version">⚡ New Version</button>` : ''}
       </div>
       <div style="display:flex;gap:6px;">
         <button class="btn" data-wo-modal-act="close">Close</button>
@@ -8205,6 +8226,15 @@ async function handleWoModalAction(act, wo, woUrl) {
     renderDetail();
     return;
   }
+  if (act === 'convert-to-po') {
+    await convertWoToPo(wo);
+    modal.classList.remove('on');
+    return;
+  }
+  if (act === 'resend-po') {
+    await sendPoToSub(wo);
+    return;
+  }
   if (act === 'save-and-send' || act === 'resend') {
     if (act === 'save-and-send') {
       updates.status = 'sent';
@@ -8228,6 +8258,88 @@ async function handleWoModalAction(act, wo, woUrl) {
     renderDetail();
     return;
   }
+}
+
+async function convertWoToPo(wo) {
+  if (!confirm(`Convert this signed Work Order to a Purchase Order?\n\nThis will:\n• Generate a PO number\n• Email ${wo.sub?.company_name || 'the sub'} a link to upload their invoice\n• When the sub uploads their invoice, an Albi "Write Note" task auto-fires for Lisa Greil\n\nProceed?`)) return;
+
+  // Generate PO number: PO-{jobnum}-{yymmdd}-{4 chars}
+  const p = state.activeProject;
+  const jobShort = (p.albi_job_number || 'JOB').replace(/[^A-Za-z0-9]/g, '').slice(-6).toUpperCase();
+  const today = new Date();
+  const dateCode = `${String(today.getFullYear()).slice(2)}${String(today.getMonth()+1).padStart(2,'0')}${String(today.getDate()).padStart(2,'0')}`;
+  const randCode = wo.id.replace(/-/g,'').slice(0,4).toUpperCase();
+  const poNumber = `PO-${jobShort}-${dateCode}-${randCode}`;
+
+  const { error } = await sb.from('rebuild_work_orders').update({
+    status: 'converted_to_po',
+    po_number: poNumber,
+    po_created_at: new Date().toISOString(),
+    po_created_by_email: state.pmEmail,
+  }).eq('id', wo.id);
+  if (error) { toast('Convert failed: ' + error.message); return; }
+
+  await sb.from('rebuild_work_order_history').insert({
+    work_order_id: wo.id, action: 'converted_to_po', actor: state.pmEmail,
+    details: `Issued ${poNumber}`,
+  });
+
+  // Reload to get the fresh wo with po_invoice_token (set by DB default)
+  await loadWorkOrders();
+  const updatedWo = state.workOrders.find(w => w.id === wo.id);
+  if (!updatedWo) { toast('PO issued'); renderDetail(); return; }
+
+  await sendPoToSub(updatedWo);
+  toast('PO issued and sent to sub');
+  renderDetail();
+}
+
+async function sendPoToSub(wo) {
+  const sub = wo.sub || state.subs.find(s => s.id === wo.sub_id);
+  const toEmail = wo.sent_to_email || sub?.email;
+  if (!toEmail) { toast('No email on file — add one in the WO before sending PO'); return; }
+  const p = state.activeProject;
+  const invoiceUrl = `${location.origin}${location.pathname.replace(/[^/]*$/, '')}invoice.html?t=${wo.po_invoice_token}`;
+  const body = buildBrandedEmail({
+    preheader: `PO ${wo.po_number} — please upload your invoice`,
+    headline: `Purchase Order ${wo.po_number}`,
+    intro: `Hi ${sub?.primary_contact || sub?.company_name || 'there'}, thank you for completing the work on ${p.albi_job_number || 'this project'}. Please upload your invoice using the link below so we can process payment.`,
+    bodyHtml: `
+      <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width:100%;border-collapse:collapse;margin:14px 0;">
+        <tr><td style="padding:8px 0;border-bottom:1px solid #e3e7f0;font-size:13px;color:#7884a0;width:40%;">PO Number</td><td style="padding:8px 0;border-bottom:1px solid #e3e7f0;font-size:14px;font-weight:700;color:#1a2540;">${esc(wo.po_number)}</td></tr>
+        <tr><td style="padding:8px 0;border-bottom:1px solid #e3e7f0;font-size:13px;color:#7884a0;">Project</td><td style="padding:8px 0;border-bottom:1px solid #e3e7f0;font-size:14px;color:#1a2540;">${esc(p.albi_job_number || '')} — ${esc(p.customer_name || '')}</td></tr>
+        <tr><td style="padding:8px 0;border-bottom:1px solid #e3e7f0;font-size:13px;color:#7884a0;">Authorized Amount</td><td style="padding:8px 0;border-bottom:1px solid #e3e7f0;font-size:16px;font-weight:800;color:#e85d04;">$${Number(wo.total_amount || 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td></tr>
+      </table>
+      <p style="margin:14px 0;font-size:13px;color:#1a2540;line-height:1.5;"><b>Two ways to submit your invoice:</b><br>
+      &nbsp;&nbsp;1. Click the button below to upload it on the JG portal (preferred)<br>
+      &nbsp;&nbsp;2. Or simply reply to this email with your invoice as an attachment</p>`,
+    ctaLabel: 'Upload Invoice',
+    ctaUrl: invoiceUrl,
+    signoffName: state.pmName || 'JG Restoration',
+    signoffPhone: p.albi_pm_phone || '(920) 428-4200',
+  });
+  try {
+    await fetch(MESSAGE_HOOK, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        channel: 'email',
+        to_email: toEmail,
+        from_email: p.albi_pm_email || state.pmEmail || 'josh@jg-restoration.com',
+        from_name: 'JG Restoration',
+        recipient_name: sub?.primary_contact || sub?.company_name || toEmail,
+        recipient_type: 'sub',
+        subject: `PO ${wo.po_number} — please upload invoice (${p.albi_job_number || 'project'})`,
+        body,
+        attachment_count: 0, attachment_urls: '',
+        // Reply-to address for Zapier Email Parser fallback
+        reply_to: `po-${wo.po_invoice_token}@jg-restoration.com`,
+        po_number: wo.po_number,
+        po_invoice_token: wo.po_invoice_token,
+      }),
+      mode: 'no-cors',
+    });
+  } catch (e) { console.error('PO email send failed:', e); }
 }
 
 async function sendWorkOrderToSub(wo, woUrl) {
@@ -9538,6 +9650,7 @@ function setupRealtime() {
               todo_assigned: 'todos',
               todo_completed: 'todos',
               wo_signed: 'workorders',
+        invoice_received: 'workorders',
             };
             const targetTab = tabForEvent[n.event_type] || 'phases';
             const ctaUrl = n.project_id
@@ -9608,6 +9721,7 @@ async function loadNotifications() {
         todo_assigned: 'todos',
         todo_completed: 'todos',
         wo_signed: 'workorders',
+        invoice_received: 'workorders',
       };
       const targetTab = tabForEvent[n.event_type] || 'phases';
       const ctaUrl = n.project_id
@@ -9674,6 +9788,7 @@ function renderNotifList() {
       todo_assigned: '✅',
       todo_completed: '✔',
       wo_signed: '✍',
+      invoice_received: '📥',
     }[n.event_type] || '🔔';
     return `
       <div class="notif-item ${n.read_at ? '' : 'unread'}" data-id="${n.id}" data-project="${n.project_id || ''}">
@@ -9709,6 +9824,7 @@ function renderNotifList() {
         todo_assigned: 'todos',
         todo_completed: 'todos',
         wo_signed: 'workorders',
+        invoice_received: 'workorders',
       };
       const targetTab = tabForEvent[n?.event_type] || 'selections';
 
