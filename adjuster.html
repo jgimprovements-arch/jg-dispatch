@@ -978,7 +978,7 @@ Return ONLY valid JSON:
   "disputed_items":[
     {"id":"DISP-001","description":"","jg_line_num":"","jg_code":"","jg_description":"","jg_qty":"","jg_unit":"","jg_unit_cost":"","jg_amount":"","adj_line_num":"","adj_code":"","adj_description":"","adj_qty":"","adj_unit":"","adj_unit_cost":"","adj_amount":"","difference":"","category":"removed|reduced|rate_changed|code_changed","standard_reference":"","standard_text":"","encircle_evidence":"","defense_statement":""}
   ],
-  "response_letter":"A complete professional response letter from JG Restoration to the adjuster. TONE: Firm but professional and respectful — not combative or threatening. Use language like 'we respectfully request', 'we welcome the opportunity to discuss', 'we are available to provide additional documentation'. Avoid 'we will not accept', 'our position is final', 'we demand'. STRUCTURE: 1) Opening paragraph stating JG has reviewed the adjuster's estimate and is providing documentation for maintained items plus good-faith concessions where appropriate. 2) For each DEFENDED item: reference JG estimate line number, Xactimate code, applicable standard, and Encircle evidence. 3) Briefly acknowledge conceded items. 4) FINANCIAL SUMMARY section: calculate and state the JG original total, total concessions, adjusted total (original minus concessions), State Farm approved total, and additional payment requested (adjusted minus approved). 5) Closing paragraph requesting payment of the adjusted amount and offering to discuss further. Sign as JG Restoration, (920) 428-4200."
+  "response_letter":"A CONDENSED professional response letter from JG Restoration to the adjuster, formatted in HTML for email. TONE: Firm but professional and respectful. CRITICAL FORMATTING RULES: Use HTML tags for visual structure. Use <h3 style='color:#1B2A4A'> for section headers (DEFENDED ITEMS, CONCEDED ITEMS, FINANCIAL SUMMARY). Use <strong style='color:#C62828'> for disputed amounts. Use <strong style='color:#1E88E5'> for Xactimate codes and standards references. Use <strong style='color:#43A047'> for JG amounts and concession totals. Use <em> for Encircle evidence references. Keep each disputed item to 2-3 sentences MAX — state the code, the standard, the evidence, done. Do NOT write paragraph-length defenses for each item — be direct and cite-heavy. STRUCTURE: 1) Brief opening (2-3 sentences). 2) <h3>DEFENDED ITEMS</h3> — each item as a compact block: item ID, description, disputed amount in bold red, 2-3 sentence defense with bold standard citations and italic Encircle references. 3) <h3>CONCEDED ITEMS</h3> — simple list, one line per item. 4) <h3>FINANCIAL SUMMARY</h3> — use an HTML table with the calculated totals: JG original, concessions, adjusted total, carrier approved, additional payment requested. 5) Brief closing (2 sentences) requesting payment and offering to discuss. Sign as JG Restoration, (920) 428-4200. The entire letter should be roughly 40-50% shorter than a traditional rebuttal letter."
 }`;
 
 // ══ ADJUSTER REBUTTAL ANALYSIS ══
@@ -1051,11 +1051,24 @@ async function runAdjusterAnalysis(){
     }
     
     S.prog='Loading historical intel...';draw();
-    // Pull adjuster/carrier name from email hint if available
+    // Pull adjuster/carrier name from multiple sources
     var adjHint = (S.adjEmail||'').match(/from[:\s]+([A-Z][a-z]+ [A-Z][a-z]+)/i);
     var adjNameHint = adjHint ? adjHint[1] : '';
-    var carrierHint = (S.adjEmail||'').match(/(allstate|state farm|farmers|liberty mutual|travelers|nationwide|usaa|progressive|erie|american family|cincinnati|westbend|acuity|society|secura|grinnell|pekin|germantown)/i);
+    // Also check adjuster name input fields if they exist
+    var adjNameField = document.getElementById('adjNameField')?.value||'';
+    var carrierField = document.getElementById('carrierField')?.value||'';
+    if(adjNameField.trim()) adjNameHint = adjNameField.trim();
+    // Also extract from adjuster PDF filename (e.g. "Peyton_State_Farm_revised.pdf")
+    if(!adjNameHint && S.adjEst?.name){
+      var fnHint = S.adjEst.name.match(/([A-Z][a-z]+)[\s_-]+([A-Z][a-z]+)/);
+      if(fnHint) adjNameHint = fnHint[1]+' '+fnHint[2];
+    }
+    var carrierPatterns = /(allstate|state farm|farmers|liberty mutual|travelers|nationwide|usaa|progressive|erie|american family|amfam|cincinnati|west\s*bend|acuity|society|secura|grinnell|pekin|germantown|auto[- ]?owners|safeco|foremost|chubb|hartford|hanover)/i;
+    var allText = (S.adjEmail||'') + ' ' + (S.adjEst?.name||'') + ' ' + carrierField;
+    var carrierHint = allText.match(carrierPatterns);
     var carrierNameHint = carrierHint ? carrierHint[0] : '';
+    if(carrierField.trim()) carrierNameHint = carrierField.trim();
+    console.log('Intel lookup — Adjuster:', adjNameHint, '| Carrier:', carrierNameHint);
     const historicalIntel = await fetchHistoricalIntel(adjNameHint, carrierNameHint);
     const enrichedPrompt = ADJUSTER_PROMPT + historicalIntel;
     S.prog='AI analyzing disputes (30-60 sec)...';draw();
@@ -1196,7 +1209,7 @@ async function regenerateAdjusterResponse(){
     const additionalPayment=adjustedJgTotal-adjTotal;
     const financialSummary='\n\nFINANCIAL SUMMARY (include these exact numbers in the letter):\nJG Original Total: $'+jgOrig.toFixed(2)+'\nTotal Concessions ('+conceded.length+' items): -$'+concededTotal.toFixed(2)+'\nJG Adjusted Total: $'+adjustedJgTotal.toFixed(2)+'\nAdjuster/Carrier Approved: $'+adjTotal.toFixed(2)+'\nAdditional Payment Requested: $'+additionalPayment.toFixed(2);
 
-    const regenPrompt='You are writing a response letter from JG Restoration to an insurance adjuster. TONE: Firm but professional and respectful. Use language like "we respectfully request", "we welcome the opportunity to discuss", "we are available to provide additional documentation". Do NOT use combative language like "we will not accept", "our position is final", "we demand".\n\nAdjuster: '+(ar.adjuster_info?.name||'Unknown')+' — '+(ar.adjuster_info?.company||'')+'\nJG Total: '+(ar.summary?.jg_total||'')+'\nAdjuster Total: '+(ar.summary?.adjuster_total||'')+'\nTotal Disputed: '+(ar.summary?.total_disputed||'')+'\n\nDEFENDED ITEMS WITH PM NOTES:\n'+notesForAI+concededList+financialSummary+'\n\nWrite a complete professional response letter that:\n1. Opens stating JG has reviewed the adjuster estimate and is providing documentation for maintained items, plus good-faith concessions where appropriate\n2. For each DEFENDED item, reference the JG estimate line number, Xactimate code, applicable standard, Encircle evidence, AND incorporate the PM notes as additional supporting evidence or context\n3. If any items are conceded, briefly acknowledge each concession\n4. Include a FINANCIAL SUMMARY section with the exact dollar amounts provided above: original total, concessions, adjusted total, carrier approved, and additional payment requested\n5. Close by respectfully requesting the additional payment amount and offering to discuss any item further\n6. Sign as JG Restoration, (920) 428-4200\n\nReturn ONLY the letter text, no JSON, no markdown formatting.';
+    const regenPrompt='You are writing a CONDENSED response letter from JG Restoration to an insurance adjuster, formatted in HTML for email display. TONE: Firm but professional and respectful.\n\nFORMATTING: Use HTML tags. <h3 style="color:#1B2A4A;border-bottom:2px solid #1B2A4A;padding-bottom:4px;margin-top:16px"> for section headers. <strong style="color:#C62828"> for disputed amounts. <strong style="color:#1E88E5"> for Xactimate codes and standards. <strong style="color:#43A047"> for JG amounts. <em style="color:#7B1FA2"> for Encircle evidence. Use <table style="border-collapse:collapse;width:100%;margin:8px 0"> for the financial summary with alternating row backgrounds.\n\nBe CONCISE: each disputed item should be 2-3 sentences MAX. State the code, cite the standard, reference the Encircle evidence, done. The entire letter should be 40-50% shorter than a traditional rebuttal.\n\nAdjuster: '+(ar.adjuster_info?.name||'Unknown')+' — '+(ar.adjuster_info?.company||'')+'\nJG Total: '+(ar.summary?.jg_total||'')+'\nAdjuster Total: '+(ar.summary?.adjuster_total||'')+'\nTotal Disputed: '+(ar.summary?.total_disputed||'')+'\n\nDEFENDED ITEMS WITH PM NOTES:\n'+notesForAI+concededList+financialSummary+'\n\nWrite the letter with:\n1. Brief opening (2-3 sentences)\n2. <h3>DEFENDED ITEMS</h3> — compact blocks, 2-3 sentences each, with bold colored citations and PM notes incorporated\n3. <h3>CONCEDED ITEMS</h3> — one line per item\n4. <h3>FINANCIAL SUMMARY</h3> — HTML table with exact dollar amounts\n5. Brief closing (2 sentences) requesting payment\n6. Sign as JG Restoration, (920) 428-4200\n\nReturn ONLY the HTML letter, no markdown, no code fences.';
     
     const r=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',
       headers:{'Content-Type':'application/json','x-api-key':S.apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
@@ -1278,6 +1291,34 @@ async function saveRebuttalToSupabase() {
     }
   } catch(e) {
     console.error('saveRebuttalToSupabase error:', e);
+  }
+}
+
+// ══ PREVIEW INTEL LOOKUP ══
+async function previewIntelLookup(){
+  var adjName=document.getElementById('adjNameField')?.value||'';
+  var carrier=document.getElementById('carrierField')?.value||'';
+  var div=document.getElementById('intelPreview');
+  if(!div)return;
+  if(!adjName.trim()&&!carrier.trim()){div.innerHTML='<span style="color:var(--wrn)">Enter an adjuster name or carrier to look up intel.</span>';return;}
+  div.innerHTML='<span style="color:var(--purp)">Loading...</span>';
+  var intel=await fetchHistoricalIntel(adjName.trim(),carrier.trim());
+  if(intel){
+    // Format for display
+    var lines=intel.replace('HISTORICAL INTELLIGENCE FROM PAST REBUTTALS:','').split('\n').filter(l=>l.trim());
+    var html=lines.map(function(l){
+      if(l.startsWith('═'))return '<div style="margin-top:8px;font-weight:700;color:var(--purp);font-size:12px">'+l.replace(/═/g,'')+'</div>';
+      if(l.startsWith('ADJUSTER HISTORY')||l.startsWith('CARRIER HISTORY')||l.startsWith('JG RESTORATION'))return '<div style="margin-top:6px;font-weight:700;color:var(--acc)">'+l+'</div>';
+      if(l.startsWith('ADJUSTER SUB-PROFILE'))return '<div style="margin-top:6px;font-weight:700;color:var(--red)">'+l+'</div>';
+      if(l.startsWith('KNOWN')||l.startsWith('PRIORITY')||l.startsWith('HIGH'))return '<div style="font-weight:600;color:var(--wrn)">'+l+'</div>';
+      if(l.match(/^\d\./))return '<div style="padding-left:12px">'+l+'</div>';
+      if(l.startsWith('  '))return '<div style="padding-left:8px;color:var(--txt)">'+l+'</div>';
+      if(l.startsWith('-'))return '<div style="padding-left:12px">'+l+'</div>';
+      return '<div>'+l+'</div>';
+    }).join('');
+    div.innerHTML=html||'<span style="color:var(--dim)">No historical data found for this adjuster/carrier yet. Data builds as you finalize rebuttals.</span>';
+  } else {
+    div.innerHTML='<span style="color:var(--dim)">No historical data found. Intel builds as you finalize rebuttals through the tool.</span>';
   }
 }
 
@@ -1365,8 +1406,103 @@ async function fetchHistoricalIntel(adjusterName, carrier) {
       intel.push('  Most successfully defended codes: ' + topAllWins.map(function(c){return c[0]+' ('+c[1]+'x won)';}).join(', '));
     }
 
-    return intel.length ? '\n\nHISTORICAL INTELLIGENCE FROM PAST REBUTTALS:\n' + intel.join('\n') + '\n\nUse this to strengthen defenses. Be extra firm on codes previously won against this adjuster/carrier.' : '';
+    // ══ CARRIER STRATEGY LAYER ══
+    var carrierStrategy = getCarrierStrategy(carr, adjName);
+    if (carrierStrategy) intel.push(carrierStrategy);
+
+    return intel.length ? '\n\nHISTORICAL INTELLIGENCE FROM PAST REBUTTALS:\n' + intel.join('\n') + '\n\nUse this intelligence to strengthen defenses. Prioritize codes previously won against this adjuster/carrier. Apply the carrier-specific strategy instructions.' : '';
   } catch(e) { console.warn('Intel fetch failed:', e); return ''; }
+}
+
+// ══ CARRIER STRATEGY PROFILES ══
+function getCarrierStrategy(carrier, adjuster) {
+  var c = (carrier||'').toLowerCase();
+  var a = (adjuster||'').toLowerCase();
+  var strategies = [];
+
+  // ── STATE FARM ──
+  if (c.includes('state farm')) {
+    strategies.push('');
+    strategies.push('═══ STATE FARM — CARRIER STRATEGY ═══');
+    strategies.push('PRIORITY CARRIER: State Farm accounts for ~50% of JG disputes. Apply maximum scrutiny.');
+    strategies.push('');
+    strategies.push('KNOWN STATE FARM PATTERNS (auto-detect and flag all of these):');
+    strategies.push('1. DMO COMPOSITE SUBSTITUTION: State Farm consistently replaces individual WTR tearout codes with lump-sum DMO composites (DMO KTCHN, DMO BATH, DMO BDRM). This ALWAYS undervalues the work. Flag every DMO code that replaces a WTR code. Defense anchor: controlled tearout in contaminated environment ≠ standard dry demolition.');
+    strategies.push('2. EQUIPMENT DURATION CAPS: State Farm routinely reduces equipment days with no field-based justification — typical pattern is capping at 50-60% of actual documented days. Defense anchor: Encircle Hydro timestamps and kWh logs are third-party objective data, not estimates.');
+    strategies.push('3. INSULATION/SUBFLOOR DENIAL: State Farm frequently disputes insulation removal and subfloor removal claiming insufficient documentation. Defense anchor: equipment placement patterns (air movers in a closet = subfloor removed), moisture readings, progressive demolition photos.');
+    strategies.push('4. QUANTITY COMPRESSION: State Farm may approve the line item but reduce quantities below documented levels. Compare SF quantities against JG sketch/room dimensions. Defense anchor: Xactimate sketch measurements and Encircle room photos.');
+    strategies.push('');
+    strategies.push('STATE FARM TONE: Professional and respectful but thoroughly documented. State Farm responds to evidence density — every claim must have standard citation + Encircle reference + equipment data. Do not leave gaps for them to exploit.');
+
+    // Adjuster-specific sub-profiles
+    if (a.includes('renard') || a.includes('jason')) {
+      strategies.push('');
+      strategies.push('ADJUSTER SUB-PROFILE — Jason Renard:');
+      strategies.push('- Known for DMO KTCHN and DMO BATH substitutions on Cat 3 kitchens/bathrooms');
+      strategies.push('- Has previously reduced air scrubber days with no documentation basis');
+      strategies.push('- Responds to Encircle equipment logs as objective evidence — lean into kWh data and placement timestamps');
+      strategies.push('- Pre-emptive: check EVERY room for DMO-for-WTR substitution, check ALL equipment durations against Hydro logs');
+    }
+    if (a.includes('peyton') || a.includes('makenzi')) {
+      strategies.push('');
+      strategies.push('ADJUSTER SUB-PROFILE — Makenzi Peyton:');
+      strategies.push('- Requires pre-emptive documentation — extra detail on every line item');
+      strategies.push('- Has disputed subfloor removal and insulation scope');
+      strategies.push('- Defense must be airtight: reference specific photo numbers, specific timestamps, specific moisture readings');
+      strategies.push('- Include inferential evidence (e.g., air mover placement patterns proving subfloor removal) in addition to direct photographic evidence');
+    }
+  }
+
+  // ── ERIE INSURANCE ──
+  if (c.includes('erie')) {
+    strategies.push('');
+    strategies.push('═══ ERIE INSURANCE — CARRIER STRATEGY ═══');
+    strategies.push('HIGH SCRUTINY CARRIER: Erie requires bulletproof documentation with zero margin for error.');
+    strategies.push('');
+    strategies.push('KNOWN ERIE PATTERNS:');
+    strategies.push('1. LINE-BY-LINE VERIFICATION: Erie adjusters verify every single line item against photographic evidence. Any line without a direct photo = disputed.');
+    strategies.push('2. METHODOLOGY CHALLENGES: Erie may accept the scope but dispute the Xactimate methodology (LF vs SF, code selection). Defense anchor: Xactimate code notes and Verisk line item descriptions.');
+    strategies.push('3. EQUIPMENT JUSTIFICATION: Erie expects documented justification for every piece of equipment — not just placement logs but WHY each unit was necessary for that room/area.');
+    strategies.push('');
+    strategies.push('ERIE TONE: Hyper-professional, documentation-forward. Lead with data, not argument. Every defense statement should read like a technical report: "Encircle photo #X dated MM/DD at HH:MM documents [specific condition]. Per IICRC S500 §X.X, this condition requires [specific action]. JG estimate line #X bills [code] at [qty] [unit] to address this documented condition."');
+
+    if (a.includes('brown') || a.includes('kevin')) {
+      strategies.push('');
+      strategies.push('ADJUSTER SUB-PROFILE — Kevin Brown:');
+      strategies.push('- Demands photo-to-line-item traceability for every charge');
+      strategies.push('- Will reject items where documentation is inferential rather than direct');
+      strategies.push('- For Kevin Brown claims: EVERY defense must include specific Encircle photo numbers with timestamps');
+      strategies.push('- Include moisture readings with exact values, not ranges or generalizations');
+      strategies.push('- Zero tolerance for rounding or approximation — use exact quantities from Xactimate sketch');
+    }
+  }
+
+  // ── AMERICAN FAMILY ──
+  if (c.includes('american family') || c.includes('amfam')) {
+    strategies.push('');
+    strategies.push('═══ AMERICAN FAMILY — CARRIER STRATEGY ═══');
+    strategies.push('STANDARD CARRIER: American Family typically follows Xactimate pricing but may challenge scope on larger losses.');
+    strategies.push('Focus defenses on scope justification (why each room/area was included) rather than rate/code methodology.');
+  }
+
+  // ── ALLSTATE ──
+  if (c.includes('allstate')) {
+    strategies.push('');
+    strategies.push('═══ ALLSTATE — CARRIER STRATEGY ═══');
+    strategies.push('KNOWN PATTERNS: Allstate may use third-party review firms (e.g., Hancock Claims Consultants) that apply blanket percentage reductions.');
+    strategies.push('Defense anchor: rebut the specific line items, not the percentage methodology. Force them back to line-by-line.');
+  }
+
+  // ── WEST BEND / ACUITY / SOCIETY / SECURA (WI regional mutuals) ──
+  if (c.includes('west bend') || c.includes('westbend') || c.includes('acuity') || c.includes('society') || c.includes('secura')) {
+    strategies.push('');
+    strategies.push('═══ WISCONSIN REGIONAL MUTUAL — CARRIER STRATEGY ═══');
+    strategies.push('WI regional mutuals (West Bend, Acuity, Society, Secura) are generally fair but expect IICRC compliance documentation.');
+    strategies.push('These carriers respond well to professional tone and thorough documentation. Aggressive language is counterproductive.');
+    strategies.push('Focus on standards compliance and field documentation — they are less likely to use DMO substitution tactics.');
+  }
+
+  return strategies.length ? strategies.join('\n') : '';
 }
 
 // ══ ADJUSTER SIGN-OFF ══
@@ -1489,6 +1625,9 @@ function draw(){
     </div>`;
 
     h+=`<div style="margin-bottom:14px"><label style="display:block;font-size:11px;color:var(--dim);margin-bottom:4px;font-family:'JetBrains Mono',monospace;text-transform:uppercase">Albi Project Name <span style="color:var(--red)">* required</span></label><input type="text" id="projIn" value="${S.proj}" placeholder="e.g. Wang-2798-WTR" style="width:100%;max-width:400px"></div>`;
+
+    // Adjuster Intelligence Lookup
+    h+=`<div style="background:var(--s1);border:1px solid var(--brd);border-radius:10px;padding:14px;margin-bottom:16px"><div class="mono" style="font-size:11px;font-weight:700;color:var(--purp);margin-bottom:10px;text-transform:uppercase">🔍 Adjuster Intelligence (Optional)</div><div style="display:grid;grid-template-columns:1fr 1fr auto;gap:10px;align-items:end"><div><label style="display:block;font-size:10px;color:var(--dim);margin-bottom:3px;font-family:'JetBrains Mono',monospace">Adjuster Name</label><input type="text" id="adjNameField" placeholder="e.g. Jason Renard" style="width:100%;font-size:12px"></div><div><label style="display:block;font-size:10px;color:var(--dim);margin-bottom:3px;font-family:'JetBrains Mono',monospace">Carrier</label><input type="text" id="carrierField" placeholder="e.g. State Farm" style="width:100%;font-size:12px"></div><button style="padding:8px 16px;border-radius:6px;border:none;background:linear-gradient(135deg,#7B1FA2,#4A148C);color:#fff;font-size:11px;font-weight:700;cursor:pointer;font-family:'JetBrains Mono',monospace;white-space:nowrap" onclick="previewIntelLookup()">Preview Intel</button></div><div id="intelPreview" style="margin-top:8px;font-size:11px;color:var(--dim);line-height:1.5"></div><p style="font-size:10px;color:var(--dim);margin-top:6px">Looks up historical patterns from past rebuttals — win rates, most-challenged codes, successful defense codes. Optional but recommended.</p></div>`;
     
     h+=`<div class="mono" style="font-size:12px;font-weight:700;color:var(--red);margin:16px 0 8px;text-transform:uppercase">Adjuster's Pushback</div>`;
     h+=`<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:12px"><div style="border:2px dashed ${S.adjEst?'var(--red)':'var(--brd)'};border-radius:10px;padding:${S.adjEst?'16px':'24px 16px'};text-align:${S.adjEst?'left':'center'};cursor:pointer;background:${S.adjEst?'var(--s1)':'transparent'};transition:border-color .15s,background .15s" onclick="document.getElementById('adjF').click()" ondragover="dragOver(event)" ondragleave="dragLeave(event)" ondrop="dropFile(event,'adjEst')"><input type="file" id="adjF" accept=".pdf" style="display:none" onchange="if(this.files[0]){S.adjEst=this.files[0];draw()}">${S.adjEst?'<div style="display:flex;align-items:center;gap:10px"><span style="font-size:22">⚖️</span><div><p style="font-size:12px;font-weight:600;color:var(--red)">Adjuster estimate loaded</p><p style="font-size:11px;color:var(--dim);margin-top:2px">'+S.adjEst.name+'</p></div></div>':'<div style="font-size:24px;opacity:.4;margin-bottom:6px">⚖️</div><p style="font-size:12px;font-weight:600">Adjuster Xactimate</p><p style="font-size:11px;color:var(--dim);margin-top:4px">Drop PDF here or click to browse</p>'}</div>`;
@@ -1575,14 +1714,30 @@ function draw(){
     if(S.busy&&S.prog)h+=`<div style="margin-top:12px;padding:12px;border-radius:6px;background:var(--s1);border:1px solid rgba(232,147,12,0.2);display:flex;align-items:center;gap:10px"><div style="width:16px;height:16px;border:2px solid var(--acc);border-top-color:transparent;border-radius:50%;animation:spin .8s linear infinite"></div><span style="font-size:12px;color:var(--acc);font-family:'JetBrains Mono',monospace">${S.prog}</span></div>`;
 
     // Editable email draft
-    h+=`<div style="margin-top:24px;background:var(--s1);border:2px solid var(--brd);border-radius:12px;padding:20px"><div class="mono" style="font-size:14px;font-weight:700;margin-bottom:4px;color:var(--acc)">EMAIL DRAFT — Edit Before Sending</div><div style="font-size:11px;color:var(--dim);margin-bottom:12px">Review and edit the response letter below. Your changes will be included in the PDF and Albi note.</div><textarea id="adjLetterEdit" oninput="S.adjLetterEdited=this.value" style="width:100%;min-height:300px;border-color:var(--acc);font-size:12px;line-height:1.6;padding:14px;background:var(--s2);color:var(--txt);font-family:'DM Sans',sans-serif">${S.adjLetterEdited||ar.response_letter||''}</textarea></div>`;
+    // Format letter for display — convert plain text to styled HTML if needed
+    var letterContent=S.adjLetterEdited||ar.response_letter||'';
+    if(letterContent&&!letterContent.includes('<h3')&&!letterContent.includes('<strong')){
+      // Auto-format plain text into styled HTML
+      letterContent=letterContent
+        .replace(/^(DEFENDED ITEMS|CONCEDED ITEMS|FINANCIAL SUMMARY|SUMMARY.*PAYMENT.*REQUEST)/gm,'<h3 style="color:#1B2A4A;border-bottom:2px solid #1B2A4A;padding-bottom:4px;margin-top:16px">$1</h3>')
+        .replace(/(DISP-\d+)/g,'<strong style="color:#E65100">$1</strong>')
+        .replace(/(\$[\d,]+\.?\d*)/g,'<strong style="color:#C62828">$1</strong>')
+        .replace(/(IICRC S500[^.;,]*|IICRC S520[^.;,]*|OSHA 29 CFR[^.;,]*)/g,'<strong style="color:#1E88E5">$1</strong>')
+        .replace(/(WTR [A-Z]+|DMO [A-Z]+)/g,'<strong style="color:#1E88E5">$1</strong>')
+        .replace(/(Encircle[^.;]*(?:report|photo|section|Hydro|documentation)[^.;]*)/gi,'<em style="color:#7B1FA2">$1</em>')
+        .replace(/\n\n/g,'</p><p style="margin:8px 0">')
+        .replace(/\n/g,'<br>');
+      letterContent='<p style="margin:8px 0">'+letterContent+'</p>';
+    }
+
+    h+=`<div style="margin-top:24px;background:var(--s1);border:2px solid var(--brd);border-radius:12px;padding:20px"><div class="mono" style="font-size:14px;font-weight:700;margin-bottom:4px;color:var(--acc)">EMAIL DRAFT — Edit Before Sending</div><div style="font-size:11px;color:var(--dim);margin-bottom:12px">Review and edit the response letter below. Your changes will be included in the PDF and Albi note.</div><div id="adjLetterEdit" contenteditable="true" oninput="S.adjLetterEdited=this.innerHTML" style="width:100%;min-height:300px;border:2px solid var(--acc);border-radius:8px;font-size:12px;line-height:1.7;padding:14px;background:var(--s2);color:var(--txt);font-family:'DM Sans',sans-serif;overflow-y:auto;outline:none">${letterContent}</div></div>`;
     
     // Action buttons
     if(!S.adjDone){
       h+=`<div style="margin-top:20px;text-align:center"><button style="background:linear-gradient(135deg,#E53935,#C62828);border:none;color:#fff;padding:12px 28px;border-radius:8px;cursor:pointer;font-size:13px;font-weight:700;font-family:'JetBrains Mono',monospace" onclick="adjusterSignOff()">Finalize & Post to Albi</button></div>`;
     } else {
       h+=`<div style="background:var(--grnD);border:2px solid var(--grn);border-radius:12px;padding:20px;margin:20px 0;text-align:center"><div style="font-size:32px;margin-bottom:8px">✓</div><div class="mono" style="font-size:16px;font-weight:700;color:var(--grn)">Rebuttal Complete — Posted to Albi</div><div style="font-size:12px;color:var(--dim);margin-top:4px">Defending ${defended.length} items${conceded.length>0?' | Conceded '+conceded.length+' items':''}</div></div>`;
-      h+=`<div style="display:flex;gap:10px;justify-content:center;margin-top:20px;flex-wrap:wrap"><button style="background:linear-gradient(135deg,#E53935,#C62828);border:none;color:#fff;padding:10px 20px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600;font-family:'JetBrains Mono',monospace" onclick="generateAdjusterPDF()">Download Rebuttal PDF</button><button style="background:linear-gradient(135deg,#B71C1C,#880E0E);border:none;color:#fff;padding:10px 20px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600;font-family:'JetBrains Mono',monospace" onclick="generateAdjusterPDF();setTimeout(()=>window.open('https://drive.google.com/drive/folders/1ccxK-5ILFKCU2sw1YAf0-APhTLtKYjGT','_blank'),500)">PDF + Save to Drive</button><button style="background:var(--s2);border:1px solid var(--brdH);color:var(--txt);padding:10px 20px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600;font-family:'JetBrains Mono',monospace" onclick="navigator.clipboard.writeText(S.adjLetterEdited||S.adjResult?.response_letter||'')">Copy Email Draft</button><button style="background:transparent;border:1px solid var(--brd);color:var(--dim);padding:10px 20px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600;font-family:'JetBrains Mono',monospace" onclick="S.mode='landing';draw()">← Menu</button></div>`;
+      h+=`<div style="display:flex;gap:10px;justify-content:center;margin-top:20px;flex-wrap:wrap"><button style="background:linear-gradient(135deg,#E53935,#C62828);border:none;color:#fff;padding:10px 20px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600;font-family:'JetBrains Mono',monospace" onclick="generateAdjusterPDF()">Download Rebuttal PDF</button><button style="background:linear-gradient(135deg,#B71C1C,#880E0E);border:none;color:#fff;padding:10px 20px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600;font-family:'JetBrains Mono',monospace" onclick="generateAdjusterPDF();setTimeout(()=>window.open('https://drive.google.com/drive/folders/1ccxK-5ILFKCU2sw1YAf0-APhTLtKYjGT','_blank'),500)">PDF + Save to Drive</button><button style="background:var(--s2);border:1px solid var(--brdH);color:var(--txt);padding:10px 20px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600;font-family:'JetBrains Mono',monospace" onclick="var el=document.getElementById('adjLetterEdit');if(el){var html=el.innerHTML;var blob=new Blob([html],{type:'text/html'});var plain=el.innerText;navigator.clipboard.write([new ClipboardItem({'text/html':blob,'text/plain':new Blob([plain],{type:'text/plain'})}]).catch(()=>navigator.clipboard.writeText(plain))}">Copy Email Draft</button><button style="background:transparent;border:1px solid var(--brd);color:var(--dim);padding:10px 20px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600;font-family:'JetBrains Mono',monospace" onclick="S.mode='landing';draw()">← Menu</button></div>`;
     }
     a.innerHTML=h;return;
   }
