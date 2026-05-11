@@ -36,6 +36,132 @@
   .cat-chip { background: var(--card); border: 1px solid var(--line); border-radius: 999px; padding: 7px 14px; font-size: 12px; font-weight: 700; color: var(--navy); white-space: nowrap; cursor: pointer; flex-shrink: 0; }
   .cat-chip.on { background: var(--navy); color: #fff; border-color: var(--navy); }
 
+  /* External Links */
+  .ext-links {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 14px;
+    margin-bottom: 16px;
+  }
+  .ext-links-head { margin-bottom: 10px; }
+  .ext-links-title { font-size: 12px; font-weight: 800; color: var(--navy); text-transform: uppercase; letter-spacing: .8px; }
+  .ext-links-sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .ext-link-card {
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 10px 12px;
+    margin-bottom: 8px;
+  }
+  .ext-link-card:last-child { margin-bottom: 0; }
+  .ext-link-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-height: 32px;
+  }
+  .ext-link-icon { font-size: 20px; flex-shrink: 0; }
+  .ext-link-info { flex: 1; min-width: 0; }
+  .ext-link-label { font-size: 13px; font-weight: 700; color: var(--text); }
+  .ext-link-url {
+    font-size: 11px;
+    color: var(--orange);
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-decoration: none;
+    margin-top: 1px;
+  }
+  .ext-link-empty {
+    font-size: 11px;
+    color: var(--muted);
+    font-style: italic;
+  }
+  .ext-link-open {
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--navy);
+    text-decoration: none;
+    background: #fff;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 5px 9px;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+  .ext-link-edit {
+    background: #fff;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 5px 8px;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 12px;
+    flex-shrink: 0;
+  }
+  .ext-link-toggles {
+    display: flex;
+    gap: 16px;
+    margin-top: 8px;
+    flex-wrap: wrap;
+  }
+  .ext-link-toggles label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    color: var(--text-soft);
+    cursor: pointer;
+  }
+  .ext-link-toggles input[type="checkbox"] {
+    accent-color: var(--orange);
+    width: 16px;
+    height: 16px;
+    margin: 0;
+  }
+
+  /* Folder grid */
+  .folder-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 10px;
+    margin-bottom: 16px;
+  }
+  @media (min-width: 480px) {
+    .folder-grid { grid-template-columns: repeat(3, 1fr); }
+  }
+  .folder-card {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 16px 8px 12px;
+    text-align: center;
+    cursor: pointer;
+    transition: transform .1s, border-color .15s;
+    font-family: inherit;
+  }
+  .folder-card:active { transform: scale(.97); border-color: var(--orange); }
+  .folder-icon {
+    font-size: 36px;
+    line-height: 1;
+    margin-bottom: 8px;
+    filter: drop-shadow(0 1px 2px rgba(0,0,0,.08));
+  }
+  .folder-name {
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--navy);
+    line-height: 1.25;
+    margin-bottom: 4px;
+  }
+  .folder-count {
+    font-size: 10px;
+    color: var(--muted);
+    font-weight: 600;
+  }
+
   .doc-card-wrap {
     position: relative;
     margin-bottom: 8px;
@@ -857,9 +983,27 @@ const ALBI_DOC_DELETE_HOOK = 'https://hooks.zapier.com/hooks/catch/12653197/uves
 const sb = createClient(SB_URL, SB_ANON);
 
 const CATEGORIES = [
-  'Photos','Inspection Reports','Estimates','Invoices','Insurance Documents',
-  'Customer Documents','Subcontractor Documents','Receipts','Permits','Other',
+  'Estimate/Invoices',
+  'Insurance / COI',
+  'Permits',
+  'Photos',
+  'Customer Documents',
+  'Subcontractor Documents',
+  'Final Billing',
+  'Reports',
 ];
+
+// Folder icon emoji for visual mobile cards
+const CATEGORY_ICONS = {
+  'Estimate/Invoices': '📋',
+  'Insurance / COI': '🛡',
+  'Permits': '📜',
+  'Photos': '📷',
+  'Customer Documents': '👤',
+  'Subcontractor Documents': '🔧',
+  'Final Billing': '💵',
+  'Reports': '📊',
+};
 
 const params = new URLSearchParams(window.location.search);
 const projectId = params.get('p');
@@ -933,24 +1077,143 @@ function render() {
   });
   const cats = ['All', ...CATEGORIES.filter(c => catCounts[c])];
 
+  const p = state.project || {};
+  const showFolderGrid = state.filter === 'All';
   const filtered = state.filter === 'All' ? state.docs : state.docs.filter(d => d.category === state.filter);
 
-  document.getElementById('main').innerHTML = `
+  // External Links section
+  const extLinks = [
+    {
+      key: 'docusketch',
+      label: 'DocuSketch',
+      icon: '📐',
+      url: p.docusketch_url || '',
+      visCustomer: !!p.docusketch_visible_customer,
+      visContractor: p.docusketch_visible_contractor !== false,
+    },
+    {
+      key: 'hover',
+      label: 'Hover',
+      icon: '🏠',
+      url: p.hover_url || '',
+      visCustomer: !!p.hover_visible_customer,
+      visContractor: p.hover_visible_contractor !== false,
+    },
+  ];
+
+  const extLinksHtml = `
+    <div class="ext-links">
+      <div class="ext-links-head">
+        <div class="ext-links-title">External Links</div>
+        <div class="ext-links-sub">URLs to 3D scans and measurements</div>
+      </div>
+      ${extLinks.map(l => `
+        <div class="ext-link-card">
+          <div class="ext-link-row">
+            <span class="ext-link-icon">${l.icon}</span>
+            <div class="ext-link-info">
+              <div class="ext-link-label">${esc(l.label)}</div>
+              ${l.url
+                ? `<a href="${esc(l.url)}" target="_blank" class="ext-link-url" title="${esc(l.url)}">${esc(l.url)}</a>`
+                : '<span class="ext-link-empty">No URL set</span>'}
+            </div>
+            ${l.url ? `<a href="${esc(l.url)}" target="_blank" class="ext-link-open">Open ↗</a>` : ''}
+            <button class="ext-link-edit" data-edit-link="${l.key}" title="Edit URL">✏️</button>
+          </div>
+          <div class="ext-link-toggles">
+            <label><input type="checkbox" data-vis="${l.key}-customer" ${l.visCustomer ? 'checked' : ''}> Show customer</label>
+            <label><input type="checkbox" data-vis="${l.key}-contractor" ${l.visContractor ? 'checked' : ''}> Show contractors</label>
+          </div>
+        </div>
+      `).join('')}
+    </div>
+  `;
+
+  // Folder grid (shown when no filter applied)
+  const folderGridHtml = showFolderGrid ? `
+    <div class="folder-grid">
+      ${CATEGORIES.map(c => `
+        <button class="folder-card" data-folder="${esc(c)}">
+          <div class="folder-icon">${CATEGORY_ICONS[c] || '📁'}</div>
+          <div class="folder-name">${esc(c)}</div>
+          <div class="folder-count">${catCounts[c] || 0} files</div>
+        </button>
+      `).join('')}
+    </div>
+  ` : '';
+
+  // Filter chips (always rendered, useful when drilled into a folder)
+  const chipsHtml = `
     <div class="cat-row">
       ${cats.map(c => `<div class="cat-chip ${state.filter === c ? 'on' : ''}" data-cat="${esc(c)}">${esc(c)} (${catCounts[c] || 0})</div>`).join('')}
     </div>
-
-    ${filtered.length === 0 ? `
-      <div class="empty">
-        <div class="ico">📂</div>
-        <h3>No documents${state.filter === 'All' ? '' : ' in ' + state.filter}</h3>
-        <p>Tap "+ Upload" to add files.</p>
-      </div>
-    ` : filtered.map(docCard).join('')}
   `;
 
+  document.getElementById('main').innerHTML = `
+    ${extLinksHtml}
+    ${folderGridHtml}
+    ${chipsHtml}
+
+    ${state.filter === 'All' && filtered.length === 0 ? `
+      <div class="empty">
+        <div class="ico">📂</div>
+        <h3>No documents yet</h3>
+        <p>Tap a folder above, or "+ Upload" to add files.</p>
+      </div>
+    ` : (filtered.length === 0 ? `
+      <div class="empty">
+        <div class="ico">📂</div>
+        <h3>No documents in ${esc(state.filter)}</h3>
+        <p>Tap "+ Upload" to add files.</p>
+      </div>
+    ` : filtered.map(docCard).join(''))}
+  `;
+
+  // Wire folder cards
+  document.querySelectorAll('[data-folder]').forEach(card => {
+    card.addEventListener('click', () => {
+      state.filter = card.dataset.folder;
+      render();
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    });
+  });
+
+  // Wire filter chips
   document.querySelectorAll('.cat-chip').forEach(chip => {
     chip.addEventListener('click', () => { state.filter = chip.dataset.cat; render(); });
+  });
+
+  // Wire external link editors (pencil button → prompt for URL)
+  document.querySelectorAll('[data-edit-link]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const key = btn.dataset.editLink;
+      const label = key === 'docusketch' ? 'DocuSketch' : 'Hover';
+      const currentUrl = (state.project || {})[`${key}_url`] || '';
+      const newUrl = prompt(`${label} URL:`, currentUrl);
+      if (newUrl === null) return; // cancelled
+      const trimmed = newUrl.trim();
+      const { error } = await sb.from('rebuild_projects')
+        .update({ [`${key}_url`]: trimmed || null })
+        .eq('id', projectId);
+      if (error) { toast('Save failed: ' + error.message); return; }
+      state.project[`${key}_url`] = trimmed || null;
+      toast('✓ Saved');
+      render();
+    });
+  });
+
+  // Wire visibility toggles
+  document.querySelectorAll('[data-vis]').forEach(cb => {
+    cb.addEventListener('change', async (e) => {
+      const [key, who] = cb.dataset.vis.split('-');
+      const col = `${key}_visible_${who}`;
+      const { error } = await sb.from('rebuild_projects')
+        .update({ [col]: cb.checked })
+        .eq('id', projectId);
+      if (error) { toast('Update failed: ' + error.message); cb.checked = !cb.checked; return; }
+      state.project[col] = cb.checked;
+      toast('✓ Saved');
+    });
   });
 
   // Wire pencil markup buttons on image cards
