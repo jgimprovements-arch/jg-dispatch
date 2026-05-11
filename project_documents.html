@@ -64,6 +64,32 @@
   .doc-icon.pdf { background: rgba(214,69,69,.10); color: var(--red); }
   .doc-icon.img { background: rgba(74,144,226,.10); color: #4a90e2; }
   .doc-icon.doc { background: rgba(45,156,95,.10); color: var(--green); }
+
+  .doc-thumb-wrap {
+    position: relative;
+    width: 56px;
+    height: 56px;
+    flex-shrink: 0;
+  }
+  .doc-thumb {
+    width: 56px;
+    height: 56px;
+    border-radius: 10px;
+    object-fit: cover;
+    background: var(--bg);
+    border: 1px solid var(--line);
+    position: relative;
+    z-index: 2;
+  }
+  .doc-icon-fallback {
+    position: absolute;
+    inset: 0;
+    width: 56px;
+    height: 56px;
+    z-index: 1;
+  }
+  /* When thumb fails to load (network error, deleted), fallback shows through */
+  .doc-thumb-wrap.thumb-failed .doc-icon-fallback { z-index: 3; }
   .doc-info { flex: 1; min-width: 0; }
   .doc-name {
     font-weight: 700;
@@ -238,6 +264,26 @@
   }
   .markup-source-btn:active { background: rgba(255,255,255,.22); }
 
+  .markup-tools-preview {
+    border-top: 1px solid rgba(255,255,255,.1);
+    padding-top: 16px;
+  }
+  .tools-preview-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    justify-content: center;
+  }
+  .tools-preview-row span {
+    background: rgba(255,255,255,.08);
+    border: 1px solid rgba(255,255,255,.15);
+    padding: 5px 10px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 600;
+    color: rgba(255,255,255,.85);
+  }
+
   .markup-toolbar {
     background: #1a2540;
     border-top: 1px solid rgba(255,255,255,.1);
@@ -373,11 +419,11 @@
   <div class="markup-canvas-wrap" id="markupCanvasWrap">
     <!-- Step 1: Capture photo first -->
     <div class="markup-capture-step" id="markupCaptureStep">
-      <div style="text-align:center;color:#fff;">
+      <div style="text-align:center;color:#fff;max-width:400px;">
         <div style="font-size:64px;margin-bottom:12px;">📸</div>
         <h3 style="margin:0 0 6px;font-size:18px;">Take or choose a photo</h3>
-        <p style="font-size:13px;opacity:.7;margin:0 0 20px;">Then add markup, arrows, and notes</p>
-        <div style="display:flex;gap:10px;justify-content:center;">
+        <p style="font-size:13px;opacity:.7;margin:0 0 20px;">After capturing, you'll get markup tools to add notes and shapes</p>
+        <div style="display:flex;gap:10px;justify-content:center;margin-bottom:24px;">
           <label class="markup-source-btn" for="markup_camera_input">
             <div style="font-size:32px;">📷</div>
             <div>Camera</div>
@@ -388,6 +434,19 @@
             <div>Library</div>
             <input type="file" id="markup_library_input" accept="image/*" style="display:none;">
           </label>
+        </div>
+        <div class="markup-tools-preview">
+          <div style="font-size:10px;opacity:.5;text-transform:uppercase;letter-spacing:1px;font-weight:700;margin-bottom:8px;">Tools you'll get</div>
+          <div class="tools-preview-row">
+            <span>✏️ Pen</span>
+            <span>🩹 Eraser</span>
+            <span>T Text</span>
+            <span>↗ Arrow</span>
+            <span>▭ Box</span>
+            <span>◯ Circle</span>
+            <span>🎨 Colors</span>
+            <span>↶ Undo</span>
+          </div>
         </div>
       </div>
     </div>
@@ -529,11 +588,26 @@ function render() {
 function docCard(d) {
   const isPdf = /pdf/i.test(d.mime_type || '') || /\.pdf$/i.test(d.filename || '');
   const isImg = /image/i.test(d.mime_type || '') || /\.(jpe?g|png|gif|webp)$/i.test(d.filename || '');
-  const iconClass = isPdf ? 'pdf' : (isImg ? 'img' : 'doc');
-  const icon = isPdf ? '📄' : (isImg ? '🖼' : '📋');
+
+  // Build the thumb slot
+  let thumbHtml;
+  if (isImg && d.file_url) {
+    // Supabase transformation: insert /render/image/public/ path
+    // Original URL: https://xxx.supabase.co/storage/v1/object/public/rebuild-documents/foo.png
+    // Thumb URL:    https://xxx.supabase.co/storage/v1/render/image/public/rebuild-documents/foo.png?width=120&height=120&resize=cover
+    const thumbUrl = d.file_url.replace('/storage/v1/object/public/', '/storage/v1/render/image/public/') + '?width=120&height=120&resize=cover&quality=70';
+    thumbHtml = `<img src="${esc(thumbUrl)}" alt="" class="doc-thumb" loading="lazy" decoding="async" onerror="this.parentElement.classList.add('thumb-failed');this.style.display='none';">`;
+  } else if (isPdf) {
+    thumbHtml = `<div class="doc-icon pdf">📄</div>`;
+  } else {
+    thumbHtml = `<div class="doc-icon doc">📋</div>`;
+  }
+
+  const icon = isImg ? `<div class="doc-icon img doc-icon-fallback">🖼</div>${thumbHtml}` : thumbHtml;
+
   return `
     <a href="${esc(d.file_url || '#')}" target="_blank" class="doc-card">
-      <div class="doc-icon ${iconClass}">${icon}</div>
+      <div class="doc-thumb-wrap">${icon}</div>
       <div class="doc-info">
         <div class="doc-name">${esc(d.filename || 'Untitled')}</div>
         <div class="doc-meta"><span class="doc-cat-pill">${esc(d.category || '')}</span>${fmtDate(d.uploaded_at)}${d.file_size_bytes ? ' · ' + fmtBytes(d.file_size_bytes) : ''}</div>
@@ -727,8 +801,8 @@ async function handleMarkupSource(e) {
   const wrap = document.getElementById('markupCanvasWrap');
   const wrapW = wrap.clientWidth;
   const wrapH = wrap.clientHeight;
-  // Use a higher internal resolution for crisp drawing, max ~2400px
-  const maxDim = 2400;
+  // Use a higher internal resolution for crisp drawing, max ~1600px
+  const maxDim = 1600;
   const ratio = img.width / img.height;
   let cw = img.width, ch = img.height;
   if (cw > maxDim) { cw = maxDim; ch = cw / ratio; }
@@ -986,18 +1060,18 @@ async function saveMarkupAndUpload() {
   saveBtn.textContent = 'Saving…';
 
   try {
-    // Flatten canvas to PNG blob
-    const blob = await new Promise(res => markup.canvas.toBlob(res, 'image/png', 0.92));
+    // Flatten canvas to JPEG blob (smaller than PNG, fine for photos)
+    const blob = await new Promise(res => markup.canvas.toBlob(res, 'image/jpeg', 0.85));
     if (!blob) { toast('Save failed'); saveBtn.textContent = orig; saveBtn.disabled = false; return; }
 
     const p = state.project;
     const ts = new Date();
     const tsCode = `${ts.getFullYear()}${String(ts.getMonth()+1).padStart(2,'0')}${String(ts.getDate()).padStart(2,'0')}-${String(ts.getHours()).padStart(2,'0')}${String(ts.getMinutes()).padStart(2,'0')}${String(ts.getSeconds()).padStart(2,'0')}`;
-    const filename = `Markup_${p.albi_job_number || 'project'}_${tsCode}.png`;
+    const filename = `Markup_${p.albi_job_number || 'project'}_${tsCode}.jpg`;
     const path = `projects/${projectId}/${Date.now()}-${filename}`;
 
     const { error: upErr } = await sb.storage.from('rebuild-documents').upload(path, blob, {
-      contentType: 'image/png',
+      contentType: 'image/jpeg',
       upsert: false,
     });
     if (upErr) { console.error(upErr); toast('Upload failed'); saveBtn.textContent = orig; saveBtn.disabled = false; return; }
@@ -1009,7 +1083,7 @@ async function saveMarkupAndUpload() {
       filename,
       file_url: urlData.publicUrl,
       file_size_bytes: blob.size,
-      mime_type: 'image/png',
+      mime_type: 'image/jpeg',
       uploaded_by_email: 'mobile-pwa@jg-restoration.com',
       push_status: 'pending',
     }).select();
@@ -1028,7 +1102,7 @@ async function saveMarkupAndUpload() {
             category: 'Photos',
             filename,
             file_url: urlData.publicUrl,
-            mime_type: 'image/png',
+            mime_type: 'image/jpeg',
             notes: 'Photo with markup from mobile PWA',
           }),
           mode: 'no-cors',
@@ -1058,6 +1132,13 @@ document.getElementById('markupCancel').addEventListener('click', () => {
   closeMarkupEditor();
 });
 document.getElementById('markupSave').addEventListener('click', saveMarkupAndUpload);
+
+// Auto-open markup editor on deep-link from project_detail.html
+const autoAction = new URLSearchParams(location.search).get('action');
+if (autoAction === 'capture') {
+  // Wait for init to settle so state is ready
+  setTimeout(() => openMarkupEditor(), 200);
+}
 
 init();
 </script>
