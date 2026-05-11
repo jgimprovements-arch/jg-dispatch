@@ -225,13 +225,25 @@ You will be GIVEN structured extraction data. Use it as your source of truth —
 
 JUDGMENT RULES (apply these — the code filter handles edge cases):
 
+CATEGORY UPGRADE DETECTION (CRITICAL) — Per IICRC S500 Section 4.2, Category 1 water that has been allowed to deteriorate or has contacted contaminated materials MUST be reclassified as Category 2. The estimator may have billed conservatively as Cat 1 when evidence supports Cat 2. Flag a HIGH severity gap titled "Water Category Should Be Upgraded — Cat 1 → Cat 2" when the job is billed as Category 1 but ANY of the following are present in Encircle:
+- Drying time exceeded 48 hours from date_of_loss to mitigation start
+- Drywall, insulation, carpet pad, or other porous materials were removed (deterioration indicator)
+- Antimicrobial (WTR GRMB) was applied or billed (contradicts Cat 1 classification)
+- Source of loss is sump pump, sewer backup, basement flood, exterior groundwater, washing machine drain, dishwasher drain, toilet supply (clean) where line contacted floor, or any source involving subgrade contact
+- Encircle photos show visible contamination, debris, or discoloration
+- Encircle scope_notes mention "decontamination", "decon", "contaminated", or similar
+- Equipment placed > 3 days indicates the contamination spread or materials deteriorated
+This is the highest-leverage gap for JG revenue — Cat 2 unlocks antimicrobial billing on ALL affected surfaces, PPE billing, and stronger justification for demolition scope. Reference: IICRC S500 Section 4.2 Category Classification and Section 12.5.3 Antimicrobial Application.
+
+5+ DAY EQUIPMENT REDUCTION POLICY (JG SPECIFIC) — JG Restoration reduces equipment billing when calendar drying time exceeds 5 days. When Encircle shows equipment onsite > 5 calendar days AND billed equipment-days are less than calendar days, DO NOT flag this as underbilling. This is intentional JG billing policy: days 1-5 are billed at full rate, days 6+ may be reduced based on whether drying goals were met or equipment was left for tech-routing convenience. Only flag equipment-day shortfalls when Encircle drying span is 5 days or less.
+
 LABOR MINIMUMS ARE NEVER BILLABLE — do NOT flag missing minimum-hour charges, trip charges, 1-hour minimums, half-hour minimums, or any minimum labor gap. JG bills actual hours from the activity log, never a floor. Skip these entirely.
 
 UNDERBILLING — flag aggressively:
-- Equipment days: if Encircle shows equipment onsite N days but estimate bills < N days
+- Equipment days: if Encircle shows equipment onsite N days (where N ≤ 5) but estimate bills < N days. For jobs with calendar drying > 5 days, see the 5+ DAY EQUIPMENT REDUCTION POLICY above — do not flag those.
 - Equipment count: if Encircle photos show more units than billed
 - Monitoring: JG bills monitoring labor based on ACTUAL VISIT DAYS, not calendar days equipment was onsite. Count the distinct dates in Encircle moisture_readings (and physical-visit photos). Multiply by 1.5 hrs/day × WTR EQ. If Encircle shows readings on 3 distinct dates, monitoring = 4.5 hrs. Do NOT use placement-to-removal calendar span — JG techs frequently skip non-visit days and bill only when onsite.
-- Anti-microbial (WTR GRMB): required on ALL surfaces in Cat 2+ rooms
+- Anti-microbial (WTR GRMB): required on ALL surfaces in Cat 2+ rooms. For Cat 1 jobs, check first whether the category should be upgraded (see CATEGORY UPGRADE DETECTION above) — if the job is truly Cat 1 with no upgrade indicators, do NOT flag missing antimicrobial.
 - Drying holes: 2 per LF of affected wall (covered by WTR DRYWLS flood cuts)
 - After-hours: ONLY flag missing WTR LABA rate when the INITIAL response on the date of loss happened outside business hours. Business hours: Mon-Fri 7:30 AM - 4:00 PM Central. Do NOT flag mid-job timestamps (techs finishing a job at 4:30 PM is not after-hours dispatch). Only flag when (a) date_of_loss falls on Saturday or Sunday, OR (b) the EARLIEST timestamp on the day-of-loss is before 7:30 AM or after 4:00 PM.
 - Emergency service call: ONLY flag if date_of_loss_after_hours=true AND no emergency call line item exists. Do NOT flag if any emergency-call line item is already billed (regardless of rate).
@@ -459,6 +471,142 @@ function auditSalesTax(extracted, auditResult) {
     auditResult._tax_audit = {missed_tax: missedTax, lines: taxableUnpaid};
   }
 
+  return auditResult;
+}
+
+// ══ CATEGORY UPGRADE DETECTION (S500 §4.2) ══
+// Cat 1 water that deteriorates or contacts contaminated materials must be
+// reclassified as Cat 2. This is THE highest-leverage gap for JG revenue
+// because Cat 2 unlocks antimicrobial billing on every affected surface.
+// We're aggressive here: if ANY indicator is present, flag the upgrade.
+function auditCategoryUpgrade(extracted, auditResult) {
+  const cat = String(extracted.job_info?.water_category || '').trim().toLowerCase();
+  // Only run if billed as Cat 1
+  const isCat1 = cat === '1' || cat === 'i' || cat === 'category 1' || cat === 'cat 1' || cat.startsWith('1 ') || cat === '';
+  if (!isCat1) return auditResult;
+
+  const indicators = [];
+  const lineCodes = (extracted.estimate?.line_items || []).map(li => (li.code||'').toUpperCase().trim());
+  const lineDescs = (extracted.estimate?.line_items || []).map(li => (li.description||'').toLowerCase()).join(' | ');
+  const source = String(extracted.job_info?.source_of_loss || '').toLowerCase();
+  const scopeNotes = (extracted.encircle?.scope_notes || []).map(n => (n.text||'').toLowerCase()).join(' ');
+  const dryingDays = Number(extracted.encircle?.drying_days || 0);
+  const photoCount = (extracted.encircle?.content_manipulation_photos || []).length +
+                     (extracted.encircle?.dumpster_or_debris || []).length;
+
+  // Indicator 1: Antimicrobial was applied (contradicts Cat 1)
+  if (lineCodes.some(c => c.includes('GRMB') || c.includes('ANTI'))) {
+    indicators.push('antimicrobial billed/applied (contradicts Cat 1 classification)');
+  }
+  // Indicator 2: Demolition of porous materials (deterioration evidence)
+  if (lineCodes.some(c => c.includes('DRYWS') || c.includes('DRYWLS') || c.includes('INSS') || c.includes('PADS'))) {
+    indicators.push('porous materials removed (drywall/insulation/pad — deterioration evidence)');
+  }
+  // Indicator 3: Source of loss is contamination-likely
+  const contamSources = ['sump', 'sewer', 'sewage', 'basement flood', 'groundwater', 'ground water',
+                          'washing machine drain', 'dishwasher drain', 'subgrade', 'crawlspace',
+                          'septic', 'toilet overflow', 'flood', 'storm water', 'rain water through'];
+  for (const ck of contamSources) {
+    if (source.includes(ck)) {
+      indicators.push('source of loss involves subgrade/contamination contact ("' + source + '")');
+      break;
+    }
+  }
+  // Indicator 4: Drying span > 48 hours OR equipment placed > 3 days (deterioration)
+  if (dryingDays > 3) {
+    indicators.push('drying span of ' + dryingDays + ' days exceeds 48-hour Cat 1 deterioration threshold');
+  }
+  // Indicator 5: Scope notes mention contamination/decon work
+  if (/decontaminat|decon\b|contaminat|sewage|black water|gray water|grey water/.test(scopeNotes)) {
+    indicators.push('scope notes reference contamination or decon work');
+  }
+  // Indicator 6: After-hours emergency response (suggests urgent contamination response)
+  if (extracted.job_info?.date_of_loss_after_hours === true) {
+    // Not standalone — only counts if combined with another indicator
+  }
+
+  if (indicators.length === 0) return auditResult;
+
+  // Build the gap. Estimate antimicrobial revenue across all rooms.
+  const rooms = extracted.encircle?.rooms || [];
+  let totalAffectedSF = 0;
+  for (const r of rooms) { totalAffectedSF += Number(r.sf_affected) || 0; }
+  // Fallback estimate if rooms missing SF
+  if (totalAffectedSF === 0) {
+    const eqByRoom = extracted.encircle?.equipment_by_room || [];
+    totalAffectedSF = eqByRoom.length * 150; // crude: 150 SF per affected room
+  }
+  const grmbValue = +(totalAffectedSF * 0.38).toFixed(2);
+
+  const gap = {
+    id: 'GAP-CATUP-001',
+    category: 'UNDERBILLED',
+    severity: 'HIGH',
+    xact_code: 'WTR GRMB',
+    description: 'Water Category Should Be Upgraded — Cat 1 → Cat 2. ' +
+                 indicators.length + ' indicator(s) of contamination/deterioration found in Encircle: ' +
+                 indicators.join('; ') + '. Per IICRC S500 §4.2, Cat 1 water that deteriorates or contacts ' +
+                 'contaminated materials must be reclassified. Upgrade enables WTR GRMB antimicrobial on all ' +
+                 'affected surfaces (~' + totalAffectedSF + ' SF) plus PPE billing and stronger demo justification.',
+    recommended_qty: totalAffectedSF,
+    unit: 'SF',
+    unit_cost: 0.38,
+    estimated_value: '$' + grmbValue.toFixed(2) + ' antimicrobial + PPE/scope',
+    encircle_evidence: 'See indicators above — full evidence in Encircle photos and scope notes',
+    encircle_page: 0,
+    xactimate_current: 'Billed as Category 1, no antimicrobial line items',
+    standard_reference: 'IICRC S500 §4.2 + §12.5.3',
+    standard_text: 'Category 1 water that has been allowed to deteriorate (>48 hrs) or has contacted contaminated materials shall be reclassified as Category 2. All Cat 2 surfaces require antimicrobial treatment. Reclassification at the time of estimating is the responsibility of the IICRC-certified restorer based on field documentation.'
+  };
+  auditResult.gaps = auditResult.gaps || [];
+  auditResult.gaps.unshift(gap); // put at top — highest priority
+  auditResult._cat_upgrade = { indicators, estimated_grmb_sf: totalAffectedSF, estimated_value: grmbValue };
+  console.log('[cat-upgrade] Flagged Cat 1 → Cat 2 with ' + indicators.length + ' indicators:', indicators);
+
+  return auditResult;
+}
+
+// ══ 5+ DAY EQUIPMENT REDUCTION SUPPRESSION ══
+// JG bills days 1-5 at full rate, then reduces on extended jobs.
+// When equipment-day shortfall is on a job > 5 calendar days, suppress
+// equipment-day gaps — that's the policy, not a billing miss.
+function auditEquipmentReductionSuppress(extracted, auditResult) {
+  const dryingDays = Number(extracted.encircle?.drying_days || 0);
+  const eqByRoom = extracted.encircle?.equipment_by_room || [];
+  let maxDays = dryingDays;
+  for (const eq of eqByRoom) {
+    if (Number(eq.days_onsite) > maxDays) maxDays = Number(eq.days_onsite);
+  }
+  // Only suppress if calendar span exceeds 5 days
+  if (maxDays <= 5) return auditResult;
+
+  const gaps = auditResult.gaps || [];
+  const filtered = [];
+  const suppressed = [];
+
+  for (const g of gaps) {
+    const desc = (g.description || '').toLowerCase();
+    const code = (g.xact_code || '').toUpperCase();
+    // Only equipment-day related: WTR DRY+, WTR DRY, WTR DHM>, WTR DHM>>, WTR NAFAN
+    const isEquipDayCode = /WTR (DRY\+?|DHM>>?|NAFAN)/.test(code);
+    // Equipment-day shortfall keywords
+    const isEquipDayGap = isEquipDayCode &&
+      (/equipment day|ea[- ]day|onsite \d+ day|underbilled/.test(desc) ||
+       /\d+\s*(ea|days?)\s*\b(billed|missing|underbilled|short)/.test(desc));
+
+    if (isEquipDayGap) {
+      suppressed.push({ ...g, suppressed_reason: 'JG 5+ day equipment reduction policy (calendar span: ' + maxDays + ' days)' });
+      console.log('[5day-reduction] Suppressed equipment-day gap on ' + maxDays + '-day job:', g.id, g.description?.slice(0,80));
+      continue;
+    }
+    filtered.push(g);
+  }
+
+  auditResult.gaps = filtered;
+  if (suppressed.length > 0) {
+    auditResult._5day_reduction = { calendar_days: maxDays, suppressed_count: suppressed.length };
+    auditResult._suppressed = (auditResult._suppressed || []).concat(suppressed);
+  }
   return auditResult;
 }
 
@@ -907,8 +1055,10 @@ async function runPass1(){
     S.prog='Applying JG billing rules...';draw();
     audit=applyBillingRules(extracted,audit);
     audit=auditSalesTax(extracted,audit);
+    audit=auditCategoryUpgrade(extracted,audit);
     audit=auditEquipmentAlignment(extracted,audit);
     audit=auditOrphanEquipment(extracted,audit);
+    audit=auditEquipmentReductionSuppress(extracted,audit);
 
     // Merge job_info and estimate_submitted from extracted into audit for compat with rest of UI
     audit.job_info=extracted.job_info||{};
