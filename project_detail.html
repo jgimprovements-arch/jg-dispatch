@@ -292,6 +292,91 @@
   .capture-title { font-size: 16px; font-weight: 800; letter-spacing: -.1px; line-height: 1.1; }
   .capture-sub { font-size: 12px; opacity: .9; margin-top: 2px; }
   .capture-arrow { width: 18px; height: 18px; opacity: .7; flex-shrink: 0; }
+
+  /* Add Note button (similar layout to capture-btn, navy theme) */
+  .note-btn {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    width: 100%;
+    background: var(--navy);
+    color: #fff;
+    border: 0;
+    border-radius: 14px;
+    padding: 14px 18px;
+    text-decoration: none;
+    margin-top: 8px;
+    box-shadow: 0 6px 18px rgba(13,45,94,.18);
+    transition: transform .15s, box-shadow .15s;
+    cursor: pointer;
+    font-family: inherit;
+    text-align: left;
+  }
+  .note-btn:active {
+    transform: scale(.98);
+    box-shadow: 0 3px 10px rgba(13,45,94,.18);
+  }
+
+  /* Note bottom sheet */
+  .sheet-back { position: fixed; inset: 0; background: rgba(13,45,94,.5); z-index: 100; display: none; align-items: flex-end; }
+  .sheet-back.on { display: flex; }
+  .note-sheet {
+    background: var(--card);
+    width: 100%;
+    max-width: 720px;
+    margin: 0 auto;
+    border-radius: 18px 18px 0 0;
+    padding: 18px 16px calc(var(--safe-bottom) + 18px);
+    box-shadow: 0 -8px 32px rgba(13,45,94,.3);
+    max-height: 92vh;
+    overflow-y: auto;
+    animation: sheetUp .25s ease-out;
+  }
+  @keyframes sheetUp { from { transform: translateY(100%); } to { transform: translateY(0); } }
+  .note-sheet h3 { margin: 0 0 14px; color: var(--navy); font-size: 17px; font-weight: 800; display: flex; justify-content: space-between; align-items: center; }
+  .note-sheet .close-x { background: var(--bg); border: 0; border-radius: 50%; width: 32px; height: 32px; font-size: 18px; cursor: pointer; color: var(--muted); }
+  .note-sheet textarea {
+    width: 100%;
+    border: 1px solid var(--line);
+    background: #fff;
+    border-radius: 9px;
+    padding: 12px 14px;
+    font-size: 14px;
+    font-family: inherit;
+    color: var(--text);
+    min-height: 140px;
+    resize: vertical;
+    line-height: 1.4;
+  }
+  .note-sheet textarea:focus { outline: none; border-color: var(--orange); }
+  .note-sheet .opts {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 0;
+    font-size: 13px;
+    color: var(--text);
+  }
+  .note-sheet .opts label { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+  .note-sheet .opts input { accent-color: var(--orange); width: 18px; height: 18px; }
+  .note-sheet .actions { display: flex; gap: 8px; margin-top: 14px; }
+  .sheet-btn {
+    flex: 1;
+    padding: 12px;
+    border-radius: 999px;
+    font-size: 14px;
+    font-weight: 700;
+    cursor: pointer;
+    border: 1px solid transparent;
+    font-family: inherit;
+  }
+  .sheet-btn.primary { background: var(--orange); color: #fff; border-color: var(--orange); }
+  .sheet-btn.primary:disabled { opacity: .5; }
+  .sheet-btn.ghost { background: var(--bg); color: var(--navy); border-color: var(--line); }
+
+  /* Toast */
+  .toast { position: fixed; bottom: 90px; left: 50%; transform: translateX(-50%); background: var(--navy); color: #fff; padding: 10px 20px; border-radius: 999px; font-size: 13px; font-weight: 600; box-shadow: 0 4px 16px rgba(13,45,94,.3); z-index: 200; opacity: 0; transition: opacity .2s; pointer-events: none; }
+  .toast.on { opacity: 1; }
   .section-btn {
     background: var(--card);
     border: 1px solid var(--line);
@@ -388,12 +473,33 @@
   <div class="loading">Loading project…</div>
 </main>
 
+<div class="toast" id="toast"></div>
+
+<!-- Add Note bottom sheet -->
+<div class="sheet-back" id="noteSheetBack">
+  <div class="note-sheet">
+    <h3>Add Note <button class="close-x" id="closeNoteSheet">×</button></h3>
+    <textarea id="noteSheetText" placeholder="What's happening on this job? Material status, customer conversation, blocker, observation…"></textarea>
+    <div class="opts">
+      <label><input type="checkbox" id="notePushAlbi" checked> Push to Albi</label>
+      <label><input type="checkbox" id="noteCustomerVisible"> Customer-visible</label>
+    </div>
+    <div class="actions">
+      <button class="sheet-btn ghost" id="cancelNoteSheet">Cancel</button>
+      <button class="sheet-btn primary" id="noteSheetSave" disabled>Post Note</button>
+    </div>
+  </div>
+</div>
+
 <script type="module">
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
 const SB_URL = 'https://nuykvchgecpiuikoerze.supabase.co';
 const SB_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im51eWt2Y2hnZWNwaXVpa29lcnplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYyNjM3ODYsImV4cCI6MjA5MTgzOTc4Nn0.39hZ8DdjT_0iFJXPeAL2FXUSLw8FZBirDVzxZTO1W9s';
 const sb = createClient(SB_URL, SB_ANON);
+
+// Module-scoped state for cross-function access
+const state = { project: null };
 
 const params = new URLSearchParams(window.location.search);
 const projectId = params.get('p');
@@ -422,6 +528,7 @@ async function init() {
     showError('Project not found', 'It may have been deleted or you may not have access.');
     return;
   }
+  state.project = project;
 
   // Pull counts in parallel for badges
   const [phases, wos, sels, docs, msgs] = await Promise.all([
@@ -539,6 +646,17 @@ function render(p, counts) {
       <svg class="capture-arrow" viewBox="0 0 24 24" fill="currentColor"><path d="M9 6l6 6-6 6"/></svg>
     </a>
 
+    <button class="note-btn" id="addNoteBtn">
+      <svg class="capture-ico" viewBox="0 0 24 24" fill="currentColor">
+        <path d="M14.06 9.02l.92.92L5.92 19H5v-.92l9.06-9.06M17.66 3c-.25 0-.51.1-.7.29l-1.83 1.83 3.75 3.75 1.83-1.83c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.2-.2-.45-.29-.71-.29zm-3.6 3.19L3 17.25V21h3.75L17.81 9.94l-3.75-3.75z"/>
+      </svg>
+      <div class="capture-text">
+        <div class="capture-title">Add Note</div>
+        <div class="capture-sub">Posts to project journal + Albi feed</div>
+      </div>
+      <svg class="capture-arrow" viewBox="0 0 24 24" fill="currentColor"><path d="M9 6l6 6-6 6"/></svg>
+    </button>
+
     <div class="section-label">Project Sections</div>
     <div class="section-grid">
       <a href="project_schedule.html?p=${p.id}" class="section-btn">
@@ -598,6 +716,113 @@ document.getElementById('backBtn').addEventListener('click', (e) => {
     location.href = 'project.html';
   }
 });
+
+// ════════════════ ADD NOTE ════════════════
+const ALBI_NOTE_HOOK = 'https://hooks.zapier.com/hooks/catch/12653197/uvugxag/';
+
+function toast(msg) {
+  const t = document.getElementById('toast');
+  if (!t) { console.log(msg); return; }
+  t.textContent = msg;
+  t.classList.add('on');
+  setTimeout(() => t.classList.remove('on'), 2200);
+}
+
+function openNoteSheet() {
+  document.getElementById('noteSheetBack').classList.add('on');
+  const ta = document.getElementById('noteSheetText');
+  ta.value = '';
+  document.getElementById('noteCustomerVisible').checked = false;
+  document.getElementById('notePushAlbi').checked = true;
+  document.getElementById('noteSheetSave').disabled = true;
+  setTimeout(() => ta.focus(), 100);
+}
+function closeNoteSheet() {
+  document.getElementById('noteSheetBack').classList.remove('on');
+}
+
+async function saveNote() {
+  const body = document.getElementById('noteSheetText').value.trim();
+  if (!body) return;
+  const customerVisible = document.getElementById('noteCustomerVisible').checked;
+  const pushAlbi = document.getElementById('notePushAlbi').checked;
+  const p = state.project;
+  if (!p) return;
+
+  const saveBtn = document.getElementById('noteSheetSave');
+  saveBtn.disabled = true;
+  saveBtn.textContent = 'Posting…';
+
+  let user = null;
+  try { user = JSON.parse(localStorage.getItem('jg_platform_user') || 'null'); } catch {}
+  const email = (user?.email || 'mobile-pwa@jg-restoration.com').toLowerCase();
+  const name = user?.name || email.split('@')[0];
+
+  // Insert journal entry
+  const { error } = await sb.from('rebuild_journal_entries').insert({
+    project_id: p.id,
+    body,
+    author_email: email,
+    author_name: name,
+    author_role: 'field',
+    customer_visible: customerVisible,
+  });
+  if (error) {
+    console.error(error);
+    toast('Post failed: ' + error.message);
+    saveBtn.disabled = false;
+    saveBtn.textContent = 'Post Note';
+    return;
+  }
+
+  // Push to Albi if requested
+  if (pushAlbi && p.albi_project_id) {
+    try {
+      await fetch(ALBI_NOTE_HOOK, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          project_id: p.id,
+          albi_project_id: p.albi_project_id,
+          albi_job_number: p.albi_job_number,
+          note_text: body,
+          author_name: name,
+          author_email: email,
+          source: 'mobile-pwa',
+        }),
+        mode: 'no-cors',
+      });
+    } catch (e) {
+      console.warn('Albi note push failed:', e);
+    }
+  }
+
+  toast('Note posted');
+  saveBtn.textContent = 'Post Note';
+  closeNoteSheet();
+}
+
+// Wire after DOMContentLoaded (already loaded by now via script position)
+document.getElementById('addNoteBtn').addEventListener('click', openNoteSheet);
+document.getElementById('closeNoteSheet').addEventListener('click', closeNoteSheet);
+document.getElementById('cancelNoteSheet').addEventListener('click', closeNoteSheet);
+document.getElementById('noteSheetBack').addEventListener('click', (e) => { if (e.target.id === 'noteSheetBack') closeNoteSheet(); });
+document.getElementById('noteSheetText').addEventListener('input', (e) => {
+  document.getElementById('noteSheetSave').disabled = !e.target.value.trim();
+});
+document.getElementById('noteSheetSave').addEventListener('click', saveNote);
+
+// Auto-open if deep-linked
+const autoAction = new URLSearchParams(location.search).get('action');
+if (autoAction === 'note') {
+  // Need to wait for init() to set state.project
+  const waitForProject = setInterval(() => {
+    if (state && state.project) {
+      clearInterval(waitForProject);
+      setTimeout(() => openNoteSheet(), 100);
+    }
+  }, 150);
+}
 
 init();
 </script>
