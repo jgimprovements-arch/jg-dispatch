@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0d2d5e">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Work Orders · JG Restoration</title>
+<link rel="icon" href="https://jgimprovements-arch.github.io/jg-dispatch/logo.png">
+<link rel="manifest" href="manifest.json">
+<style>
+  :root {
+    --navy: #0d2d5e; --orange: #e85d04; --gold: #f5a623; --green: #2d9c5f; --red: #d64545;
+    --bg: #f4f6fb; --card: #ffffff; --text: #1a2540; --muted: #7884a0; --line: #e3e7f0;
+    --safe-top: env(safe-area-inset-top, 0px);
+    --safe-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--text); }
+
+  .topbar { background: linear-gradient(135deg, #0d2d5e 0%, #1a4080 100%); color: #fff; padding: calc(var(--safe-top) + 14px) 16px 14px; display: flex; align-items: center; gap: 10px; box-shadow: 0 2px 12px rgba(13,45,94,.25); position: sticky; top: 0; z-index: 10; }
+  .back-btn { background: rgba(255,255,255,.12); border: 1px solid rgba(255,255,255,.2); color: #fff; border-radius: 999px; width: 36px; height: 36px; display: flex; align-items: center; justify-content: center; font-size: 18px; text-decoration: none; flex-shrink: 0; }
+  .back-btn:active { background: rgba(255,255,255,.22); }
+  .title { flex: 1; min-width: 0; }
+  .title h1 { margin: 0; font-size: 15px; font-weight: 800; }
+  .title .sub { font-size: 10px; opacity: .8; letter-spacing: .8px; text-transform: uppercase; }
+
+  main { padding: 14px 14px calc(var(--safe-bottom) + 28px); max-width: 720px; margin: 0 auto; }
+
+  .wo-card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; margin-bottom: 10px; }
+  .wo-card.signed { border-left: 4px solid var(--green); padding-left: 13px; }
+  .wo-card.sent { border-left: 4px solid var(--gold); padding-left: 13px; }
+  .wo-card.draft { border-left: 4px solid var(--muted); padding-left: 13px; }
+  .wo-card.converted_to_po { border-left: 4px solid #4a90e2; padding-left: 13px; }
+  .wo-card.invoice_received { border-left: 4px solid var(--green); padding-left: 13px; }
+
+  .wo-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; margin-bottom: 8px; }
+  .wo-sub-name { font-size: 15px; font-weight: 800; color: var(--navy); letter-spacing: -.1px; }
+  .wo-version { font-size: 10px; color: var(--muted); font-weight: 700; margin-bottom: 2px; }
+  .status-pill { font-size: 10px; font-weight: 700; padding: 3px 9px; border-radius: 999px; text-transform: uppercase; letter-spacing: .4px; white-space: nowrap; }
+  .wo-amount { font-size: 18px; font-weight: 800; color: var(--orange); margin: 6px 0; }
+  .wo-meta { font-size: 12px; color: var(--muted); margin-bottom: 8px; line-height: 1.4; }
+  .wo-meta b { color: var(--navy); font-weight: 600; }
+
+  .wo-info-row {
+    background: var(--bg);
+    border-radius: 8px;
+    padding: 8px 12px;
+    margin: 8px 0;
+    font-size: 12px;
+    color: var(--text);
+    line-height: 1.5;
+  }
+  .wo-info-row b { color: var(--navy); }
+  .wo-info-row.signed { background: rgba(45,156,95,.10); }
+  .wo-info-row.po { background: rgba(74,144,226,.10); }
+  .wo-info-row.invoice { background: rgba(45,156,95,.15); }
+
+  .wo-actions { display: flex; gap: 6px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); flex-wrap: wrap; }
+  .wo-action { flex: 1; min-width: 100px; background: var(--bg); border: 1px solid var(--line); color: var(--navy); border-radius: 999px; padding: 8px 10px; font-size: 12px; font-weight: 700; text-align: center; cursor: pointer; font-family: inherit; }
+  .wo-action:active { background: var(--orange); color: #fff; border-color: var(--orange); }
+  .wo-action.primary { background: var(--orange); color: #fff; border-color: var(--orange); }
+  .wo-action.primary:active { background: #d05303; }
+
+  .empty { text-align: center; padding: 50px 20px; color: var(--muted); }
+  .empty .ico { font-size: 42px; opacity: .4; margin-bottom: 8px; }
+  .empty h3 { color: var(--navy); margin: 0 0 4px; }
+  .empty p { margin: 0; font-size: 13px; }
+
+  .info-banner {
+    background: #eef4fc;
+    border: 1px solid #b3d4f3;
+    border-radius: 10px;
+    padding: 10px 14px;
+    margin-bottom: 14px;
+    font-size: 12px;
+    color: var(--navy);
+    line-height: 1.4;
+  }
+
+  .toast { position: fixed; bottom: calc(var(--safe-bottom) + 20px); left: 50%; transform: translateX(-50%); background: var(--navy); color: #fff; padding: 10px 20px; border-radius: 999px; font-size: 13px; font-weight: 600; box-shadow: 0 4px 16px rgba(13,45,94,.3); z-index: 100; opacity: 0; transition: opacity .2s; pointer-events: none; }
+  .toast.on { opacity: 1; }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <a href="#" class="back-btn" id="backBtn">←</a>
+  <div class="title">
+    <h1 id="topJob">Work Orders</h1>
+    <div class="sub" id="topSub">Loading…</div>
+  </div>
+</div>
+
+<main id="main">
+  <div class="empty"><p>Loading…</p></div>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script type="module">
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+const SB_URL = 'https://nuykvchgecpiuikoerze.supabase.co';
+const SB_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im51eWt2Y2hnZWNwaXVpa29lcnplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYyNjM3ODYsImV4cCI6MjA5MTgzOTc4Nn0.39hZ8DdjT_0iFJXPeAL2FXUSLw8FZBirDVzxZTO1W9s';
+const MESSAGE_HOOK = 'https://hooks.zapier.com/hooks/catch/12653197/uvule41/';
+const ALBI_NOTE_HOOK = 'https://hooks.zapier.com/hooks/catch/12653197/uvugxag/';
+const sb = createClient(SB_URL, SB_ANON);
+
+const params = new URLSearchParams(window.location.search);
+const projectId = params.get('p');
+document.getElementById('backBtn').href = `project_detail.html?p=${projectId}`;
+
+const state = { project: null, wos: [] };
+
+const WO_STATUS_META = {
+  draft:            { label: 'Draft',              bg: 'rgba(120,132,160,.15)', fg: '#7884a0' },
+  sent:             { label: 'Awaiting Signature', bg: 'rgba(245,166,35,.15)',  fg: '#b87900' },
+  signed:           { label: 'Signed',             bg: 'rgba(45,156,95,.15)',   fg: 'var(--green)' },
+  converted_to_po:  { label: 'PO Issued',          bg: 'rgba(74,144,226,.15)',  fg: '#4a90e2' },
+  invoice_received: { label: 'Invoice Received',   bg: 'rgba(45,156,95,.18)',   fg: 'var(--green)' },
+  superseded:       { label: 'Superseded',         bg: 'rgba(120,132,160,.10)', fg: '#7884a0' },
+  cancelled:        { label: 'Cancelled',          bg: 'rgba(214,69,69,.12)',   fg: 'var(--red)' },
+};
+
+const esc = s => String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+const fmtMoney = n => n == null ? '—' : '$' + Number(n).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+const fmtDate = d => d ? new Date(d + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '—';
+const fmtDateTime = d => d ? new Date(d).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '';
+
+function toast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('on');
+  setTimeout(() => t.classList.remove('on'), 2200);
+}
+
+async function init() {
+  if (!projectId) return showEmpty('Missing project', 'Open from project list');
+  const [{ data: project }, { data: wos }] = await Promise.all([
+    sb.from('rebuild_projects').select('*').eq('id', projectId).maybeSingle(),
+    sb.from('rebuild_work_orders').select('*, sub:rebuild_subs(id, company_name, primary_contact, email, phone)').eq('project_id', projectId).order('created_at', { ascending: false }),
+  ]);
+  if (!project) return showEmpty('Project not found', 'It may have been deleted.');
+  state.project = project;
+  state.wos = wos || [];
+
+  document.getElementById('topJob').textContent = `Work Orders · ${project.albi_job_number || ''}`;
+  document.getElementById('topSub').textContent = project.customer_name || '';
+
+  render();
+
+  sb.channel('wos_' + projectId)
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'rebuild_work_orders', filter: `project_id=eq.${projectId}` },
+        async () => {
+          const { data } = await sb.from('rebuild_work_orders').select('*, sub:rebuild_subs(id, company_name, primary_contact, email, phone)').eq('project_id', projectId).order('created_at', { ascending: false });
+          state.wos = data || [];
+          render();
+        })
+    .subscribe();
+}
+
+function render() {
+  const active = state.wos.filter(w => !['superseded','cancelled'].includes(w.status));
+  if (!active.length) {
+    document.getElementById('main').innerHTML = `
+      <div class="empty">
+        <div class="ico">📋</div>
+        <h3>No work orders</h3>
+        <p>Create one in the full app first.</p>
+      </div>
+    `;
+    return;
+  }
+
+  document.getElementById('main').innerHTML = `
+    <div class="info-banner">
+      📋 ${active.length} active work order${active.length === 1 ? '' : 's'}. Tap actions below to send, resend, convert to PO, or open the invoice link.
+    </div>
+    ${active.map(woCard).join('')}
+  `;
+
+  document.querySelectorAll('[data-act]').forEach(btn => {
+    btn.addEventListener('click', () => handleAction(btn.dataset.act, btn.dataset.id));
+  });
+}
+
+function woCard(wo) {
+  const sm = WO_STATUS_META[wo.status] || WO_STATUS_META.draft;
+  const sub = wo.sub || {};
+  return `
+    <div class="wo-card ${wo.status}">
+      <div class="wo-top">
+        <div>
+          <div class="wo-version">WO v${wo.version}${wo.po_number ? ' · ' + esc(wo.po_number) : ''}</div>
+          <div class="wo-sub-name">${esc(sub.company_name || 'Sub')}</div>
+        </div>
+        <div class="status-pill" style="background:${sm.bg};color:${sm.fg};">${sm.label}</div>
+      </div>
+      <div class="wo-amount">${fmtMoney(wo.total_amount)}</div>
+      <div class="wo-meta">
+        ${wo.start_date || wo.end_date ? `<b>📅</b> ${fmtDate(wo.start_date)} → ${fmtDate(wo.end_date)}<br>` : ''}
+        ${sub.email ? `<b>✉</b> ${esc(sub.email)}<br>` : ''}
+      </div>
+
+      ${wo.signed_at ? `
+        <div class="wo-info-row signed">
+          ✓ <b>Signed</b> by ${esc(wo.signed_by_name || '')}${wo.signed_by_title ? ' (' + esc(wo.signed_by_title) + ')' : ''}<br>
+          ${fmtDateTime(wo.signed_at)}
+        </div>
+      ` : ''}
+
+      ${wo.po_number ? `
+        <div class="wo-info-row po">
+          📋 <b>PO ${esc(wo.po_number)}</b> issued ${fmtDateTime(wo.po_created_at)}
+          ${wo.invoice_received_at ? '' : `<br><span style="color:var(--muted);">Awaiting sub invoice…</span>`}
+        </div>
+      ` : ''}
+
+      ${wo.invoice_received_at ? `
+        <div class="wo-info-row invoice">
+          📥 <b>Invoice received</b> ${fmtDateTime(wo.invoice_received_at)}<br>
+          ${wo.invoice_uploaded_by_name ? esc(wo.invoice_uploaded_by_name) : ''}${wo.invoice_amount ? ' · ' + fmtMoney(wo.invoice_amount) : ''}
+          ${wo.albi_payment_task_created_at ? '<br><span style="color:var(--green);">✓ Albi Write Note task fired</span>' : ''}
+        </div>
+      ` : ''}
+
+      <div class="wo-actions">
+        ${wo.status === 'sent' ? `<button class="wo-action" data-act="copy-link" data-id="${wo.id}">📋 Copy Sign Link</button>` : ''}
+        ${wo.status === 'sent' ? `<button class="wo-action primary" data-act="resend" data-id="${wo.id}">📧 Resend</button>` : ''}
+        ${wo.status === 'signed' ? `<button class="wo-action primary" data-act="convert-to-po" data-id="${wo.id}">→ Convert to PO</button>` : ''}
+        ${wo.status === 'converted_to_po' ? `<button class="wo-action" data-act="copy-invoice-link" data-id="${wo.id}">📋 Copy Invoice Link</button>` : ''}
+        ${wo.status === 'converted_to_po' ? `<button class="wo-action primary" data-act="resend-po" data-id="${wo.id}">📧 Resend PO</button>` : ''}
+        ${sub.phone ? `<a class="wo-action" href="tel:${sub.phone}">📞 Call</a>` : ''}
+      </div>
+    </div>
+  `;
+}
+
+async function handleAction(act, woId) {
+  const wo = state.wos.find(w => w.id === woId);
+  if (!wo) return;
+
+  if (act === 'copy-link') {
+    const url = `${location.origin}${location.pathname.replace(/[^/]*$/, '')}wo.html?t=${wo.accept_token}`;
+    navigator.clipboard.writeText(url).then(() => toast('Sign link copied'));
+    return;
+  }
+
+  if (act === 'copy-invoice-link') {
+    const url = `${location.origin}${location.pathname.replace(/[^/]*$/, '')}invoice.html?t=${wo.po_invoice_token}`;
+    navigator.clipboard.writeText(url).then(() => toast('Invoice link copied'));
+    return;
+  }
+
+  if (act === 'resend' || act === 'resend-po') {
+    if (!confirm(act === 'resend' ? 'Resend Work Order email to sub?' : 'Resend PO email to sub?')) return;
+    const sub = wo.sub || {};
+    const toEmail = wo.sent_to_email || sub.email;
+    if (!toEmail) { toast('No sub email on file'); return; }
+    const p = state.project;
+    const isPo = act === 'resend-po';
+    const link = isPo
+      ? `${location.origin}${location.pathname.replace(/[^/]*$/, '')}invoice.html?t=${wo.po_invoice_token}`
+      : `${location.origin}${location.pathname.replace(/[^/]*$/, '')}wo.html?t=${wo.accept_token}`;
+    try {
+      await fetch(MESSAGE_HOOK, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          channel: 'email',
+          to_email: toEmail,
+          from_email: p.albi_pm_email || 'josh@jg-restoration.com',
+          from_name: 'JG Restoration',
+          recipient_name: sub.primary_contact || sub.company_name,
+          recipient_type: 'sub',
+          subject: isPo ? `Reminder: PO ${wo.po_number} — please upload invoice` : `Reminder: please sign Work Order for ${p.albi_job_number || 'project'}`,
+          body: `Hi ${sub.primary_contact || sub.company_name || ''},\n\nJust a reminder — please ${isPo ? 'upload your invoice' : 'review and sign the work order'} at:\n\n${link}\n\nThanks,\nJG Restoration`,
+          attachment_count: 0, attachment_urls: '',
+        }),
+        mode: 'no-cors',
+      });
+      await sb.from('rebuild_work_orders').update({
+        reminder_count: (wo.reminder_count || 0) + 1,
+        last_reminder_at: new Date().toISOString(),
+      }).eq('id', wo.id);
+      await sb.from('rebuild_work_order_history').insert({
+        work_order_id: wo.id, action: 'reminded', actor: 'mobile-pwa',
+      });
+      toast('Reminder sent');
+    } catch (e) { console.error(e); toast('Send failed'); }
+    return;
+  }
+
+  if (act === 'convert-to-po') {
+    if (!confirm(`Convert to Purchase Order?\n\n• Generates a PO number\n• Emails sub a link to upload their invoice\n• When sub uploads, Albi "Write Note" task fires for Lisa Greil`)) return;
+
+    const p = state.project;
+    const jobShort = (p.albi_job_number || 'JOB').replace(/[^A-Za-z0-9]/g, '').slice(-6).toUpperCase();
+    const today = new Date();
+    const dateCode = `${String(today.getFullYear()).slice(2)}${String(today.getMonth()+1).padStart(2,'0')}${String(today.getDate()).padStart(2,'0')}`;
+    const randCode = wo.id.replace(/-/g,'').slice(0,4).toUpperCase();
+    const poNumber = `PO-${jobShort}-${dateCode}-${randCode}`;
+
+    const { error } = await sb.from('rebuild_work_orders').update({
+      status: 'converted_to_po',
+      po_number: poNumber,
+      po_created_at: new Date().toISOString(),
+      po_created_by_email: 'mobile-pwa',
+    }).eq('id', wo.id);
+    if (error) { toast('Convert failed'); return; }
+
+    await sb.from('rebuild_work_order_history').insert({
+      work_order_id: wo.id, action: 'converted_to_po', actor: 'mobile-pwa', details: `Issued ${poNumber}`,
+    });
+
+    // Reload to grab po_invoice_token
+    const { data: refreshed } = await sb.from('rebuild_work_orders').select('*, sub:rebuild_subs(id, company_name, primary_contact, email, phone)').eq('id', wo.id).maybeSingle();
+    if (!refreshed) { toast('PO issued'); return; }
+
+    // Send PO email
+    const sub = refreshed.sub || {};
+    const toEmail = refreshed.sent_to_email || sub.email;
+    if (toEmail) {
+      const invoiceUrl = `${location.origin}${location.pathname.replace(/[^/]*$/, '')}invoice.html?t=${refreshed.po_invoice_token}`;
+      try {
+        await fetch(MESSAGE_HOOK, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            channel: 'email',
+            to_email: toEmail,
+            from_email: p.albi_pm_email || 'josh@jg-restoration.com',
+            from_name: 'JG Restoration',
+            recipient_name: sub.primary_contact || sub.company_name,
+            recipient_type: 'sub',
+            subject: `PO ${poNumber} — please upload invoice`,
+            body: `Hi ${sub.primary_contact || sub.company_name || ''},\n\nThank you for completing work on ${p.albi_job_number || 'this project'}.\n\nPO Number: ${poNumber}\nAuthorized Amount: ${fmtMoney(refreshed.total_amount)}\n\nUpload your invoice here:\n${invoiceUrl}\n\nThanks,\nJG Restoration`,
+            attachment_count: 0, attachment_urls: '',
+          }),
+          mode: 'no-cors',
+        });
+      } catch (e) { console.error(e); }
+    }
+    toast('PO issued and sent');
+    return;
+  }
+}
+
+function showEmpty(t, m) {
+  document.getElementById('main').innerHTML = `<div class="empty"><h3>${esc(t)}</h3><p>${esc(m)}</p></div>`;
+}
+
+init();
+</script>
+</body>
+</html>
