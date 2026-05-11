@@ -692,6 +692,46 @@ async function saveRelationship() {
     savedRow = data[0];
     action = 'edited';
   } else {
+    // DEDUPE: if no directory_contact_id was already set (user didn't pick from directory),
+    // call find_or_create_contact to either find an existing match or create a new directory entry.
+    let matchedExisting = false;
+    if (!fields.directory_contact_id) {
+      const { data: dirId, error: rpcErr } = await sb.rpc('find_or_create_contact', {
+        p_display_name: fields.display_name,
+        p_phone: fields.phone,
+        p_email: fields.email,
+        p_role: fields.role,
+        p_company: fields.company,
+      });
+      if (rpcErr) {
+        console.warn('find_or_create_contact failed, continuing without dedupe:', rpcErr);
+      } else if (dirId) {
+        fields.directory_contact_id = dirId;
+        // Pull the canonical contact info from the directory to ensure consistency
+        const { data: existing } = await sb.from('contact_directory')
+          .select('display_name, mobile_phone, email, organization_name, role')
+          .eq('id', dirId).maybeSingle();
+        if (existing) {
+          // Detect if this was an existing match (vs. brand new)
+          const isMatch = (
+            existing.display_name?.trim().toLowerCase() === fields.display_name.trim().toLowerCase() &&
+            (
+              (fields.phone && existing.mobile_phone &&
+                existing.mobile_phone.replace(/\D/g,'') === fields.phone.replace(/\D/g,'')) ||
+              (fields.email && existing.email &&
+                existing.email.toLowerCase() === fields.email.toLowerCase())
+            )
+          );
+          // For both matches and creates, use the canonical directory values
+          fields.display_name = existing.display_name;
+          fields.phone = fields.phone || existing.mobile_phone;
+          fields.email = fields.email || existing.email;
+          fields.company = fields.company || existing.organization_name;
+          matchedExisting = isMatch;
+        }
+      }
+    }
+
     // Insert
     fields.source = 'jg';
     fields.created_by_email = state.userEmail;
@@ -700,7 +740,9 @@ async function saveRelationship() {
       .insert(fields).select();
     if (error) { toast('Save failed: ' + error.message); saveBtn.disabled = false; saveBtn.textContent = 'Save'; return; }
     savedRow = data[0];
-    action = 'created';
+    action = matchedExisting ? 'created_from_existing' : 'created';
+    // Show a brief signal that it merged
+    if (matchedExisting) toast('Matched existing contact');
   }
 
   // History log
@@ -717,7 +759,10 @@ async function saveRelationship() {
 
   await loadRelationships();
   render();
-  toast(state.editingId ? 'Relationship updated' : 'Relationship added');
+  // Only show the generic toast if we didn't already show "Matched existing contact"
+  if (action !== 'created_from_existing') {
+    toast(state.editingId ? 'Relationship updated' : 'Relationship added');
+  }
   saveBtn.disabled = false;
   saveBtn.textContent = 'Save';
   closeSheet();
@@ -900,7 +945,7 @@ function renderDirList(items) {
   });
 }
 
-
+async function deleteRelationship() {
   if (!state.editingId) return;
   const r = state.relationships.find(x => x.id === state.editingId);
   if (!r) return;

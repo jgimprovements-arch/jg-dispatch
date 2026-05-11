@@ -4950,12 +4950,50 @@ async function relSave() {
     if (error) { toast('Save failed: ' + error.message); saveBtn.disabled = false; saveBtn.textContent = orig; return; }
     savedRow = data[0]; action = 'edited';
   } else {
+    // DEDUPE: find or create a directory contact unless user already picked one
+    let matchedExisting = false;
+    if (!fields.directory_contact_id) {
+      const { data: dirId, error: rpcErr } = await sb.rpc('find_or_create_contact', {
+        p_display_name: fields.display_name,
+        p_phone: fields.phone,
+        p_email: fields.email,
+        p_role: fields.role,
+        p_company: fields.company,
+      });
+      if (rpcErr) {
+        console.warn('find_or_create_contact failed:', rpcErr);
+      } else if (dirId) {
+        fields.directory_contact_id = dirId;
+        const { data: existing } = await sb.from('contact_directory')
+          .select('display_name, mobile_phone, email, organization_name, role')
+          .eq('id', dirId).maybeSingle();
+        if (existing) {
+          const isMatch = (
+            existing.display_name?.trim().toLowerCase() === fields.display_name.trim().toLowerCase() &&
+            (
+              (fields.phone && existing.mobile_phone &&
+                existing.mobile_phone.replace(/\D/g,'') === fields.phone.replace(/\D/g,'')) ||
+              (fields.email && existing.email &&
+                existing.email.toLowerCase() === fields.email.toLowerCase())
+            )
+          );
+          fields.display_name = existing.display_name;
+          fields.phone = fields.phone || existing.mobile_phone;
+          fields.email = fields.email || existing.email;
+          fields.company = fields.company || existing.organization_name;
+          matchedExisting = isMatch;
+        }
+      }
+    }
+
     fields.source = 'jg';
     fields.created_by_email = state.pmEmail;
     fields.created_by_name = state.pmName;
     const { data, error } = await sb.from('rebuild_project_relationships').insert(fields).select();
     if (error) { toast('Save failed: ' + error.message); saveBtn.disabled = false; saveBtn.textContent = orig; return; }
-    savedRow = data[0]; action = 'created';
+    savedRow = data[0];
+    action = matchedExisting ? 'created_from_existing' : 'created';
+    if (matchedExisting) toast('Matched existing contact');
   }
 
   try {
@@ -4971,7 +5009,9 @@ async function relSave() {
 
   await loadRelationships();
   renderTabContent();
-  toast(action === 'created' ? 'Relationship added' : 'Relationship updated');
+  if (action !== 'created_from_existing') {
+    toast(action === 'created' ? 'Relationship added' : 'Relationship updated');
+  }
 }
 
 async function relDelete() {
