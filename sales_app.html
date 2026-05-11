@@ -698,6 +698,16 @@ if ('serviceWorker' in navigator) {
       </div>
     </div>
 
+    <!-- Admin-only: team progress today. Hidden for non-admins via display:none;
+         renderHome flips it to block for admin users. Inner HTML rendered there. -->
+    <div id="team-today-card" style="display:none;background:var(--card);border:1.5px solid var(--border);border-radius:14px;padding:14px 16px;margin-bottom:16px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
+        <div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;">👥 Team Today</div>
+        <div id="team-today-summary" style="font-size:11px;color:var(--muted);font-weight:600;"></div>
+      </div>
+      <div id="team-today-rows"></div>
+    </div>
+
     <div class="section-title">Today's Route</div>
     <div id="home-route">
       <div class="loading">Loading route...</div>
@@ -866,7 +876,7 @@ if ('serviceWorker' in navigator) {
     <div class="install-banner-sub" id="install-instructions">Tap Share → Add to Home Screen</div>
   </div>
   <button class="install-banner-btn" id="install-btn" onclick="triggerInstall()">Install</button>
-  <button class="install-banner-close" onclick="document.getElementById('install-banner').style.display='none'">×</button>
+  <button class="install-banner-close" onclick="localStorage.setItem('jg_install_dismissed','1');document.getElementById('install-banner').style.display='none'">×</button>
 </div>
 
 <!-- RECURRING ROUTE NOTIFICATION -->
@@ -1496,6 +1506,73 @@ function renderHome() {
         cardEl.style.background = 'var(--card)';
         if (barEl) barEl.style.background = 'linear-gradient(90deg, var(--orange) 0%, #d05303 100%)';
       }
+    }
+
+    // ── Admin Team Today card ──
+    // Per-rep leaderboard for the day. Only shown to admins. Each row has
+    // rep name, count, and a mini progress bar. Sorted by count desc so
+    // the strongest reps surface first.
+    var teamCard = document.getElementById('team-today-card');
+    var isAdminUser = window.JG_SHARED.permissions && window.JG_SHARED.permissions.isAdmin();
+    if (teamCard && isAdminUser) {
+      teamCard.style.display = 'block';
+
+      // Build list of unique reps from REPS map (deduped by display name)
+      var allReps = [];
+      var seenReps = {};
+      if (window.JG_SHARED.REPS) {
+        Object.keys(window.JG_SHARED.REPS).forEach(function(em){
+          var n = window.JG_SHARED.REPS[em];
+          if (!seenReps[n]) { seenReps[n] = 1; allReps.push(n); }
+        });
+      }
+
+      // Count today's touches for each rep
+      var todayTouches = (APP.touches || []).filter(function(t){ return t.touch_date === today; });
+      var perRep = allReps.map(function(name){
+        var count = todayTouches.filter(function(t){ return t.logged_by === name; }).length;
+        return { name: name, count: count };
+      });
+      // Sort: highest count first, then alphabetical to stabilize ties
+      perRep.sort(function(a, b){
+        if (b.count !== a.count) return b.count - a.count;
+        return a.name.localeCompare(b.name);
+      });
+
+      var teamTotal = perRep.reduce(function(s, r){ return s + r.count; }, 0);
+      var teamGoal = goal * allReps.length;
+      var hitGoalCount = perRep.filter(function(r){ return r.count >= goal; }).length;
+
+      // Header summary
+      var summaryEl = document.getElementById('team-today-summary');
+      if (summaryEl) {
+        summaryEl.textContent = teamTotal + ' total · ' + hitGoalCount + '/' + allReps.length + ' hit goal';
+      }
+
+      // Per-rep rows
+      var rowsHtml = '';
+      perRep.forEach(function(r, idx){
+        var pct = Math.min(100, Math.round((r.count / goal) * 100));
+        var hitGoal = r.count >= goal;
+        var rank = idx + 1;
+        var isMe = r.name === APP.repName;
+        var barColor = hitGoal
+          ? 'linear-gradient(90deg, var(--ok) 0%, #176e3c 100%)'
+          : (r.count === 0 ? 'rgba(13,45,94,.15)' : 'linear-gradient(90deg, var(--orange) 0%, #d05303 100%)');
+        var rankBadge = rank === 1 && r.count > 0 ? '🥇' : rank === 2 && r.count > 0 ? '🥈' : rank === 3 && r.count > 0 ? '🥉' : '';
+        rowsHtml += '<div style="margin-bottom:10px;' + (isMe ? 'background:rgba(232,93,4,.04);padding:6px 8px;border-radius:8px;margin-left:-8px;margin-right:-8px;' : '') + '">';
+        rowsHtml += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">';
+        rowsHtml += '<div style="font-size:12px;font-weight:700;color:var(--navy);">' + (rankBadge ? rankBadge + ' ' : '') + r.name + (isMe ? ' <span style="font-size:9px;color:var(--orange);font-weight:700;">(you)</span>' : '') + '</div>';
+        rowsHtml += '<div style="font-size:11px;font-weight:700;color:' + (hitGoal ? 'var(--ok)' : 'var(--muted)') + ';">' + r.count + ' / ' + goal + (hitGoal ? ' ✓' : '') + '</div>';
+        rowsHtml += '</div>';
+        rowsHtml += '<div style="background:rgba(13,45,94,.06);border-radius:4px;height:5px;overflow:hidden;">';
+        rowsHtml += '<div style="height:100%;background:' + barColor + ';width:' + pct + '%;border-radius:4px;transition:width .4s ease;"></div>';
+        rowsHtml += '</div>';
+        rowsHtml += '</div>';
+      });
+      document.getElementById('team-today-rows').innerHTML = rowsHtml;
+    } else if (teamCard) {
+      teamCard.style.display = 'none';
     }
   }
 
