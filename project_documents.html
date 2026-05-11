@@ -45,7 +45,7 @@
     border: 1px solid var(--line);
     border-radius: 12px;
     padding: 12px 14px;
-    padding-right: 50px; /* room for markup button */
+    padding-right: 96px; /* room for markup + delete buttons */
     display: flex;
     align-items: center;
     gap: 12px;
@@ -56,7 +56,7 @@
   .doc-card:active { border-color: var(--orange); transform: scale(.98); }
   .doc-markup-btn {
     position: absolute;
-    right: 10px;
+    right: 52px;
     top: 50%;
     transform: translateY(-50%);
     width: 36px;
@@ -76,6 +76,29 @@
     font-family: inherit;
   }
   .doc-markup-btn:active { background: #d05303; transform: translateY(-50%) scale(.92); }
+  .doc-delete-btn {
+    position: absolute;
+    right: 10px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    background: rgba(214,69,69,.1);
+    border: 1px solid rgba(214,69,69,.3);
+    color: var(--red);
+    font-size: 15px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 2;
+    transition: transform .15s, background .15s;
+    font-family: inherit;
+  }
+  .doc-delete-btn:active { background: var(--red); color: #fff; transform: translateY(-50%) scale(.92); }
+  /* Cards without markup button: shift delete to first slot */
+  .doc-card-wrap:not(:has(.doc-markup-btn)) .doc-card { padding-right: 54px; }
   .doc-icon {
     width: 44px;
     height: 44px;
@@ -828,6 +851,9 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 const SB_URL = 'https://nuykvchgecpiuikoerze.supabase.co';
 const SB_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im51eWt2Y2hnZWNwaXVpa29lcnplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYyNjM3ODYsImV4cCI6MjA5MTgzOTc4Nn0.39hZ8DdjT_0iFJXPeAL2FXUSLw8FZBirDVzxZTO1W9s';
 const ALBI_DOC_HOOK = 'https://hooks.zapier.com/hooks/catch/12653197/uves4j9/';
+// TODO: replace with real Zapier delete hook ID when one is created. For now points to the existing doc hook
+// and includes deleted_by field so the Zap can route on "delete" semantics if you wire that side.
+const ALBI_DOC_DELETE_HOOK = 'https://hooks.zapier.com/hooks/catch/12653197/uves4j9/';
 const sb = createClient(SB_URL, SB_ANON);
 
 const CATEGORIES = [
@@ -846,7 +872,21 @@ document.getElementById('backBtn').addEventListener('click', (e) => {
   }
 });
 
-const state = { project: null, docs: [], filter: 'All', pendingFiles: [] };
+const state = { project: null, docs: [], filter: 'All', pendingFiles: [], userEmail: null, userName: null, userRole: 'field' };
+
+const ADMIN_EMAILS_DOC = new Set(['josh@jg-restoration.com','jgimprovements@gmail.com']);
+const PM_EMAILS_DOC = new Set(['hannah@jg-restoration.com','kristina@jg-restoration.com','brent@jg-restoration.com','anthony@jg-restoration.com','ana@jg-restoration.com']);
+
+// Initialize current user from localStorage
+try {
+  const user = JSON.parse(localStorage.getItem('jg_platform_user') || 'null');
+  if (user?.email) {
+    state.userEmail = user.email.toLowerCase();
+    state.userName = user.name || state.userEmail.split('@')[0];
+    state.userRole = ADMIN_EMAILS_DOC.has(state.userEmail) ? 'admin'
+      : PM_EMAILS_DOC.has(state.userEmail) ? 'pm' : 'field';
+  }
+} catch {}
 
 const esc = s => String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 const fmtDate = d => d ? new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '';
@@ -923,6 +963,74 @@ function render() {
       if (doc) openMarkupEditorWithExistingDoc(doc);
     });
   });
+
+  // Wire delete buttons
+  document.querySelectorAll('[data-delete-doc]').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const docId = btn.dataset.deleteDoc;
+      const doc = state.docs.find(d => d.id === docId);
+      if (!doc) return;
+      if (!confirm(`Delete "${doc.filename}"?\n\nThis removes it from the platform, storage, and Albi. This cannot be undone.`)) return;
+      await deleteDoc(doc);
+    });
+  });
+}
+
+async function deleteDoc(doc) {
+  toast('Deleting…');
+  try {
+    // 1. Extract storage path from URL
+    // URL format: https://xxx.supabase.co/storage/v1/object/public/rebuild-documents/projects/{uuid}/{ts-name}
+    const url = doc.file_url || '';
+    const marker = '/storage/v1/object/public/rebuild-documents/';
+    let storagePath = null;
+    const idx = url.indexOf(marker);
+    if (idx >= 0) storagePath = url.substring(idx + marker.length);
+
+    // 2. Delete from storage (best-effort — don't block on failure)
+    if (storagePath) {
+      try {
+        const { error } = await sb.storage.from('rebuild-documents').remove([storagePath]);
+        if (error) console.warn('Storage delete failed:', error);
+      } catch (e) { console.warn('Storage delete threw:', e); }
+    }
+
+    // 3. Fire Albi delete hook (best-effort)
+    try {
+      await fetch(ALBI_DOC_DELETE_HOOK, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          document_id: doc.id,
+          project_id: doc.project_id,
+          albi_project_id: state.project?.albi_project_id,
+          albi_job_number: state.project?.albi_job_number,
+          filename: doc.filename,
+          file_url: doc.file_url,
+          deleted_by: state.userEmail || 'mobile-pwa',
+        }),
+        mode: 'no-cors',
+      });
+    } catch (e) { console.warn('Albi delete hook failed:', e); }
+
+    // 4. Delete the database row (this is the must-succeed step)
+    const { error: dbErr } = await sb.from('rebuild_documents').delete().eq('id', doc.id);
+    if (dbErr) {
+      console.error('DB delete failed:', dbErr);
+      toast('Delete failed: ' + dbErr.message);
+      return;
+    }
+
+    // Remove from local state and re-render
+    state.docs = state.docs.filter(d => d.id !== doc.id);
+    render();
+    toast('Photo deleted');
+  } catch (e) {
+    console.error(e);
+    toast('Delete failed');
+  }
 }
 
 function docCard(d) {
@@ -943,6 +1051,14 @@ function docCard(d) {
   const icon = isImg ? `<div class="doc-icon img doc-icon-fallback">🖼</div>${thumbHtml}` : thumbHtml;
   const markupBtn = isImg ? `<button class="doc-markup-btn" data-markup-doc="${d.id}" title="Mark up this photo">✏️</button>` : '';
 
+  // Show delete button if: user uploaded this doc, or user is admin/PM
+  const canDelete = state.userEmail && (
+    d.uploaded_by_email === state.userEmail ||
+    state.userRole === 'admin' ||
+    state.userRole === 'pm'
+  );
+  const deleteBtn = canDelete ? `<button class="doc-delete-btn" data-delete-doc="${d.id}" title="Delete">🗑</button>` : '';
+
   return `
     <div class="doc-card-wrap">
       <a href="${esc(d.file_url || '#')}" target="_blank" class="doc-card">
@@ -953,6 +1069,7 @@ function docCard(d) {
         </div>
       </a>
       ${markupBtn}
+      ${deleteBtn}
     </div>
   `;
 }
@@ -1076,7 +1193,7 @@ async function uploadFile(file, category, displayName) {
       file_url: urlData.publicUrl,
       file_size_bytes: file.size,
       mime_type: file.type || 'application/octet-stream',
-      uploaded_by_email: 'mobile-pwa@jg-restoration.com',
+      uploaded_by_email: (state.userEmail || 'mobile-pwa@jg-restoration.com'),
       push_status: 'pending',
     }).select();
     // Push to Albi
@@ -1729,7 +1846,7 @@ async function saveMarkupAndUpload() {
       file_url: urlData.publicUrl,
       file_size_bytes: blob.size,
       mime_type: 'image/jpeg',
-      uploaded_by_email: 'mobile-pwa@jg-restoration.com',
+      uploaded_by_email: (state.userEmail || 'mobile-pwa@jg-restoration.com'),
       push_status: 'pending',
     }).select();
 

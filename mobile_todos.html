@@ -133,6 +133,104 @@
   .btn.primary:disabled { opacity: .5; }
   .btn.ghost { background: var(--bg); color: var(--navy); border-color: var(--line); }
 
+  /* Searchable picker button (replaces select) */
+  .picker-btn {
+    width: 100%;
+    background: var(--bg-input);
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    padding: 11px 13px;
+    font-size: 14px;
+    font-family: inherit;
+    color: var(--text);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    text-align: left;
+  }
+  .picker-btn:active { border-color: var(--orange); }
+  .picker-label {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .picker-label.placeholder { color: var(--muted); }
+  .picker-caret {
+    color: var(--muted);
+    font-size: 20px;
+    line-height: 1;
+    transform: rotate(90deg);
+    flex-shrink: 0;
+  }
+
+  /* Picker overlay */
+  .picker-back { position: fixed; inset: 0; background: rgba(13,45,94,.5); z-index: 200; display: none; }
+  .picker-back.on { display: block; }
+  .picker-overlay {
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: var(--bg);
+    z-index: 210;
+    transform: translateY(100%);
+    transition: transform .25s;
+    display: flex;
+    flex-direction: column;
+    max-width: 720px;
+    margin: 0 auto;
+  }
+  .picker-overlay.on { transform: translateY(0); }
+  .picker-header {
+    padding: calc(var(--safe-top) + 14px) 14px 12px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: var(--bg-elev);
+    border-bottom: 1px solid var(--line);
+  }
+  .picker-search {
+    flex: 1;
+    border: 1px solid var(--line);
+    background: var(--bg-input);
+    border-radius: 10px;
+    padding: 10px 14px;
+    font-size: 15px;
+    color: var(--text);
+    font-family: inherit;
+  }
+  .picker-search:focus { outline: none; border-color: var(--orange); }
+  .picker-close {
+    background: var(--orange);
+    color: #fff;
+    border: 0;
+    border-radius: 999px;
+    padding: 9px 18px;
+    font-size: 13px;
+    font-weight: 700;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  .picker-list {
+    flex: 1;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    padding: 8px 14px calc(var(--safe-bottom) + 14px);
+  }
+  .picker-item {
+    padding: 14px 12px;
+    border-bottom: 1px solid var(--line);
+    cursor: pointer;
+    transition: background .15s;
+  }
+  .picker-item:active { background: var(--bg-elev); }
+  .picker-item.selected { background: rgba(232,93,4,.08); border-left: 3px solid var(--orange); padding-left: 9px; }
+  .picker-item-title { font-size: 14px; font-weight: 700; color: var(--text); }
+  .picker-item-sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .picker-item.clear { color: var(--muted); font-style: italic; }
+  .picker-item.clear .picker-item-title { color: var(--muted); font-weight: 600; }
+
   .toast { position: fixed; bottom: calc(var(--safe-bottom) + 90px); left: 50%; transform: translateX(-50%); background: var(--navy); color: #fff; padding: 10px 20px; border-radius: 999px; font-size: 13px; font-weight: 600; box-shadow: 0 4px 16px rgba(13,45,94,.3); z-index: 200; opacity: 0; transition: opacity .2s; pointer-events: none; }
   .toast.on { opacity: 1; }
 
@@ -218,9 +316,11 @@
     <label>Title *</label>
     <input type="text" id="t_title" placeholder="What needs to be done?" autocomplete="off">
     <label>Project</label>
-    <select id="t_project">
-      <option value="">— No project (personal) —</option>
-    </select>
+    <button type="button" class="picker-btn" id="t_project_btn">
+      <span class="picker-label" id="t_project_label">— No project (personal) —</span>
+      <span class="picker-caret">›</span>
+    </button>
+    <input type="hidden" id="t_project" value="">
     <div class="row2" style="margin-top:4px;">
       <div>
         <label>Assign to</label>
@@ -257,6 +357,16 @@
       <button class="btn primary" id="saveNew" disabled>Create To-Do</button>
     </div>
   </div>
+</div>
+
+<!-- Searchable project picker overlay -->
+<div class="picker-back" id="projectPickerBack"></div>
+<div class="picker-overlay" id="projectPicker">
+  <div class="picker-header">
+    <input type="text" class="picker-search" id="picker_search" placeholder="Search projects, customers…">
+    <button class="picker-close" id="picker_close">Done</button>
+  </div>
+  <div class="picker-list" id="picker_list"></div>
 </div>
 
 <div class="toast" id="toast"></div>
@@ -465,10 +575,11 @@ async function toggleDone(id) {
 }
 
 function openNewSheet() {
-  // Populate projects
-  const projSel = $('#t_project');
-  projSel.innerHTML = '<option value="">— No project (personal) —</option>' +
-    state.projects.map(p => `<option value="${p.id}" ${state.prefilledProjectId === p.id ? 'selected' : ''}>${esc(p.albi_job_number || '')} · ${esc(p.customer_name || '')}</option>`).join('');
+  // Initialize project picker value
+  const prefilled = state.prefilledProjectId
+    ? state.projects.find(p => p.id === state.prefilledProjectId)
+    : null;
+  setPickedProject(prefilled || null);
 
   // Populate assignees
   const assignSel = $('#t_assignee');
@@ -491,6 +602,68 @@ function openNewSheet() {
 
   $('#newSheetBack').classList.add('on');
   setTimeout(() => $('#t_title').focus(), 100);
+}
+
+// ─── Project picker ───
+function setPickedProject(project) {
+  const hidden = $('#t_project');
+  const label = $('#t_project_label');
+  if (project) {
+    hidden.value = project.id;
+    label.textContent = `${project.albi_job_number || ''} · ${project.customer_name || ''}`.replace(/^ · /, '');
+    label.classList.remove('placeholder');
+  } else {
+    hidden.value = '';
+    label.textContent = '— No project (personal) —';
+    label.classList.add('placeholder');
+  }
+}
+
+function openProjectPicker() {
+  $('#projectPickerBack').classList.add('on');
+  $('#projectPicker').classList.add('on');
+  $('#picker_search').value = '';
+  renderPickerList('');
+  setTimeout(() => $('#picker_search').focus(), 100);
+}
+
+function closeProjectPicker() {
+  $('#projectPickerBack').classList.remove('on');
+  $('#projectPicker').classList.remove('on');
+}
+
+function renderPickerList(q) {
+  q = (q || '').trim().toLowerCase();
+  const current = $('#t_project').value;
+  const filtered = q
+    ? state.projects.filter(p =>
+        (p.albi_job_number || '').toLowerCase().includes(q) ||
+        (p.customer_name || '').toLowerCase().includes(q) ||
+        (p.property_address || '').toLowerCase().includes(q))
+    : state.projects;
+
+  const items = [`
+    <div class="picker-item clear ${!current ? 'selected' : ''}" data-id="">
+      <div class="picker-item-title">— No project (personal) —</div>
+    </div>
+  `];
+  filtered.forEach(p => {
+    items.push(`
+      <div class="picker-item ${current === p.id ? 'selected' : ''}" data-id="${esc(p.id)}">
+        <div class="picker-item-title">${esc(p.albi_job_number || '')} · ${esc(p.customer_name || '')}</div>
+        ${p.property_address ? `<div class="picker-item-sub">${esc(p.property_address)}</div>` : ''}
+      </div>
+    `);
+  });
+  $('#picker_list').innerHTML = items.join('') || `<div style="padding:24px;text-align:center;color:var(--muted);font-size:13px;">No matches.</div>`;
+  $('#picker_list').querySelectorAll('.picker-item').forEach(el => {
+    el.addEventListener('click', () => {
+      const id = el.dataset.id;
+      const project = id ? state.projects.find(p => p.id === id) : null;
+      setPickedProject(project);
+      closeProjectPicker();
+    });
+  });
 }
 
 function closeNewSheet() {
@@ -586,6 +759,12 @@ function wire() {
   $('#newSheetBack').addEventListener('click', (e) => { if (e.target.id === 'newSheetBack') closeNewSheet(); });
   $('#t_title').addEventListener('input', validateNew);
   $('#saveNew').addEventListener('click', saveNew);
+
+  // Project picker
+  $('#t_project_btn').addEventListener('click', openProjectPicker);
+  $('#picker_close').addEventListener('click', closeProjectPicker);
+  $('#projectPickerBack').addEventListener('click', closeProjectPicker);
+  $('#picker_search').addEventListener('input', (e) => renderPickerList(e.target.value));
 }
 
 if ('serviceWorker' in navigator) {
