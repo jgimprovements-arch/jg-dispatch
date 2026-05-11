@@ -36,12 +36,16 @@
   .cat-chip { background: var(--card); border: 1px solid var(--line); border-radius: 999px; padding: 7px 14px; font-size: 12px; font-weight: 700; color: var(--navy); white-space: nowrap; cursor: pointer; flex-shrink: 0; }
   .cat-chip.on { background: var(--navy); color: #fff; border-color: var(--navy); }
 
+  .doc-card-wrap {
+    position: relative;
+    margin-bottom: 8px;
+  }
   .doc-card {
     background: var(--card);
     border: 1px solid var(--line);
     border-radius: 12px;
     padding: 12px 14px;
-    margin-bottom: 8px;
+    padding-right: 50px; /* room for markup button */
     display: flex;
     align-items: center;
     gap: 12px;
@@ -50,6 +54,28 @@
     transition: border-color .15s, transform .15s;
   }
   .doc-card:active { border-color: var(--orange); transform: scale(.98); }
+  .doc-markup-btn {
+    position: absolute;
+    right: 10px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    background: var(--orange);
+    border: 0;
+    color: #fff;
+    font-size: 16px;
+    cursor: pointer;
+    box-shadow: 0 2px 8px rgba(232,93,4,.3);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 2;
+    transition: transform .15s, background .15s;
+    font-family: inherit;
+  }
+  .doc-markup-btn:active { background: #d05303; transform: translateY(-50%) scale(.92); }
   .doc-icon {
     width: 44px;
     height: 44px;
@@ -353,6 +379,85 @@
     width: 90px;
     accent-color: var(--orange);
   }
+
+  /* Queue label under "Markup" title */
+  .markup-queue-label {
+    font-size: 10px;
+    color: rgba(255,255,255,.65);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .8px;
+    margin-top: 2px;
+  }
+  #markupSkip {
+    background: rgba(255,255,255,.12);
+    color: #fff;
+  }
+
+  /* Photo picker grid */
+  .picker-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+    gap: 8px;
+    max-height: 50vh;
+    overflow-y: auto;
+    padding: 4px 0 12px;
+  }
+  .picker-thumb {
+    position: relative;
+    aspect-ratio: 1;
+    border-radius: 10px;
+    overflow: hidden;
+    cursor: pointer;
+    border: 2px solid var(--line);
+    background: var(--bg);
+    display: block;
+  }
+  .picker-thumb input[type="checkbox"] {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    z-index: 3;
+    width: 22px;
+    height: 22px;
+    accent-color: var(--orange);
+    margin: 0;
+    cursor: pointer;
+  }
+  .picker-thumb img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+  }
+  .picker-thumb-fallback {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 36px;
+    opacity: .5;
+  }
+  .picker-thumb-name {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    background: linear-gradient(transparent, rgba(0,0,0,.75));
+    color: #fff;
+    font-size: 10px;
+    padding: 12px 6px 6px;
+    text-align: center;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    pointer-events: none;
+  }
+  .picker-thumb.selected {
+    border-color: var(--orange);
+    box-shadow: 0 0 0 2px var(--orange);
+  }
 </style>
 </head>
 <body>
@@ -412,7 +517,11 @@
 <div class="markup-overlay" id="markupOverlay">
   <div class="markup-topbar">
     <button class="markup-btn ghost" id="markupCancel">✕</button>
-    <div class="markup-title">Markup</div>
+    <div class="markup-title">
+      Markup
+      <div class="markup-queue-label" id="markupQueueLabel" style="display:none;"></div>
+    </div>
+    <button class="markup-btn" id="markupSkip" style="display:none;">Skip</button>
     <button class="markup-btn primary" id="markupSave" disabled>Save</button>
   </div>
 
@@ -490,6 +599,32 @@
     <div class="actions">
       <button class="btn ghost" id="textPromptCancel">Cancel</button>
       <button class="btn primary" id="textPromptOk">Add</button>
+    </div>
+  </div>
+</div>
+
+<!-- Markup decision modal: "any markup needed?" -->
+<div class="modal-back" id="markupDecisionModal">
+  <div class="modal" style="border-radius: 18px; max-width: 380px;">
+    <h3 style="margin:0 0 10px;">Markup?</h3>
+    <p id="markupDecisionMsg" style="margin:0 0 16px;font-size:14px;color:var(--text);line-height:1.5;"></p>
+    <div class="actions" style="flex-direction:column;gap:8px;">
+      <button class="btn primary" id="mdYes" style="width:100%;">Yes — Mark up</button>
+      <button class="btn ghost" id="mdNo" style="width:100%;">No — Upload as-is</button>
+      <button class="btn ghost" id="mdCancel" style="width:100%;color:var(--muted);">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- Markup photo picker: choose which photos to mark up -->
+<div class="modal-back" id="markupPickerModal">
+  <div class="modal" style="border-radius: 18px 18px 0 0; max-width: 600px;">
+    <h3 style="margin:0 0 6px;">Select Photos to Mark Up <button class="close-x" id="markupPickerClose">×</button></h3>
+    <p style="margin:0 0 12px;font-size:12px;color:var(--muted);">Tap photos you want to annotate. Others will upload as-is.</p>
+    <div class="picker-grid" id="markupPickerGrid"></div>
+    <div class="actions">
+      <button class="btn ghost" id="markupPickerCancel">Cancel</button>
+      <button class="btn primary" id="markupPickerGo" disabled><span id="markupPickerCount">Select photos to mark up</span></button>
     </div>
   </div>
 </div>
@@ -583,6 +718,17 @@ function render() {
   document.querySelectorAll('.cat-chip').forEach(chip => {
     chip.addEventListener('click', () => { state.filter = chip.dataset.cat; render(); });
   });
+
+  // Wire pencil markup buttons on image cards
+  document.querySelectorAll('[data-markup-doc]').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const docId = btn.dataset.markupDoc;
+      const doc = state.docs.find(d => d.id === docId);
+      if (doc) openMarkupEditorWithExistingDoc(doc);
+    });
+  });
 }
 
 function docCard(d) {
@@ -592,9 +738,6 @@ function docCard(d) {
   // Build the thumb slot
   let thumbHtml;
   if (isImg && d.file_url) {
-    // Supabase transformation: insert /render/image/public/ path
-    // Original URL: https://xxx.supabase.co/storage/v1/object/public/rebuild-documents/foo.png
-    // Thumb URL:    https://xxx.supabase.co/storage/v1/render/image/public/rebuild-documents/foo.png?width=120&height=120&resize=cover
     const thumbUrl = d.file_url.replace('/storage/v1/object/public/', '/storage/v1/render/image/public/') + '?width=120&height=120&resize=cover&quality=70';
     thumbHtml = `<img src="${esc(thumbUrl)}" alt="" class="doc-thumb" loading="lazy" decoding="async" onerror="this.parentElement.classList.add('thumb-failed');this.style.display='none';">`;
   } else if (isPdf) {
@@ -604,15 +747,19 @@ function docCard(d) {
   }
 
   const icon = isImg ? `<div class="doc-icon img doc-icon-fallback">🖼</div>${thumbHtml}` : thumbHtml;
+  const markupBtn = isImg ? `<button class="doc-markup-btn" data-markup-doc="${d.id}" title="Mark up this photo">✏️</button>` : '';
 
   return `
-    <a href="${esc(d.file_url || '#')}" target="_blank" class="doc-card">
-      <div class="doc-thumb-wrap">${icon}</div>
-      <div class="doc-info">
-        <div class="doc-name">${esc(d.filename || 'Untitled')}</div>
-        <div class="doc-meta"><span class="doc-cat-pill">${esc(d.category || '')}</span>${fmtDate(d.uploaded_at)}${d.file_size_bytes ? ' · ' + fmtBytes(d.file_size_bytes) : ''}</div>
-      </div>
-    </a>
+    <div class="doc-card-wrap">
+      <a href="${esc(d.file_url || '#')}" target="_blank" class="doc-card">
+        <div class="doc-thumb-wrap">${icon}</div>
+        <div class="doc-info">
+          <div class="doc-name">${esc(d.filename || 'Untitled')}</div>
+          <div class="doc-meta"><span class="doc-cat-pill">${esc(d.category || '')}</span>${fmtDate(d.uploaded_at)}${d.file_size_bytes ? ' · ' + fmtBytes(d.file_size_bytes) : ''}</div>
+        </div>
+      </a>
+      ${markupBtn}
+    </div>
   `;
 }
 
@@ -673,62 +820,205 @@ function wireUpload() {
 
   submitBtn.addEventListener('click', async () => {
     if (!state.pendingFiles.length) return;
-    submitBtn.disabled = true;
-    const orig = submitBtn.textContent;
-    const category = catSelect.value;
-    const p = state.project;
-    let okCount = 0;
-    for (const [i, file] of state.pendingFiles.entries()) {
-      submitBtn.textContent = `Uploading ${i + 1}/${state.pendingFiles.length}…`;
-      try {
-        const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
-        const path = `projects/${projectId}/${Date.now()}-${safeName}`;
-        const { error: upErr } = await sb.storage.from('rebuild-documents').upload(path, file, {
-          contentType: file.type || 'application/octet-stream',
-          upsert: false,
-        });
-        if (upErr) { console.error(upErr); continue; }
-        const { data: urlData } = sb.storage.from('rebuild-documents').getPublicUrl(path);
-        const { data: docRow } = await sb.from('rebuild_documents').insert({
-          project_id: projectId,
-          category,
-          filename: safeName,
-          file_url: urlData.publicUrl,
-          file_size_bytes: file.size,
-          mime_type: file.type || 'application/octet-stream',
-          uploaded_by_email: 'mobile-pwa@jg-restoration.com',
-          push_status: 'pending',
-        }).select();
-        // Push to Albi
-        if (docRow?.[0] && p.albi_project_id) {
-          try {
-            await fetch(ALBI_DOC_HOOK, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                document_id: docRow[0].id,
-                project_id: projectId,
-                albi_project_id: p.albi_project_id,
-                albi_job_number: p.albi_job_number,
-                category, filename: safeName,
-                file_url: urlData.publicUrl,
-                mime_type: file.type,
-                notes: `Uploaded from mobile PWA`,
-              }),
-              mode: 'no-cors',
-            });
-            await sb.from('rebuild_documents').update({ push_status: 'sent', pushed_to_albi_at: new Date().toISOString() }).eq('id', docRow[0].id);
-          } catch (e) { console.warn('Albi push failed:', e); }
-        }
-        okCount++;
-      } catch (e) { console.error(e); }
+    // Filter out non-image files for the markup question — only images can be marked up
+    const imageFiles = state.pendingFiles.filter(f => /image/i.test(f.type));
+    const nonImageFiles = state.pendingFiles.filter(f => !/image/i.test(f.type));
+
+    // If there are no images, skip the markup question entirely
+    if (!imageFiles.length) {
+      modal.classList.remove('on');
+      await uploadBatch(state.pendingFiles, catSelect.value);
+      state.pendingFiles = [];
+      return;
     }
-    submitBtn.textContent = orig;
-    submitBtn.disabled = false;
-    toast(`Uploaded ${okCount}/${state.pendingFiles.length}`);
-    state.pendingFiles = [];
+
+    // Ask: any markup needed?
     modal.classList.remove('on');
+    const wantsMarkup = await askMarkupDecision(imageFiles.length, nonImageFiles.length);
+    if (wantsMarkup === null) {
+      // User cancelled — reopen modal
+      modal.classList.add('on');
+      return;
+    }
+    if (wantsMarkup === false) {
+      await uploadBatch(state.pendingFiles, catSelect.value);
+      state.pendingFiles = [];
+      return;
+    }
+    // wantsMarkup === true → show selection grid
+    const toMarkUp = await pickPhotosForMarkup(imageFiles);
+    if (toMarkUp === null) {
+      // Cancelled — reopen modal
+      modal.classList.add('on');
+      return;
+    }
+    const toMarkUpSet = new Set(toMarkUp);
+    const passThroughFiles = state.pendingFiles.filter(f => !toMarkUpSet.has(f));
+    const markupQueue = state.pendingFiles.filter(f => toMarkUpSet.has(f));
+    state.pendingFiles = [];
+
+    // Upload non-markup files first as background batch
+    if (passThroughFiles.length) {
+      uploadBatch(passThroughFiles, catSelect.value).catch(e => console.error(e));
+    }
+    // Then walk the markup queue
+    if (markupQueue.length) {
+      enterMarkupQueue(markupQueue, catSelect.value);
+    }
   });
+}
+
+// Batch upload (used for non-markup files)
+async function uploadBatch(files, category) {
+  if (!files.length) return;
+  const p = state.project;
+  let okCount = 0;
+  toast(`Uploading ${files.length} file${files.length === 1 ? '' : 's'}…`);
+  for (const file of files) {
+    if (await uploadFile(file, category, file.name)) okCount++;
+  }
+  toast(`Uploaded ${okCount}/${files.length}`);
+}
+
+// Single file upload — returns true on success
+async function uploadFile(file, category, displayName) {
+  const p = state.project;
+  try {
+    const safeName = (displayName || file.name).replace(/[^a-zA-Z0-9._-]/g, '_');
+    const path = `projects/${projectId}/${Date.now()}-${safeName}`;
+    const { error: upErr } = await sb.storage.from('rebuild-documents').upload(path, file, {
+      contentType: file.type || 'application/octet-stream',
+      upsert: false,
+    });
+    if (upErr) { console.error(upErr); return false; }
+    const { data: urlData } = sb.storage.from('rebuild-documents').getPublicUrl(path);
+    const { data: docRow } = await sb.from('rebuild_documents').insert({
+      project_id: projectId,
+      category,
+      filename: safeName,
+      file_url: urlData.publicUrl,
+      file_size_bytes: file.size,
+      mime_type: file.type || 'application/octet-stream',
+      uploaded_by_email: 'mobile-pwa@jg-restoration.com',
+      push_status: 'pending',
+    }).select();
+    // Push to Albi
+    if (docRow?.[0] && p.albi_project_id) {
+      try {
+        await fetch(ALBI_DOC_HOOK, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            document_id: docRow[0].id,
+            project_id: projectId,
+            albi_project_id: p.albi_project_id,
+            albi_job_number: p.albi_job_number,
+            category, filename: safeName,
+            file_url: urlData.publicUrl,
+            mime_type: file.type,
+            notes: `Uploaded from mobile PWA`,
+          }),
+          mode: 'no-cors',
+        });
+        await sb.from('rebuild_documents').update({ push_status: 'sent', pushed_to_albi_at: new Date().toISOString() }).eq('id', docRow[0].id);
+      } catch (e) { console.warn('Albi push failed:', e); }
+    }
+    return true;
+  } catch (e) { console.error(e); return false; }
+}
+
+// Ask: any markup needed? Returns true/false/null(cancel)
+function askMarkupDecision(imgCount, nonImgCount) {
+  return new Promise((resolve) => {
+    const modal = document.getElementById('markupDecisionModal');
+    const msg = document.getElementById('markupDecisionMsg');
+    msg.textContent = imgCount === 1
+      ? `Do you want to mark up this photo before uploading?`
+      : `Do you want to mark up any of these ${imgCount} photos before uploading?${nonImgCount ? ` (${nonImgCount} other file${nonImgCount === 1 ? '' : 's'} will upload as-is.)` : ''}`;
+    modal.classList.add('on');
+    const cleanup = () => {
+      modal.classList.remove('on');
+      document.getElementById('mdYes').onclick = null;
+      document.getElementById('mdNo').onclick = null;
+      document.getElementById('mdCancel').onclick = null;
+    };
+    document.getElementById('mdYes').onclick = () => { cleanup(); resolve(true); };
+    document.getElementById('mdNo').onclick = () => { cleanup(); resolve(false); };
+    document.getElementById('mdCancel').onclick = () => { cleanup(); resolve(null); };
+  });
+}
+
+// Show photo grid with checkboxes, return selected files or null on cancel
+function pickPhotosForMarkup(imageFiles) {
+  return new Promise(async (resolve) => {
+    const modal = document.getElementById('markupPickerModal');
+    const grid = document.getElementById('markupPickerGrid');
+    const countEl = document.getElementById('markupPickerCount');
+    const goBtn = document.getElementById('markupPickerGo');
+
+    // Build thumbnails (read each file as data URL for preview)
+    grid.innerHTML = '<div style="padding:20px;text-align:center;color:var(--muted);">Loading previews…</div>';
+    modal.classList.add('on');
+
+    const previews = await Promise.all(imageFiles.map(file => new Promise(res => {
+      const r = new FileReader();
+      r.onload = () => res({ file, dataUrl: r.result });
+      r.onerror = () => res({ file, dataUrl: null });
+      r.readAsDataURL(file);
+    })));
+
+    const selected = new Set();
+    grid.innerHTML = previews.map((p, i) => `
+      <label class="picker-thumb" data-i="${i}">
+        <input type="checkbox" data-i="${i}">
+        ${p.dataUrl ? `<img src="${p.dataUrl}" alt="">` : `<div class="picker-thumb-fallback">🖼</div>`}
+        <div class="picker-thumb-name">${esc(p.file.name)}</div>
+      </label>
+    `).join('');
+
+    const refresh = () => {
+      countEl.textContent = selected.size > 0 ? `Mark Up Selected (${selected.size})` : 'Select photos to mark up';
+      goBtn.disabled = selected.size === 0;
+    };
+    refresh();
+
+    grid.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+      cb.addEventListener('change', (e) => {
+        const i = Number(e.target.dataset.i);
+        const label = e.target.closest('.picker-thumb');
+        if (e.target.checked) { selected.add(i); label.classList.add('selected'); }
+        else { selected.delete(i); label.classList.remove('selected'); }
+        refresh();
+      });
+    });
+
+    const cleanup = () => {
+      modal.classList.remove('on');
+      document.getElementById('markupPickerGo').onclick = null;
+      document.getElementById('markupPickerCancel').onclick = null;
+      document.getElementById('markupPickerClose').onclick = null;
+    };
+    document.getElementById('markupPickerGo').onclick = () => {
+      const files = Array.from(selected).map(i => previews[i].file);
+      cleanup();
+      resolve(files);
+    };
+    document.getElementById('markupPickerCancel').onclick = () => { cleanup(); resolve(null); };
+    document.getElementById('markupPickerClose').onclick = () => { cleanup(); resolve(null); };
+  });
+}
+
+// Markup queue: walk through files one at a time, opening the editor for each
+async function enterMarkupQueue(files, category) {
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i];
+    toast(`Photo ${i + 1} of ${files.length}`);
+    await new Promise((resolve) => {
+      // Open editor with this file pre-loaded, callback when saved or skipped
+      openMarkupEditorWithFile(file, category, `${i + 1} of ${files.length}`, resolve);
+    });
+  }
+  toast('All photos uploaded');
 }
 
 function showEmpty(t, m) {
@@ -762,12 +1052,20 @@ function openMarkupEditor() {
   markup.imgEl = null;
   markup.history = [];
   markup.historyIndex = -1;
+  markup.queueMode = false;
+  markup.queueCategory = null;
+  markup.queueLabel = null;
+  markup.queueOriginalFile = null;
+  markup.queueOnDone = null;
+  markup.existingDocMode = false;
 
   // Reset to capture step
   document.getElementById('markupCaptureStep').style.display = 'flex';
   markup.canvas.style.display = 'none';
   document.getElementById('markupToolbar').style.display = 'none';
   document.getElementById('markupSave').disabled = true;
+  document.getElementById('markupSkip').style.display = 'none';
+  document.getElementById('markupQueueLabel').style.display = 'none';
 
   markup.overlay.classList.add('on');
 
@@ -776,9 +1074,113 @@ function openMarkupEditor() {
   document.getElementById('markup_library_input').onchange = handleMarkupSource;
 }
 
+// Open editor with a pre-loaded file (for batch markup queue)
+async function openMarkupEditorWithFile(file, category, queueLabel, onDone) {
+  markup.overlay = document.getElementById('markupOverlay');
+  markup.canvas = document.getElementById('markupCanvas');
+  markup.ctx = markup.canvas.getContext('2d');
+  markup.imgEl = null;
+  markup.history = [];
+  markup.historyIndex = -1;
+  markup.queueMode = true;
+  markup.queueCategory = category;
+  markup.queueLabel = queueLabel;
+  markup.queueOriginalFile = file;
+  markup.queueOnDone = onDone;
+  markup.existingDocMode = false;
+
+  // Skip Step 1 — go straight to canvas
+  document.getElementById('markupCaptureStep').style.display = 'none';
+  markup.canvas.style.display = 'block';
+  document.getElementById('markupToolbar').style.display = 'flex';
+
+  // Show Skip button + queue counter
+  const skipBtn = document.getElementById('markupSkip');
+  skipBtn.style.display = 'block';
+  skipBtn.textContent = 'Skip';
+  const lbl = document.getElementById('markupQueueLabel');
+  lbl.textContent = queueLabel;
+  lbl.style.display = 'block';
+
+  markup.overlay.classList.add('on');
+
+  // Load the file directly
+  const img = await new Promise((res, rej) => {
+    const i = new Image();
+    i.onload = () => res(i);
+    i.onerror = rej;
+    i.src = URL.createObjectURL(file);
+  });
+  await loadImageToCanvas(img);
+}
+
+// Open editor with an existing doc URL (for "go back and mark up" feature)
+async function openMarkupEditorWithExistingDoc(doc) {
+  markup.overlay = document.getElementById('markupOverlay');
+  markup.canvas = document.getElementById('markupCanvas');
+  markup.ctx = markup.canvas.getContext('2d');
+  markup.imgEl = null;
+  markup.history = [];
+  markup.historyIndex = -1;
+  markup.queueMode = false;
+  markup.existingDocMode = true;
+  markup.existingDoc = doc;
+
+  document.getElementById('markupCaptureStep').style.display = 'none';
+  markup.canvas.style.display = 'block';
+  document.getElementById('markupToolbar').style.display = 'flex';
+  document.getElementById('markupSkip').style.display = 'none';
+  const lbl = document.getElementById('markupQueueLabel');
+  lbl.textContent = 'Re-marking';
+  lbl.style.display = 'block';
+
+  markup.overlay.classList.add('on');
+  toast('Loading photo…');
+
+  // Load image with crossOrigin so canvas isn't tainted (Supabase serves Access-Control-Allow-Origin:*)
+  try {
+    const img = await new Promise((res, rej) => {
+      const i = new Image();
+      i.crossOrigin = 'anonymous';
+      i.onload = () => res(i);
+      i.onerror = () => rej(new Error('image load failed'));
+      // Use thumbnail-sized version for faster load + smaller working set
+      // but cap at 1600 so quality is good for re-markup
+      const workUrl = doc.file_url.replace('/storage/v1/object/public/', '/storage/v1/render/image/public/') + '?width=1600&quality=85';
+      i.src = workUrl;
+    });
+    await loadImageToCanvas(img);
+  } catch (e) {
+    console.error('Failed to load existing photo:', e);
+    toast('Could not load photo (CORS issue?)');
+    closeMarkupEditor();
+  }
+}
+
+async function loadImageToCanvas(img) {
+  markup.imgEl = img;
+  const wrap = document.getElementById('markupCanvasWrap');
+  const wrapW = wrap.clientWidth;
+  const wrapH = wrap.clientHeight;
+  const maxDim = 1600;
+  const ratio = img.width / img.height;
+  let cw = img.width, ch = img.height;
+  if (cw > maxDim) { cw = maxDim; ch = cw / ratio; }
+  if (ch > maxDim) { ch = maxDim; cw = ch * ratio; }
+  markup.canvas.width = Math.round(cw);
+  markup.canvas.height = Math.round(ch);
+  const scale = Math.min(wrapW / cw, wrapH / ch);
+  markup.imgScale = scale;
+  markup.canvas.style.width = (cw * scale) + 'px';
+  markup.canvas.style.height = (ch * scale) + 'px';
+  markup.ctx.drawImage(img, 0, 0, cw, ch);
+  pushHistory();
+  document.getElementById('markupSave').disabled = false;
+  wireMarkupCanvas();
+}
+
 function closeMarkupEditor() {
   markup.overlay.classList.remove('on');
-  // Reset
   document.getElementById('markup_camera_input').value = '';
   document.getElementById('markup_library_input').value = '';
 }
@@ -787,47 +1189,17 @@ async function handleMarkupSource(e) {
   const file = e.target.files[0];
   if (!file) return;
   if (file.size > 25 * 1024 * 1024) { toast('Photo too large (max 25 MB)'); return; }
-
-  // Load image
   const img = await new Promise((res, rej) => {
     const i = new Image();
     i.onload = () => res(i);
     i.onerror = rej;
     i.src = URL.createObjectURL(file);
   });
-  markup.imgEl = img;
-
-  // Compute canvas size: fit to viewport, maintain aspect ratio
-  const wrap = document.getElementById('markupCanvasWrap');
-  const wrapW = wrap.clientWidth;
-  const wrapH = wrap.clientHeight;
-  // Use a higher internal resolution for crisp drawing, max ~1600px
-  const maxDim = 1600;
-  const ratio = img.width / img.height;
-  let cw = img.width, ch = img.height;
-  if (cw > maxDim) { cw = maxDim; ch = cw / ratio; }
-  if (ch > maxDim) { ch = maxDim; cw = ch * ratio; }
-  markup.canvas.width = Math.round(cw);
-  markup.canvas.height = Math.round(ch);
-  // Compute display scale so the canvas fits the wrap
-  const scale = Math.min(wrapW / cw, wrapH / ch);
-  markup.imgScale = scale;
-  markup.canvas.style.width = (cw * scale) + 'px';
-  markup.canvas.style.height = (ch * scale) + 'px';
-
-  // Draw photo as base layer
-  markup.ctx.drawImage(img, 0, 0, cw, ch);
-
-  // Push to history
-  pushHistory();
-
   // Show canvas + toolbar
   document.getElementById('markupCaptureStep').style.display = 'none';
   markup.canvas.style.display = 'block';
   document.getElementById('markupToolbar').style.display = 'flex';
-  document.getElementById('markupSave').disabled = false;
-
-  wireMarkupCanvas();
+  await loadImageToCanvas(img);
 }
 
 function pushHistory() {
@@ -1060,15 +1432,24 @@ async function saveMarkupAndUpload() {
   saveBtn.textContent = 'Saving…';
 
   try {
-    // Flatten canvas to JPEG blob (smaller than PNG, fine for photos)
     const blob = await new Promise(res => markup.canvas.toBlob(res, 'image/jpeg', 0.85));
     if (!blob) { toast('Save failed'); saveBtn.textContent = orig; saveBtn.disabled = false; return; }
 
     const p = state.project;
     const ts = new Date();
     const tsCode = `${ts.getFullYear()}${String(ts.getMonth()+1).padStart(2,'0')}${String(ts.getDate()).padStart(2,'0')}-${String(ts.getHours()).padStart(2,'0')}${String(ts.getMinutes()).padStart(2,'0')}${String(ts.getSeconds()).padStart(2,'0')}`;
-    const filename = `Markup_${p.albi_job_number || 'project'}_${tsCode}.jpg`;
+
+    // Build filename based on mode
+    let baseName = `Markup_${p.albi_job_number || 'project'}_${tsCode}`;
+    if (markup.existingDocMode && markup.existingDoc) {
+      // Re-marking an existing photo
+      const origName = (markup.existingDoc.filename || 'photo').replace(/\.[^.]+$/, '');
+      baseName = `${origName}_marked_${tsCode}`;
+    }
+    const filename = `${baseName}.jpg`;
     const path = `projects/${projectId}/${Date.now()}-${filename}`;
+
+    const category = markup.queueMode ? (markup.queueCategory || 'Photos') : 'Photos';
 
     const { error: upErr } = await sb.storage.from('rebuild-documents').upload(path, blob, {
       contentType: 'image/jpeg',
@@ -1079,7 +1460,7 @@ async function saveMarkupAndUpload() {
     const { data: urlData } = sb.storage.from('rebuild-documents').getPublicUrl(path);
     const { data: docRow } = await sb.from('rebuild_documents').insert({
       project_id: projectId,
-      category: 'Photos',
+      category,
       filename,
       file_url: urlData.publicUrl,
       file_size_bytes: blob.size,
@@ -1088,7 +1469,6 @@ async function saveMarkupAndUpload() {
       push_status: 'pending',
     }).select();
 
-    // Push to Albi
     if (docRow?.[0] && p.albi_project_id) {
       try {
         await fetch(ALBI_DOC_HOOK, {
@@ -1099,11 +1479,11 @@ async function saveMarkupAndUpload() {
             project_id: projectId,
             albi_project_id: p.albi_project_id,
             albi_job_number: p.albi_job_number,
-            category: 'Photos',
+            category,
             filename,
             file_url: urlData.publicUrl,
             mime_type: 'image/jpeg',
-            notes: 'Photo with markup from mobile PWA',
+            notes: markup.existingDocMode ? 'Marked-up version of existing photo' : 'Photo with markup from mobile PWA',
           }),
           mode: 'no-cors',
         });
@@ -1112,12 +1492,42 @@ async function saveMarkupAndUpload() {
     }
 
     toast('Photo saved');
-    closeMarkupEditor();
+
+    // Queue mode: signal the queue to move on
+    if (markup.queueMode) {
+      const cb = markup.queueOnDone;
+      closeMarkupEditor();
+      if (cb) cb();
+    } else {
+      closeMarkupEditor();
+    }
   } catch (e) {
     console.error(e);
     toast('Save failed');
     saveBtn.textContent = orig;
     saveBtn.disabled = false;
+  }
+}
+
+// Skip: upload original file without markup, move to next in queue
+async function skipMarkupAndUpload() {
+  if (!markup.queueMode || !markup.queueOriginalFile) return;
+  const skipBtn = document.getElementById('markupSkip');
+  skipBtn.disabled = true;
+  const orig = skipBtn.textContent;
+  skipBtn.textContent = 'Uploading…';
+  try {
+    await uploadFile(markup.queueOriginalFile, markup.queueCategory, markup.queueOriginalFile.name);
+    toast('Uploaded as-is');
+    const cb = markup.queueOnDone;
+    closeMarkupEditor();
+    if (cb) cb();
+  } catch (e) {
+    console.error(e);
+    toast('Upload failed');
+  } finally {
+    skipBtn.disabled = false;
+    skipBtn.textContent = orig;
   }
 }
 
@@ -1129,9 +1539,17 @@ document.getElementById('markup_zone').addEventListener('click', () => {
 });
 document.getElementById('markupCancel').addEventListener('click', () => {
   if (markup.imgEl && !confirm('Discard this markup?')) return;
+  // In queue mode, cancelling skips this item too
+  if (markup.queueMode) {
+    const cb = markup.queueOnDone;
+    closeMarkupEditor();
+    if (cb) cb();
+    return;
+  }
   closeMarkupEditor();
 });
 document.getElementById('markupSave').addEventListener('click', saveMarkupAndUpload);
+document.getElementById('markupSkip').addEventListener('click', skipMarkupAndUpload);
 
 // Auto-open markup editor on deep-link from project_detail.html
 const autoAction = new URLSearchParams(location.search).get('action');
