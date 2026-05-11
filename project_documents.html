@@ -603,32 +603,6 @@
   </div>
 </div>
 
-<!-- Markup decision modal: "any markup needed?" -->
-<div class="modal-back" id="markupDecisionModal">
-  <div class="modal" style="border-radius: 18px; max-width: 380px;">
-    <h3 style="margin:0 0 10px;">Markup?</h3>
-    <p id="markupDecisionMsg" style="margin:0 0 16px;font-size:14px;color:var(--text);line-height:1.5;"></p>
-    <div class="actions" style="flex-direction:column;gap:8px;">
-      <button class="btn primary" id="mdYes" style="width:100%;">Yes — Mark up</button>
-      <button class="btn ghost" id="mdNo" style="width:100%;">No — Upload as-is</button>
-      <button class="btn ghost" id="mdCancel" style="width:100%;color:var(--muted);">Cancel</button>
-    </div>
-  </div>
-</div>
-
-<!-- Markup photo picker: choose which photos to mark up -->
-<div class="modal-back" id="markupPickerModal">
-  <div class="modal" style="border-radius: 18px 18px 0 0; max-width: 600px;">
-    <h3 style="margin:0 0 6px;">Select Photos to Mark Up <button class="close-x" id="markupPickerClose">×</button></h3>
-    <p style="margin:0 0 12px;font-size:12px;color:var(--muted);">Tap photos you want to annotate. Others will upload as-is.</p>
-    <div class="picker-grid" id="markupPickerGrid"></div>
-    <div class="actions">
-      <button class="btn ghost" id="markupPickerCancel">Cancel</button>
-      <button class="btn primary" id="markupPickerGo" disabled><span id="markupPickerCount">Select photos to mark up</span></button>
-    </div>
-  </div>
-</div>
-
 <script type="module">
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 const SB_URL = 'https://nuykvchgecpiuikoerze.supabase.co';
@@ -820,51 +794,10 @@ function wireUpload() {
 
   submitBtn.addEventListener('click', async () => {
     if (!state.pendingFiles.length) return;
-    // Filter out non-image files for the markup question — only images can be marked up
-    const imageFiles = state.pendingFiles.filter(f => /image/i.test(f.type));
-    const nonImageFiles = state.pendingFiles.filter(f => !/image/i.test(f.type));
-
-    // If there are no images, skip the markup question entirely
-    if (!imageFiles.length) {
-      modal.classList.remove('on');
-      await uploadBatch(state.pendingFiles, catSelect.value);
-      state.pendingFiles = [];
-      return;
-    }
-
-    // Ask: any markup needed?
     modal.classList.remove('on');
-    const wantsMarkup = await askMarkupDecision(imageFiles.length, nonImageFiles.length);
-    if (wantsMarkup === null) {
-      // User cancelled — reopen modal
-      modal.classList.add('on');
-      return;
-    }
-    if (wantsMarkup === false) {
-      await uploadBatch(state.pendingFiles, catSelect.value);
-      state.pendingFiles = [];
-      return;
-    }
-    // wantsMarkup === true → show selection grid
-    const toMarkUp = await pickPhotosForMarkup(imageFiles);
-    if (toMarkUp === null) {
-      // Cancelled — reopen modal
-      modal.classList.add('on');
-      return;
-    }
-    const toMarkUpSet = new Set(toMarkUp);
-    const passThroughFiles = state.pendingFiles.filter(f => !toMarkUpSet.has(f));
-    const markupQueue = state.pendingFiles.filter(f => toMarkUpSet.has(f));
+    const files = state.pendingFiles;
     state.pendingFiles = [];
-
-    // Upload non-markup files first as background batch
-    if (passThroughFiles.length) {
-      uploadBatch(passThroughFiles, catSelect.value).catch(e => console.error(e));
-    }
-    // Then walk the markup queue
-    if (markupQueue.length) {
-      enterMarkupQueue(markupQueue, catSelect.value);
-    }
+    await uploadBatch(files, catSelect.value);
   });
 }
 
@@ -925,100 +858,6 @@ async function uploadFile(file, category, displayName) {
     }
     return true;
   } catch (e) { console.error(e); return false; }
-}
-
-// Ask: any markup needed? Returns true/false/null(cancel)
-function askMarkupDecision(imgCount, nonImgCount) {
-  return new Promise((resolve) => {
-    const modal = document.getElementById('markupDecisionModal');
-    const msg = document.getElementById('markupDecisionMsg');
-    msg.textContent = imgCount === 1
-      ? `Do you want to mark up this photo before uploading?`
-      : `Do you want to mark up any of these ${imgCount} photos before uploading?${nonImgCount ? ` (${nonImgCount} other file${nonImgCount === 1 ? '' : 's'} will upload as-is.)` : ''}`;
-    modal.classList.add('on');
-    const cleanup = () => {
-      modal.classList.remove('on');
-      document.getElementById('mdYes').onclick = null;
-      document.getElementById('mdNo').onclick = null;
-      document.getElementById('mdCancel').onclick = null;
-    };
-    document.getElementById('mdYes').onclick = () => { cleanup(); resolve(true); };
-    document.getElementById('mdNo').onclick = () => { cleanup(); resolve(false); };
-    document.getElementById('mdCancel').onclick = () => { cleanup(); resolve(null); };
-  });
-}
-
-// Show photo grid with checkboxes, return selected files or null on cancel
-function pickPhotosForMarkup(imageFiles) {
-  return new Promise(async (resolve) => {
-    const modal = document.getElementById('markupPickerModal');
-    const grid = document.getElementById('markupPickerGrid');
-    const countEl = document.getElementById('markupPickerCount');
-    const goBtn = document.getElementById('markupPickerGo');
-
-    // Build thumbnails (read each file as data URL for preview)
-    grid.innerHTML = '<div style="padding:20px;text-align:center;color:var(--muted);">Loading previews…</div>';
-    modal.classList.add('on');
-
-    const previews = await Promise.all(imageFiles.map(file => new Promise(res => {
-      const r = new FileReader();
-      r.onload = () => res({ file, dataUrl: r.result });
-      r.onerror = () => res({ file, dataUrl: null });
-      r.readAsDataURL(file);
-    })));
-
-    const selected = new Set();
-    grid.innerHTML = previews.map((p, i) => `
-      <label class="picker-thumb" data-i="${i}">
-        <input type="checkbox" data-i="${i}">
-        ${p.dataUrl ? `<img src="${p.dataUrl}" alt="">` : `<div class="picker-thumb-fallback">🖼</div>`}
-        <div class="picker-thumb-name">${esc(p.file.name)}</div>
-      </label>
-    `).join('');
-
-    const refresh = () => {
-      countEl.textContent = selected.size > 0 ? `Mark Up Selected (${selected.size})` : 'Select photos to mark up';
-      goBtn.disabled = selected.size === 0;
-    };
-    refresh();
-
-    grid.querySelectorAll('input[type="checkbox"]').forEach(cb => {
-      cb.addEventListener('change', (e) => {
-        const i = Number(e.target.dataset.i);
-        const label = e.target.closest('.picker-thumb');
-        if (e.target.checked) { selected.add(i); label.classList.add('selected'); }
-        else { selected.delete(i); label.classList.remove('selected'); }
-        refresh();
-      });
-    });
-
-    const cleanup = () => {
-      modal.classList.remove('on');
-      document.getElementById('markupPickerGo').onclick = null;
-      document.getElementById('markupPickerCancel').onclick = null;
-      document.getElementById('markupPickerClose').onclick = null;
-    };
-    document.getElementById('markupPickerGo').onclick = () => {
-      const files = Array.from(selected).map(i => previews[i].file);
-      cleanup();
-      resolve(files);
-    };
-    document.getElementById('markupPickerCancel').onclick = () => { cleanup(); resolve(null); };
-    document.getElementById('markupPickerClose').onclick = () => { cleanup(); resolve(null); };
-  });
-}
-
-// Markup queue: walk through files one at a time, opening the editor for each
-async function enterMarkupQueue(files, category) {
-  for (let i = 0; i < files.length; i++) {
-    const file = files[i];
-    toast(`Photo ${i + 1} of ${files.length}`);
-    await new Promise((resolve) => {
-      // Open editor with this file pre-loaded, callback when saved or skipped
-      openMarkupEditorWithFile(file, category, `${i + 1} of ${files.length}`, resolve);
-    });
-  }
-  toast('All photos uploaded');
 }
 
 function showEmpty(t, m) {
