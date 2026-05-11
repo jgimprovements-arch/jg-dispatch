@@ -1685,7 +1685,16 @@ function renderHome() {
       html += '<div class="route-stop-num' + (s.completed?' done':'') + '">' + (s.completed?'✓':(i+1)) + '</div>';
       html += '<div class="route-stop-info"><div class="route-stop-name">' + (s.partner_name||'Stop '+(i+1)) + '</div>';
       html += '<div class="route-stop-time">' + fmt(startMins) + ' – ' + fmt(endMins) + (s.address?' · '+s.address:'') + '</div></div>';
-      if (!s.completed) html += '<button class="route-stop-log" onclick="event.stopPropagation();openLogTouchForStop(\x27' + s.partner_id + '\x27,\x27' + (s.partner_name||'').replace(/'/g,'\x27') + '\x27)">Log</button>';
+      // Escape partner name for safe inclusion in onclick attribute.
+      // Replaces ' " < > & with HTML entities so they survive the
+      // double-quoted attribute string.
+      var safePid = (s.partner_id || '').replace(/[&<>"']/g, function(c){
+        return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
+      });
+      var safeName = (s.partner_name || '').replace(/[&<>"']/g, function(c){
+        return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
+      });
+      if (!s.completed) html += '<button class="route-stop-log" onclick="event.stopPropagation();openLogTouchForStop(&quot;' + safePid + '&quot;,&quot;' + safeName + '&quot;)">Log</button>';
       html += '</div>';
       startMins = endMins + 15;
     });
@@ -4841,12 +4850,25 @@ function renderRoutes() {
       var endMins = startMins + (s.duration||45);
       var fmt = function(m){ var h=Math.floor(m/60),mn=m%60; return h+':'+(mn<10?'0':'')+mn; };
       var pid = s.partner_id || '';
-      html += '<div class="route-stop-row" onclick="' + (pid ? 'openPartnerDetail(' + JSON.stringify(pid) + ')' : '') + '">';
+      var safePidRow = pid.replace(/[&<>"']/g, function(c){
+        return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
+      });
+      html += '<div class="route-stop-row" onclick="' + (pid ? 'openPartnerDetail(&quot;' + safePidRow + '&quot;)' : '') + '">';
       html += '<div class="route-stop-num' + (s.completed?' done':'') + '">' + (s.completed?'✓':(i+1)) + '</div>';
       html += '<div class="route-stop-info"><div class="route-stop-name">' + (s.partner_name||'Stop '+(i+1)) + '</div>';
       html += '<div class="route-stop-time">' + fmt(startMins) + ' – ' + fmt(endMins) + '</div></div>';
       if (!s.completed) {
-        var logClick = 'event.stopPropagation();openLogTouchForStop(' + JSON.stringify(pid) + ',' + JSON.stringify(s.partner_name||'') + ')';
+        // Escape for safe inclusion in a double-quoted onclick attribute.
+        // JSON.stringify would wrap in " which collides with the outer
+        // quotes and produces an unparseable handler — this caused log
+        // buttons to silently fail.
+        var safePid2 = (pid || '').replace(/[&<>"']/g, function(c){
+          return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
+        });
+        var safeName2 = (s.partner_name || '').replace(/[&<>"']/g, function(c){
+          return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
+        });
+        var logClick = 'event.stopPropagation();openLogTouchForStop(&quot;' + safePid2 + '&quot;,&quot;' + safeName2 + '&quot;)';
         html += '<button class="route-stop-log" onclick="' + logClick + '">Log</button>';
       }
       html += '</div>';
