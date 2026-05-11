@@ -1,0 +1,720 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0d2d5e">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="JG Schedule">
+<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="manifest" href="manifest.json">
+<title>Schedule · JG Restoration</title>
+<link rel="icon" href="https://jgimprovements-arch.github.io/jg-dispatch/logo.png">
+<style>
+  :root {
+    --bg: #f4f6fb; --bg-elev: #ffffff; --bg-input: #ffffff;
+    --text: #1a2540; --text-soft: #5a6478; --muted: #7884a0;
+    --line: #e3e7f0; --line-strong: #c8cfdc;
+    --navy: #0d2d5e; --orange: #e85d04; --gold: #f5a623;
+    --green: #2d9c5f; --red: #d64545; --blue-primary: #2563eb;
+    --safe-top: env(safe-area-inset-top, 0px);
+    --safe-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  html { color-scheme: light; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; padding: 0; height: 100%; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--text); overscroll-behavior-y: contain; padding-bottom: calc(var(--safe-bottom) + 72px); }
+
+  /* Topbar */
+  .topbar { padding: calc(var(--safe-top) + 14px) 18px 12px; display: flex; align-items: center; justify-content: space-between; gap: 12px; position: sticky; top: 0; background: var(--bg); z-index: 10; }
+  .menu-btn, .icon-btn { background: transparent; border: 0; color: var(--text); width: 38px; height: 38px; display: flex; align-items: center; justify-content: center; cursor: pointer; border-radius: 8px; }
+  .menu-btn:active, .icon-btn:active { background: var(--bg-elev); }
+  .menu-btn svg, .icon-btn svg { width: 24px; height: 24px; }
+  .page-title { font-size: 18px; font-weight: 800; letter-spacing: -.2px; flex: 1; text-align: center; }
+
+  main { padding: 0 14px; max-width: 720px; margin: 0 auto; }
+
+  /* Filter chips */
+  .filter-row { display: flex; gap: 6px; margin: 4px 0 14px; overflow-x: auto; -webkit-overflow-scrolling: touch; padding-bottom: 4px; }
+  .filter-row::-webkit-scrollbar { display: none; }
+  .filter-chip { background: var(--bg-elev); border: 1px solid var(--line); border-radius: 999px; padding: 7px 14px; font-size: 12px; font-weight: 700; color: var(--navy); white-space: nowrap; cursor: pointer; flex-shrink: 0; }
+  .filter-chip.on { background: var(--navy); color: #fff; border-color: var(--navy); }
+
+  /* Month picker */
+  .month-header {
+    background: var(--bg-elev);
+    border: 1px solid var(--line);
+    border-radius: 14px 14px 0 0;
+    border-bottom: 0;
+    padding: 14px 18px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .month-title { font-size: 16px; font-weight: 800; color: var(--text); }
+  .month-nav { display: flex; gap: 4px; }
+  .month-nav-btn { width: 34px; height: 34px; border: 1px solid var(--line); background: var(--bg); color: var(--navy); border-radius: 50%; cursor: pointer; font-size: 16px; font-weight: 700; font-family: inherit; display: flex; align-items: center; justify-content: center; }
+  .month-nav-btn:active { background: var(--orange); color: #fff; border-color: var(--orange); }
+  .today-btn { background: transparent; border: 1px solid var(--orange); color: var(--orange); border-radius: 999px; padding: 5px 11px; font-size: 11px; font-weight: 700; cursor: pointer; font-family: inherit; }
+  .today-btn:active { background: var(--orange); color: #fff; }
+
+  /* Calendar grid */
+  .month-grid {
+    background: var(--bg-elev);
+    border: 1px solid var(--line);
+    border-top: 0;
+    border-radius: 0 0 14px 14px;
+    padding: 8px 8px 10px;
+    margin-bottom: 14px;
+  }
+  .week-header { display: grid; grid-template-columns: repeat(7, 1fr); margin-bottom: 4px; }
+  .week-header .wd {
+    text-align: center;
+    font-size: 10px;
+    font-weight: 700;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: .6px;
+    padding: 4px 0;
+  }
+  .days-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; }
+  .day-cell {
+    aspect-ratio: 1;
+    border-radius: 8px;
+    position: relative;
+    background: transparent;
+    border: 0;
+    color: var(--text);
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    padding: 4px 0 14px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-start;
+    font-family: inherit;
+    transition: background .15s;
+  }
+  .day-cell:active { background: var(--bg); }
+  .day-cell.outside { color: var(--muted); opacity: .35; }
+  .day-cell.today { color: var(--orange); font-weight: 800; }
+  .day-cell.today::after {
+    content: '';
+    position: absolute;
+    bottom: 2px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 24px;
+    height: 2px;
+    background: var(--orange);
+    border-radius: 2px;
+  }
+  .day-cell.selected {
+    background: var(--navy);
+    color: #fff;
+  }
+  .day-cell.selected.today { color: #fff; }
+  .day-cell.selected.today::after { background: #fff; }
+  .day-dots {
+    position: absolute;
+    bottom: 4px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    gap: 2px;
+    align-items: center;
+  }
+  .day-cell.today .day-dots { bottom: 8px; }
+  .day-cell.selected.today .day-dots { bottom: 8px; }
+  .day-dot {
+    width: 4px;
+    height: 4px;
+    border-radius: 50%;
+    background: var(--blue-primary);
+  }
+  .day-dot.orange { background: var(--orange); }
+  .day-dot.green { background: var(--green); }
+  .day-dot.red { background: var(--red); }
+  .day-dot.gold { background: var(--gold); }
+  .day-cell.selected .day-dot { background: #fff; }
+
+  /* Agenda */
+  .agenda-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-bottom: 8px;
+  }
+  .agenda-title { font-size: 16px; font-weight: 800; color: var(--text); }
+  .agenda-sub { font-size: 12px; color: var(--muted); }
+
+  .agenda-list { display: flex; flex-direction: column; gap: 8px; }
+  .agenda-card {
+    background: var(--bg-elev);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 12px 14px;
+    cursor: pointer;
+    transition: transform .1s, border-color .15s;
+    border-left-width: 4px;
+    border-left-style: solid;
+    text-decoration: none;
+    color: inherit;
+    display: block;
+  }
+  .agenda-card:active { transform: scale(.99); border-color: var(--orange); }
+  .agenda-card.not_started { border-left-color: var(--muted); }
+  .agenda-card.in_progress { border-left-color: var(--orange); }
+  .agenda-card.completed { border-left-color: var(--green); opacity: .7; }
+  .agenda-card.blocked { border-left-color: var(--red); }
+  .ag-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; margin-bottom: 4px; }
+  .ag-job { font-size: 13px; font-weight: 800; color: var(--navy); letter-spacing: -.1px; }
+  .ag-status {
+    font-size: 9px; font-weight: 700; padding: 2px 7px; border-radius: 999px;
+    text-transform: uppercase; letter-spacing: .4px; white-space: nowrap;
+  }
+  .ag-status.not_started { background: rgba(120,132,160,.15); color: var(--muted); }
+  .ag-status.in_progress { background: rgba(232,93,4,.15); color: var(--orange); }
+  .ag-status.completed { background: rgba(45,156,95,.15); color: var(--green); }
+  .ag-status.blocked { background: rgba(214,69,69,.15); color: var(--red); }
+  .ag-phase { font-size: 14px; font-weight: 700; color: var(--text); margin-bottom: 6px; }
+  .ag-customer { font-size: 12px; color: var(--text-soft); }
+  .ag-meta { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .ag-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background: var(--bg);
+    border: 1px solid var(--line);
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--navy);
+  }
+  .ag-pill.carp { background: rgba(232,93,4,.10); border-color: rgba(232,93,4,.3); color: var(--orange); }
+
+  /* Empty */
+  .empty-block { background: var(--bg-elev); border: 1px dashed var(--line); border-radius: 14px; padding: 36px 20px; text-align: center; color: var(--muted); margin-top: 4px; }
+  .empty-block .ico { font-size: 38px; opacity: .4; margin-bottom: 6px; }
+  .empty-block h3 { color: var(--text); margin: 0 0 4px; font-size: 14px; }
+  .empty-block p { margin: 0; font-size: 12px; }
+
+  .loading { text-align: center; padding: 60px 20px; color: var(--muted); font-size: 13px; }
+
+  /* Search modal */
+  .search-back { position: fixed; inset: 0; background: rgba(13,45,94,.5); z-index: 100; display: none; }
+  .search-back.on { display: block; }
+  .search-sheet {
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    background: var(--bg-elev);
+    padding: calc(var(--safe-top) + 14px) 14px 14px;
+    box-shadow: 0 4px 16px rgba(13,45,94,.2);
+    z-index: 110;
+    transform: translateY(-100%);
+    transition: transform .25s;
+  }
+  .search-sheet.on { transform: translateY(0); }
+  .search-sheet-bar { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+  .search-input {
+    flex: 1;
+    border: 1px solid var(--line);
+    background: var(--bg-input);
+    border-radius: 10px;
+    padding: 10px 14px;
+    font-size: 14px;
+    color: var(--text);
+    font-family: inherit;
+  }
+  .search-input:focus { outline: none; border-color: var(--orange); }
+  .search-close { background: transparent; border: 0; color: var(--navy); font-size: 14px; font-weight: 700; cursor: pointer; padding: 6px 10px; font-family: inherit; }
+  .search-result {
+    display: block;
+    padding: 12px 8px;
+    border-radius: 8px;
+    text-decoration: none;
+    color: var(--text);
+    cursor: pointer;
+    border-bottom: 1px solid var(--line);
+  }
+  .search-result:active { background: var(--bg); }
+  .search-result:last-child { border-bottom: 0; }
+  .sr-title { font-size: 13px; font-weight: 700; color: var(--text); }
+  .sr-meta { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .sr-results { max-height: 60vh; overflow-y: auto; }
+
+  /* Bottom nav */
+  .bottom-nav { position: fixed; bottom: 0; left: 0; right: 0; background: var(--bg-elev); border-top: 1px solid var(--line); padding: 8px 4px calc(var(--safe-bottom) + 4px); display: grid; grid-template-columns: repeat(5, 1fr); z-index: 50; }
+  .nav-item { display: flex; flex-direction: column; align-items: center; gap: 3px; padding: 6px 0; text-decoration: none; color: var(--muted); font-size: 11px; font-weight: 600; border: 0; background: transparent; cursor: pointer; font-family: inherit; position: relative; }
+  .nav-item.on { color: var(--orange); }
+  .nav-item.on::before { content: ''; position: absolute; top: 0; left: 28%; right: 28%; height: 3px; background: var(--orange); border-radius: 0 0 4px 4px; }
+  .nav-item svg { width: 22px; height: 22px; }
+
+  /* Side menu */
+  .side-menu-back { position: fixed; inset: 0; background: rgba(0,0,0,.5); z-index: 90; display: none; }
+  .side-menu-back.on { display: block; }
+  .side-menu { position: fixed; top: 0; left: 0; bottom: 0; width: 78%; max-width: 320px; background: var(--bg-elev); padding: calc(var(--safe-top) + 22px) 0 var(--safe-bottom); transform: translateX(-100%); transition: transform .25s; z-index: 100; display: flex; flex-direction: column; }
+  .side-menu.on { transform: translateX(0); }
+  .side-menu .header { padding: 0 22px 18px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 12px; }
+  .side-menu .header img { width: 42px; height: 42px; border-radius: 8px; background: var(--bg); padding: 4px; }
+  .side-menu .header .name { font-weight: 800; font-size: 15px; }
+  .side-menu .header .role { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .6px; font-weight: 700; }
+  .side-menu .links { padding: 8px 0; flex: 1; overflow-y: auto; }
+  .side-menu .link { display: flex; align-items: center; gap: 12px; padding: 14px 22px; color: var(--text); text-decoration: none; font-size: 14px; font-weight: 600; }
+  .side-menu .link:active { background: var(--bg); }
+  .side-menu .link .ico { font-size: 20px; opacity: .8; }
+  .side-menu .footer { padding: 12px 22px; border-top: 1px solid var(--line); font-size: 11px; color: var(--muted); }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <button class="menu-btn" id="menuBtn">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
+  </button>
+  <div class="page-title">Schedule</div>
+  <button class="icon-btn" id="searchBtn" title="Search">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3-3"/></svg>
+  </button>
+</div>
+
+<main id="main">
+  <div class="filter-row" id="filterRow"></div>
+
+  <!-- Month picker -->
+  <div class="month-header">
+    <button class="month-nav-btn" id="prevMonth">‹</button>
+    <div style="display:flex;align-items:center;gap:10px;">
+      <div class="month-title" id="monthTitle">—</div>
+      <button class="today-btn" id="todayBtn">Today</button>
+    </div>
+    <button class="month-nav-btn" id="nextMonth">›</button>
+  </div>
+
+  <div class="month-grid">
+    <div class="week-header">
+      <div class="wd">Sun</div><div class="wd">Mon</div><div class="wd">Tue</div><div class="wd">Wed</div><div class="wd">Thu</div><div class="wd">Fri</div><div class="wd">Sat</div>
+    </div>
+    <div class="days-grid" id="daysGrid"></div>
+  </div>
+
+  <div class="agenda-header">
+    <div class="agenda-title" id="agendaTitle">Today</div>
+    <div class="agenda-sub" id="agendaSub">—</div>
+  </div>
+  <div id="agenda">
+    <div class="loading">Loading…</div>
+  </div>
+</main>
+
+<!-- Bottom nav -->
+<nav class="bottom-nav">
+  <a href="project.html" class="nav-item">
+    <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 3l9 7v11h-6v-6h-6v6H3V10l9-7z"/></svg>
+    Home
+  </a>
+  <a href="project.html" class="nav-item">
+    <svg viewBox="0 0 24 24" fill="currentColor"><path d="M20 6h-4V4c0-1.1-.9-2-2-2h-4c-1.1 0-2 .9-2 2v2H4c-1.1 0-2 .9-2 2v11c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zM10 4h4v2h-4V4z"/></svg>
+    Projects
+  </a>
+  <a href="mobile_todos.html" class="nav-item">
+    <svg viewBox="0 0 24 24" fill="currentColor"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-9 14l-5-5 1.4-1.4L10 14.2l7.6-7.6L19 8l-9 9z"/></svg>
+    To-Dos
+  </a>
+  <a href="timeclock.html" class="nav-item">
+    <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10 10-4.5 10-10S17.5 2 12 2zm4.2 14.2L11 13V7h1.5v5.2l4.5 2.7-.8 1.3z"/></svg>
+    Clock
+  </a>
+  <a href="mobile_schedule.html" class="nav-item on">
+    <svg viewBox="0 0 24 24" fill="currentColor"><path d="M19 4h-1V2h-2v2H8V2H6v2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 16H5V10h14v10zM5 8V6h14v2H5z"/></svg>
+    Schedule
+  </a>
+</nav>
+
+<!-- Side menu -->
+<div class="side-menu-back" id="sideMenuBack"></div>
+<aside class="side-menu" id="sideMenu">
+  <div class="header">
+    <img src="https://jgimprovements-arch.github.io/jg-dispatch/logo.png" alt="JG">
+    <div>
+      <div class="name" id="sideMenuName">—</div>
+      <div class="role" id="sideMenuRole">—</div>
+    </div>
+  </div>
+  <div class="links">
+    <a href="project.html" class="link"><span class="ico">🏠</span> Home</a>
+    <a href="mobile_todos.html" class="link"><span class="ico">✅</span> My To-Dos</a>
+    <a href="mobile_schedule.html" class="link"><span class="ico">📅</span> Schedule</a>
+    <a href="timeclock.html" class="link"><span class="ico">⏱</span> Time Clock</a>
+    <a href="hub.html" class="link"><span class="ico">⚙</span> JG Hub</a>
+  </div>
+  <div class="footer">JG Restoration · v1.0</div>
+</aside>
+
+<!-- Search overlay -->
+<div class="search-back" id="searchBack"></div>
+<div class="search-sheet" id="searchSheet">
+  <div class="search-sheet-bar">
+    <input type="text" class="search-input" id="searchInput" placeholder="Search jobs, subs, or carpenters…">
+    <button class="search-close" id="searchClose">Done</button>
+  </div>
+  <div class="sr-results" id="searchResults"></div>
+</div>
+
+<script type="module">
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+const SB_URL = 'https://nuykvchgecpiuikoerze.supabase.co';
+const SB_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im51eWt2Y2hnZWNwaXVpa29lcnplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYyNjM3ODYsImV4cCI6MjA5MTgzOTc4Nn0.39hZ8DdjT_0iFJXPeAL2FXUSLw8FZBirDVzxZTO1W9s';
+const sb = createClient(SB_URL, SB_ANON);
+
+const ADMIN_EMAILS = new Set(['josh@jg-restoration.com','jgimprovements@gmail.com']);
+const PM_EMAILS = new Set(['hannah@jg-restoration.com','kristina@jg-restoration.com','brent@jg-restoration.com','anthony@jg-restoration.com','ana@jg-restoration.com']);
+
+const state = {
+  email: null, name: null, role: null,
+  cursor: new Date(), // first day of currently-shown month
+  selectedDay: new Date(), // local Date (midnight)
+  phases: [], // phases that overlap the visible window
+  subs: [], employees: [],
+  filterType: 'all', // 'all' | 'sub' | 'carpenter' | 'job'
+  filterId: null, // sub_id / employee_id / project_id
+  filterLabel: null,
+};
+
+const $ = sel => document.querySelector(sel);
+const esc = s => String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+
+const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+
+function fmtMonth(d) { return `${MONTHS[d.getMonth()]} ${d.getFullYear()}`; }
+function localISO(d) { const y = d.getFullYear(); const m = String(d.getMonth()+1).padStart(2,'0'); const dd = String(d.getDate()).padStart(2,'0'); return `${y}-${m}-${dd}`; }
+function isSameDay(a, b) { return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate(); }
+function startOfDay(d) { const x = new Date(d); x.setHours(0,0,0,0); return x; }
+
+async function init() {
+  let user = null;
+  try { user = JSON.parse(localStorage.getItem('jg_platform_user') || 'null'); } catch {}
+  state.email = (user?.email || '').toLowerCase();
+  state.name = user?.name || (state.email ? state.email.split('@')[0] : '');
+  if (!state.email) {
+    $('#agenda').innerHTML = `<div class="empty-block"><div class="ico">🔒</div><h3>Sign in required</h3><p>Open the JG Hub, sign in, then return.</p></div>`;
+    return;
+  }
+  state.role = ADMIN_EMAILS.has(state.email) ? 'admin' : PM_EMAILS.has(state.email) ? 'pm' : 'field';
+
+  $('#sideMenuName').textContent = state.name;
+  $('#sideMenuRole').textContent = state.role === 'admin' ? 'Administrator' : state.role === 'pm' ? 'Project Manager' : 'Field Tech';
+
+  // Start at today, but cursor at first of month
+  state.cursor = new Date();
+  state.cursor.setDate(1);
+  state.cursor.setHours(0,0,0,0);
+  state.selectedDay = startOfDay(new Date());
+
+  // For field techs, auto-filter to their own carpenter ID
+  if (state.role === 'field') {
+    const { data: emp } = await sb.from('employees')
+      .select('id, name')
+      .or(`email.eq.${state.email},personal_email.eq.${state.email}`)
+      .maybeSingle();
+    if (emp) {
+      state.filterType = 'carpenter';
+      state.filterId = emp.id;
+      state.filterLabel = emp.name;
+    }
+  }
+
+  await Promise.all([loadPhases(), loadSubsAndEmps()]);
+  renderFilters();
+  renderMonth();
+  renderAgenda();
+  wire();
+}
+
+async function loadPhases() {
+  // Pull phases that overlap the visible month (broaden by ±7 days to catch edge cases)
+  const monthStart = new Date(state.cursor);
+  const monthEnd = new Date(state.cursor);
+  monthEnd.setMonth(monthEnd.getMonth() + 1);
+  monthEnd.setDate(0);
+  const fromDate = new Date(monthStart);
+  fromDate.setDate(fromDate.getDate() - 7);
+  const toDate = new Date(monthEnd);
+  toDate.setDate(toDate.getDate() + 7);
+
+  const { data } = await sb.from('rebuild_phases')
+    .select(`
+      id, phase_name, status, scheduled_start, scheduled_end, project_id,
+      project:rebuild_projects(id, albi_job_number, customer_name, property_address),
+      assignees:rebuild_phase_assignees(id, assignee_type, sub_id, employee_id,
+        sub:rebuild_subs(id, company_name),
+        employee:employees(id, name))
+    `)
+    .lte('scheduled_start', localISO(toDate))
+    .gte('scheduled_end', localISO(fromDate))
+    .order('scheduled_start');
+  state.phases = data || [];
+}
+
+async function loadSubsAndEmps() {
+  const [{ data: subs }, { data: emps }] = await Promise.all([
+    sb.from('rebuild_subs').select('id, company_name').order('company_name'),
+    sb.from('employees').select('id, name, active').eq('active', true).order('name'),
+  ]);
+  state.subs = subs || [];
+  state.employees = emps || [];
+}
+
+function renderFilters() {
+  const label = state.filterLabel ? ` · ${state.filterLabel}` : '';
+  $('#filterRow').innerHTML = `
+    <div class="filter-chip ${state.filterType === 'all' ? 'on' : ''}" data-type="all" data-id="">Everyone${state.filterType === 'all' ? '' : ''}</div>
+    ${state.filterType !== 'all' ? `<div class="filter-chip on" data-type="${esc(state.filterType)}" data-id="${esc(state.filterId)}">✕ ${esc(state.filterLabel)}</div>` : ''}
+    <div class="filter-chip" data-action="search">🔍 Search</div>
+  `;
+  $('#filterRow').querySelectorAll('[data-type]').forEach(c => {
+    c.addEventListener('click', () => {
+      // Clicking the active filter pill clears it
+      if (c.classList.contains('on') && state.filterType !== 'all') {
+        state.filterType = 'all'; state.filterId = null; state.filterLabel = null;
+      } else if (c.dataset.type === 'all') {
+        state.filterType = 'all'; state.filterId = null; state.filterLabel = null;
+      }
+      renderFilters();
+      renderMonth();
+      renderAgenda();
+    });
+  });
+  $('#filterRow').querySelector('[data-action="search"]').addEventListener('click', openSearch);
+}
+
+function phasesForDay(day) {
+  const dayStr = localISO(day);
+  return state.phases.filter(p => {
+    if (!p.scheduled_start || !p.scheduled_end) return false;
+    if (p.scheduled_start > dayStr || p.scheduled_end < dayStr) return false;
+    // Apply filter
+    if (state.filterType === 'all') return true;
+    if (state.filterType === 'job') return p.project_id === state.filterId;
+    if (state.filterType === 'sub') return (p.assignees || []).some(a => a.assignee_type === 'sub' && a.sub_id === state.filterId);
+    if (state.filterType === 'carpenter') return (p.assignees || []).some(a => a.assignee_type === 'employee' && a.employee_id === state.filterId);
+    return true;
+  });
+}
+
+function renderMonth() {
+  $('#monthTitle').textContent = fmtMonth(state.cursor);
+
+  // Build 6-week grid: start with Sunday on/before the 1st
+  const firstOfMonth = new Date(state.cursor);
+  const startWeekday = firstOfMonth.getDay();
+  const gridStart = new Date(firstOfMonth);
+  gridStart.setDate(1 - startWeekday);
+
+  const today = startOfDay(new Date());
+  const days = [];
+  for (let i = 0; i < 42; i++) {
+    const d = new Date(gridStart);
+    d.setDate(gridStart.getDate() + i);
+    days.push(d);
+  }
+
+  $('#daysGrid').innerHTML = days.map(d => {
+    const inMonth = d.getMonth() === state.cursor.getMonth();
+    const isToday = isSameDay(d, today);
+    const isSelected = isSameDay(d, state.selectedDay);
+    const dayPhases = phasesForDay(d);
+    // Show up to 4 dots; color by status
+    const dots = dayPhases.slice(0, 4).map(p => {
+      const cls = p.status === 'in_progress' ? 'orange' : p.status === 'completed' ? 'green' : p.status === 'blocked' ? 'red' : '';
+      return `<span class="day-dot ${cls}"></span>`;
+    }).join('');
+    return `
+      <button class="day-cell ${inMonth ? '' : 'outside'} ${isToday ? 'today' : ''} ${isSelected ? 'selected' : ''}" data-iso="${localISO(d)}">
+        ${d.getDate()}
+        ${dots ? `<span class="day-dots">${dots}</span>` : ''}
+      </button>
+    `;
+  }).join('');
+
+  $('#daysGrid').querySelectorAll('.day-cell').forEach(cell => {
+    cell.addEventListener('click', () => {
+      const [y, m, dd] = cell.dataset.iso.split('-').map(Number);
+      state.selectedDay = new Date(y, m - 1, dd);
+      renderMonth();
+      renderAgenda();
+    });
+  });
+}
+
+function renderAgenda() {
+  const day = state.selectedDay;
+  const today = startOfDay(new Date());
+  const isToday = isSameDay(day, today);
+  $('#agendaTitle').textContent = isToday ? 'Today' : day.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
+  const dayPhases = phasesForDay(day);
+  $('#agendaSub').textContent = `${dayPhases.length} ${dayPhases.length === 1 ? 'phase' : 'phases'}${state.filterLabel ? ' · ' + state.filterLabel : ''}`;
+
+  if (!dayPhases.length) {
+    $('#agenda').innerHTML = `
+      <div class="empty-block">
+        <div class="ico">📅</div>
+        <h3>Nothing scheduled</h3>
+        <p>${state.filterLabel ? 'No work for ' + esc(state.filterLabel) + ' on this day.' : 'No phases scheduled for this day.'}</p>
+      </div>
+    `;
+    return;
+  }
+
+  $('#agenda').innerHTML = `<div class="agenda-list">${dayPhases.map(agendaCard).join('')}</div>`;
+}
+
+function agendaCard(p) {
+  const proj = p.project || {};
+  const status = p.status || 'not_started';
+  const statusLabel = status.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+  const subs = (p.assignees || []).filter(a => a.assignee_type === 'sub').map(a => esc(a.sub?.company_name || 'Sub'));
+  const carps = (p.assignees || []).filter(a => a.assignee_type === 'employee').map(a => esc(a.employee?.name || 'Carpenter'));
+  const dateRange = p.scheduled_start && p.scheduled_end
+    ? (p.scheduled_start === p.scheduled_end
+       ? new Date(p.scheduled_start + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+       : `${new Date(p.scheduled_start + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} → ${new Date(p.scheduled_end + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`)
+    : null;
+  return `
+    <a href="project_detail.html?p=${p.project_id}" class="agenda-card ${status}">
+      <div class="ag-top">
+        <div class="ag-job">${esc(proj.albi_job_number || '#' + (proj.id || '').slice(0,6))}</div>
+        <span class="ag-status ${status}">${esc(statusLabel)}</span>
+      </div>
+      <div class="ag-phase">${esc(p.phase_name)}</div>
+      <div class="ag-customer">${esc(proj.customer_name || '')}</div>
+      <div class="ag-meta">
+        ${dateRange ? `<span class="ag-pill">📅 ${esc(dateRange)}</span>` : ''}
+        ${subs.map(s => `<span class="ag-pill">${s}</span>`).join('')}
+        ${carps.map(c => `<span class="ag-pill carp">🏠 ${c}</span>`).join('')}
+      </div>
+    </a>
+  `;
+}
+
+// ─── Search ───
+function openSearch() {
+  $('#searchBack').classList.add('on');
+  $('#searchSheet').classList.add('on');
+  $('#searchInput').value = '';
+  $('#searchResults').innerHTML = renderSearchHints();
+  setTimeout(() => $('#searchInput').focus(), 100);
+}
+function closeSearch() {
+  $('#searchBack').classList.remove('on');
+  $('#searchSheet').classList.remove('on');
+}
+function renderSearchHints() {
+  return `<div style="padding:10px 8px;color:var(--muted);font-size:12px;">Type to search jobs, subs, or carpenters…</div>`;
+}
+
+function runSearch(q) {
+  q = q.trim().toLowerCase();
+  if (!q) { $('#searchResults').innerHTML = renderSearchHints(); return; }
+
+  // Search across projects (from phases.project), subs, and employees
+  const projMap = new Map();
+  state.phases.forEach(p => { if (p.project) projMap.set(p.project_id, p.project); });
+  const projMatches = Array.from(projMap.values()).filter(p =>
+    (p.albi_job_number || '').toLowerCase().includes(q) ||
+    (p.customer_name || '').toLowerCase().includes(q)
+  ).slice(0, 6);
+  const subMatches = state.subs.filter(s => (s.company_name || '').toLowerCase().includes(q)).slice(0, 6);
+  const empMatches = state.employees.filter(e => (e.name || '').toLowerCase().includes(q)).slice(0, 6);
+
+  const items = [];
+  if (projMatches.length) {
+    items.push(`<div style="padding:8px 6px 4px;font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);font-weight:700;">Jobs</div>`);
+    projMatches.forEach(p => {
+      items.push(`<a class="search-result" data-pick="job" data-id="${esc(p.id)}" data-label="${esc(p.albi_job_number || '')}">
+        <div class="sr-title">${esc(p.albi_job_number || '')}</div>
+        <div class="sr-meta">${esc(p.customer_name || '')}</div>
+      </a>`);
+    });
+  }
+  if (subMatches.length) {
+    items.push(`<div style="padding:8px 6px 4px;font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);font-weight:700;">Subs</div>`);
+    subMatches.forEach(s => {
+      items.push(`<a class="search-result" data-pick="sub" data-id="${esc(s.id)}" data-label="${esc(s.company_name)}">
+        <div class="sr-title">${esc(s.company_name)}</div>
+        <div class="sr-meta">Subcontractor</div>
+      </a>`);
+    });
+  }
+  if (empMatches.length) {
+    items.push(`<div style="padding:8px 6px 4px;font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);font-weight:700;">Carpenters</div>`);
+    empMatches.forEach(e => {
+      items.push(`<a class="search-result" data-pick="carpenter" data-id="${esc(e.id)}" data-label="${esc(e.name)}">
+        <div class="sr-title">${esc(e.name)}</div>
+        <div class="sr-meta">Carpenter</div>
+      </a>`);
+    });
+  }
+
+  $('#searchResults').innerHTML = items.length ? items.join('') : `<div style="padding:18px 8px;color:var(--muted);font-size:13px;text-align:center;">No matches.</div>`;
+  $('#searchResults').querySelectorAll('[data-pick]').forEach(el => {
+    el.addEventListener('click', () => {
+      state.filterType = el.dataset.pick;
+      state.filterId = el.dataset.id;
+      state.filterLabel = el.dataset.label;
+      closeSearch();
+      renderFilters();
+      renderMonth();
+      renderAgenda();
+    });
+  });
+}
+
+function wire() {
+  $('#prevMonth').addEventListener('click', async () => {
+    state.cursor.setMonth(state.cursor.getMonth() - 1);
+    await loadPhases();
+    renderMonth();
+    renderAgenda();
+  });
+  $('#nextMonth').addEventListener('click', async () => {
+    state.cursor.setMonth(state.cursor.getMonth() + 1);
+    await loadPhases();
+    renderMonth();
+    renderAgenda();
+  });
+  $('#todayBtn').addEventListener('click', async () => {
+    const today = new Date();
+    state.cursor = new Date(today.getFullYear(), today.getMonth(), 1);
+    state.selectedDay = startOfDay(today);
+    await loadPhases();
+    renderMonth();
+    renderAgenda();
+  });
+  $('#searchBtn').addEventListener('click', openSearch);
+  $('#searchClose').addEventListener('click', closeSearch);
+  $('#searchBack').addEventListener('click', closeSearch);
+  $('#searchInput').addEventListener('input', (e) => runSearch(e.target.value));
+
+  // Side menu
+  $('#menuBtn').addEventListener('click', () => {
+    $('#sideMenu').classList.add('on');
+    $('#sideMenuBack').classList.add('on');
+  });
+  $('#sideMenuBack').addEventListener('click', () => {
+    $('#sideMenu').classList.remove('on');
+    $('#sideMenuBack').classList.remove('on');
+  });
+}
+
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('service-worker.js', { scope: '/jg-dispatch/' }).catch(() => {});
+}
+
+init();
+</script>
+</body>
+</html>
