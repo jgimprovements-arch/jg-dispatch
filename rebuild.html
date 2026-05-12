@@ -1774,6 +1774,131 @@
     letter-spacing: .4px;
     margin-bottom: 10px;
   }
+  /* Upload queue tiles — appears above Recent Uploads */
+  .upload-tile-strip {
+    margin: 8px 0 18px;
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 12px 14px;
+  }
+  .upload-tile-strip-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: .5px;
+    margin-bottom: 10px;
+  }
+  .upload-tile-counts { display: flex; gap: 6px; flex: 1; }
+  .upload-tile-count {
+    padding: 2px 9px;
+    border-radius: 999px;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: none;
+    letter-spacing: 0;
+  }
+  .upload-tile-count.uploading { background: rgba(232,93,4,.12); color: var(--orange); }
+  .upload-tile-count.failed { background: rgba(214,69,69,.12); color: var(--red); }
+  .upload-tile-retry-all, .upload-tile-clear {
+    background: transparent;
+    border: 1px solid var(--line);
+    color: var(--navy);
+    border-radius: 6px;
+    padding: 4px 10px;
+    font-size: 11px;
+    font-weight: 700;
+    cursor: pointer;
+  }
+  .upload-tile-retry-all { background: rgba(232,93,4,.08); border-color: rgba(232,93,4,.3); color: var(--orange); }
+  .upload-tile-retry-all:hover { background: rgba(232,93,4,.16); }
+  .upload-tile-clear:hover { background: var(--bg); }
+
+  .upload-tiles {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    gap: 8px;
+  }
+  .upload-tile {
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    position: relative;
+    min-height: 110px;
+  }
+  .upload-tile-icon { font-size: 24px; margin-bottom: 4px; }
+  .upload-tile-name {
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--navy);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 100%;
+    margin-bottom: 4px;
+  }
+  .upload-tile-status {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .3px;
+    margin-bottom: 4px;
+  }
+  .upload-tile-err {
+    font-size: 9px;
+    color: var(--red);
+    font-style: italic;
+    margin-bottom: 4px;
+    line-height: 1.3;
+    word-break: break-word;
+  }
+  .upload-tile-actions { display: flex; gap: 4px; margin-top: auto; }
+  .upload-tile-btn {
+    background: #fff;
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    padding: 3px 8px;
+    font-size: 10px;
+    font-weight: 700;
+    cursor: pointer;
+    color: var(--navy);
+  }
+  .upload-tile-btn.retry { background: rgba(232,93,4,.10); border-color: rgba(232,93,4,.3); color: var(--orange); }
+  .upload-tile-btn.repick { background: rgba(48,79,254,.10); border-color: rgba(48,79,254,.3); color: var(--accent); }
+  .upload-tile-btn.dismiss { background: transparent; }
+
+  .upload-tile-queued { border-color: var(--line); }
+  .upload-tile-queued .upload-tile-status { color: var(--muted); }
+  .upload-tile-converting { border-color: rgba(245,166,35,.4); background: rgba(245,166,35,.05); }
+  .upload-tile-converting .upload-tile-status { color: var(--gold); }
+  .upload-tile-uploading { border-color: rgba(232,93,4,.4); background: rgba(232,93,4,.05); }
+  .upload-tile-uploading .upload-tile-status { color: var(--orange); }
+  .upload-tile-uploading::after {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 2px;
+    background: linear-gradient(90deg, transparent, var(--orange), transparent);
+    background-size: 200% 100%;
+    animation: upload-shimmer 1.2s linear infinite;
+    border-radius: 8px 8px 0 0;
+  }
+  @keyframes upload-shimmer {
+    0% { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+  }
+  .upload-tile-failed { border-color: rgba(214,69,69,.4); background: rgba(214,69,69,.04); }
+  .upload-tile-failed .upload-tile-status { color: var(--red); }
+
   .doc-recent-list {
     display: flex;
     gap: 10px;
@@ -4338,6 +4463,8 @@ const state = {
   })(),
   journalEntries: [],
   todos: [],
+  uploadQueue: [],
+  uploadQueueFiles: null, // Map (not serializable) — populated lazily
   workOrders: [],
   allStaff: [],
   woBudget: null,         // current upload summary + WO rollups
@@ -6454,6 +6581,7 @@ function renderDocumentsTab() {
       </div>
     </div>
     <div style="font-size:11px;color:var(--muted);margin:-4px 0 14px;">Files auto-push to Albi project record</div>
+    <div id="upload_tiles_host"></div>
     ${recentStrip}
     ${renderExternalLinks()}
     <div class="doc-folder-grid">
@@ -6664,47 +6792,287 @@ async function runParallel(items, concurrency, taskFn) {
   return results;
 }
 
-async function uploadFilesToCategory(files, category) {
-  if (!files || !files.length) return;
+// ========== Upload queue with progress tiles, auto-retry, and crash recovery ==========
 
-  // Convert any HEIC files to JPEG first (sequential is fine — conversion is CPU-bound, not network)
-  const heicCount = files.filter(f => /\.(heic|heif)$/i.test(f.name || '')).length;
-  if (heicCount > 0) {
-    toast(`Converting ${heicCount} HEIC photo${heicCount === 1 ? '' : 's'} to JPEG…`);
-  }
-  const prepared = [];
-  for (const f of files) {
-    prepared.push(await convertHeicIfNeeded(f));
-  }
+const UPLOAD_QUEUE_KEY = 'jg_upload_queue_v1';
+const MAX_AUTO_RETRIES = 3;
+const UPLOAD_CONCURRENCY = 5;
 
-  toast(`Uploading ${prepared.length} file${prepared.length === 1 ? '' : 's'} to ${category}…`);
-
-  // Upload in parallel batches of 5 — fast but doesn't choke on big batches / weak connections
-  const uploadedDocs = await runParallel(prepared, 5, async (f) => {
-    return await uploadDocument(f, category, /* skipPush */ true);
+function loadUploadQueue() {
+  try {
+    const raw = localStorage.getItem(UPLOAD_QUEUE_KEY);
+    state.uploadQueue = raw ? JSON.parse(raw) : [];
+  } catch (e) { state.uploadQueue = []; }
+  // Clean entries that are 'done' (no need to surface those) or older than 24h
+  const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+  state.uploadQueue = (state.uploadQueue || []).filter(q =>
+    q.status !== 'done' && (q.createdAt || 0) > cutoff
+  );
+  // Mark in-flight items as 'failed' on load — they were killed by page close.
+  // We have no File for them so user must re-pick.
+  state.uploadQueue.forEach(q => {
+    if (q.status === 'queued' || q.status === 'converting' || q.status === 'uploading') {
+      q.status = 'failed';
+      q.lastError = 'Page closed mid-upload — file must be re-picked';
+      q.lost = true;
+    }
   });
+  saveUploadQueue();
+}
 
-  const successDocs = uploadedDocs.filter(Boolean);
-  await loadDocuments();
-  renderDetail();
+function saveUploadQueue() {
+  try {
+    localStorage.setItem(UPLOAD_QUEUE_KEY, JSON.stringify(state.uploadQueue || []));
+  } catch (e) { /* quota or disabled — non-fatal */ }
+}
 
-  // Single Albi push for the whole batch
-  if (successDocs.length === 1) {
-    pushDocumentToAlbi(successDocs[0]);
-  } else if (successDocs.length > 1) {
-    pushDocumentBatchToAlbi(successDocs, category);
+function updateQueueItem(id, patch) {
+  const item = state.uploadQueue.find(q => q.id === id);
+  if (!item) return;
+  Object.assign(item, patch);
+  saveUploadQueue();
+  renderUploadTiles();
+}
+
+function removeQueueItem(id) {
+  state.uploadQueue = state.uploadQueue.filter(q => q.id !== id);
+  if (state.uploadQueueFiles) state.uploadQueueFiles.delete(id);
+  saveUploadQueue();
+  renderUploadTiles();
+}
+
+function clearDoneQueueItems() {
+  state.uploadQueue = (state.uploadQueue || []).filter(q => q.status !== 'done');
+  saveUploadQueue();
+  renderUploadTiles();
+}
+
+// Render tiles for queued/in-progress/failed uploads above the Recent Uploads grid.
+// 'done' tiles fade out and self-remove after a moment.
+function renderUploadTiles() {
+  const host = document.getElementById('upload_tiles_host');
+  if (!host) return;
+  const items = (state.uploadQueue || []).filter(q =>
+    q.projectId === state.activeProjectId && q.status !== 'done'
+  );
+  if (!items.length) {
+    host.innerHTML = '';
+    return;
+  }
+  const counts = {
+    uploading: items.filter(q => q.status === 'uploading' || q.status === 'converting' || q.status === 'queued').length,
+    failed: items.filter(q => q.status === 'failed').length,
+  };
+  host.innerHTML = `
+    <div class="upload-tile-strip">
+      <div class="upload-tile-strip-head">
+        <span>Upload queue</span>
+        <span class="upload-tile-counts">
+          ${counts.uploading ? `<span class="upload-tile-count uploading">${counts.uploading} in progress</span>` : ''}
+          ${counts.failed ? `<span class="upload-tile-count failed">${counts.failed} failed</span>` : ''}
+        </span>
+        ${counts.failed ? `<button class="upload-tile-retry-all" id="upload_retry_all">Retry all failed</button>` : ''}
+        <button class="upload-tile-clear" id="upload_clear_done">Clear done</button>
+      </div>
+      <div class="upload-tiles">
+        ${items.map(q => {
+          const statusLabel = {
+            queued: 'Queued',
+            converting: 'Converting…',
+            uploading: `Uploading… ${q.attempts > 0 ? '(retry ' + q.attempts + ')' : ''}`,
+            failed: q.lost ? 'File lost' : 'Failed',
+          }[q.status] || q.status;
+          const cls = `upload-tile upload-tile-${q.status}`;
+          const ext = (q.filename.split('.').pop() || '').toLowerCase();
+          const icon = ['jpg','jpeg','png','gif','webp','heic','heif'].includes(ext) ? '📷'
+                     : ext === 'pdf' ? '📕' : '📄';
+          return `
+            <div class="${cls}" data-q-id="${esc(q.id)}">
+              <div class="upload-tile-icon">${icon}</div>
+              <div class="upload-tile-name" title="${esc(q.filename)}">${esc(q.filename)}</div>
+              <div class="upload-tile-status">${statusLabel}</div>
+              ${q.status === 'failed' && q.lastError ? `<div class="upload-tile-err" title="${esc(q.lastError)}">${esc(q.lastError.slice(0, 60))}</div>` : ''}
+              <div class="upload-tile-actions">
+                ${q.status === 'failed' && !q.lost ? `<button class="upload-tile-btn retry" data-q-id="${esc(q.id)}">↻ Retry</button>` : ''}
+                ${q.status === 'failed' && q.lost ? `<button class="upload-tile-btn repick" data-q-id="${esc(q.id)}" data-filename="${esc(q.filename)}" data-category="${esc(q.category)}">📂 Re-pick</button>` : ''}
+                ${(q.status === 'failed' || q.status === 'queued') ? `<button class="upload-tile-btn dismiss" data-q-id="${esc(q.id)}">✕</button>` : ''}
+              </div>
+            </div>
+          `;
+        }).join('')}
+      </div>
+    </div>
+  `;
+
+  // Wire actions
+  document.getElementById('upload_clear_done')?.addEventListener('click', () => {
+    state.uploadQueue = (state.uploadQueue || []).filter(q =>
+      q.status === 'uploading' || q.status === 'queued' || q.status === 'converting'
+    );
+    saveUploadQueue();
+    renderUploadTiles();
+  });
+  document.getElementById('upload_retry_all')?.addEventListener('click', retryAllFailed);
+  host.querySelectorAll('.upload-tile-btn.retry').forEach(btn => {
+    btn.addEventListener('click', () => retryQueueItem(btn.dataset.qId));
+  });
+  host.querySelectorAll('.upload-tile-btn.dismiss').forEach(btn => {
+    btn.addEventListener('click', () => removeQueueItem(btn.dataset.qId));
+  });
+  host.querySelectorAll('.upload-tile-btn.repick').forEach(btn => {
+    btn.addEventListener('click', () => repickQueueItem(btn.dataset.qId));
+  });
+}
+
+function repickQueueItem(id) {
+  const item = state.uploadQueue.find(q => q.id === id);
+  if (!item) return;
+  // Open a file picker. Whatever user picks replaces this slot.
+  const inp = document.createElement('input');
+  inp.type = 'file';
+  inp.style.display = 'none';
+  document.body.appendChild(inp);
+  inp.addEventListener('change', async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) { inp.remove(); return; }
+    if (!state.uploadQueueFiles) state.uploadQueueFiles = new Map();
+    state.uploadQueueFiles.set(id, file);
+    item.filename = file.name;
+    item.size = file.size;
+    item.status = 'queued';
+    item.attempts = 0;
+    item.lastError = null;
+    item.lost = false;
+    saveUploadQueue();
+    renderUploadTiles();
+    processQueueItem(id);
+    inp.remove();
+  });
+  inp.click();
+}
+
+async function retryAllFailed() {
+  const failed = state.uploadQueue.filter(q => q.status === 'failed' && !q.lost);
+  for (const q of failed) {
+    q.status = 'queued';
+    q.attempts = 0;
+    q.lastError = null;
+  }
+  saveUploadQueue();
+  renderUploadTiles();
+  // Kick off processing — runQueue handles concurrency
+  runQueue();
+}
+
+async function retryQueueItem(id) {
+  const item = state.uploadQueue.find(q => q.id === id);
+  if (!item || item.lost) return;
+  item.status = 'queued';
+  item.attempts = 0;
+  item.lastError = null;
+  saveUploadQueue();
+  renderUploadTiles();
+  processQueueItem(id);
+}
+
+// Process a single queue item. Handles HEIC conversion + upload + retries.
+async function processQueueItem(id) {
+  const item = state.uploadQueue.find(q => q.id === id);
+  if (!item) return;
+  if (!state.uploadQueueFiles) state.uploadQueueFiles = new Map();
+  let file = state.uploadQueueFiles.get(id);
+  if (!file) {
+    updateQueueItem(id, { status: 'failed', lost: true, lastError: 'File not available' });
+    return;
   }
 
-  const failed = uploadedDocs.length - successDocs.length;
-  if (failed > 0) {
-    toast(`✓ ${successDocs.length} uploaded, ${failed} failed — check log`, true);
-  } else {
-    toast(`✓ ${successDocs.length} file${successDocs.length === 1 ? '' : 's'} uploaded to ${category}`);
+  while (true) {
+    try {
+      // HEIC conversion if needed
+      const isHeic = /\.(heic|heif)$/i.test(file.name || '');
+      if (isHeic) {
+        updateQueueItem(id, { status: 'converting' });
+        file = await convertHeicIfNeeded(file);
+        state.uploadQueueFiles.set(id, file);
+        updateQueueItem(id, { filename: file.name });
+      }
+
+      // Upload
+      updateQueueItem(id, { status: 'uploading' });
+      const doc = await uploadDocument(file, item.category, /* skipPush */ true);
+      if (!doc) throw new Error('Upload returned no document');
+
+      // Success
+      updateQueueItem(id, { status: 'done', documentId: doc.id });
+      // Background-push to Albi (non-blocking)
+      pushDocumentToAlbi(doc);
+      // Drop the File from memory now that it's safely uploaded
+      state.uploadQueueFiles.delete(id);
+      return;
+    } catch (err) {
+      const msg = err?.message || String(err);
+      const currentAttempts = (state.uploadQueue.find(q => q.id === id)?.attempts) || 0;
+      if (currentAttempts < MAX_AUTO_RETRIES) {
+        // Backoff: 1s, 2s, 4s
+        const wait = 1000 * Math.pow(2, currentAttempts);
+        updateQueueItem(id, { attempts: currentAttempts + 1, lastError: msg + ' — retrying' });
+        await new Promise(r => setTimeout(r, wait));
+        continue;
+      }
+      updateQueueItem(id, { status: 'failed', lastError: msg });
+      return;
+    }
   }
 }
 
+// Run all queued items with concurrency limit
+let _queueRunning = false;
+async function runQueue() {
+  if (_queueRunning) return;
+  _queueRunning = true;
+  try {
+    while (true) {
+      const queued = state.uploadQueue.filter(q => q.status === 'queued' && q.projectId === state.activeProjectId);
+      if (!queued.length) break;
+      const batch = queued.slice(0, UPLOAD_CONCURRENCY);
+      await Promise.all(batch.map(q => processQueueItem(q.id)));
+    }
+    // After queue drains, refresh the document grid
+    await loadDocuments();
+    renderDetail();
+  } finally {
+    _queueRunning = false;
+  }
+}
+
+// Public entry — replaces the old uploadFilesToCategory
+async function uploadFilesToCategory(files, category) {
+  if (!files || !files.length) return;
+  if (!state.uploadQueueFiles) state.uploadQueueFiles = new Map();
+
+  // Add each file to the queue
+  for (const f of files) {
+    const id = (crypto.randomUUID ? crypto.randomUUID() : `q_${Date.now()}_${Math.random().toString(36).slice(2)}`);
+    state.uploadQueue.push({
+      id,
+      projectId: state.activeProjectId,
+      category,
+      filename: f.name,
+      size: f.size,
+      status: 'queued',
+      attempts: 0,
+      lastError: null,
+      createdAt: Date.now(),
+    });
+    state.uploadQueueFiles.set(id, f);
+  }
+  saveUploadQueue();
+  renderUploadTiles();
+  runQueue();
+}
+
 async function uploadDocument(file, category, skipPush) {
-  if (!sb || !state.activeProjectId) return null;
+  if (!sb || !state.activeProjectId) throw new Error('No active project / Supabase client');
   const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
   const path = `projects/${state.activeProjectId}/${Date.now()}-${safeName}`;
 
@@ -6712,7 +7080,7 @@ async function uploadDocument(file, category, skipPush) {
     contentType: file.type || 'application/octet-stream',
     upsert: false,
   });
-  if (upErr) { console.warn(`Upload failed: ${file.name}`, upErr); return null; }
+  if (upErr) throw new Error(upErr.message);
 
   const { data: urlData } = sb.storage.from('rebuild-documents').getPublicUrl(path);
   const fileUrl = urlData.publicUrl;
@@ -6752,7 +7120,7 @@ async function uploadDocument(file, category, skipPush) {
     ...photoFields,
   }).select();
 
-  if (insErr) { console.warn(`Save failed: ${file.name}`, insErr); return null; }
+  if (insErr) throw new Error('DB save failed: ' + insErr.message);
 
   // Skip push when caller (batch upload) handles it
   if (!skipPush) {
@@ -7994,7 +8362,10 @@ function renderTabContent() {
   else if (state.tab === 'todos') c.innerHTML = renderTodosTab();
   else if (state.tab === 'workorders') c.innerHTML = renderWorkOrdersTab();
   else if (state.tab === 'audit')   c.innerHTML = renderAuditTab();
-  else if (state.tab === 'documents') c.innerHTML = renderDocumentsTab();
+  else if (state.tab === 'documents') {
+    c.innerHTML = renderDocumentsTab();
+    renderUploadTiles();
+  }
   else c.innerHTML = `<div class="empty" style="padding:40px 20px;">
     <p>${state.tab} not implemented.</p>
   </div>`;
@@ -14453,6 +14824,8 @@ function wireNotifBell() {
 
 // ──── Boot ────
 (async function init() {
+  // Restore any persisted upload queue from previous session
+  loadUploadQueue();
   // Load cached projects + roster in parallel — renders board instantly
   await Promise.all([loadProjects(), loadSubs(), loadEmployees(), loadAllStaff()]);
   setupRealtime();
