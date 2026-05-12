@@ -10386,15 +10386,135 @@ function wireWoDetailModal(tradeKey) {
 
   // Save assignee
   $('#wobx_save_assignee')?.addEventListener('click', async () => {
+    const btn = $('#wobx_save_assignee');
     const t = typeSel.value || null;
     const id = idSel.value || null;
-    await upsertWoBuilderRow(tradeKey, {
+    if (!t || !id) {
+      toast('Pick an assignee type and name first', true);
+      return;
+    }
+
+    btn.disabled = true;
+    btn.textContent = 'Saving…';
+
+    // Step 1: Save assignee to WO Builder row
+    const result = await upsertWoBuilderRow(tradeKey, {
       assignee_type: t,
       assignee_sub_id: t === 'sub' ? id : null,
       assignee_employee_id: t === 'carpenter' ? id : null,
     });
-    toast('Assignee saved');
+    if (!result.ok) {
+      toast('Save failed: ' + result.error, true);
+      btn.disabled = false;
+      btn.textContent = 'Save';
+      return;
+    }
+
+    // Step 2: Schedule via the trade's mapped phase
+    // Find the trade's mapped phase (from wo_builder_work_orders.phase_id, set in main-table dropdown)
     await loadWoBudget();
+    const wbWo = (state.woBudget?.wos || []).find(w => w.trade_category === tradeKey);
+    const phaseId = wbWo?.phase_id;
+
+    if (!phaseId) {
+      toast(`✓ Assignee saved. To schedule, pick a phase on the main trade table.`);
+      btn.disabled = false;
+      btn.textContent = 'Save';
+      await refreshBudgetSummary();
+      closeWoDetailModal();
+      renderTabContent();
+      return;
+    }
+
+    const phase = (state.phases || []).find(p => p.id === phaseId);
+    if (!phase) {
+      toast('✓ Assignee saved. Phase not found — set on main trade table.', true);
+      btn.disabled = false;
+      btn.textContent = 'Save';
+      await refreshBudgetSummary();
+      closeWoDetailModal();
+      renderTabContent();
+      return;
+    }
+
+    // If phase already has dates, we're good
+    if (phase.scheduled_start && phase.scheduled_end) {
+      toast(`✓ Saved. Scheduled to "${phase.phase_name}": ${phase.scheduled_start} → ${phase.scheduled_end}`);
+      btn.disabled = false;
+      btn.textContent = 'Save';
+      await refreshBudgetSummary();
+      closeWoDetailModal();
+      renderTabContent();
+      return;
+    }
+
+    // Phase has no dates — prompt for them
+    const today = new Date().toISOString().slice(0, 10);
+    const startStr = prompt(
+      `Phase "${phase.phase_name}" has no scheduled dates yet.\n\nEnter scheduled START date (YYYY-MM-DD):`,
+      today
+    );
+    if (!startStr) {
+      toast(`✓ Assignee saved. Schedule "${phase.phase_name}" later from the Phases tab.`);
+      btn.disabled = false;
+      btn.textContent = 'Save';
+      await refreshBudgetSummary();
+      closeWoDetailModal();
+      renderTabContent();
+      return;
+    }
+    const endStr = prompt(
+      `Enter scheduled END date (YYYY-MM-DD):`,
+      startStr
+    );
+    if (!endStr) {
+      toast(`✓ Assignee saved. Schedule "${phase.phase_name}" later from the Phases tab.`);
+      btn.disabled = false;
+      btn.textContent = 'Save';
+      await refreshBudgetSummary();
+      closeWoDetailModal();
+      renderTabContent();
+      return;
+    }
+
+    // Validate dates
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(startStr) || !/^\d{4}-\d{2}-\d{2}$/.test(endStr)) {
+      toast('Dates must be YYYY-MM-DD format. Assignee saved but schedule skipped.', true);
+      btn.disabled = false;
+      btn.textContent = 'Save';
+      await refreshBudgetSummary();
+      closeWoDetailModal();
+      renderTabContent();
+      return;
+    }
+    if (endStr < startStr) {
+      toast('End date can\'t be before start date. Assignee saved but schedule skipped.', true);
+      btn.disabled = false;
+      btn.textContent = 'Save';
+      await refreshBudgetSummary();
+      closeWoDetailModal();
+      renderTabContent();
+      return;
+    }
+
+    // Save phase dates
+    const { error: phaseErr } = await sb.from('rebuild_phases')
+      .update({ scheduled_start: startStr, scheduled_end: endStr })
+      .eq('id', phaseId);
+    if (phaseErr) {
+      toast(`✓ Assignee saved. Phase date save failed: ${phaseErr.message}`, true);
+      btn.disabled = false;
+      btn.textContent = 'Save';
+      await refreshBudgetSummary();
+      closeWoDetailModal();
+      renderTabContent();
+      return;
+    }
+
+    toast(`✓ Saved. "${phase.phase_name}" scheduled ${startStr} → ${endStr}`);
+    btn.disabled = false;
+    btn.textContent = 'Save';
+    await loadPhases();
     await refreshBudgetSummary();
     closeWoDetailModal();
     renderTabContent();
@@ -10467,10 +10587,9 @@ function wireWoDetailModal(tradeKey) {
         return;
       }
       inp.disabled = true;
-      try {
-        await upsertWoBuilderRow(tradeCategory, { trade_budget: newVal });
-      } catch (e) {
-        toast('Save failed: ' + (e?.message || e), true);
+      const result = await upsertWoBuilderRow(tradeCategory, { trade_budget: newVal });
+      if (!result.ok) {
+        toast('Save failed: ' + result.error, true);
         inp.value = originalValue;
         inp.disabled = false;
         return;
@@ -10497,10 +10616,9 @@ function wireWoDetailModal(tradeKey) {
       const newVal = parseFloat(inp.value);
       if (isNaN(newVal) || newVal < 0) { inp.value = originalValue; return; }
       inp.disabled = true;
-      try {
-        await upsertWoBuilderRow(tradeCategory, { materials_budget: newVal });
-      } catch (e) {
-        toast('Save failed: ' + (e?.message || e), true);
+      const result = await upsertWoBuilderRow(tradeCategory, { materials_budget: newVal });
+      if (!result.ok) {
+        toast('Save failed: ' + result.error, true);
         inp.value = originalValue;
         inp.disabled = false;
         return;
@@ -10524,10 +10642,9 @@ function wireWoDetailModal(tradeKey) {
       const tradeCategory = jgSuppliesCheckbox.dataset.trade;
       const newSupplier = jgSuppliesCheckbox.checked ? 'jg' : 'sub';
       jgSuppliesCheckbox.disabled = true;
-      try {
-        await upsertWoBuilderRow(tradeCategory, { materials_supplier: newSupplier });
-      } catch (e) {
-        toast('Save failed: ' + (e?.message || e), true);
+      const result = await upsertWoBuilderRow(tradeCategory, { materials_supplier: newSupplier });
+      if (!result.ok) {
+        toast('Save failed: ' + result.error, true);
         jgSuppliesCheckbox.checked = !jgSuppliesCheckbox.checked;
         jgSuppliesCheckbox.disabled = false;
         return;
@@ -10869,22 +10986,27 @@ async function convertAllApproved() {
 
 async function upsertWoBuilderRow(tradeCategory, fields) {
   const uploadId = state.woBudget?.upload?.id;
-  if (!uploadId) return;
-  const { data: existing } = await sb.from('wo_builder_work_orders')
+  if (!uploadId) return { ok: false, error: 'No upload loaded' };
+  const { data: existing, error: selErr } = await sb.from('wo_builder_work_orders')
     .select('id')
     .eq('upload_id', uploadId)
     .eq('trade_category', tradeCategory)
     .maybeSingle();
+  if (selErr) return { ok: false, error: selErr.message };
   if (existing) {
-    await sb.from('wo_builder_work_orders').update(fields).eq('id', existing.id);
+    const { error } = await sb.from('wo_builder_work_orders').update(fields).eq('id', existing.id);
+    if (error) return { ok: false, error: error.message };
+    return { ok: true, id: existing.id };
   } else {
-    await sb.from('wo_builder_work_orders').insert({
+    const { data, error } = await sb.from('wo_builder_work_orders').insert({
       upload_id: uploadId,
       project_id: state.activeProjectId,
       trade_category: tradeCategory,
       title: MERGED_TRADE_GROUPS[tradeCategory]?.label || tradeCategory,
       ...fields,
-    });
+    }).select('id').single();
+    if (error) return { ok: false, error: error.message };
+    return { ok: true, id: data?.id };
   }
 }
 
@@ -11507,10 +11629,9 @@ function wireWoBuilderControls() {
       const newVal = parseFloat(inp.value);
       if (isNaN(newVal) || newVal < 0) { inp.value = originalValue; return; }
       inp.disabled = true;
-      try {
-        await upsertWoBuilderRow(trade, { trade_budget: newVal });
-      } catch (e) {
-        toast('Save failed: ' + (e?.message || e), true);
+      const result = await upsertWoBuilderRow(trade, { trade_budget: newVal });
+      if (!result.ok) {
+        toast('Save failed: ' + result.error, true);
         inp.value = originalValue;
         inp.disabled = false;
         return;
@@ -11545,7 +11666,11 @@ function wireWoBuilderControls() {
         // Re-render so all dropdowns get the new option
         renderTabContent();
       }
-      await upsertWoBuilderRow(trade, { phase_id: phaseId, phase_id_user_set: true });
+      const phaseResult = await upsertWoBuilderRow(trade, { phase_id: phaseId, phase_id_user_set: true });
+      if (!phaseResult.ok) {
+        toast('Phase save failed: ' + phaseResult.error, true);
+        return;
+      }
       lastValue = phaseId || '';
       toast('Phase mapping saved');
     });
