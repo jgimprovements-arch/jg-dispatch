@@ -32,11 +32,27 @@ export async function parseAndStoreXactPDFs(sb, projectId, estimateFile, compone
     .eq('project_id', projectId)
     .is('deleted_at', null);
 
+  // ─── 1b. Upload both PDFs to rebuild-documents (audit trail) ───
+  // These land in the Estimate/Invoices folder alongside other estimate docs.
+  onProgress('Saving PDFs to Documents…', 8);
+  const [estimateDocUrl, componentsDocUrl] = await Promise.all([
+    uploadPdfToDocuments(sb, projectId, estimateFile, uploadedByEmail).catch(e => {
+      console.warn('[WO Builder] Estimate doc upload failed:', e);
+      return null;
+    }),
+    uploadPdfToDocuments(sb, projectId, componentsFile, uploadedByEmail).catch(e => {
+      console.warn('[WO Builder] Components doc upload failed:', e);
+      return null;
+    }),
+  ]);
+
   // ─── 2. Create a pending upload row ───
   const { data: upload, error: upErr } = await sb.from('wo_builder_uploads').insert({
     project_id: projectId,
     estimate_filename: estimateFile.name,
     components_filename: componentsFile.name,
+    estimate_file_url: estimateDocUrl,
+    components_file_url: componentsDocUrl,
     parse_status: 'parsing',
     is_current: true,
     uploaded_by_email: uploadedByEmail || null,
@@ -409,6 +425,37 @@ function classifyEstimateItem(item, mappings) {
 }
 
 // ─── Utilities ───────────────────────────────────────────────────────
+async function uploadPdfToDocuments(sb, projectId, file, uploadedByEmail) {
+  // Upload to Supabase Storage + create rebuild_documents row.
+  // Mirrors the pattern used in project_documents.html so files appear
+  // in the Estimate/Invoices folder. Does NOT push to Albi (internal parse artifact).
+  const safeName = (file.name || 'wo-builder-upload.pdf').replace(/[^a-zA-Z0-9._-]/g, '_');
+  const path = `projects/${projectId}/${Date.now()}-${safeName}`;
+
+  const { error: upErr } = await sb.storage.from('rebuild-documents').upload(path, file, {
+    contentType: file.type || 'application/pdf',
+    upsert: false,
+  });
+  if (upErr) throw new Error('Storage upload failed: ' + upErr.message);
+
+  const { data: urlData } = sb.storage.from('rebuild-documents').getPublicUrl(path);
+  const publicUrl = urlData?.publicUrl || null;
+
+  const { error: docErr } = await sb.from('rebuild_documents').insert({
+    project_id: projectId,
+    category: 'Estimate/Invoices',
+    filename: safeName,
+    file_url: publicUrl,
+    file_size_bytes: file.size,
+    mime_type: file.type || 'application/pdf',
+    uploaded_by_email: uploadedByEmail || 'wo-builder@jg-restoration.com',
+    push_status: 'skipped',  // internal parse artifact — don't push to Albi
+  });
+  if (docErr) throw new Error('Document row insert failed: ' + docErr.message);
+
+  return publicUrl;
+}
+
 function fileToBase64(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
