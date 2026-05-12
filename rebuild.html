@@ -3187,11 +3187,12 @@
     background: var(--line);
     border-radius: 8px;
     overflow: hidden;
-    margin: 0 0 18px 0;
+    margin: 4px 0 18px 0;
+    border: 1px solid var(--line);
   }
   .wobx-jg-total {
     background: var(--card);
-    padding: 12px 14px;
+    padding: 14px 14px 12px;
     text-align: center;
   }
   .wobx-jg-total-label {
@@ -3200,18 +3201,19 @@
     color: var(--muted);
     text-transform: uppercase;
     letter-spacing: .4px;
-    margin-bottom: 4px;
+    margin-bottom: 6px;
   }
   .wobx-jg-total-value {
-    font-size: 18px;
+    font-size: 20px;
     font-weight: 800;
     color: var(--navy);
     font-variant-numeric: tabular-nums;
+    line-height: 1.2;
   }
   .wobx-jg-total-sub {
     font-size: 10px;
     color: var(--muted);
-    margin-top: 3px;
+    margin-top: 4px;
     font-weight: 600;
   }
   .wobx-jg-vendor-hint {
@@ -8582,6 +8584,309 @@ function openReportBuilder() {
   modal.querySelectorAll('[data-pdf-thumb]').forEach(el => renderPdfThumbnail(el));
 }
 
+// ─── PDF: JG Purchased Materials list ───
+function generateJgMaterialsPdf(materialsByTrade, sortedTradeKeys, meta) {
+  if (!window.jspdf) { toast('PDF library not loaded yet', true); return; }
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ orientation: 'p', unit: 'mm', format: 'letter' });
+  const p = state.activeProject;
+  const pageW = doc.internal.pageSize.getWidth();
+  const pageH = doc.internal.pageSize.getHeight();
+  const margin = 14;
+  const NAVY = [13, 45, 94];
+  const ORANGE = [232, 93, 4];
+  const MUTED = [120, 132, 160];
+
+  function drawHeader() {
+    doc.setFillColor(...NAVY);
+    doc.rect(0, 0, pageW, 16, 'F');
+    doc.setFontSize(9); doc.setTextColor(255, 255, 255); doc.setFont('helvetica', 'bold');
+    doc.text('JG RESTORATION', margin, 10);
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(8);
+    doc.text(`${p?.albi_job_number || ''} · JG Purchased Materials`, pageW - margin, 10, { align: 'right' });
+    return 22;
+  }
+  function drawFooter(n) {
+    doc.setFillColor(...NAVY);
+    doc.rect(0, pageH - 8, pageW, 8, 'F');
+    doc.setFontSize(7); doc.setTextColor(255, 255, 255);
+    doc.text('JG Restoration · Fire · Water · Mold · Reconstruction · (920) 428-4200', margin, pageH - 3);
+    doc.text(`Page ${n}`, pageW - margin, pageH - 3, { align: 'right' });
+  }
+
+  let y = drawHeader();
+
+  // Title
+  doc.setTextColor(...NAVY); doc.setFontSize(16); doc.setFont('helvetica', 'bold');
+  doc.text('JG Purchased Materials', margin, y);
+  y += 6;
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(10); doc.setTextColor(...MUTED);
+  doc.text(`${p?.customer_name || ''} · ${p?.property_address || ''}`, margin, y);
+  y += 5;
+  doc.text(`${meta.totalMaterialsCount} materials · ${sortedTradeKeys.length} trade${sortedTradeKeys.length === 1 ? '' : 's'} · ${new Date().toLocaleDateString()}`, margin, y);
+  y += 8;
+
+  // Totals strip — 3 boxes
+  const boxW = (pageW - margin * 2 - 6) / 3;
+  const boxH = 22;
+  const boxes = [
+    { label: 'XACT TOTAL', val: '$' + Math.round(meta.grandTotalXact).toLocaleString(), sub: `${meta.totalMaterialsCount} lines` },
+    { label: 'YOUR BUDGET', val: '$' + Math.round(meta.displayBudget).toLocaleString(), sub: meta.userBudget != null ? 'override set' : 'matches Xact' },
+    { label: meta.userBudget != null && meta.userBudget < meta.grandTotalXact ? 'SAVINGS' : 'DELTA', val: meta.userBudget != null ? '$' + Math.round(meta.grandTotalXact - meta.userBudget).toLocaleString() : '—', sub: meta.userBudget != null ? 'vs Xact' : '—' },
+  ];
+  boxes.forEach((b, i) => {
+    const x = margin + i * (boxW + 3);
+    doc.setFillColor(248, 250, 255);
+    doc.setDrawColor(220, 225, 235);
+    doc.roundedRect(x, y, boxW, boxH, 2, 2, 'FD');
+    doc.setFontSize(8); doc.setTextColor(...MUTED); doc.setFont('helvetica', 'bold');
+    doc.text(b.label, x + boxW / 2, y + 6, { align: 'center' });
+    doc.setFontSize(14); doc.setTextColor(...NAVY);
+    doc.text(b.val, x + boxW / 2, y + 13, { align: 'center' });
+    doc.setFontSize(7); doc.setTextColor(...MUTED); doc.setFont('helvetica', 'normal');
+    doc.text(b.sub, x + boxW / 2, y + 18, { align: 'center' });
+  });
+  y += boxH + 8;
+
+  // Per-trade sections via autoTable
+  sortedTradeKeys.forEach((tradeKey) => {
+    const tradeLabel = MERGED_TRADE_GROUPS[tradeKey]?.label || tradeKey;
+    const rows = materialsByTrade[tradeKey];
+    const tradeTotal = rows.reduce((s, r) => s + (Number(r.total) || 0), 0);
+
+    // Section header
+    if (y > pageH - 40) { doc.addPage(); y = drawHeader(); }
+    doc.setFillColor(...NAVY);
+    doc.rect(margin, y, pageW - margin * 2, 7, 'F');
+    doc.setTextColor(255, 255, 255); doc.setFont('helvetica', 'bold'); doc.setFontSize(10);
+    doc.text(tradeLabel.toUpperCase(), margin + 3, y + 5);
+    doc.text('$' + Math.round(tradeTotal).toLocaleString(), pageW - margin - 3, y + 5, { align: 'right' });
+    y += 9;
+
+    // Table
+    doc.autoTable({
+      startY: y,
+      head: [['Code', 'Description', 'Qty', 'Unit', 'Unit $', 'Xact Total']],
+      body: rows.map(r => [
+        r.code || '',
+        r.description || '',
+        r.quantity != null ? String(r.quantity) : '',
+        r.unit || '',
+        r.unit_price != null ? '$' + Number(r.unit_price).toFixed(2) : '—',
+        '$' + Math.round(Number(r.total) || 0).toLocaleString(),
+      ]),
+      theme: 'grid',
+      headStyles: { fillColor: [245, 247, 252], textColor: NAVY, fontStyle: 'bold', fontSize: 8 },
+      bodyStyles: { fontSize: 8, textColor: [40, 50, 80] },
+      columnStyles: {
+        0: { cellWidth: 24, fontStyle: 'bold' },
+        1: { cellWidth: 'auto' },
+        2: { cellWidth: 16, halign: 'right' },
+        3: { cellWidth: 14, halign: 'center' },
+        4: { cellWidth: 20, halign: 'right' },
+        5: { cellWidth: 24, halign: 'right' },
+      },
+      margin: { left: margin, right: margin },
+      didDrawPage: () => { /* nothing per-page; outer drawHeader/Footer handles it */ },
+    });
+    y = doc.lastAutoTable.finalY + 6;
+  });
+
+  // Stamp every page with header/footer
+  const pages = doc.getNumberOfPages();
+  for (let i = 1; i <= pages; i++) {
+    doc.setPage(i);
+    if (i > 1) drawHeader();
+    drawFooter(i);
+  }
+
+  const filename = `JG_Materials_${p?.albi_job_number || 'project'}_${new Date().toISOString().slice(0,10)}.pdf`;
+  doc.save(filename);
+  toast(`✓ Downloaded ${filename}`);
+}
+
+// ─── PDF: Work Order ───
+// Pulls scope + WO header info and produces a contractor-facing PDF.
+// Hides any "LABOR:" or "MATERIALS:" section the way the live scope already hides them.
+function generateWorkOrderPdf(wo) {
+  if (!window.jspdf) { toast('PDF library not loaded yet', true); return; }
+  if (!wo) { toast('No WO loaded', true); return; }
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ orientation: 'p', unit: 'mm', format: 'letter' });
+  const p = state.activeProject;
+  const pageW = doc.internal.pageSize.getWidth();
+  const pageH = doc.internal.pageSize.getHeight();
+  const margin = 14;
+  const NAVY = [13, 45, 94];
+  const ORANGE = [232, 93, 4];
+  const MUTED = [120, 132, 160];
+  const TEXT = [26, 37, 64];
+
+  function drawHeader() {
+    doc.setFillColor(...NAVY);
+    doc.rect(0, 0, pageW, 16, 'F');
+    doc.setFontSize(9); doc.setTextColor(255, 255, 255); doc.setFont('helvetica', 'bold');
+    doc.text('JG RESTORATION', margin, 10);
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(8);
+    doc.text(`${p?.albi_job_number || ''} · WO ${wo.wo_number || ''}`, pageW - margin, 10, { align: 'right' });
+    return 22;
+  }
+  function drawFooter(n) {
+    doc.setFillColor(...NAVY);
+    doc.rect(0, pageH - 8, pageW, 8, 'F');
+    doc.setFontSize(7); doc.setTextColor(255, 255, 255);
+    doc.text('JG Restoration · Fire · Water · Mold · Reconstruction · (920) 428-4200', margin, pageH - 3);
+    doc.text(`Page ${n}`, pageW - margin, pageH - 3, { align: 'right' });
+  }
+
+  let y = drawHeader();
+
+  // Title block
+  doc.setTextColor(...NAVY); doc.setFontSize(18); doc.setFont('helvetica', 'bold');
+  doc.text('WORK ORDER', margin, y);
+  doc.setFontSize(11); doc.setTextColor(...ORANGE);
+  doc.text(wo.wo_number || '—', pageW - margin, y, { align: 'right' });
+  y += 7;
+  doc.setFontSize(10); doc.setTextColor(...TEXT); doc.setFont('helvetica', 'bold');
+  doc.text(wo.trade_label || wo.trade_category || 'Trade', margin, y);
+  y += 5;
+  doc.setFont('helvetica', 'normal'); doc.setTextColor(...MUTED); doc.setFontSize(9);
+  doc.text(`Issued: ${wo.created_at ? new Date(wo.created_at).toLocaleDateString() : '—'}`, margin, y);
+  y += 4;
+  doc.text(`Status: ${wo.status || 'pending'}`, margin, y);
+  y += 8;
+
+  // Project + Sub blocks
+  const colW = (pageW - margin * 2 - 6) / 2;
+  doc.setFillColor(248, 250, 255); doc.setDrawColor(220, 225, 235);
+  doc.roundedRect(margin, y, colW, 30, 2, 2, 'FD');
+  doc.roundedRect(margin + colW + 6, y, colW, 30, 2, 2, 'FD');
+
+  doc.setTextColor(...MUTED); doc.setFontSize(8); doc.setFont('helvetica', 'bold');
+  doc.text('PROJECT', margin + 4, y + 6);
+  doc.text('CONTRACTOR', margin + colW + 10, y + 6);
+  doc.setTextColor(...TEXT); doc.setFontSize(9); doc.setFont('helvetica', 'normal');
+  // Project col
+  doc.text(p?.customer_name || '—', margin + 4, y + 12);
+  doc.text(p?.property_address || '', margin + 4, y + 17, { maxWidth: colW - 8 });
+  doc.text(p?.albi_job_number || '', margin + 4, y + 26);
+  // Contractor col
+  const subName = wo.sub?.company_name || wo.sub_company || '—';
+  const subContact = wo.sub?.primary_contact || '';
+  const subPhone = wo.sub?.phone || '';
+  const subEmail = wo.sub?.email || '';
+  doc.text(subName, margin + colW + 10, y + 12);
+  if (subContact) doc.text(subContact, margin + colW + 10, y + 17);
+  if (subPhone) doc.text(subPhone, margin + colW + 10, y + 22);
+  if (subEmail) doc.text(subEmail, margin + colW + 10, y + 27);
+  y += 36;
+
+  // Total
+  doc.setFillColor(...ORANGE);
+  doc.roundedRect(margin, y, pageW - margin * 2, 14, 2, 2, 'F');
+  doc.setTextColor(255, 255, 255); doc.setFontSize(11); doc.setFont('helvetica', 'bold');
+  doc.text('WORK ORDER TOTAL', margin + 4, y + 9);
+  doc.setFontSize(14);
+  doc.text('$' + Number(wo.total_amount || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }), pageW - margin - 4, y + 9, { align: 'right' });
+  y += 20;
+
+  // Scope of Work (parsed from scope_of_work text — the same one shown in-app)
+  doc.setFillColor(...NAVY);
+  doc.rect(margin, y, pageW - margin * 2, 7, 'F');
+  doc.setTextColor(255, 255, 255); doc.setFont('helvetica', 'bold'); doc.setFontSize(10);
+  doc.text('SCOPE OF WORK', margin + 3, y + 5);
+  y += 11;
+
+  doc.setTextColor(...TEXT); doc.setFont('helvetica', 'normal'); doc.setFontSize(9);
+  const scopeText = wo.scope_of_work || '(No scope set)';
+  // Word-wrap each line
+  const lines = scopeText.split('\n');
+  const lineHeight = 4.6;
+  for (const ln of lines) {
+    if (y > pageH - 16) {
+      doc.addPage();
+      y = drawHeader();
+    }
+    if (!ln.trim()) { y += lineHeight / 2; continue; }
+    const isBold = ln.startsWith('**') || /^[A-Z\s]{3,}:?$/.test(ln.trim().replace(/^\s*\*+\s*/, '').replace(/\s*\*+\s*$/, ''));
+    const isHeader = /^[A-Z][A-Z\s]+:?$/.test(ln.trim());
+    if (isHeader) { doc.setFont('helvetica', 'bold'); doc.setTextColor(...NAVY); }
+    else if (isBold) { doc.setFont('helvetica', 'bold'); doc.setTextColor(...TEXT); }
+    else { doc.setFont('helvetica', 'normal'); doc.setTextColor(...TEXT); }
+    const cleaned = ln.replace(/^\*\*\s*/, '').replace(/\s*\*\*$/, '');
+    const wrapped = doc.splitTextToSize(cleaned, pageW - margin * 2);
+    for (const w of wrapped) {
+      if (y > pageH - 16) { doc.addPage(); y = drawHeader(); }
+      doc.text(w, margin, y);
+      y += lineHeight;
+    }
+  }
+  y += 4;
+
+  // Payment terms (boilerplate)
+  if (y > pageH - 40) { doc.addPage(); y = drawHeader(); }
+  doc.setFillColor(...NAVY);
+  doc.rect(margin, y, pageW - margin * 2, 7, 'F');
+  doc.setTextColor(255, 255, 255); doc.setFont('helvetica', 'bold'); doc.setFontSize(10);
+  doc.text('PAYMENT TERMS', margin + 3, y + 5);
+  y += 11;
+
+  const terms = [
+    'Payment issued via Purchase Order upon completion and verification of work.',
+    'Submit invoice with photo documentation of completed work. PO is required on every invoice.',
+    'Payment due net 15 from invoice receipt with all required documentation.',
+    'Lien waiver required upon final payment.',
+  ];
+  doc.setTextColor(...TEXT); doc.setFont('helvetica', 'normal'); doc.setFontSize(9);
+  for (const t of terms) {
+    if (y > pageH - 16) { doc.addPage(); y = drawHeader(); }
+    const wrapped = doc.splitTextToSize('• ' + t, pageW - margin * 2);
+    for (const w of wrapped) {
+      doc.text(w, margin, y);
+      y += lineHeight;
+    }
+    y += 1;
+  }
+
+  // Signature block
+  if (y > pageH - 35) { doc.addPage(); y = drawHeader(); }
+  y += 6;
+  doc.setDrawColor(...MUTED); doc.setLineWidth(0.2);
+  // Sub signature
+  doc.line(margin, y, margin + colW, y);
+  doc.setFontSize(8); doc.setTextColor(...MUTED);
+  doc.text('Contractor signature', margin, y + 4);
+  doc.text('Date', margin + colW - 25, y + 4);
+  // JG signature
+  doc.line(margin + colW + 6, y, pageW - margin, y);
+  doc.text('JG Restoration', margin + colW + 6, y + 4);
+  doc.text('Date', pageW - margin - 25, y + 4);
+
+  // If signed digitally, show the URL
+  if (wo.status === 'signed' && wo.signed_at) {
+    y += 10;
+    doc.setFont('helvetica', 'bold'); doc.setTextColor(...NAVY); doc.setFontSize(9);
+    doc.text(`✓ Signed electronically on ${new Date(wo.signed_at).toLocaleDateString()}`, margin, y);
+    if (wo.signed_by_name) {
+      y += 4;
+      doc.setFont('helvetica', 'normal'); doc.setTextColor(...TEXT); doc.setFontSize(8);
+      doc.text(`Signed by: ${wo.signed_by_name}`, margin, y);
+    }
+  }
+
+  // Stamp every page
+  const pages = doc.getNumberOfPages();
+  for (let i = 1; i <= pages; i++) {
+    doc.setPage(i);
+    if (i > 1) drawHeader();
+    drawFooter(i);
+  }
+
+  const filename = `WO_${wo.wo_number || 'draft'}_${(subName || '').replace(/\s+/g, '_')}.pdf`;
+  doc.save(filename);
+  toast(`✓ Downloaded ${filename}`);
+}
+
 async function generateProjectReportPdf({ sections, docIds, reportTitle, coverPhotoUrl }) {
   const { jsPDF } = window.jspdf;
   const doc = new jsPDF({ orientation: 'p', unit: 'mm', format: 'letter' });
@@ -12444,33 +12749,33 @@ function openJgMaterialsModal() {
           <button class="wobx-modal-close" id="wobx_modal_close">×</button>
         </div>
 
-        <div class="wobx-jg-totals-strip">
-          <div class="wobx-jg-total">
-            <div class="wobx-jg-total-label">Xact Total</div>
-            <div class="wobx-jg-total-value">${usdCompact(grandTotalXact)}</div>
-            <div class="wobx-jg-total-sub">${totalMaterialsCount} line items</div>
-          </div>
-          <div class="wobx-jg-total">
-            <div class="wobx-jg-total-label">Your Budget</div>
-            <div class="wobx-jg-total-value">${usdCompact(displayBudget)}</div>
-            <div class="wobx-jg-total-sub">${userBudget != null ? 'override set' : 'matches Xact'}</div>
-          </div>
-          <div class="wobx-jg-total">
-            <div class="wobx-jg-total-label">${userBudget != null && userBudget < grandTotalXact ? 'Savings vs Xact' : userBudget != null ? 'Over Xact' : '—'}</div>
-            <div class="wobx-jg-total-value" style="color:${userBudget != null && userBudget < grandTotalXact ? 'var(--green)' : 'var(--muted)'};">
-              ${userBudget != null ? usdCompact(grandTotalXact - userBudget) : '—'}
+        <div class="wobx-modal-body">
+          <div class="wobx-jg-totals-strip">
+            <div class="wobx-jg-total">
+              <div class="wobx-jg-total-label">Xact Total</div>
+              <div class="wobx-jg-total-value">${usdCompact(grandTotalXact)}</div>
+              <div class="wobx-jg-total-sub">${totalMaterialsCount} line items</div>
+            </div>
+            <div class="wobx-jg-total">
+              <div class="wobx-jg-total-label">Your Budget</div>
+              <div class="wobx-jg-total-value">${usdCompact(displayBudget)}</div>
+              <div class="wobx-jg-total-sub">${userBudget != null ? 'override set' : 'matches Xact'}</div>
+            </div>
+            <div class="wobx-jg-total">
+              <div class="wobx-jg-total-label">${userBudget != null && userBudget < grandTotalXact ? 'Savings vs Xact' : userBudget != null ? 'Over Xact' : '—'}</div>
+              <div class="wobx-jg-total-value" style="color:${userBudget != null && userBudget < grandTotalXact ? 'var(--green)' : 'var(--muted)'};">
+                ${userBudget != null ? usdCompact(grandTotalXact - userBudget) : '—'}
+              </div>
             </div>
           </div>
-        </div>
-
-        <div class="wobx-modal-body">
           ${sections || '<div class="wobx-detail-empty" style="padding:20px;text-align:center;">No materials yet. Turn on "JG supplies materials" in any trade to populate this list.</div>'}
         </div>
 
         <div class="wobx-modal-foot">
           <div class="wobx-jg-vendor-hint">
-            💡 Vendor assignment + Purchase Order generation coming soon — for now this is a view-only summary.
+            💡 Vendor assignment + Purchase Order generation coming soon
           </div>
+          <button class="wobx-action-btn" id="wobx_jg_download_pdf">📄 Download PDF</button>
           <button class="wobx-modal-done" id="wobx_modal_done">Done</button>
         </div>
       </div>
@@ -12484,6 +12789,16 @@ function openJgMaterialsModal() {
   $('#wobx_modal_close')?.addEventListener('click', closeWoDetailModal);
   $('#wobx_modal_done')?.addEventListener('click', closeWoDetailModal);
   back.addEventListener('click', (e) => { if (e.target.id === 'wobx_modal_back') closeWoDetailModal(); });
+
+  // Wire PDF download
+  $('#wobx_jg_download_pdf')?.addEventListener('click', () => {
+    generateJgMaterialsPdf(materialsByTrade, sortedTradeKeys, {
+      grandTotalXact,
+      displayBudget,
+      userBudget,
+      totalMaterialsCount,
+    });
+  });
 }
 
 // Upsert helper for wo_builder_work_orders (uses upload_id + trade_category as natural key)
@@ -14066,6 +14381,7 @@ function openWoEditModal(woId) {
         ${wo.status === 'signed' || wo.status === 'converted_to_po' || wo.status === 'invoice_received' ? `<button class="btn ghost" data-wo-modal-act="new-version">⚡ New Version</button>` : ''}
       </div>
       <div style="display:flex;gap:6px;">
+        <button class="btn ghost" data-wo-modal-act="download-pdf">📄 Download PDF</button>
         <button class="btn" data-wo-modal-act="close">Close</button>
         ${!isReadOnly ? `<button class="btn primary" data-wo-modal-act="save">Save</button>` : ''}
         ${wo.status === 'draft' ? `<button class="btn primary" data-wo-modal-act="save-and-send">Save & Send to Sub</button>` : ''}
@@ -14086,6 +14402,13 @@ async function handleWoModalAction(act, wo, woUrl) {
   if (act === 'close') { modal.classList.remove('on'); return; }
   if (act === 'copy-link') {
     navigator.clipboard.writeText(woUrl).then(() => toast('Link copied'));
+    return;
+  }
+  if (act === 'download-pdf') {
+    // Build a richer WO object with assignee name + trade label for the PDF
+    const subName = wo.sub?.company_name || (wo.employee_id ? ((state.employees || []).find(e => e.id === wo.employee_id)?.name) : '') || '';
+    const tradeLabel = MERGED_TRADE_GROUPS?.[wo.trade_category]?.label || wo.trade_category || '';
+    generateWorkOrderPdf({ ...wo, sub_company: subName, trade_label: tradeLabel });
     return;
   }
   if (act === 'cancel') {
