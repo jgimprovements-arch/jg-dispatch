@@ -11993,6 +11993,10 @@ function wireWoDetailModal(tradeKey) {
     await loadWoBudget();
     await loadWorkOrders();
     await refreshBudgetSummary();
+
+    // After convert, prompt to schedule if not already scheduled
+    await ensurePhaseScheduledForTrade(tradeKey);
+
     closeWoDetailModal();
     renderTabContent();
   });
@@ -12128,24 +12132,33 @@ function wireWoDetailModal(tradeKey) {
     }
 
     // Step 2: Schedule via the trade's mapped phase
-    // Find the trade's mapped phase (from wo_builder_work_orders.phase_id, set in main-table dropdown)
+    // Reload BOTH phases and wo_builder so state is fresh
+    await loadPhases();
     await loadWoBudget();
     const wbWo = (state.woBudget?.wos || []).find(w => w.trade_category === tradeKey);
-    const phaseId = wbWo?.phase_id;
+    let phaseId = wbWo?.phase_id;
+    let phase = phaseId ? (state.phases || []).find(p => p.id === phaseId) : null;
 
-    if (!phaseId) {
-      toast(`✓ Assignee saved. To schedule, pick a phase on the main trade table.`);
-      btn.disabled = false;
-      btn.textContent = 'Save';
-      await refreshBudgetSummary();
-      closeWoDetailModal();
-      renderTabContent();
-      return;
+    // Fallback: if no explicit phase_id mapping, try matching by trade label
+    // (e.g. Framing → "Framing Repair", Drywall → "Drywall", etc.)
+    if (!phase) {
+      const tradeLabel = (MERGED_TRADE_GROUPS[tradeKey]?.label || tradeKey).toLowerCase();
+      phase = (state.phases || []).find(p => {
+        const name = (p.phase_name || '').toLowerCase();
+        // Bidirectional substring match: "framing" matches "framing repair", "drywall" matches "drywall"
+        return name === tradeLabel
+            || name.includes(tradeLabel)
+            || tradeLabel.includes(name);
+      });
+      if (phase) {
+        phaseId = phase.id;
+        // Persist the mapping back to wo_builder_work_orders so subsequent saves are fast
+        await upsertWoBuilderRow(tradeKey, { phase_id: phaseId, phase_id_user_set: false });
+      }
     }
 
-    const phase = (state.phases || []).find(p => p.id === phaseId);
     if (!phase) {
-      toast('✓ Assignee saved. Phase not found — set on main trade table.', true);
+      toast(`✓ Assignee saved. No matching phase — add one named like "${MERGED_TRADE_GROUPS[tradeKey]?.label || tradeKey}" to the Phase Schedule, or pick from the dropdown on the main trade table.`);
       btn.disabled = false;
       btn.textContent = 'Save';
       await refreshBudgetSummary();
@@ -12642,6 +12655,68 @@ async function deleteConvertedWo(tradeKey) {
   if (unlockErr) return { ok: false, error: 'Unlock failed: ' + unlockErr.message };
 
   return { ok: true };
+}
+
+// Ensure the phase mapped to a given trade has scheduled dates.
+// If no mapping, tries fuzzy name match. If no dates, prompts via date picker.
+// Returns true if scheduled (or already was), false if user skipped / no match found.
+async function ensurePhaseScheduledForTrade(tradeKey) {
+  await loadPhases();
+  await loadWoBudget();
+  const wbWo = (state.woBudget?.wos || []).find(w => w.trade_category === tradeKey);
+  let phaseId = wbWo?.phase_id;
+  let phase = phaseId ? (state.phases || []).find(p => p.id === phaseId) : null;
+
+  // Fallback fuzzy match by trade label
+  if (!phase) {
+    const tradeLabel = (MERGED_TRADE_GROUPS[tradeKey]?.label || tradeKey).toLowerCase();
+    phase = (state.phases || []).find(p => {
+      const name = (p.phase_name || '').toLowerCase();
+      return name === tradeLabel || name.includes(tradeLabel) || tradeLabel.includes(name);
+    });
+    if (phase) {
+      phaseId = phase.id;
+      await upsertWoBuilderRow(tradeKey, { phase_id: phaseId, phase_id_user_set: false });
+    }
+  }
+
+  if (!phase) {
+    toast(`No phase named like "${MERGED_TRADE_GROUPS[tradeKey]?.label || tradeKey}" — add one in Phase Schedule to enable auto-scheduling.`);
+    return false;
+  }
+
+  // Already scheduled
+  if (phase.scheduled_start && phase.scheduled_end) return true;
+
+  // Prompt for dates
+  const today = new Date().toISOString().slice(0, 10);
+  const picked = await JG.pickDateRange({
+    title: `Schedule "${phase.phase_name}"`,
+    subtitle: `${MERGED_TRADE_GROUPS[tradeKey]?.label || tradeKey} · pick the work window`,
+    defaultStart: today,
+    defaultEnd: today,
+  });
+  if (!picked) {
+    toast(`Schedule "${phase.phase_name}" later from the Phases tab.`);
+    return false;
+  }
+
+  // Save dates
+  const { error: phaseErr } = await sb.from('rebuild_phases')
+    .update({ scheduled_start: picked.startStr, scheduled_end: picked.endStr })
+    .eq('id', phase.id);
+  if (phaseErr) {
+    toast('Phase scheduling failed: ' + phaseErr.message, true);
+    return false;
+  }
+
+  // Refresh local state
+  await loadPhases();
+  toast(`✓ "${phase.phase_name}" scheduled ${picked.startStr} → ${picked.endStr}`);
+  if (typeof logToAlbi === 'function') {
+    try { logToAlbi('phase_scheduled', `Phase "${phase.phase_name}" scheduled: ${picked.startStr} → ${picked.endStr}`); } catch (e) {}
+  }
+  return true;
 }
 
 async function convertTradeToWo(tradeKey) {
