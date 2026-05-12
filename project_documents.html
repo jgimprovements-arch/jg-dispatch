@@ -440,8 +440,8 @@
   .cam-thumbs::-webkit-scrollbar { display: none; }
   .cam-thumbs:empty { display: none; }
   .cam-thumb-item {
-    width: 48px;
-    height: 48px;
+    width: 64px;
+    height: 64px;
     border-radius: 6px;
     overflow: hidden;
     flex-shrink: 0;
@@ -457,13 +457,31 @@
     position: absolute;
     top: 2px;
     right: 2px;
-    width: 16px;
-    height: 16px;
+    width: 20px;
+    height: 20px;
     border-radius: 50%;
-    background: rgba(0,0,0,.7);
+    background: rgba(0,0,0,.75);
     color: #fff;
     border: 0;
-    font-size: 10px;
+    font-size: 12px;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .cam-thumb-item .cam-thumb-markup {
+    position: absolute;
+    bottom: 2px;
+    right: 2px;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    background: rgba(232, 93, 4, .92);
+    color: #fff;
+    border: 0;
+    font-size: 11px;
     line-height: 1;
     cursor: pointer;
     padding: 0;
@@ -826,7 +844,7 @@
       <div class="file-zone" id="camera_zone">
         <div class="ico">📷</div>
         <div class="lbl">Camera</div>
-        <div class="hint">Fast in-app shutter</div>
+        <div class="hint">Fast in-app shutter · markup after each shot</div>
         <input type="file" id="camera_input" accept="image/*" capture="environment" style="display:none;" multiple>
       </div>
       <label class="file-zone" for="library_input">
@@ -835,11 +853,6 @@
         <div class="hint">Photos or PDFs</div>
         <input type="file" id="library_input" accept="image/*,application/pdf" style="display:none;" multiple>
       </label>
-      <div class="file-zone" id="markup_zone" style="grid-column:1 / -1;">
-        <div class="ico">✏️</div>
-        <div class="lbl">Photo + Markup</div>
-        <div class="hint">Capture and annotate damage, measurements, notes</div>
-      </div>
     </div>
 
     <div class="preview-list" id="preview_list"></div>
@@ -1603,6 +1616,7 @@ function renderCamThumbs() {
   wrap.innerHTML = cam.shots.map((_, i) => `
     <div class="cam-thumb-item">
       <img src="${cam.thumbUrls[i]}" alt="">
+      <button class="cam-thumb-markup" data-markup-shot="${i}" title="Markup this shot">✏️</button>
       <button class="rm-shot" data-rm-shot="${i}">×</button>
     </div>
   `).join('');
@@ -1615,6 +1629,25 @@ function renderCamThumbs() {
       renderCamThumbs();
       document.getElementById('camShotCount').textContent = `${cam.shots.length} shot${cam.shots.length === 1 ? '' : 's'}`;
       document.getElementById('camDone').disabled = cam.shots.length === 0;
+    };
+  });
+  wrap.querySelectorAll('[data-markup-shot]').forEach(b => {
+    b.onclick = async () => {
+      const i = Number(b.dataset.markupShot);
+      const shot = cam.shots[i];
+      if (!shot) return;
+      // Pause the camera stream so we don't fight for the camera while marking up
+      if (cam.stream) cam.stream.getTracks().forEach(t => t.enabled = false);
+      const markedFile = await openMarkupEditorOnFile(shot);
+      // Resume the camera stream
+      if (cam.stream) cam.stream.getTracks().forEach(t => t.enabled = true);
+      if (markedFile) {
+        // Replace this shot with the marked-up version
+        URL.revokeObjectURL(cam.thumbUrls[i]);
+        cam.shots[i] = markedFile;
+        cam.thumbUrls[i] = URL.createObjectURL(markedFile);
+        renderCamThumbs();
+      }
     };
   });
   // Scroll to end so latest is visible
@@ -1716,6 +1749,51 @@ function openMarkupEditor() {
   // Wire capture inputs (once per open)
   document.getElementById('markup_camera_input').onchange = handleMarkupSource;
   document.getElementById('markup_library_input').onchange = handleMarkupSource;
+}
+
+// Open the markup editor on a single file. Returns a Promise that resolves with
+// the marked-up File (if user saved) or null (if user cancelled).
+async function openMarkupEditorOnFile(file) {
+  return new Promise(async (resolve) => {
+    markup.overlay = document.getElementById('markupOverlay');
+    markup.canvas = document.getElementById('markupCanvas');
+    markup.ctx = markup.canvas.getContext('2d');
+    markup.imgEl = null;
+    markup.history = [];
+    markup.historyIndex = -1;
+    markup.queueMode = false;
+    markup.existingDocMode = false;
+    markup.standaloneResolve = resolve;
+    markup.standaloneOriginalFile = file;
+
+    document.getElementById('markupCaptureStep').style.display = 'none';
+    markup.canvas.style.display = 'block';
+    document.getElementById('markupToolbar').style.display = 'flex';
+    document.getElementById('markupSkip').style.display = 'none';
+    const lbl = document.getElementById('markupQueueLabel');
+    lbl.textContent = 'Markup';
+    lbl.style.display = 'block';
+
+    markup.overlay.classList.add('on');
+
+    // Load image into canvas
+    try {
+      const url = URL.createObjectURL(file);
+      const img = await new Promise((res, rej) => {
+        const i = new Image();
+        i.onload = () => res(i);
+        i.onerror = () => rej(new Error('image load failed'));
+        i.src = url;
+      });
+      await loadImageToCanvas(img);
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      console.error('Failed to load file for markup:', e);
+      toast('Could not load image for markup');
+      closeMarkupEditor();
+      resolve(null);
+    }
+  });
 }
 
 // Open editor with a pre-loaded file (for batch markup queue)
@@ -2079,6 +2157,22 @@ async function saveMarkupAndUpload() {
     const blob = await new Promise(res => markup.canvas.toBlob(res, 'image/jpeg', 0.85));
     if (!blob) { toast('Save failed'); saveBtn.textContent = orig; saveBtn.disabled = false; return; }
 
+    // Standalone mode: caller passed a file, wants the marked-up version back as a File.
+    // No upload happens here — the camera/lightbox flow handles upload separately.
+    if (markup.standaloneResolve) {
+      const origFile = markup.standaloneOriginalFile;
+      const baseName = (origFile?.name || 'photo').replace(/\.[^.]+$/, '');
+      const ts = new Date();
+      const tsCode = `${ts.getFullYear()}${String(ts.getMonth()+1).padStart(2,'0')}${String(ts.getDate()).padStart(2,'0')}-${String(ts.getHours()).padStart(2,'0')}${String(ts.getMinutes()).padStart(2,'0')}${String(ts.getSeconds()).padStart(2,'0')}`;
+      const newFile = new File([blob], `${baseName}_markup_${tsCode}.jpg`, { type: 'image/jpeg' });
+      const cb = markup.standaloneResolve;
+      markup.standaloneResolve = null;
+      markup.standaloneOriginalFile = null;
+      closeMarkupEditor();
+      cb(newFile);
+      return;
+    }
+
     const p = state.project;
     const ts = new Date();
     const tsCode = `${ts.getFullYear()}${String(ts.getMonth()+1).padStart(2,'0')}${String(ts.getDate()).padStart(2,'0')}-${String(ts.getHours()).padStart(2,'0')}${String(ts.getMinutes()).padStart(2,'0')}${String(ts.getSeconds()).padStart(2,'0')}`;
@@ -2176,13 +2270,17 @@ async function skipMarkupAndUpload() {
 }
 
 // Wire markup overlay buttons
-document.getElementById('markup_zone').addEventListener('click', () => {
-  // Close the upload modal first
-  document.getElementById('uploadModal').classList.remove('on');
-  openMarkupEditor();
-});
 document.getElementById('markupCancel').addEventListener('click', () => {
   if (markup.imgEl && !confirm('Discard this markup?')) return;
+  // Standalone mode: resolve with null so caller knows user cancelled
+  if (markup.standaloneResolve) {
+    const cb = markup.standaloneResolve;
+    markup.standaloneResolve = null;
+    markup.standaloneOriginalFile = null;
+    closeMarkupEditor();
+    cb(null);
+    return;
+  }
   // In queue mode, cancelling skips this item too
   if (markup.queueMode) {
     const cb = markup.queueOnDone;
@@ -2198,8 +2296,8 @@ document.getElementById('markupSkip').addEventListener('click', skipMarkupAndUpl
 // Auto-open markup editor or camera on deep-link from project home
 const autoAction = new URLSearchParams(location.search).get('action');
 if (autoAction === 'capture') {
-  // Markup editor
-  setTimeout(() => openMarkupEditor(), 200);
+  // Deep link 'capture' → open Camera (in-browser shutter), markup is per-shot ✏️ button
+  setTimeout(() => document.getElementById('camera_zone').click(), 200);
 } else if (autoAction === 'camera') {
   // Use the same flow as the Upload section's Camera tile —
   // open the upload modal, then auto-trigger the camera tile inside it.

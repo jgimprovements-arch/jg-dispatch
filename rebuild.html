@@ -4188,6 +4188,122 @@
     color: rgba(255,255,255,.5);
   }
 
+  /* ─── Markup Overlay ─── */
+  .jg-markup {
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,.97);
+    z-index: 100050;
+    display: flex;
+    flex-direction: column;
+  }
+  .jg-mk-topbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 16px;
+    background: rgba(0,0,0,.7);
+    flex-shrink: 0;
+    padding-top: max(12px, env(safe-area-inset-top));
+  }
+  .jg-mk-title {
+    flex: 1;
+    color: #fff;
+    font-size: 13px;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+  }
+  .jg-mk-btn {
+    background: rgba(255,255,255,.14);
+    color: #fff;
+    border: 0;
+    padding: 8px 14px;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 700;
+    cursor: pointer;
+    font-family: inherit;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .jg-mk-btn:hover, .jg-mk-btn:active { background: rgba(255,255,255,.26); }
+  .jg-mk-btn.primary { background: var(--orange); }
+  .jg-mk-btn.primary:hover, .jg-mk-btn.primary:active { background: #d05303; }
+  .jg-mk-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .jg-mk-stage {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    min-height: 0;
+    touch-action: none;
+  }
+  #jgMarkupCanvas {
+    background: #222;
+    box-shadow: 0 4px 24px rgba(0,0,0,.4);
+    cursor: crosshair;
+    touch-action: none;
+    max-width: 100%;
+    max-height: 100%;
+  }
+  .jg-mk-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    padding: 12px 14px;
+    background: rgba(0,0,0,.78);
+    -webkit-backdrop-filter: blur(8px);
+    backdrop-filter: blur(8px);
+    flex-shrink: 0;
+    padding-bottom: max(12px, env(safe-area-inset-bottom));
+  }
+  .jg-mk-tool-group {
+    display: flex;
+    gap: 4px;
+    align-items: center;
+  }
+  .jg-mk-tool {
+    background: rgba(255,255,255,.14);
+    color: #fff;
+    border: 0;
+    width: 40px; height: 40px;
+    border-radius: 8px;
+    font-size: 16px;
+    font-weight: 700;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+    transition: background .12s;
+  }
+  .jg-mk-tool:hover, .jg-mk-tool:active { background: rgba(255,255,255,.26); }
+  .jg-mk-tool.on { background: var(--orange); color: #fff; }
+  .jg-mk-color {
+    width: 28px; height: 28px;
+    border-radius: 50%;
+    cursor: pointer;
+    border: 2px solid transparent;
+    transition: transform .12s, border-color .12s;
+    padding: 0;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .jg-mk-color:hover { transform: scale(1.15); }
+  .jg-mk-color.on { border-color: #fff; transform: scale(1.15); }
+  .jg-mk-stroke-wrap {
+    display: flex; align-items: center; gap: 6px;
+    color: #fff; font-size: 11px; font-weight: 700;
+  }
+  .jg-mk-stroke-wrap input[type="range"] { width: 90px; }
+  @media (max-width: 600px) {
+    .jg-mk-toolbar { gap: 6px; padding: 8px; }
+    .jg-mk-tool-group { gap: 3px; }
+    .jg-mk-tool { width: 36px; height: 36px; font-size: 14px; }
+    .jg-mk-color { width: 24px; height: 24px; }
+    .jg-mk-stroke-wrap input[type="range"] { width: 70px; }
+  }
+
   /* Bottom action bar — always-visible action buttons */
   .jg-lb-bottombar {
     display: flex;
@@ -4705,6 +4821,7 @@ JG.openLightbox = function(images, startIdx) {
       <button class="jg-lb-tool" data-act="zoom-out" title="Zoom out (−)">−</button>
       <button class="jg-lb-tool" data-act="zoom-in" title="Zoom in (+)">+</button>
       <button class="jg-lb-tool" data-act="rotate" title="Rotate (R)">↻</button>
+      <button class="jg-lb-tool" data-act="markup" title="Markup (M)">✏️</button>
       <button class="jg-lb-tool" data-act="print" title="Print (P)">🖨</button>
       <button class="jg-lb-tool" data-act="download" title="Download">📥</button>
       <button class="jg-lb-tool danger" data-act="delete" title="Delete (Del)">🗑</button>
@@ -4807,6 +4924,30 @@ JG.openLightbox = function(images, startIdx) {
     }
   }
 
+  async function doMarkup() {
+    const cur = images[idx];
+    if (!cur.docId || cur._kind !== 'doc') {
+      alert("Can only mark up primary documents from here. This image is part of a selection or message.");
+      return;
+    }
+    if (isHeic(cur.name)) {
+      alert("Can't mark up HEIC images directly. Download or convert to JPEG first.");
+      return;
+    }
+    // Pass the doc data to the markup overlay (built into rebuild.html below as JG.openMarkupOverlay)
+    const doc = (state.documents || []).find(d => d.id === cur.docId);
+    if (!doc) { alert("Document not found"); return; }
+    close();
+    JG.openMarkupOverlay(doc, async (savedDoc) => {
+      // After save: reload docs so the new markup file appears, then reopen lightbox on the new file
+      await loadDocuments();
+      renderDetail();
+      const all = JG.collectProjectImages();
+      const newIdx = all.findIndex(x => x._kind === 'doc' && x.docId === savedDoc.id);
+      if (newIdx >= 0) JG.openLightbox(all, newIdx);
+    });
+  }
+
   function doPrint() {
     const cur = images[idx];
     if (isHeic(cur.name)) {
@@ -4841,6 +4982,7 @@ JG.openLightbox = function(images, startIdx) {
     else if (e.key === '-' || e.key === '_') { zoom = Math.max(zoom / 1.25, 0.2); applyTransform(); }
     else if (e.key === '0') { zoom = 1; panX = 0; panY = 0; rotation = 0; applyTransform(); }
     else if (e.key === 'r' || e.key === 'R') { rotation = (rotation + 90) % 360; applyTransform(); }
+    else if (e.key === 'm' || e.key === 'M') doMarkup();
     else if (e.key === 'p' || e.key === 'P') doPrint();
     else if (e.key === 'Delete' || e.key === 'Backspace') doDelete();
   };
@@ -4857,6 +4999,7 @@ JG.openLightbox = function(images, startIdx) {
       else if (act === 'zoom-out') { zoom = Math.max(zoom / 1.25, 0.2); applyTransform(); }
       else if (act === 'zoom-reset') { zoom = 1; panX = 0; panY = 0; rotation = 0; applyTransform(); }
       else if (act === 'rotate') { rotation = (rotation + 90) % 360; applyTransform(); }
+      else if (act === 'markup') doMarkup();
       else if (act === 'print') doPrint();
       else if (act === 'download') JG.downloadFile(images[idx].url, images[idx].name);
       else if (act === 'delete') doDelete();
@@ -4984,12 +5127,284 @@ JG.downloadFile = async function(url, filename) {
     setTimeout(() => { URL.revokeObjectURL(blobUrl); a.remove(); }, 250);
   } catch (e) {
     console.error('download failed', e);
-    // Fallback: open in new tab
     window.open(url, '_blank');
   }
 };
 
-// Helper: collect all images from current project for lightbox navigation
+// ─── Markup Overlay ───
+// Opens a full-screen canvas editor over a document. Supports pen, arrow, rect, text, undo.
+// onSave callback receives the new document row after upload.
+JG.openMarkupOverlay = function(doc, onSave) {
+  let overlay = document.getElementById('jgMarkup');
+  if (!overlay) {
+    overlay = document.createElement('div');
+    overlay.id = 'jgMarkup';
+    overlay.className = 'jg-markup';
+    document.body.appendChild(overlay);
+  }
+  overlay.innerHTML = `
+    <div class="jg-mk-topbar">
+      <button class="jg-mk-btn" data-mk-act="cancel">✕ Cancel</button>
+      <div class="jg-mk-title">Markup · ${(doc.filename || '').replace(/^.*[/\\]/, '')}</div>
+      <button class="jg-mk-btn primary" data-mk-act="save" disabled>Save</button>
+    </div>
+    <div class="jg-mk-stage">
+      <canvas id="jgMarkupCanvas"></canvas>
+    </div>
+    <div class="jg-mk-toolbar">
+      <div class="jg-mk-tool-group">
+        <button class="jg-mk-tool on" data-tool="pen" title="Pen">✏️</button>
+        <button class="jg-mk-tool" data-tool="arrow" title="Arrow">↗</button>
+        <button class="jg-mk-tool" data-tool="rect" title="Rectangle">▭</button>
+        <button class="jg-mk-tool" data-tool="text" title="Text">T</button>
+      </div>
+      <div class="jg-mk-tool-group">
+        <button class="jg-mk-color on" data-color="#ff3b30" style="background:#ff3b30;" title="Red"></button>
+        <button class="jg-mk-color" data-color="#ffcc00" style="background:#ffcc00;" title="Yellow"></button>
+        <button class="jg-mk-color" data-color="#34c759" style="background:#34c759;" title="Green"></button>
+        <button class="jg-mk-color" data-color="#007aff" style="background:#007aff;" title="Blue"></button>
+        <button class="jg-mk-color" data-color="#ffffff" style="background:#ffffff;" title="White"></button>
+        <button class="jg-mk-color" data-color="#000000" style="background:#000000;" title="Black"></button>
+      </div>
+      <div class="jg-mk-tool-group">
+        <label class="jg-mk-stroke-wrap">
+          <span>Size</span>
+          <input type="range" id="jgMkStroke" min="2" max="20" value="4">
+        </label>
+      </div>
+      <button class="jg-mk-btn" data-mk-act="undo" title="Undo (Ctrl/Cmd+Z)">↶ Undo</button>
+    </div>
+  `;
+
+  const canvas = overlay.querySelector('#jgMarkupCanvas');
+  const ctx = canvas.getContext('2d');
+  const stage = overlay.querySelector('.jg-mk-stage');
+  const saveBtn = overlay.querySelector('[data-mk-act="save"]');
+
+  const mk = {
+    tool: 'pen',
+    color: '#ff3b30',
+    stroke: 4,
+    history: [],         // image data snapshots
+    img: null,           // base image
+    isDrawing: false,
+    startX: 0, startY: 0,
+    lastX: 0, lastY: 0,
+    snapshot: null,      // pre-shape snapshot for live preview
+  };
+
+  function pushHistory() {
+    try {
+      mk.history.push(ctx.getImageData(0, 0, canvas.width, canvas.height));
+      // Cap history at 30 to avoid memory bloat
+      if (mk.history.length > 30) mk.history.shift();
+      saveBtn.disabled = mk.history.length <= 1;  // only enable after first stroke
+    } catch (e) { console.warn('history push failed (canvas tainted?)', e); }
+  }
+
+  function undo() {
+    if (mk.history.length <= 1) return;
+    mk.history.pop();
+    const prev = mk.history[mk.history.length - 1];
+    ctx.putImageData(prev, 0, 0);
+    saveBtn.disabled = mk.history.length <= 1;
+  }
+
+  // Load the document image into the canvas
+  toast('Loading photo…');
+  const img = new Image();
+  img.crossOrigin = 'anonymous';
+  img.onload = () => {
+    mk.img = img;
+    // Fit canvas to stage while preserving aspect ratio. Use natural resolution capped at 1600.
+    const maxDim = 1600;
+    const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+    canvas.width = Math.round(img.width * scale);
+    canvas.height = Math.round(img.height * scale);
+    // CSS sizing — fit to viewport
+    const fit = () => {
+      const stageW = stage.clientWidth;
+      const stageH = stage.clientHeight;
+      const sc = Math.min(stageW / canvas.width, stageH / canvas.height) * 0.95;
+      canvas.style.width = (canvas.width * sc) + 'px';
+      canvas.style.height = (canvas.height * sc) + 'px';
+    };
+    fit();
+    window.addEventListener('resize', fit);
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    pushHistory();
+  };
+  img.onerror = () => {
+    toast('Could not load photo for markup', true);
+    overlay.remove();
+  };
+  // Use Supabase transform for faster load if available
+  const workUrl = doc.file_url.replace('/storage/v1/object/public/', '/storage/v1/render/image/public/') + '?width=1600&quality=85';
+  img.src = workUrl;
+
+  function getCanvasPos(e) {
+    const rect = canvas.getBoundingClientRect();
+    const sx = canvas.width / rect.width;
+    const sy = canvas.height / rect.height;
+    const pt = e.touches ? e.touches[0] : e;
+    return { x: (pt.clientX - rect.left) * sx, y: (pt.clientY - rect.top) * sy };
+  }
+
+  function down(e) {
+    e.preventDefault();
+    const { x, y } = getCanvasPos(e);
+    mk.isDrawing = true;
+    mk.startX = x; mk.startY = y;
+    mk.lastX = x; mk.lastY = y;
+    if (mk.tool === 'pen') {
+      ctx.strokeStyle = mk.color;
+      ctx.lineWidth = mk.stroke;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+    } else if (mk.tool === 'text') {
+      mk.isDrawing = false;
+      const text = prompt('Text:');
+      if (text) {
+        ctx.fillStyle = mk.color;
+        ctx.font = `bold ${Math.max(20, mk.stroke * 5)}px -apple-system, sans-serif`;
+        ctx.fillText(text, x, y);
+        pushHistory();
+      }
+    } else {
+      // arrow / rect — snapshot before for live redraw
+      mk.snapshot = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    }
+  }
+  function move(e) {
+    if (!mk.isDrawing) return;
+    e.preventDefault();
+    const { x, y } = getCanvasPos(e);
+    if (mk.tool === 'pen') {
+      ctx.lineTo(x, y);
+      ctx.stroke();
+      mk.lastX = x; mk.lastY = y;
+    } else if (mk.tool === 'arrow' || mk.tool === 'rect') {
+      // Restore pre-shape, redraw shape live
+      ctx.putImageData(mk.snapshot, 0, 0);
+      ctx.strokeStyle = mk.color;
+      ctx.fillStyle = mk.color;
+      ctx.lineWidth = mk.stroke;
+      ctx.lineCap = 'round';
+      if (mk.tool === 'rect') {
+        ctx.strokeRect(mk.startX, mk.startY, x - mk.startX, y - mk.startY);
+      } else if (mk.tool === 'arrow') {
+        drawArrow(ctx, mk.startX, mk.startY, x, y, mk.stroke);
+      }
+      mk.lastX = x; mk.lastY = y;
+    }
+  }
+  function up(e) {
+    if (!mk.isDrawing) return;
+    mk.isDrawing = false;
+    if (mk.tool === 'pen' || mk.tool === 'arrow' || mk.tool === 'rect') {
+      pushHistory();
+    }
+    mk.snapshot = null;
+  }
+
+  function drawArrow(c, x1, y1, x2, y2, sz) {
+    const headLen = Math.max(10, sz * 3);
+    const angle = Math.atan2(y2 - y1, x2 - x1);
+    c.beginPath();
+    c.moveTo(x1, y1); c.lineTo(x2, y2); c.stroke();
+    c.beginPath();
+    c.moveTo(x2, y2);
+    c.lineTo(x2 - headLen * Math.cos(angle - Math.PI / 6), y2 - headLen * Math.sin(angle - Math.PI / 6));
+    c.lineTo(x2 - headLen * Math.cos(angle + Math.PI / 6), y2 - headLen * Math.sin(angle + Math.PI / 6));
+    c.closePath();
+    c.fill();
+  }
+
+  canvas.addEventListener('mousedown', down);
+  canvas.addEventListener('mousemove', move);
+  window.addEventListener('mouseup', up);
+  canvas.addEventListener('touchstart', down, { passive: false });
+  canvas.addEventListener('touchmove', move, { passive: false });
+  canvas.addEventListener('touchend', up);
+
+  // Tool / color / stroke buttons
+  overlay.querySelectorAll('[data-tool]').forEach(b => {
+    b.addEventListener('click', () => {
+      overlay.querySelectorAll('[data-tool]').forEach(x => x.classList.remove('on'));
+      b.classList.add('on');
+      mk.tool = b.dataset.tool;
+    });
+  });
+  overlay.querySelectorAll('[data-color]').forEach(b => {
+    b.addEventListener('click', () => {
+      overlay.querySelectorAll('[data-color]').forEach(x => x.classList.remove('on'));
+      b.classList.add('on');
+      mk.color = b.dataset.color;
+    });
+  });
+  overlay.querySelector('#jgMkStroke').addEventListener('input', e => {
+    mk.stroke = parseInt(e.target.value, 10);
+  });
+
+  // Actions
+  overlay.querySelector('[data-mk-act="undo"]').addEventListener('click', undo);
+  overlay.querySelector('[data-mk-act="cancel"]').addEventListener('click', () => {
+    if (mk.history.length > 1 && !confirm('Discard markup?')) return;
+    overlay.remove();
+  });
+  overlay.querySelector('[data-mk-act="save"]').addEventListener('click', async () => {
+    if (saveBtn.disabled) return;
+    saveBtn.disabled = true;
+    const origText = saveBtn.textContent;
+    saveBtn.textContent = 'Saving…';
+    try {
+      const blob = await new Promise(res => canvas.toBlob(res, 'image/jpeg', 0.9));
+      if (!blob) throw new Error('toBlob returned null');
+
+      const ts = new Date();
+      const tsCode = `${ts.getFullYear()}${String(ts.getMonth()+1).padStart(2,'0')}${String(ts.getDate()).padStart(2,'0')}-${String(ts.getHours()).padStart(2,'0')}${String(ts.getMinutes()).padStart(2,'0')}${String(ts.getSeconds()).padStart(2,'0')}`;
+      const baseName = (doc.filename || 'photo').replace(/\.[^.]+$/, '');
+      const newFilename = `${baseName}_markup_${tsCode}.jpg`;
+      const path = `projects/${state.activeProjectId}/${Date.now()}-${newFilename}`;
+
+      const { error: upErr } = await sb.storage.from('rebuild-documents').upload(path, blob, {
+        contentType: 'image/jpeg',
+        upsert: false,
+      });
+      if (upErr) throw upErr;
+
+      const { data: urlData } = sb.storage.from('rebuild-documents').getPublicUrl(path);
+
+      const { data: inserted, error: insErr } = await sb.from('rebuild_documents').insert({
+        project_id: state.activeProjectId,
+        category: doc.category || 'Photos',
+        filename: newFilename,
+        file_url: urlData.publicUrl,
+        file_size_bytes: blob.size,
+        mime_type: 'image/jpeg',
+        uploaded_by_email: state.pmEmail || null,
+        uploaded_by_name: state.pmName || null,
+        push_status: 'pending',
+      }).select();
+      if (insErr) throw insErr;
+
+      const savedDoc = inserted?.[0];
+      overlay.remove();
+      toast(`✓ Markup saved as ${newFilename}`);
+      if (savedDoc && onSave) onSave(savedDoc);
+      // Background push to Albi
+      if (savedDoc && typeof pushDocumentToAlbi === 'function') pushDocumentToAlbi(savedDoc);
+    } catch (e) {
+      console.error('Markup save failed:', e);
+      toast('Save failed: ' + (e.message || e), true);
+      saveBtn.disabled = false;
+      saveBtn.textContent = origText;
+    }
+  });
+};
+
 JG.collectProjectImages = function() {
   const isImg = name => /\.(jpg|jpeg|png|gif|webp|heic|heif)$/i.test(name || '');
   const out = [];
