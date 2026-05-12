@@ -2429,6 +2429,25 @@
     text-transform: uppercase;
     letter-spacing: .5px;
     margin-bottom: 8px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .wobx-split-toggle {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: none;
+    letter-spacing: 0;
+    color: var(--text-soft);
+    cursor: pointer;
+  }
+  .wobx-split-toggle input {
+    accent-color: var(--orange);
+    width: 14px;
+    height: 14px;
   }
   .wobx-trade-table {
     width: 100%;
@@ -9396,7 +9415,13 @@ function renderWoBuilderSection(budget) {
       </div>
 
       <div class="wobx-trades">
-        <div class="wobx-trades-title">Work Orders by Trade</div>
+        <div class="wobx-trades-title">
+          <span>Work Orders by Trade</span>
+          <label class="wobx-split-toggle">
+            <input type="checkbox" id="wobx_split" ${state.woBuilderSplit ? 'checked' : ''}>
+            <span>Split by detail</span>
+          </label>
+        </div>
         <table class="wobx-trade-table">
           <thead>
             <tr>
@@ -9458,32 +9483,87 @@ function renderWoBuilderSection(budget) {
 }
 
 // Roll up estimate items + components into per-trade WO data
+// Merged trade groups — multiple raw trades roll up into one "work order" trade.
+// This fixes the negative-margin problem where Xactimate's Components report puts
+// all finish work under CARP-FNC labor, but estimate line items get classified into
+// separate sub-trades like trim/cabinetry/doors.
+const MERGED_TRADE_GROUPS = {
+  finish_carpentry: {
+    label: 'Finish Carpentry',
+    categories: ['trim', 'cabinetry', 'doors', 'hardware', 'fasteners'],
+    sort: 50,
+  },
+  paint: { label: 'Paint', categories: ['paint'], sort: 35 },
+  drywall: { label: 'Drywall', categories: ['drywall'], sort: 30 },
+  flooring: { label: 'Flooring', categories: ['flooring'], sort: 40 },
+  insulation: { label: 'Insulation', categories: ['insulation'], sort: 25 },
+  framing: { label: 'Framing', categories: ['framing'], sort: 20 },
+  plumbing: { label: 'Plumbing', categories: ['plumbing'], sort: 85 },
+  electrical: { label: 'Electrical', categories: ['electrical'], sort: 80 },
+  appliances: { label: 'Appliances', categories: ['appliances'], sort: 90 },
+  demo: { label: 'Demolition', categories: ['demo'], sort: 10 },
+  containment: { label: 'Containment', categories: ['containment'], sort: 12 },
+  contents: { label: 'Contents Handling', categories: ['contents'], sort: 15 },
+  supervision: { label: 'Project Management', categories: ['supervision'], sort: 5 },
+  cleaning: { label: 'Final Cleaning', categories: ['cleaning'], sort: 95 },
+  general: { label: 'General Labor', categories: ['general', 'misc'], sort: 99 },
+};
+
+// Reverse lookup: raw category → merged group key
+function mergedGroupFor(rawCategory) {
+  for (const [groupKey, group] of Object.entries(MERGED_TRADE_GROUPS)) {
+    if (group.categories.includes(rawCategory)) return groupKey;
+  }
+  return 'general';
+}
+
 function computeTradeRollup(budget) {
+  const split = state.woBuilderSplit === true;  // false = merged (default), true = raw categories
   const byTrade = {};
+
+  // Helper to get/create a bucket for a given key
+  function bucket(key, label, sort) {
+    if (!byTrade[key]) {
+      byTrade[key] = { category: key, label, revenue: 0, material: 0, labor: 0, equipment: 0, hours: 0, sort };
+    }
+    return byTrade[key];
+  }
+
+  function keyFor(rawCategory) {
+    if (split) {
+      return {
+        key: rawCategory || 'general',
+        label: tradeLabelFor(rawCategory || 'general'),
+        sort: 100,
+      };
+    } else {
+      const groupKey = mergedGroupFor(rawCategory || 'general');
+      const group = MERGED_TRADE_GROUPS[groupKey];
+      return { key: groupKey, label: group.label, sort: group.sort };
+    }
+  }
+
   // Revenue from estimate items
   (budget.items || []).forEach(it => {
-    const k = it.trade_category || 'general';
-    if (!byTrade[k]) byTrade[k] = { category: k, label: tradeLabelFor(k), revenue: 0, material: 0, labor: 0, equipment: 0, hours: 0 };
-    byTrade[k].revenue += Number(it.line_total) || 0;
+    const k = keyFor(it.trade_category);
+    bucket(k.key, k.label, k.sort).revenue += Number(it.line_total) || 0;
   });
   // Material cost
   (budget.materials || []).forEach(m => {
-    const k = m.trade_category || 'general';
-    if (!byTrade[k]) byTrade[k] = { category: k, label: tradeLabelFor(k), revenue: 0, material: 0, labor: 0, equipment: 0, hours: 0 };
-    byTrade[k].material += Number(m.total) || 0;
+    const k = keyFor(m.trade_category);
+    bucket(k.key, k.label, k.sort).material += Number(m.total) || 0;
   });
   // Labor cost + hours
   (budget.labor || []).forEach(l => {
-    const k = l.trade_category || 'general';
-    if (!byTrade[k]) byTrade[k] = { category: k, label: tradeLabelFor(k), revenue: 0, material: 0, labor: 0, equipment: 0, hours: 0 };
-    byTrade[k].labor += Number(l.total) || 0;
-    byTrade[k].hours += Number(l.hours) || 0;
+    const k = keyFor(l.trade_category);
+    const b = bucket(k.key, k.label, k.sort);
+    b.labor += Number(l.total) || 0;
+    b.hours += Number(l.hours) || 0;
   });
   // Equipment cost
   (budget.equipment || []).forEach(e => {
-    const k = e.trade_category || 'general';
-    if (!byTrade[k]) byTrade[k] = { category: k, label: tradeLabelFor(k), revenue: 0, material: 0, labor: 0, equipment: 0, hours: 0 };
-    byTrade[k].equipment += Number(e.total) || 0;
+    const k = keyFor(e.trade_category);
+    bucket(k.key, k.label, k.sort).equipment += Number(e.total) || 0;
   });
 
   return Object.values(byTrade).map(t => {
@@ -9491,7 +9571,7 @@ function computeTradeRollup(budget) {
     t.profit = t.revenue - t.cost;
     t.suggestedPhaseId = matchPhaseForTrade(t.category);
     return t;
-  }).sort((a, b) => b.cost - a.cost);
+  }).sort((a, b) => (a.sort || 100) - (b.sort || 100) || b.cost - a.cost);
 }
 
 const TRADE_LABEL_OVERRIDES = {
@@ -9725,6 +9805,15 @@ function wireWoBuilderControls() {
       await sb.from('wo_builder_uploads').update({ deleted_at: new Date().toISOString() }).eq('id', state.woBudget.upload.id);
       state.woBudget = null;
       state.wobxPicked = { estimate: null, components: null };
+      renderTabContent();
+    });
+  }
+
+  // Split-by-detail toggle
+  const splitCb = $('#wobx_split');
+  if (splitCb) {
+    splitCb.addEventListener('change', () => {
+      state.woBuilderSplit = splitCb.checked;
       renderTabContent();
     });
   }
