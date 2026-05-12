@@ -2307,6 +2307,36 @@
   }
   .wobx-modal-convert:hover { background: #258852; }
   .wobx-modal-convert:disabled { opacity: .5; cursor: wait; }
+
+  .wobx-modal-unlock {
+    background: var(--gold);
+    color: #fff;
+    border: 0;
+    border-radius: 999px;
+    padding: 9px 18px;
+    font-size: 12px;
+    font-weight: 800;
+    cursor: pointer;
+    font-family: inherit;
+    margin-right: auto;
+    box-shadow: 0 2px 6px rgba(245,166,35,.25);
+  }
+  .wobx-modal-unlock:hover { background: #d88a17; }
+  .wobx-modal-unlock:disabled { opacity: .5; cursor: wait; }
+
+  .wobx-modal-delete-wo {
+    background: var(--bg);
+    color: var(--red);
+    border: 1px solid rgba(214,69,69,.4);
+    border-radius: 999px;
+    padding: 9px 18px;
+    font-size: 12px;
+    font-weight: 700;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  .wobx-modal-delete-wo:hover { background: var(--red); color: #fff; border-color: var(--red); }
+  .wobx-modal-delete-wo:disabled { opacity: .5; cursor: wait; }
   .wobx-body { padding: 16px; }
 
   /* Upload state — drag-and-drop zone */
@@ -2954,6 +2984,25 @@
     color: var(--navy);
     font-size: 14px;
     margin-bottom: 2px;
+  }
+  .wo-sub-name .wo-sub-type {
+    display: inline-block;
+    font-size: 9px;
+    font-weight: 700;
+    color: var(--muted);
+    background: var(--bg);
+    padding: 2px 7px;
+    border-radius: 999px;
+    margin-left: 6px;
+    text-transform: uppercase;
+    letter-spacing: .3px;
+    vertical-align: middle;
+  }
+  .wo-no-create-hint {
+    font-size: 11px;
+    color: var(--muted);
+    font-style: italic;
+    padding: 6px 0;
   }
   .wo-sub-contact { font-size: 12px; color: var(--muted); }
   .wo-status-pill {
@@ -9873,6 +9922,10 @@ function renderWoDetailModal(tradeKey, tradeLabel, budget) {
           ${!isUnassigned && !wo?.is_locked ? `
             <button class="wobx-modal-convert" id="wobx_modal_convert">Convert to Work Order →</button>
           ` : ''}
+          ${wo?.is_locked ? `
+            <button class="wobx-modal-unlock" id="wobx_modal_unlock">🔓 Unlock & Edit</button>
+            <button class="wobx-modal-delete-wo" id="wobx_modal_delete_wo">🗑 Delete WO</button>
+          ` : ''}
           <button class="wobx-modal-done" id="wobx_modal_done">Done</button>
         </div>
       </div>
@@ -10114,6 +10167,51 @@ function wireWoDetailModal(tradeKey) {
     if (!woId) return;
     closeWoDetailModal();
     openWoEditModal(woId);
+  });
+
+  // Unlock & Edit (keeps the WO, just clears the lock)
+  $('#wobx_modal_unlock')?.addEventListener('click', async () => {
+    const btn = $('#wobx_modal_unlock');
+    const tradeLabel = MERGED_TRADE_GROUPS[tradeKey]?.label || tradeKey;
+    if (!confirm(`Unlock "${tradeLabel}" for editing?\n\nThe Work Order will remain in the WO list, but you'll be able to edit the budget again here. Changes won't auto-sync to the WO — you'll need to delete and re-convert if you want the WO to reflect new numbers.`)) return;
+    btn.disabled = true;
+    btn.textContent = 'Unlocking…';
+    const result = await unlockTrade(tradeKey);
+    if (!result.ok) {
+      toast('Unlock failed: ' + result.error, true);
+      btn.disabled = false;
+      btn.textContent = '🔓 Unlock & Edit';
+      return;
+    }
+    toast(`✓ "${tradeLabel}" unlocked`);
+    await loadWoBudget();
+    await refreshBudgetSummary();
+    const tl = MERGED_TRADE_GROUPS[tradeKey]?.label || tradeKey;
+    closeWoDetailModal();
+    renderTabContent();
+    setTimeout(() => openWoDetailModal(tradeKey, tl), 50);
+  });
+
+  // Delete WO (removes the WO AND unlocks)
+  $('#wobx_modal_delete_wo')?.addEventListener('click', async () => {
+    const btn = $('#wobx_modal_delete_wo');
+    const tradeLabel = MERGED_TRADE_GROUPS[tradeKey]?.label || tradeKey;
+    if (!confirm(`Delete the Work Order for "${tradeLabel}"?\n\nThis will:\n• Permanently delete the Work Order from the WO list\n• Unlock the budget so you can edit it again\n\nIf the WO has already been sent to the sub or signed, this can't be undone.`)) return;
+    btn.disabled = true;
+    btn.textContent = 'Deleting…';
+    const result = await deleteConvertedWo(tradeKey);
+    if (!result.ok) {
+      toast('Delete failed: ' + result.error, true);
+      btn.disabled = false;
+      btn.textContent = '🗑 Delete WO';
+      return;
+    }
+    toast(`✓ WO for "${tradeLabel}" deleted · budget unlocked`);
+    await loadWoBudget();
+    await loadWorkOrders();
+    await refreshBudgetSummary();
+    closeWoDetailModal();
+    renderTabContent();
   });
 
   // Assignee type changes → repopulate ID dropdown
@@ -10366,6 +10464,56 @@ function buildConvertedWoScope(tradeKey, tradeLabel, items, materials, labor, eq
 }
 
 // Convert a single trade to a real Work Order, lock the WO Builder entry
+// Unlock a converted trade — keeps the rebuild_work_orders row, clears the lock so the budget can be edited again
+async function unlockTrade(tradeKey) {
+  if (!state.woBudget) return { ok: false, error: 'No budget loaded' };
+  const wbWo = (state.woBudget.wos || []).find(w => w.trade_category === tradeKey);
+  if (!wbWo) return { ok: false, error: 'Trade not found' };
+  if (!wbWo.is_locked) return { ok: false, error: 'Not locked' };
+
+  const { error } = await sb.from('wo_builder_work_orders')
+    .update({
+      is_locked: false,
+      locked_at: null,
+      locked_by_email: null,
+      // Keep converted_work_order_id so we still know which WO this trade is linked to
+      // Status reverts to draft so it doesn't show as approved anymore
+      status: 'draft',
+    })
+    .eq('id', wbWo.id);
+  if (error) return { ok: false, error: error.message };
+  return { ok: true, woId: wbWo.converted_work_order_id };
+}
+
+// Delete a converted WO — removes the rebuild_work_orders row AND unlocks the trade
+async function deleteConvertedWo(tradeKey) {
+  if (!state.woBudget) return { ok: false, error: 'No budget loaded' };
+  const wbWo = (state.woBudget.wos || []).find(w => w.trade_category === tradeKey);
+  if (!wbWo) return { ok: false, error: 'Trade not found' };
+  if (!wbWo.is_locked) return { ok: false, error: 'Not locked' };
+  if (!wbWo.converted_work_order_id) return { ok: false, error: 'No linked WO to delete' };
+
+  // 1. Delete the rebuild_work_orders row (and its history rows cascade via FK if set up)
+  const { error: delErr } = await sb.from('rebuild_work_orders')
+    .delete()
+    .eq('id', wbWo.converted_work_order_id);
+  if (delErr) return { ok: false, error: 'WO delete failed: ' + delErr.message };
+
+  // 2. Unlock the WO Builder row + clear the link
+  const { error: unlockErr } = await sb.from('wo_builder_work_orders')
+    .update({
+      is_locked: false,
+      locked_at: null,
+      locked_by_email: null,
+      converted_work_order_id: null,
+      status: 'draft',
+    })
+    .eq('id', wbWo.id);
+  if (unlockErr) return { ok: false, error: 'Unlock failed: ' + unlockErr.message };
+
+  return { ok: true };
+}
+
 async function convertTradeToWo(tradeKey) {
   if (!state.woBudget) return { ok: false, error: 'No budget loaded' };
   const budget = state.woBudget;
@@ -11281,45 +11429,83 @@ function renderWorkOrdersTab() {
   // Build the WO Builder section — sits above the subcontractor WO rows
   const builderHtml = renderWoBuilderSection(budget);
 
-  // Group by sub
-  const subsOnProject = new Map();
+  // Build unified assignee map — subs AND carpenters together
+  // Key format: 'sub:<uuid>' or 'carp:<uuid>' so we don't collide IDs
+  const assignees = new Map();
+
+  function addSub(sub) {
+    if (!sub) return;
+    assignees.set('sub:' + sub.id, {
+      key: 'sub:' + sub.id,
+      type: 'sub',
+      id: sub.id,
+      name: sub.company_name || '',
+      contact: sub.primary_contact || '',
+      email: sub.email || '',
+      phone: sub.phone || '',
+    });
+  }
+  function addEmployee(emp) {
+    if (!emp) return;
+    assignees.set('carp:' + emp.id, {
+      key: 'carp:' + emp.id,
+      type: 'carpenter',
+      id: emp.id,
+      name: emp.name || '',
+      contact: '',
+      email: emp.email || '',
+      phone: emp.phone || '',
+    });
+  }
+
+  // Subs from phase assignments
   state.phases.forEach(ph => (ph.assignees || []).forEach(a => {
     if (a.assignee_type === 'sub' && a.sub_id) {
-      const sub = state.subs.find(s => s.id === a.sub_id);
-      if (sub) subsOnProject.set(sub.id, sub);
+      addSub(state.subs.find(s => s.id === a.sub_id));
+    }
+    if (a.assignee_type === 'carpenter' && a.employee_id) {
+      addEmployee((state.employees || []).find(e => e.id === a.employee_id));
     }
   }));
+  // Subs from selections
   state.selections.forEach(s => {
-    if (s.sub_id) {
-      const sub = state.subs.find(x => x.id === s.sub_id);
-      if (sub) subsOnProject.set(sub.id, sub);
-    }
+    if (s.sub_id) addSub(state.subs.find(x => x.id === s.sub_id));
   });
-
-  // Subs that have WOs but maybe not on phases/selections anymore — still show
+  // Anyone with an existing WO (subs OR carpenters)
   wos.forEach(wo => {
-    if (wo.sub && !subsOnProject.has(wo.sub.id)) subsOnProject.set(wo.sub.id, wo.sub);
+    if (wo.sub_id && wo.sub) addSub(wo.sub);
+    else if (wo.sub_id) addSub(state.subs.find(s => s.id === wo.sub_id));
+    if (wo.employee_id) addEmployee((state.employees || []).find(e => e.id === wo.employee_id));
   });
 
-  if (!subsOnProject.size) {
+  if (!assignees.size) {
     return builderHtml + `
       <div class="wo-empty">
         <div style="font-size:48px;margin-bottom:10px;opacity:.4;">📋</div>
-        <h3>No subcontractors yet</h3>
-        <p>Assign subs to phases or selections, then come back here to issue Work Orders.</p>
+        <h3>No subcontractors or carpenters assigned yet</h3>
+        <p>Assign subs or carpenters to phases or selections, then come back here to issue Work Orders.</p>
       </div>
     `;
   }
 
-  const rows = Array.from(subsOnProject.values()).map(sub => {
-    const subWos = wos.filter(w => w.sub_id === sub.id);
-    const active = subWos.find(w => ['sent','signed','draft','converted_to_po','invoice_received'].includes(w.status));
+  // Sort alphabetically by name
+  const sortedAssignees = Array.from(assignees.values()).sort((a, b) =>
+    a.name.toLowerCase().localeCompare(b.name.toLowerCase())
+  );
+
+  const rows = sortedAssignees.map(a => {
+    const matchingWos = a.type === 'sub'
+      ? wos.filter(w => w.sub_id === a.id)
+      : wos.filter(w => w.employee_id === a.id);
+    const active = matchingWos.find(w => ['sent','signed','draft','converted_to_po','invoice_received'].includes(w.status));
     const sm = WO_STATUS_META[active?.status] || null;
+    const icon = a.type === 'carpenter' ? '👷' : '🏢';
+    const typeLabel = a.type === 'carpenter' ? 'JG Carpenter' : 'Subcontractor';
     return `
       <div class="wo-sub-row">
         <div class="wo-sub-info">
-          <div class="wo-sub-name">${esc(sub.company_name)}</div>
-          ${sub.primary_contact ? `<div class="wo-sub-contact">${esc(sub.primary_contact)}${sub.email ? ' · ' + esc(sub.email) : ''}</div>` : ''}
+          <div class="wo-sub-name">${icon} ${esc(a.name)} <span class="wo-sub-type">${typeLabel}</span></div>
+          ${a.contact || a.email ? `<div class="wo-sub-contact">${esc(a.contact)}${a.contact && a.email ? ' · ' : ''}${esc(a.email)}</div>` : ''}
         </div>
         <div class="wo-sub-status">
           ${active
@@ -11329,8 +11515,10 @@ function renderWorkOrdersTab() {
         <div class="wo-sub-actions">
           ${active
             ? `<button class="btn" data-wo-act="open" data-wo-id="${active.id}">${active.status === 'draft' ? '✎ Continue' : 'View'}</button>`
-            : `<button class="btn primary" data-wo-act="create" data-sub-id="${sub.id}">+ Create WO</button>`}
-          ${subWos.length > 1 ? `<button class="btn ghost" data-wo-act="history" data-sub-id="${sub.id}">History (${subWos.length})</button>` : ''}
+            : a.type === 'sub'
+              ? `<button class="btn primary" data-wo-act="create" data-sub-id="${a.id}">+ Create WO</button>`
+              : `<span class="wo-no-create-hint">Create from WO Builder</span>`}
+          ${matchingWos.length > 1 ? `<button class="btn ghost" data-wo-act="history" data-${a.type === 'sub' ? 'sub' : 'employee'}-id="${a.id}">History (${matchingWos.length})</button>` : ''}
         </div>
       </div>
     `;
@@ -11340,8 +11528,8 @@ function renderWorkOrdersTab() {
     <div class="wo-wrap">
       <div class="wo-header">
         <div>
-          <h3>Work Orders by Subcontractor</h3>
-          <p>One master Work Order per sub. Auto-built from approved selections and assigned phases.</p>
+          <h3>Work Orders</h3>
+          <p>One master Work Order per assignee. Auto-built from approved selections, assigned phases, and the WO Builder.</p>
         </div>
       </div>
       <div class="wo-list">
@@ -11451,7 +11639,17 @@ function openWoEditModal(woId) {
     document.body.appendChild(modal);
     modal.querySelector('[data-close]').addEventListener('click', () => modal.classList.remove('on'));
   }
-  $('#woModalSubName').textContent = wo.sub?.company_name || '';
+  // Get assignee name (sub OR carpenter)
+  let assigneeName = wo.sub?.company_name || '';
+  let assigneeEmail = wo.sub?.email || '';
+  let assigneeIsCarpenter = false;
+  if (!assigneeName && wo.employee_id) {
+    const emp = (state.employees || []).find(e => e.id === wo.employee_id);
+    assigneeName = emp?.name || 'Carpenter';
+    assigneeEmail = emp?.email || '';
+    assigneeIsCarpenter = true;
+  }
+  $('#woModalSubName').textContent = assigneeName;
 
   const isReadOnly = wo.status === 'signed' || wo.status === 'superseded' || wo.status === 'cancelled' || wo.status === 'converted_to_po' || wo.status === 'invoice_received';
   const woUrl = `${location.origin}${location.pathname.replace(/[^/]*$/, '')}wo.html?t=${wo.accept_token}`;
@@ -11490,8 +11688,8 @@ function openWoEditModal(woId) {
 
     <label>Agreed Amount ($)</label>
     <input type="number" step="0.01" id="wo_amount" value="${wo.total_amount || ''}" ${isReadOnly ? 'disabled' : ''} placeholder="0.00">
-    <label>Sub Email ${wo.sub?.email ? '<span style="font-size:11px;font-weight:500;color:var(--muted);text-transform:none;">(from sub profile — override if needed)</span>' : '<span style="font-size:11px;font-weight:500;color:var(--red);text-transform:none;">(not on file — add to send)</span>'}</label>
-    <input type="email" id="wo_email" value="${esc(wo.sent_to_email || wo.sub?.email || '')}" ${isReadOnly ? 'disabled' : ''} placeholder="sub@example.com">
+    <label>${assigneeIsCarpenter ? 'Carpenter' : 'Sub'} Email ${assigneeEmail ? '<span style="font-size:11px;font-weight:500;color:var(--muted);text-transform:none;">(from profile — override if needed)</span>' : '<span style="font-size:11px;font-weight:500;color:var(--red);text-transform:none;">(not on file — add to send)</span>'}</label>
+    <input type="email" id="wo_email" value="${esc(wo.sent_to_email || assigneeEmail || '')}" ${isReadOnly ? 'disabled' : ''} placeholder="${assigneeIsCarpenter ? 'carpenter@jg-restoration.com' : 'sub@example.com'}">
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px;">
       <div>
         <label>Start Date</label>
@@ -11842,7 +12040,11 @@ function wireWorkOrdersTab() {
       else if (act === 'history') {
         // Future: history modal. For now, just open the most recent.
         const subId = btn.dataset.subId;
-        const recent = state.workOrders.filter(w => w.sub_id === subId).sort((a,b) => new Date(b.created_at) - new Date(a.created_at))[0];
+        const empId = btn.dataset.employeeId;
+        const matching = subId
+          ? state.workOrders.filter(w => w.sub_id === subId)
+          : state.workOrders.filter(w => w.employee_id === empId);
+        const recent = matching.sort((a,b) => new Date(b.created_at) - new Date(a.created_at))[0];
         if (recent) createOrOpenWorkOrder(null, recent.id);
       }
     });
