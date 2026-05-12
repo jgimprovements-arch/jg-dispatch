@@ -4277,6 +4277,22 @@
   if (window.pdfjsLib) {
     window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
   }
+
+  // Lazy-load heic2any only when a HEIC file is encountered.
+  // Returns the global heic2any function. ~700KB, loaded once per session.
+  window._heic2anyLoader = null;
+  window.loadHeic2Any = function () {
+    if (window.heic2any) return Promise.resolve(window.heic2any);
+    if (window._heic2anyLoader) return window._heic2anyLoader;
+    window._heic2anyLoader = new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = 'https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js';
+      s.onload = () => resolve(window.heic2any);
+      s.onerror = () => { window._heic2anyLoader = null; reject(new Error('heic2any failed to load')); };
+      document.head.appendChild(s);
+    });
+    return window._heic2anyLoader;
+  };
 </script>
 <script src="jg-export.js"></script>
 <script>
@@ -6379,14 +6395,17 @@ function renderDocumentsTab() {
       <div class="doc-recent-head">Recent Uploads</div>
       <div class="doc-recent-list">
         ${recent.map(d => {
-          const isImage = /\.(jpg|jpeg|png|gif|webp|heic)$/i.test(d.filename);
+          const isImage = /\.(jpg|jpeg|png|gif|webp)$/i.test(d.filename);
+          const isLegacyHeic = /\.(heic|heif)$/i.test(d.filename);
           const isPdf = /\.pdf$/i.test(d.filename);
-          const isPhoto = d.category === 'Photos' && isImage;
+          const isPhoto = d.category === 'Photos' && (isImage || isLegacyHeic);
           const thumb = isImage
             ? `<img src="${d.file_url}" loading="lazy" alt="">`
-            : isPdf
-              ? `<div class="doc-recent-icon doc-recent-pdf" data-pdf-thumb="${d.file_url}" data-doc-id="${d.id}"><span class="doc-recent-pdf-fallback">📕</span></div>`
-              : `<div class="doc-recent-icon">📄</div>`;
+            : isLegacyHeic
+              ? `<div class="doc-recent-icon doc-recent-heic" title="Legacy HEIC — preview unavailable. New iPhone photos now auto-convert to JPG."><span style="font-size:24px;">📷</span><div style="font-size:8px;font-weight:700;color:var(--muted);margin-top:2px;">HEIC</div></div>`
+              : isPdf
+                ? `<div class="doc-recent-icon doc-recent-pdf" data-pdf-thumb="${d.file_url}" data-doc-id="${d.id}"><span class="doc-recent-pdf-fallback">📕</span></div>`
+                : `<div class="doc-recent-icon">📄</div>`;
           const action = isImage
             ? `data-lightbox-doc="${d.id}"`
             : `href="${d.file_url}" target="_blank"`;
@@ -6605,38 +6624,95 @@ async function renderPdfThumbnail(el) {
   }
 }
 
+// Convert HEIC files to JPEG before upload so browsers can display thumbnails.
+// Returns the original File if not HEIC, or a new File with .jpg extension if converted.
+// Falls back to the original File if conversion fails (user gets unviewable thumbnail rather than upload failure).
+async function convertHeicIfNeeded(file) {
+  const name = (file.name || '').toLowerCase();
+  const type = (file.type || '').toLowerCase();
+  const isHeic = name.endsWith('.heic') || name.endsWith('.heif')
+               || type === 'image/heic' || type === 'image/heif';
+  if (!isHeic) return file;
+
+  try {
+    const heic2any = await loadHeic2Any();
+    const blob = await heic2any({ blob: file, toType: 'image/jpeg', quality: 0.85 });
+    // heic2any may return a single Blob or an array (for multi-image HEIC); take first
+    const jpgBlob = Array.isArray(blob) ? blob[0] : blob;
+    const newName = file.name.replace(/\.(heic|heif)$/i, '.jpg');
+    return new File([jpgBlob], newName, { type: 'image/jpeg', lastModified: file.lastModified });
+  } catch (err) {
+    console.warn('HEIC conversion failed, uploading original:', err);
+    return file;
+  }
+}
+
+// Run async tasks in parallel batches of `concurrency` size.
+// Returns results array in original order.
+async function runParallel(items, concurrency, taskFn) {
+  const results = new Array(items.length);
+  let nextIdx = 0;
+  async function worker() {
+    while (true) {
+      const i = nextIdx++;
+      if (i >= items.length) return;
+      results[i] = await taskFn(items[i], i);
+    }
+  }
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, () => worker());
+  await Promise.all(workers);
+  return results;
+}
+
 async function uploadFilesToCategory(files, category) {
   if (!files || !files.length) return;
-  toast(`Uploading ${files.length} file${files.length === 1 ? '' : 's'} to ${category}…`);
-  const uploadedDocs = [];
-  for (const f of files) {
-    const inserted = await uploadDocument(f, category, /* skipPush */ true);
-    if (inserted) uploadedDocs.push(inserted);
+
+  // Convert any HEIC files to JPEG first (sequential is fine — conversion is CPU-bound, not network)
+  const heicCount = files.filter(f => /\.(heic|heif)$/i.test(f.name || '')).length;
+  if (heicCount > 0) {
+    toast(`Converting ${heicCount} HEIC photo${heicCount === 1 ? '' : 's'} to JPEG…`);
   }
+  const prepared = [];
+  for (const f of files) {
+    prepared.push(await convertHeicIfNeeded(f));
+  }
+
+  toast(`Uploading ${prepared.length} file${prepared.length === 1 ? '' : 's'} to ${category}…`);
+
+  // Upload in parallel batches of 5 — fast but doesn't choke on big batches / weak connections
+  const uploadedDocs = await runParallel(prepared, 5, async (f) => {
+    return await uploadDocument(f, category, /* skipPush */ true);
+  });
+
+  const successDocs = uploadedDocs.filter(Boolean);
   await loadDocuments();
   renderDetail();
 
   // Single Albi push for the whole batch
-  if (uploadedDocs.length === 1) {
-    pushDocumentToAlbi(uploadedDocs[0]);
-  } else if (uploadedDocs.length > 1) {
-    pushDocumentBatchToAlbi(uploadedDocs, category);
+  if (successDocs.length === 1) {
+    pushDocumentToAlbi(successDocs[0]);
+  } else if (successDocs.length > 1) {
+    pushDocumentBatchToAlbi(successDocs, category);
   }
 
-  toast(`✓ ${files.length} file${files.length === 1 ? '' : 's'} uploaded to ${category}`);
+  const failed = uploadedDocs.length - successDocs.length;
+  if (failed > 0) {
+    toast(`✓ ${successDocs.length} uploaded, ${failed} failed — check log`, true);
+  } else {
+    toast(`✓ ${successDocs.length} file${successDocs.length === 1 ? '' : 's'} uploaded to ${category}`);
+  }
 }
 
 async function uploadDocument(file, category, skipPush) {
   if (!sb || !state.activeProjectId) return null;
   const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
   const path = `projects/${state.activeProjectId}/${Date.now()}-${safeName}`;
-  toast(`Uploading ${file.name}…`);
 
   const { error: upErr } = await sb.storage.from('rebuild-documents').upload(path, file, {
     contentType: file.type || 'application/octet-stream',
     upsert: false,
   });
-  if (upErr) { toast('Upload failed: ' + upErr.message); return null; }
+  if (upErr) { console.warn(`Upload failed: ${file.name}`, upErr); return null; }
 
   const { data: urlData } = sb.storage.from('rebuild-documents').getPublicUrl(path);
   const fileUrl = urlData.publicUrl;
@@ -6676,11 +6752,11 @@ async function uploadDocument(file, category, skipPush) {
     ...photoFields,
   }).select();
 
-  if (insErr) { toast('Save failed: ' + insErr.message); return null; }
-  toast(`${file.name} uploaded`);
+  if (insErr) { console.warn(`Save failed: ${file.name}`, insErr); return null; }
 
   // Skip push when caller (batch upload) handles it
   if (!skipPush) {
+    toast(`${file.name} uploaded`);
     await loadDocuments();
     renderDetail();
     pushDocumentToAlbi(inserted[0]);
