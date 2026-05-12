@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>JG · Convert Legacy HEIC Files to JPEG</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 1000px; margin: 0 auto; padding: 20px; color: #1a2138; background: #f6f7fb; }
+    h1 { color: #1a2138; margin-bottom: 4px; }
+    .sub { color: #6b7290; margin-bottom: 24px; font-size: 14px; }
+    .row { padding: 10px 14px; border-bottom: 1px solid #eef0f7; display: grid; grid-template-columns: 1fr 110px 110px 150px; gap: 12px; align-items: center; font-size: 13px; background: #fff; }
+    .row:nth-child(odd) { background: #fafbfd; }
+    .row.head { font-weight: 700; background: #f0f2fa; border-radius: 8px 8px 0 0; padding: 12px 14px; font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: #6b7290; }
+    .row.converted { background: rgba(46,160,67,.08); }
+    .row.failed { background: rgba(214,69,69,.08); }
+    .name { font-family: ui-monospace, monospace; font-size: 12px; word-break: break-all; }
+    .badge { padding: 3px 9px; border-radius: 999px; font-size: 11px; font-weight: 700; display: inline-block; }
+    .badge.heic { background: rgba(245,166,35,.18); color: #b06b06; }
+    .badge.size { background: #eef0f7; color: #1a2138; font-variant-numeric: tabular-nums; }
+    .badge.ok { background: rgba(46,160,67,.15); color: #2ea043; }
+    button { background: #e85d04; color: white; border: 0; padding: 10px 22px; border-radius: 8px; font-weight: 700; cursor: pointer; font-size: 14px; margin-right: 8px; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    button.secondary { background: #1a2138; }
+    .summary { background: #fff; padding: 14px 18px; border-radius: 10px; margin: 12px 0 16px; border: 1px solid #eef0f7; }
+    .summary b { color: #1a2138; }
+    .controls { display: flex; align-items: center; gap: 14px; margin: 14px 0; flex-wrap: wrap; }
+    .control { display: flex; align-items: center; gap: 6px; font-size: 13px; color: #1a2138; }
+    .control input[type="range"] { width: 100px; }
+    .results { background: #fff; border-radius: 10px; overflow: hidden; border: 1px solid #eef0f7; }
+    .progress { height: 6px; background: #eef0f7; border-radius: 3px; overflow: hidden; margin: 8px 0; }
+    .progress-bar { height: 100%; background: #e85d04; transition: width 0.3s; }
+  </style>
+</head>
+<body>
+  <h1>📸 Convert Legacy HEIC Files</h1>
+  <p class="sub">Finds every <code>.heic</code> / <code>.heif</code> file in your storage and converts it to JPEG in-place. The <code>documents</code> row's filename and mime_type are updated. Originals are replaced — be sure you want this before clicking Convert.</p>
+
+  <div class="summary" id="status">Click <b>Scan</b> to start.</div>
+
+  <div class="controls">
+    <button id="btn_scan">Scan for HEIC files</button>
+    <button id="btn_convert" disabled class="secondary">Convert all (0)</button>
+    <div class="control">
+      JPEG quality:
+      <input type="range" id="quality" min="50" max="95" value="85">
+      <span id="quality_val">85</span>%
+    </div>
+  </div>
+
+  <div class="progress" id="progress" style="display:none;"><div class="progress-bar" id="progress_bar" style="width:0%"></div></div>
+
+  <div id="results"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js"></script>
+  <script>
+    const SB_URL = 'https://nuykvchgecpiuikoerze.supabase.co';
+    const SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im51eWt2Y2hnZWNwaXVpa29lcnplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDIwODI4NjYsImV4cCI6MjA1NzY1ODg2Nn0.iJSXkHZxBQbcc7-vAeZbVN3oOzNymeBpsXq6vmHcaUI';
+    const sb = supabase.createClient(SB_URL, SB_KEY);
+
+    let allHeics = [];
+
+    document.getElementById('quality').addEventListener('input', e => {
+      document.getElementById('quality_val').textContent = e.target.value;
+    });
+
+    function fmtSize(bytes) {
+      if (!bytes) return '—';
+      if (bytes < 1024) return bytes + ' B';
+      if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+      return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    }
+
+    document.getElementById('btn_scan').addEventListener('click', async () => {
+      const btn = document.getElementById('btn_scan');
+      btn.disabled = true;
+      btn.textContent = 'Scanning…';
+      document.getElementById('results').innerHTML = '';
+      document.getElementById('status').innerHTML = 'Reading documents table…';
+
+      const { data: docs, error } = await sb.from('documents')
+        .select('id, filename, storage_path, file_url, mime_type, size_bytes')
+        .or('filename.ilike.%.heic,filename.ilike.%.heif');
+
+      if (error) {
+        document.getElementById('status').innerHTML = '<span style="color:#d64545;">DB error: ' + error.message + '</span>';
+        btn.disabled = false; btn.textContent = 'Scan for HEIC files';
+        return;
+      }
+
+      allHeics = docs || [];
+      document.getElementById('status').innerHTML = `Found <b>${allHeics.length}</b> HEIC/HEIF files.`;
+      renderResults();
+
+      btn.disabled = false;
+      btn.textContent = 'Re-scan';
+      const convertBtn = document.getElementById('btn_convert');
+      convertBtn.disabled = allHeics.length === 0;
+      convertBtn.textContent = `Convert all (${allHeics.length})`;
+    });
+
+    function renderResults() {
+      if (!allHeics.length) {
+        document.getElementById('results').innerHTML = '<div style="text-align:center;padding:30px;color:#6b7290;">No legacy HEIC files found. 🎉</div>';
+        return;
+      }
+      const html = `
+        <div class="results">
+          <div class="row head"><div>Filename</div><div>Size</div><div>Type</div><div>Status</div></div>
+          ${allHeics.map(d => `
+            <div class="row" data-doc-id="${d.id}">
+              <div class="name">${d.filename}</div>
+              <div><span class="badge size">${fmtSize(d.size_bytes)}</span></div>
+              <div><span class="badge heic">HEIC</span></div>
+              <div class="status-cell">⏳ Queued</div>
+            </div>
+          `).join('')}
+        </div>
+      `;
+      document.getElementById('results').innerHTML = html;
+    }
+
+    document.getElementById('btn_convert').addEventListener('click', async () => {
+      if (!window.heic2any) {
+        alert('heic2any library not loaded yet — try refreshing the page.');
+        return;
+      }
+      const btn = document.getElementById('btn_convert');
+      btn.disabled = true;
+      btn.textContent = 'Converting…';
+      document.getElementById('btn_scan').disabled = true;
+      document.getElementById('progress').style.display = 'block';
+
+      const quality = parseInt(document.getElementById('quality').value, 10) / 100;
+      let done = 0, failed = 0;
+
+      for (const doc of allHeics) {
+        const row = document.querySelector(`[data-doc-id="${doc.id}"]`);
+        const statusCell = row?.querySelector('.status-cell');
+        if (statusCell) statusCell.textContent = '⏬ Downloading…';
+
+        try {
+          // 1. Download the HEIC file
+          const r = await fetch(doc.file_url);
+          if (!r.ok) throw new Error('Download failed: HTTP ' + r.status);
+          const heicBlob = await r.blob();
+
+          if (statusCell) statusCell.textContent = '🔄 Converting…';
+
+          // 2. Convert to JPEG
+          const jpgBlob = await window.heic2any({
+            blob: heicBlob,
+            toType: 'image/jpeg',
+            quality,
+          });
+          const finalBlob = Array.isArray(jpgBlob) ? jpgBlob[0] : jpgBlob;
+          if (!finalBlob || !finalBlob.size) throw new Error('Conversion produced empty blob');
+
+          if (statusCell) statusCell.textContent = '⏫ Re-uploading…';
+
+          // 3. New filename + new storage path
+          const newFilename = doc.filename.replace(/\.(heic|heif)$/i, '.jpg');
+          const newStoragePath = doc.storage_path.replace(/\.(heic|heif)$/i, '.jpg');
+
+          // 4. Upload JPEG to new path (don't overwrite HEIC yet — safer)
+          const uploadBlob = new Blob([finalBlob], { type: 'image/jpeg' });
+          const { error: upErr } = await sb.storage.from('rebuild-documents').upload(newStoragePath, uploadBlob, {
+            contentType: 'image/jpeg',
+            upsert: false,
+          });
+          if (upErr) throw new Error('Upload failed: ' + upErr.message);
+
+          // 5. Get new public URL
+          const { data: urlData } = sb.storage.from('rebuild-documents').getPublicUrl(newStoragePath);
+          const newFileUrl = urlData.publicUrl;
+
+          // 6. Update the documents row with new filename/path/url/mime
+          const { error: dbErr } = await sb.from('documents').update({
+            filename: newFilename,
+            storage_path: newStoragePath,
+            file_url: newFileUrl,
+            mime_type: 'image/jpeg',
+            size_bytes: finalBlob.size,
+          }).eq('id', doc.id);
+          if (dbErr) throw new Error('DB update failed: ' + dbErr.message);
+
+          // 7. Delete the old HEIC file from storage
+          await sb.storage.from('rebuild-documents').remove([doc.storage_path]);
+
+          // Mark success
+          if (statusCell) statusCell.textContent = '✓ Done · ' + fmtSize(finalBlob.size);
+          row.classList.add('converted');
+          // Update the row's data-doc-id reference so re-scan picks it up correctly
+          row.querySelector('.name').textContent = newFilename;
+          row.querySelector('.badge.heic').textContent = 'JPG';
+          row.querySelector('.badge.heic').className = 'badge ok';
+          done++;
+        } catch (e) {
+          console.error('Convert failed for', doc.filename, e);
+          if (statusCell) statusCell.textContent = '✗ ' + (e.message || e).slice(0, 50);
+          row.classList.add('failed');
+          failed++;
+        }
+
+        const total = done + failed;
+        const pct = Math.round((total / allHeics.length) * 100);
+        document.getElementById('progress_bar').style.width = pct + '%';
+        document.getElementById('status').innerHTML = `Converted: <b>${done}</b> · Failed: <b>${failed}</b> · Remaining: <b>${allHeics.length - total}</b>`;
+      }
+
+      btn.disabled = false;
+      btn.textContent = `Done — ${done} converted, ${failed} failed`;
+      document.getElementById('btn_scan').disabled = false;
+    });
+  </script>
+</body>
+</html>
