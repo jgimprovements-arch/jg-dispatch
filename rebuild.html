@@ -2224,6 +2224,89 @@
     font-family: inherit;
   }
   .wobx-action-btn:hover { background: var(--navy); color: #fff; border-color: var(--navy); }
+
+  /* Convert All button (in header) */
+  .wobx-convert-all-btn {
+    background: var(--green);
+    color: #fff;
+    border: 0;
+    border-radius: 999px;
+    padding: 6px 14px;
+    font-size: 11px;
+    font-weight: 800;
+    cursor: pointer;
+    font-family: inherit;
+    box-shadow: 0 2px 6px rgba(45,156,95,.25);
+  }
+  .wobx-convert-all-btn:hover { background: #258852; }
+  .wobx-convert-all-btn:disabled { opacity: .5; cursor: wait; }
+
+  .wobx-locked-count {
+    background: rgba(13,45,94,.08);
+    color: var(--navy);
+    font-size: 10px;
+    font-weight: 800;
+    padding: 3px 9px;
+    border-radius: 999px;
+  }
+
+  /* Lock badge on trade row */
+  .wobx-lock-pill {
+    display: inline-block;
+    background: var(--navy);
+    color: #fff;
+    font-size: 9px;
+    font-weight: 800;
+    padding: 2px 7px;
+    border-radius: 999px;
+    margin-left: 6px;
+    text-transform: uppercase;
+    letter-spacing: .3px;
+    vertical-align: middle;
+  }
+  .wobx-trade-row.wobx-locked {
+    background: rgba(13,45,94,.03);
+    cursor: default;
+  }
+  .wobx-trade-row.wobx-locked:hover { background: rgba(13,45,94,.05) !important; }
+  .wobx-trade-row.wobx-locked td:first-child b { color: var(--muted); }
+
+  /* Locked banner in modal */
+  .wobx-modal-locked-banner {
+    background: rgba(13,45,94,.05);
+    border-left: 3px solid var(--navy);
+    padding: 10px 16px;
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--navy);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 10px;
+  }
+  .wobx-modal-locked-banner a {
+    color: var(--orange);
+    text-decoration: none;
+    font-weight: 800;
+  }
+  .wobx-modal-locked-banner a:hover { text-decoration: underline; }
+
+  /* Convert button in modal footer */
+  .wobx-modal-convert {
+    background: var(--green);
+    color: #fff;
+    border: 0;
+    border-radius: 999px;
+    padding: 9px 22px;
+    font-size: 13px;
+    font-weight: 800;
+    cursor: pointer;
+    font-family: inherit;
+    margin-right: auto;
+    box-shadow: 0 2px 6px rgba(45,156,95,.25);
+  }
+  .wobx-modal-convert:hover { background: #258852; }
+  .wobx-modal-convert:disabled { opacity: .5; cursor: wait; }
   .wobx-body { padding: 16px; }
 
   /* Upload state — drag-and-drop zone */
@@ -9701,26 +9784,33 @@ function renderWoDetailModal(tradeKey, tradeLabel, budget) {
       <div class="wobx-modal">
         <div class="wobx-modal-head">
           <div>
-            <h3>${esc(tradeLabel)}${isUnassigned ? ' · Unassigned Bucket' : ' — Detail'}</h3>
+            <h3>${esc(tradeLabel)}${isUnassigned ? ' · Unassigned Bucket' : ' — Detail'}${wo?.is_locked ? ' 🔒' : ''}</h3>
             <div class="wobx-modal-sub">${items.length} estimate items · ${materials.length} materials · ${labor.length} labor · ${equipment.length} equipment</div>
           </div>
           <button class="wobx-modal-close" id="wobx_modal_close">×</button>
         </div>
 
+        ${wo?.is_locked ? `
+          <div class="wobx-modal-locked-banner">
+            🔒 This trade has been converted to a Work Order and the budget is locked.
+            ${wo.converted_work_order_id ? '<a href="#" id="wobx_view_wo" data-wo-id="' + esc(wo.converted_work_order_id) + '">View the WO →</a>' : ''}
+          </div>
+        ` : ''}
+
         ${isUnassigned ? '' : `
         <div class="wobx-modal-assignee">
           <label>Default assignee for this Work Order:</label>
           <div class="wobx-assignee-row">
-            <select id="wobx_assignee_type" class="wobx-assignee-type">
+            <select id="wobx_assignee_type" class="wobx-assignee-type" ${wo?.is_locked ? 'disabled' : ''}>
               <option value="">— Not assigned —</option>
               <option value="sub" ${currentAssigneeType === 'sub' ? 'selected' : ''}>Subcontractor</option>
               <option value="carpenter" ${currentAssigneeType === 'carpenter' ? 'selected' : ''}>JG Carpenter</option>
             </select>
-            <select id="wobx_assignee_id" class="wobx-assignee-id" ${!currentAssigneeType ? 'disabled' : ''}>
+            <select id="wobx_assignee_id" class="wobx-assignee-id" ${!currentAssigneeType || wo?.is_locked ? 'disabled' : ''}>
               <option value="">— Choose —</option>
               ${currentAssigneeType === 'sub' ? subOptions : currentAssigneeType === 'carpenter' ? empOptions : ''}
             </select>
-            <button class="wobx-save-assignee" id="wobx_save_assignee">Save</button>
+            <button class="wobx-save-assignee" id="wobx_save_assignee" ${wo?.is_locked ? 'disabled' : ''}>Save</button>
           </div>
         </div>
         `}
@@ -9740,6 +9830,9 @@ function renderWoDetailModal(tradeKey, tradeLabel, budget) {
         </div>
 
         <div class="wobx-modal-foot">
+          ${!isUnassigned && !wo?.is_locked ? `
+            <button class="wobx-modal-convert" id="wobx_modal_convert">Convert to Work Order →</button>
+          ` : ''}
           <button class="wobx-modal-done" id="wobx_modal_done">Done</button>
         </div>
       </div>
@@ -9952,6 +10045,36 @@ function wireWoDetailModal(tradeKey) {
   $('#wobx_modal_done')?.addEventListener('click', closeWoDetailModal);
   back.addEventListener('click', (e) => { if (e.target.id === 'wobx_modal_back') closeWoDetailModal(); });
 
+  // Convert to WO button
+  $('#wobx_modal_convert')?.addEventListener('click', async () => {
+    const btn = $('#wobx_modal_convert');
+    const tradeLabel = MERGED_TRADE_GROUPS[tradeKey]?.label || tradeKey;
+    if (!confirm(`Convert "${tradeLabel}" to a Work Order?\n\n• Creates a real Work Order in the WO list\n• Locks the budget — no more edits to this trade\n• Items, materials, labor, and equipment all roll into the WO scope`)) return;
+    btn.disabled = true;
+    btn.textContent = 'Converting…';
+    const result = await convertTradeToWo(tradeKey);
+    if (!result.ok) {
+      toast('Convert failed: ' + result.error, true);
+      btn.disabled = false;
+      btn.textContent = 'Convert to Work Order →';
+      return;
+    }
+    toast(`✓ "${result.tradeLabel}" converted · WO total ${usdCompact(result.totalCost)}`);
+    await loadWoBudget();
+    await loadWorkOrders();
+    closeWoDetailModal();
+    renderTabContent();
+  });
+
+  // View linked WO
+  $('#wobx_view_wo')?.addEventListener('click', (e) => {
+    e.preventDefault();
+    const woId = e.target.dataset.woId;
+    if (!woId) return;
+    closeWoDetailModal();
+    openWoEditModal(woId);
+  });
+
   // Assignee type changes → repopulate ID dropdown
   const typeSel = $('#wobx_assignee_type');
   const idSel = $('#wobx_assignee_id');
@@ -10155,6 +10278,200 @@ async function createNewPhasePrompt() {
   return data?.id || null;
 }
 
+// Build scope text for a converted WO from the trade's items + materials + labor
+function buildConvertedWoScope(tradeKey, tradeLabel, items, materials, labor, equipment) {
+  const lines = [];
+  lines.push(`Trade: ${tradeLabel}`);
+  lines.push('');
+  if (items.length) {
+    lines.push('SCOPE OF WORK (from Xactimate estimate):');
+    items.forEach(it => {
+      const room = it.room ? ` [${it.room}]` : '';
+      lines.push(`  • ${it.description}${room} — ${it.quantity || ''} ${it.unit || ''}`);
+    });
+    lines.push('');
+  }
+  if (materials.length) {
+    lines.push('MATERIALS:');
+    materials.forEach(m => {
+      lines.push(`  • ${m.code || ''} — ${m.description || ''} (${m.quantity || ''} ${m.unit || ''})`);
+    });
+    lines.push('');
+  }
+  if (labor.length) {
+    lines.push('LABOR:');
+    labor.forEach(l => {
+      lines.push(`  • ${l.code || ''} — ${l.description || ''} (${l.hours || 0} hrs)`);
+    });
+    lines.push('');
+  }
+  if (equipment.length) {
+    lines.push('EQUIPMENT:');
+    equipment.forEach(e => {
+      lines.push(`  • ${e.code || ''} — ${e.description || ''} (${e.quantity || ''} ${e.unit || ''})`);
+    });
+  }
+  return lines.join('\n').trim();
+}
+
+// Convert a single trade to a real Work Order, lock the WO Builder entry
+async function convertTradeToWo(tradeKey) {
+  if (!state.woBudget) return { ok: false, error: 'No budget loaded' };
+  const budget = state.woBudget;
+
+  // Find this trade's items
+  function inGroup(rawCat) { return mergedGroupFor(rawCat || 'general') === tradeKey; }
+  const items = (budget.items || []).filter(x => !x.is_unassigned && inGroup(x.trade_category));
+  const materials = (budget.materials || []).filter(x => !x.is_unassigned && inGroup(x.trade_category));
+  const labor = (budget.labor || []).filter(x => !x.is_unassigned && inGroup(x.trade_category));
+  const equipment = (budget.equipment || []).filter(x => !x.is_unassigned && inGroup(x.trade_category));
+
+  if (!items.length && !materials.length && !labor.length && !equipment.length) {
+    return { ok: false, error: 'No items to convert' };
+  }
+
+  // Find this trade's wo_builder_work_orders row (assignee info lives there)
+  const wbWo = (budget.wos || []).find(w => w.trade_category === tradeKey);
+  if (!wbWo) {
+    return { ok: false, error: 'No assignee set — open the trade detail and pick a sub or carpenter first' };
+  }
+  if (wbWo.is_locked) {
+    return { ok: false, error: 'Already converted' };
+  }
+  if (!wbWo.assignee_type || (!wbWo.assignee_sub_id && !wbWo.assignee_employee_id)) {
+    return { ok: false, error: 'No assignee set — open the trade detail and pick a sub or carpenter first' };
+  }
+
+  // Compute totals using budget overrides where set, auto-target where not
+  const revenue = sumField(items, 'line_total');
+  const targets = computeAutoTargetBudgets(revenue, materials, labor, equipment);
+  function effective(rows, kind) {
+    return rows.reduce((s, r) => {
+      const def = targets[kind].get(r.id) ?? 0;
+      return s + (r.budget_amount != null ? Number(r.budget_amount) : def);
+    }, 0);
+  }
+  const totalCost = effective(materials, 'material') + effective(labor, 'labor') + effective(equipment, 'equipment');
+
+  const tradeLabel = MERGED_TRADE_GROUPS[tradeKey]?.label || tradeKey;
+  const scopeText = buildConvertedWoScope(tradeKey, tradeLabel, items, materials, labor, equipment);
+
+  // Get assignee details for contact info on the WO
+  let assigneeName = '';
+  let recipientEmail = null;
+  let recipientPhone = null;
+  if (wbWo.assignee_type === 'sub') {
+    const sub = (state.subs || []).find(s => s.id === wbWo.assignee_sub_id);
+    assigneeName = sub?.company_name || '';
+    recipientEmail = sub?.email || null;
+    recipientPhone = sub?.phone || null;
+  } else {
+    const emp = (state.employees || []).find(e => e.id === wbWo.assignee_employee_id);
+    assigneeName = emp?.name || '';
+    recipientEmail = emp?.email || null;
+    recipientPhone = emp?.phone || null;
+  }
+
+  // Create the rebuild_work_orders row
+  const woInsert = {
+    project_id: state.activeProjectId,
+    sub_id: wbWo.assignee_type === 'sub' ? wbWo.assignee_sub_id : null,
+    employee_id: wbWo.assignee_type === 'carpenter' ? wbWo.assignee_employee_id : null,
+    assignee_type: wbWo.assignee_type,
+    version: 1,
+    status: 'draft',
+    scope_text: scopeText,
+    total_amount: round2(totalCost),
+    amount_source: 'wo_builder',
+    payment_terms: 'Net 30 from invoice receipt, subject to satisfactory completion.',
+    created_by_email: state.pmEmail,
+    created_by_name: state.pmName,
+    sent_to_email: recipientEmail,
+    sent_to_phone: recipientPhone,
+  };
+
+  const { data: woRow, error: woErr } = await sb.from('rebuild_work_orders')
+    .insert(woInsert)
+    .select()
+    .single();
+  if (woErr) {
+    return { ok: false, error: 'WO create failed: ' + woErr.message };
+  }
+
+  // Lock the WO Builder row + link to the new WO
+  const { error: lockErr } = await sb.from('wo_builder_work_orders')
+    .update({
+      is_locked: true,
+      locked_at: new Date().toISOString(),
+      locked_by_email: state.pmEmail,
+      converted_work_order_id: woRow.id,
+      status: 'approved',
+    })
+    .eq('id', wbWo.id);
+  if (lockErr) {
+    // Best-effort rollback of the WO row
+    await sb.from('rebuild_work_orders').delete().eq('id', woRow.id);
+    return { ok: false, error: 'Lock failed: ' + lockErr.message };
+  }
+
+  // Log to WO history
+  try {
+    await sb.from('rebuild_work_order_history').insert({
+      work_order_id: woRow.id,
+      action: 'created',
+      actor: state.pmEmail,
+      details: `Auto-generated from WO Builder · trade=${tradeLabel} · ${items.length} items · assignee=${assigneeName}`,
+    });
+  } catch (e) { console.warn('WO history log skipped:', e?.message); }
+
+  return { ok: true, woId: woRow.id, tradeLabel, totalCost: round2(totalCost) };
+}
+
+// Convert All — loops through every trade with an assignee, returns counts
+async function convertAllApproved() {
+  if (!state.woBudget) return;
+  const tradeRollup = computeTradeRollup(state.woBudget);
+
+  // Find unlocked trades that have an assignee set
+  const eligible = [];
+  const skipped = [];
+  for (const t of tradeRollup) {
+    const wbWo = (state.woBudget.wos || []).find(w => w.trade_category === t.category);
+    if (wbWo?.is_locked) {
+      skipped.push({ label: t.label, reason: 'already locked' });
+      continue;
+    }
+    if (!wbWo || !wbWo.assignee_type || (!wbWo.assignee_sub_id && !wbWo.assignee_employee_id)) {
+      skipped.push({ label: t.label, reason: 'no assignee' });
+      continue;
+    }
+    eligible.push(t);
+  }
+
+  if (!eligible.length) {
+    toast(`Nothing to convert — assign subs/carpenters first (${skipped.length} skipped: ${skipped.map(s => s.label + ' (' + s.reason + ')').slice(0, 3).join(', ')})`, true);
+    return;
+  }
+
+  const msg = `Convert ${eligible.length} trade${eligible.length === 1 ? '' : 's'} to Work Orders?\n\n${eligible.map(t => '• ' + t.label).join('\n')}\n\nEach will become a real Work Order in the WO list and the budget will be locked.${skipped.length ? '\n\nSkipping ' + skipped.length + ' (no assignee): ' + skipped.map(s => s.label).join(', ') : ''}`;
+  if (!confirm(msg)) return;
+
+  let successCount = 0;
+  let errorCount = 0;
+  for (const t of eligible) {
+    const result = await convertTradeToWo(t.category);
+    if (result.ok) successCount++;
+    else { errorCount++; console.warn('Convert failed for', t.label, result.error); }
+  }
+
+  toast(`Converted ${successCount} · ${errorCount ? errorCount + ' failed · ' : ''}${skipped.length ? skipped.length + ' skipped' : ''}`);
+
+  // Refresh state
+  await loadWoBudget();
+  await loadWorkOrders();
+  renderTabContent();
+}
+
 async function upsertWoBuilderRow(tradeCategory, fields) {
   const uploadId = state.woBudget?.upload?.id;
   if (!uploadId) return;
@@ -10256,12 +10573,23 @@ function renderWoBuilderSection(budget) {
   const marginHealth = margin >= 50 ? 'green' : margin >= 30 ? 'yellow' : 'red';
   const marginIcon = margin >= 50 ? '🟢' : margin >= 30 ? '🟡' : '🔴';
 
+  // Count trades eligible for conversion (has assignee, not locked)
+  const eligibleConvertCount = tradeRollup.reduce((n, t) => {
+    const wbWo = (budget.wos || []).find(w => w.trade_category === t.category);
+    if (wbWo?.is_locked) return n;
+    if (!wbWo || !wbWo.assignee_type || (!wbWo.assignee_sub_id && !wbWo.assignee_employee_id)) return n;
+    return n + 1;
+  }, 0);
+  const lockedCount = (budget.wos || []).filter(w => w.is_locked).length;
+
   return `
     <div class="wobx-card">
       <div class="wobx-head">
         <h3>📄 WO Builder — Budget & Work Orders</h3>
         <div style="display:flex;gap:6px;align-items:center;">
           <span class="wobx-source-pill">From ${esc(u.estimate_filename || 'estimate.pdf')}</span>
+          ${lockedCount ? `<span class="wobx-locked-count">🔒 ${lockedCount} locked</span>` : ''}
+          ${eligibleConvertCount ? `<button class="wobx-convert-all-btn" id="wobx_convert_all">Convert All (${eligibleConvertCount}) →</button>` : ''}
           <button class="wobx-action-btn" id="wobx_reupload">Re-upload</button>
         </div>
       </div>
@@ -10324,9 +10652,14 @@ function renderWoBuilderSection(budget) {
               const phaseOpts = state.phases.map(p =>
                 `<option value="${p.id}" ${t.suggestedPhaseId === p.id ? 'selected' : ''}>${esc(p.phase_name)}</option>`
               ).join('');
+              const wbWo = (budget.wos || []).find(w => w.trade_category === t.category);
+              const isLocked = !!wbWo?.is_locked;
               return `
-                <tr class="wobx-trade-row" draggable="true" data-trade="${esc(t.category)}" data-trade-label="${esc(t.label)}">
-                  <td><b>${esc(t.label)}</b><div class="wobx-row-hint">${t.itemCount} items · click for detail · drag to merge</div></td>
+                <tr class="wobx-trade-row ${isLocked ? 'wobx-locked' : ''}" ${isLocked ? '' : 'draggable="true"'} data-trade="${esc(t.category)}" data-trade-label="${esc(t.label)}" data-locked="${isLocked ? '1' : '0'}">
+                  <td>
+                    <b>${esc(t.label)}</b>${isLocked ? ' <span class="wobx-lock-pill">🔒 Locked</span>' : ''}
+                    <div class="wobx-row-hint">${t.itemCount} items · click for detail${isLocked ? ' · WO created' : ' · drag to merge'}</div>
+                  </td>
                   <td class="r">${t.hours ? t.hours.toFixed(1) : '—'}</td>
                   <td class="r">${usdCompact(t.revenue)}</td>
                   <td class="r">${usdCompact(t.material)}</td>
@@ -10336,7 +10669,7 @@ function renderWoBuilderSection(budget) {
                   <td class="r" style="color:${t.profit >= 0 ? 'var(--green)' : 'var(--red)'};">${usdCompact(t.profit)}</td>
                   <td class="r"><span class="wobx-margin-pill wobx-margin-${cls}">${ico} ${m.toFixed(0)}%</span></td>
                   <td onclick="event.stopPropagation();">
-                    <select class="wobx-phase-select" data-trade="${esc(t.category)}">
+                    <select class="wobx-phase-select" data-trade="${esc(t.category)}" ${isLocked ? 'disabled' : ''}>
                       <option value="">—</option>
                       ${phaseOpts}
                       <option value="__create__" style="font-style:italic;color:var(--orange);">+ Create new phase…</option>
@@ -10525,6 +10858,17 @@ function wireWoBuilderControls() {
   const goBtn = $('#wobx_generate');
   const reupBtn = $('#wobx_reupload');
   const retryBtn = $('#wobx_retry');
+  const convertAllBtn = $('#wobx_convert_all');
+
+  // Convert All — top button
+  if (convertAllBtn) {
+    convertAllBtn.addEventListener('click', async () => {
+      convertAllBtn.disabled = true;
+      convertAllBtn.textContent = 'Converting…';
+      await convertAllApproved();
+      // convertAllApproved already calls renderTabContent so we don't restore the button
+    });
+  }
 
   // Track selected files in state (persists across re-renders within this tab)
   if (!state.wobxPicked) state.wobxPicked = { estimate: null, components: null };
@@ -10772,6 +11116,13 @@ function wireWoBuilderControls() {
       const targetKey = row.dataset.trade;
       const targetLabel = row.dataset.tradeLabel;
       if (!sourceKey || sourceKey === targetKey) return;
+
+      // Block if target trade is locked
+      if (row.dataset.locked === '1') {
+        toast(`Can't merge into "${targetLabel}" — it's already locked to a Work Order. Reset merges or create a new WO instead.`, true);
+        return;
+      }
+
       // Confirm
       const ok = confirm(`Merge "${sourceLabel}" into "${targetLabel}"?\n\nAll items, materials, labor, and equipment from "${sourceLabel}" will roll up under "${targetLabel}". You can undo with "Reset Merges".`);
       if (!ok) return;
