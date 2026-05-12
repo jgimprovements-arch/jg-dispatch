@@ -9641,11 +9641,34 @@ function renderDetail() {
         <div class="value">${p.estimated_revenue ? '$' + Number(p.estimated_revenue).toLocaleString(undefined,{maximumFractionDigits:0}) : '—'}</div>
         <div class="sub">revenue</div>
       </div>
-      <div class="kpi">
-        <div class="label">Budgeted</div>
-        <div class="value">${p.budget_revenue ? '$' + Number(p.budget_revenue).toLocaleString(undefined,{maximumFractionDigits:0}) : '—'}</div>
-        <div class="sub">${p.budgeted_gross_margin_pct ? p.budgeted_gross_margin_pct + '% target' : 'no target'}</div>
-      </div>
+      ${(() => {
+        // BUDGETED: prefer manual project.budget_revenue, fall back to WO Builder rollup once the user has built it
+        let budgetedValue = p.budget_revenue ? Number(p.budget_revenue) : null;
+        let budgetedSource = 'manual';
+        let budgetedMargin = p.budgeted_gross_margin_pct ? Number(p.budgeted_gross_margin_pct) : null;
+        if (!budgetedValue && state.woBudget) {
+          try {
+            const rollup = computeTradeRollup(state.woBudget);
+            const rollupBudget = rollup.reduce((s, t) => s + (t.totalCost || 0), 0);
+            const rollupRevenue = rollup.reduce((s, t) => s + (t.revenue || 0), 0);
+            if (rollupBudget > 0) {
+              budgetedValue = rollupBudget;
+              budgetedSource = 'wo builder';
+              budgetedMargin = rollupRevenue > 0 ? Math.round(((rollupRevenue - rollupBudget) / rollupRevenue) * 100) : null;
+            }
+          } catch (e) { /* fall through */ }
+        }
+        const subText = budgetedValue
+          ? (budgetedMargin != null ? `${budgetedMargin}% target · ${budgetedSource}` : `from ${budgetedSource}`)
+          : 'no target';
+        return `
+          <div class="kpi">
+            <div class="label">Budgeted</div>
+            <div class="value">${budgetedValue ? '$' + Number(budgetedValue).toLocaleString(undefined,{maximumFractionDigits:0}) : '—'}</div>
+            <div class="sub">${subText}</div>
+          </div>
+        `;
+      })()}
       <div class="kpi">
         <div class="label">Billed</div>
         <div class="value">${p.actual_revenue ? '$' + Number(p.actual_revenue).toLocaleString(undefined,{maximumFractionDigits:0}) : '—'}</div>
