@@ -1056,8 +1056,78 @@
     font-size: 11px;
     font-weight: 600;
     white-space: nowrap;
+    margin-right: 4px;
+    display: inline-block;
+  }
+  .phase .assignee-chip.wb-chip {
+    background: rgba(245,166,35,.12);
+    color: var(--gold);
+    border: 1px solid rgba(245,166,35,.3);
+  }
+  .phase .assignee-chip.wb-chip em {
+    font-style: italic;
+    font-weight: 500;
+    opacity: .85;
+    font-size: 10px;
   }
   .phase .unassigned-label { font-style: italic; color: var(--muted); }
+
+  /* Carpenter checkboxes in WO Builder modal */
+  .wobx-emp-checkboxes {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+    padding: 6px 10px;
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    min-height: 38px;
+  }
+  .wobx-emp-checkboxes-hint {
+    width: 100%;
+    font-size: 10px;
+    color: var(--muted);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .3px;
+    margin-bottom: 2px;
+  }
+  .wobx-emp-checkbox {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    background: #fff;
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: 4px 10px;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--navy);
+    transition: background .12s, border-color .12s;
+  }
+  .wobx-emp-checkbox:hover {
+    background: rgba(232,93,4,.05);
+    border-color: var(--orange);
+  }
+  .wobx-emp-checkbox input[type="checkbox"] {
+    width: 14px;
+    height: 14px;
+    accent-color: var(--orange);
+    cursor: pointer;
+    margin: 0;
+  }
+  .wobx-emp-checkbox:has(input:checked) {
+    background: rgba(232,93,4,.10);
+    border-color: var(--orange);
+  }
+  .wobx-assignee-empty {
+    color: var(--muted);
+    font-style: italic;
+    font-size: 12px;
+    padding: 8px 10px;
+  }
   .wo-warn-chip {
     display: inline-flex;
     align-items: center;
@@ -8540,6 +8610,23 @@ function phaseRowHtml(ph) {
   const labels = assignees.map(a => a.assignee_type === 'sub'
     ? `<span class="assignee-chip">${a.sub?.company_name || 'Sub'}</span>${woWarningChipFor(a.sub_id)}`
     : `<span class="assignee-chip">🏠 ${a.employee?.name || 'Carpenter'}</span>`);
+
+  // Also surface WO Builder assignments mapped to this phase (trade-based assignments)
+  const wbRows = (state.woBudget?.wos || []).filter(w => w.phase_id === ph.id && w.assignee_type);
+  wbRows.forEach(w => {
+    const tradeLabel = MERGED_TRADE_GROUPS?.[w.trade_category]?.label || w.trade_category;
+    if (w.assignee_type === 'sub' && w.assignee_sub_id) {
+      const sub = (state.subs || []).find(s => s.id === w.assignee_sub_id);
+      labels.push(`<span class="assignee-chip wb-chip" title="From WO Builder · ${esc(tradeLabel)}">🔧 ${esc(sub?.company_name || 'Sub')} <em>(${esc(tradeLabel)})</em></span>`);
+    } else if (w.assignee_type === 'carpenter') {
+      const empIds = w.assignee_employee_ids?.length ? w.assignee_employee_ids : (w.assignee_employee_id ? [w.assignee_employee_id] : []);
+      empIds.forEach(eid => {
+        const emp = (state.employees || []).find(e => e.id === eid);
+        if (emp) labels.push(`<span class="assignee-chip wb-chip" title="From WO Builder · ${esc(tradeLabel)}">🏠 ${esc(emp.name)} <em>(${esc(tradeLabel)})</em></span>`);
+      });
+    }
+  });
+
   const assigneeHtml = labels.length
     ? labels.join('')
     : '<span class="unassigned-label">Unassigned</span>';
@@ -10067,16 +10154,23 @@ function renderWoDetailModal(tradeKey, tradeLabel, budget) {
 
   // Build sub/employee options
   const subOptions = (state.subs || []).map(s =>
-    `<option value="${s.id}">${esc(s.company_name)}${s.primary_contact ? ' · ' + esc(s.primary_contact) : ''}</option>`
+    `<option value="${s.id}" ${s.id === currentSubId ? 'selected' : ''}>${esc(s.company_name)}${s.primary_contact ? ' · ' + esc(s.primary_contact) : ''}</option>`
   ).join('');
-  const empOptions = (state.employees || []).map(e =>
-    `<option value="${e.id}">${esc(e.name)}</option>`
+  // Carpenter checkboxes — multi-select
+  const empCheckboxes = (state.employees || []).map(e =>
+    `<label class="wobx-emp-checkbox">
+      <input type="checkbox" value="${e.id}" ${currentEmpIdSet.has(e.id) ? 'checked' : ''} ${wo?.is_locked ? 'disabled' : ''}>
+      <span>${esc(e.name)}</span>
+    </label>`
   ).join('');
 
   const currentAssigneeType = wo?.assignee_type || '';
-  const currentAssigneeId = currentAssigneeType === 'sub'
-    ? (wo?.assignee_sub_id || '')
-    : (wo?.assignee_employee_id || '');
+  const currentSubId = wo?.assignee_sub_id || '';
+  // Carpenter assignments — multi-select via array. Falls back to legacy single field for compat.
+  const currentEmployeeIds = wo?.assignee_employee_ids?.length
+    ? wo.assignee_employee_ids
+    : (wo?.assignee_employee_id ? [wo.assignee_employee_id] : []);
+  const currentEmpIdSet = new Set(currentEmployeeIds);
 
   return `
     <div class="wobx-modal-back" id="wobx_modal_back">
@@ -10103,12 +10197,23 @@ function renderWoDetailModal(tradeKey, tradeLabel, budget) {
             <select id="wobx_assignee_type" class="wobx-assignee-type" ${wo?.is_locked ? 'disabled' : ''}>
               <option value="">— Not assigned —</option>
               <option value="sub" ${currentAssigneeType === 'sub' ? 'selected' : ''}>Subcontractor</option>
-              <option value="carpenter" ${currentAssigneeType === 'carpenter' ? 'selected' : ''}>JG Carpenter</option>
+              <option value="carpenter" ${currentAssigneeType === 'carpenter' ? 'selected' : ''}>JG Carpenter${currentEmployeeIds.length > 1 ? 's (' + currentEmployeeIds.length + ')' : ''}</option>
             </select>
-            <select id="wobx_assignee_id" class="wobx-assignee-id" ${!currentAssigneeType || wo?.is_locked ? 'disabled' : ''}>
-              <option value="">— Choose —</option>
-              ${currentAssigneeType === 'sub' ? subOptions : currentAssigneeType === 'carpenter' ? empOptions : ''}
-            </select>
+            <div id="wobx_assignee_picker" class="wobx-assignee-picker" style="flex:1;min-width:0;">
+              ${currentAssigneeType === 'sub' ? `
+                <select id="wobx_assignee_id" class="wobx-assignee-id" ${wo?.is_locked ? 'disabled' : ''}>
+                  <option value="">— Choose subcontractor —</option>
+                  ${subOptions}
+                </select>
+              ` : currentAssigneeType === 'carpenter' ? `
+                <div class="wobx-emp-checkboxes">
+                  <div class="wobx-emp-checkboxes-hint">Select one or more carpenters:</div>
+                  ${empCheckboxes || '<em style="color:var(--muted);font-size:12px;">No carpenters found</em>'}
+                </div>
+              ` : `
+                <div class="wobx-assignee-empty">Pick a type first</div>
+              `}
+            </div>
             <button class="wobx-save-assignee" id="wobx_save_assignee" ${wo?.is_locked ? 'disabled' : ''}>Save</button>
           </div>
         </div>
@@ -10429,18 +10534,33 @@ function wireWoDetailModal(tradeKey) {
 
   // Assignee type changes → repopulate ID dropdown
   const typeSel = $('#wobx_assignee_type');
-  const idSel = $('#wobx_assignee_id');
-  if (typeSel && idSel) {
+  if (typeSel) {
     typeSel.addEventListener('change', () => {
       const t = typeSel.value;
-      idSel.disabled = !t;
-      idSel.innerHTML = '<option value="">— Choose —</option>' + (
-        t === 'sub'
-          ? (state.subs || []).map(s => `<option value="${s.id}">${esc(s.company_name)}${s.primary_contact ? ' · ' + esc(s.primary_contact) : ''}</option>`).join('')
-          : t === 'carpenter'
-            ? (state.employees || []).map(e => `<option value="${e.id}">${esc(e.name)}</option>`).join('')
-            : ''
-      );
+      const picker = $('#wobx_assignee_picker');
+      if (!picker) return;
+      if (t === 'sub') {
+        picker.innerHTML = `
+          <select id="wobx_assignee_id" class="wobx-assignee-id">
+            <option value="">— Choose subcontractor —</option>
+            ${(state.subs || []).map(s => `<option value="${s.id}">${esc(s.company_name)}${s.primary_contact ? ' · ' + esc(s.primary_contact) : ''}</option>`).join('')}
+          </select>
+        `;
+      } else if (t === 'carpenter') {
+        picker.innerHTML = `
+          <div class="wobx-emp-checkboxes">
+            <div class="wobx-emp-checkboxes-hint">Select one or more carpenters:</div>
+            ${(state.employees || []).map(e => `
+              <label class="wobx-emp-checkbox">
+                <input type="checkbox" value="${e.id}">
+                <span>${esc(e.name)}</span>
+              </label>
+            `).join('') || '<em style="color:var(--muted);font-size:12px;">No carpenters found</em>'}
+          </div>
+        `;
+      } else {
+        picker.innerHTML = '<div class="wobx-assignee-empty">Pick a type first</div>';
+      }
     });
   }
 
@@ -10448,20 +10568,38 @@ function wireWoDetailModal(tradeKey) {
   $('#wobx_save_assignee')?.addEventListener('click', async () => {
     const btn = $('#wobx_save_assignee');
     const t = typeSel.value || null;
-    const id = idSel.value || null;
-    if (!t || !id) {
-      toast('Pick an assignee type and name first', true);
+    if (!t) {
+      toast('Pick an assignee type first', true);
       return;
+    }
+
+    let subId = null;
+    let empIds = [];
+    if (t === 'sub') {
+      const subSel = $('#wobx_assignee_id');
+      subId = subSel?.value || null;
+      if (!subId) {
+        toast('Pick a subcontractor', true);
+        return;
+      }
+    } else if (t === 'carpenter') {
+      empIds = Array.from(document.querySelectorAll('#wobx_assignee_picker input[type="checkbox"]:checked'))
+        .map(cb => cb.value);
+      if (!empIds.length) {
+        toast('Pick at least one carpenter', true);
+        return;
+      }
     }
 
     btn.disabled = true;
     btn.textContent = 'Saving…';
 
-    // Step 1: Save assignee to WO Builder row
+    // Save assignee
     const result = await upsertWoBuilderRow(tradeKey, {
       assignee_type: t,
-      assignee_sub_id: t === 'sub' ? id : null,
-      assignee_employee_id: t === 'carpenter' ? id : null,
+      assignee_sub_id: t === 'sub' ? subId : null,
+      assignee_employee_id: t === 'carpenter' ? empIds[0] : null,  // legacy single field — first carpenter
+      assignee_employee_ids: t === 'carpenter' ? empIds : null,    // new multi field
     });
     if (!result.ok) {
       toast('Save failed: ' + result.error, true);
