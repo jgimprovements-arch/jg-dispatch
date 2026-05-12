@@ -1,0 +1,515 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0d2d5e">
+<title>Status Board · JG Restoration</title>
+<link rel="icon" href="https://jgimprovements-arch.github.io/jg-dispatch/logo.png">
+<style>
+  :root {
+    --bg: #f4f6fb; --card: #ffffff; --text: #1a2540; --text-soft: #5a6478;
+    --muted: #7884a0; --line: #e3e7f0; --navy: #0d2d5e; --orange: #e85d04;
+    --gold: #f5a623; --green: #2d9c5f; --red: #d64545; --blue: #2563eb;
+  }
+  html { color-scheme: light; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg); color: var(--text);
+    display: flex; flex-direction: column;
+  }
+
+  /* Top bar */
+  .topbar {
+    background: var(--card);
+    border-bottom: 1px solid var(--line);
+    padding: 10px 18px;
+    display: flex; align-items: center; gap: 14px;
+    flex-shrink: 0;
+  }
+  .topbar h1 { margin: 0; font-size: 17px; font-weight: 800; color: var(--navy); }
+  .topbar .meta { font-size: 12px; color: var(--muted); font-weight: 600; }
+  .topbar .spacer { flex: 1; }
+  .back-link {
+    color: var(--navy); text-decoration: none; font-size: 13px; font-weight: 700;
+    display: flex; align-items: center; gap: 4px;
+  }
+  .search-input {
+    border: 1px solid var(--line);
+    background: var(--bg);
+    border-radius: 8px;
+    padding: 7px 12px;
+    font-size: 13px;
+    font-family: inherit;
+    min-width: 240px;
+    color: var(--text);
+  }
+  .search-input:focus { outline: none; border-color: var(--orange); background: #fff; }
+  .pm-filter {
+    border: 1px solid var(--line);
+    background: var(--bg);
+    border-radius: 8px;
+    padding: 7px 10px;
+    font-size: 13px;
+    font-family: inherit;
+    color: var(--text);
+    cursor: pointer;
+  }
+
+  /* Board container */
+  .board {
+    flex: 1;
+    overflow-x: auto;
+    overflow-y: hidden;
+    -webkit-overflow-scrolling: touch;
+    display: flex;
+    gap: 10px;
+    padding: 12px;
+    align-items: stretch;
+  }
+  .board::-webkit-scrollbar { height: 10px; }
+  .board::-webkit-scrollbar-thumb { background: rgba(13,45,94,.2); border-radius: 5px; }
+
+  /* Column */
+  .col {
+    width: 260px;
+    flex-shrink: 0;
+    background: rgba(228, 232, 240, .5);
+    border-radius: 10px;
+    display: flex;
+    flex-direction: column;
+    max-height: 100%;
+  }
+  .col.drag-over { background: rgba(232, 93, 4, .12); }
+  .col-head {
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--line);
+    flex-shrink: 0;
+  }
+  .col-title {
+    font-size: 11px;
+    font-weight: 800;
+    color: var(--navy);
+    text-transform: uppercase;
+    letter-spacing: .5px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 6px;
+  }
+  .col-count {
+    background: var(--card);
+    color: var(--muted);
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 10px;
+    font-weight: 700;
+  }
+  .col-totals {
+    margin-top: 6px;
+    font-size: 11px;
+    color: var(--text-soft);
+    line-height: 1.4;
+  }
+  .col-totals b { color: var(--navy); }
+  .col-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .col-body::-webkit-scrollbar { width: 6px; }
+  .col-body::-webkit-scrollbar-thumb { background: rgba(13,45,94,.2); border-radius: 3px; }
+
+  /* Card */
+  .card {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 10px 12px;
+    cursor: grab;
+    transition: transform .1s, box-shadow .1s, border-color .15s;
+    user-select: none;
+  }
+  .card:active { cursor: grabbing; }
+  .card:hover { border-color: var(--orange); box-shadow: 0 2px 8px rgba(13,45,94,.08); }
+  .card.dragging { opacity: .4; transform: scale(.98); }
+  .card-job {
+    font-size: 13px;
+    font-weight: 800;
+    color: var(--navy);
+    margin-bottom: 4px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .card-customer {
+    font-size: 11px;
+    color: var(--text-soft);
+    margin-bottom: 6px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .card-row {
+    font-size: 10.5px;
+    color: var(--muted);
+    line-height: 1.4;
+    display: flex;
+    justify-content: space-between;
+    gap: 6px;
+  }
+  .card-row b { color: var(--navy); font-weight: 700; }
+  .card-row.revenue b { color: var(--green); }
+  .card-margin-chip {
+    display: inline-block;
+    font-size: 9px;
+    font-weight: 800;
+    padding: 2px 7px;
+    border-radius: 999px;
+    margin-left: 6px;
+    vertical-align: middle;
+    border: 1px solid transparent;
+  }
+  .card-margin-chip.card-margin-green { background: rgba(45,156,95,.15); color: var(--green); border-color: rgba(45,156,95,.3); }
+  .card-margin-chip.card-margin-yellow { background: rgba(245,166,35,.15); color: #c87800; border-color: rgba(245,166,35,.3); }
+  .card-margin-chip.card-margin-red { background: rgba(214,69,69,.15); color: var(--red); border-color: rgba(214,69,69,.3); }
+  .card-date {
+    margin-top: 4px;
+    font-size: 10px;
+    color: var(--muted);
+    display: flex;
+    align-items: center;
+    gap: 3px;
+  }
+  .col-empty {
+    color: var(--muted);
+    font-size: 11px;
+    font-style: italic;
+    text-align: center;
+    padding: 16px 8px;
+  }
+
+  /* Loading */
+  .loading {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--muted);
+    font-size: 14px;
+  }
+
+  /* Toast */
+  .toast {
+    position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%);
+    background: var(--navy); color: #fff;
+    padding: 10px 20px; border-radius: 999px;
+    font-size: 13px; font-weight: 600;
+    box-shadow: 0 4px 16px rgba(13,45,94,.3);
+    z-index: 100; opacity: 0; transition: opacity .2s;
+    pointer-events: none;
+  }
+  .toast.on { opacity: 1; }
+  .toast.error { background: var(--red); }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <a href="rebuild.html" class="back-link">← Back to Platform</a>
+  <h1>Status Board</h1>
+  <span class="meta" id="totalsMeta">—</span>
+  <div class="spacer"></div>
+  <select class="pm-filter" id="pmFilter">
+    <option value="all">All PMs</option>
+  </select>
+  <input type="text" class="search-input" id="searchInput" placeholder="Search job / customer / address…">
+</div>
+
+<div class="board" id="board">
+  <div class="loading">Loading projects…</div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script type="module">
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+const SB_URL = 'https://nuykvchgecpiuikoerze.supabase.co';
+const SB_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im51eWt2Y2hnZWNwaXVpa29lcnplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYyNjM3ODYsImV4cCI6MjA5MTgzOTc4Nn0.39hZ8DdjT_0iFJXPeAL2FXUSLw8FZBirDVzxZTO1W9s';
+const sb = createClient(SB_URL, SB_ANON);
+
+// 14 columns — exact spelling matches what Albi writes to albi_status
+const COLUMNS = [
+  'Wait for Mit',
+  'New',
+  'Estimate Shipped',
+  'Down Payment Received',
+  'Material Hold',
+  'WO Scheduling',
+  'Active Construction',
+  'Final Construction',
+  'Const. Complete',
+  'Completed Not Invoiced',
+  'Waiting For Adjuster',
+  'Waiting For Attorney',
+  'Receivables',
+  'Final Review',
+];
+
+const state = {
+  projects: [],
+  search: '',
+  pmFilter: 'all',
+  userEmail: null,
+  userName: null,
+};
+
+try {
+  const u = JSON.parse(localStorage.getItem('jg_platform_user') || 'null');
+  if (u?.email) { state.userEmail = u.email.toLowerCase(); state.userName = u.name || ''; }
+} catch {}
+
+const $ = sel => document.querySelector(sel);
+const esc = s => String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+const usd = n => (n == null || isNaN(n)) ? '$0.00' : '$' + Number(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+function toast(msg, isError = false) {
+  const t = $('#toast');
+  t.textContent = msg;
+  t.classList.toggle('error', isError);
+  t.classList.add('on');
+  setTimeout(() => t.classList.remove('on'), 2500);
+}
+
+function fmtDate(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  return d.toLocaleDateString(undefined, { month: 'numeric', day: 'numeric', year: 'numeric' });
+}
+
+async function loadProjects() {
+  const [projRes, budRes] = await Promise.all([
+    sb.from('rebuild_projects')
+      .select('id, albi_project_id, albi_job_number, customer_name, property_address, albi_status, albi_pm_name, albi_pm_email, scope_amount, estimated_revenue, actual_revenue, updated_at, created_at')
+      .order('albi_project_id_num', { ascending: false, nullsFirst: false })
+      .limit(2000),
+    sb.from('wo_budget_summaries')
+      .select('project_id, rcv, total_cost, gross_profit, margin_pct, margin_health'),
+  ]);
+  if (projRes.error) {
+    $('#board').innerHTML = `<div class="loading">Load failed: ${esc(projRes.error.message)}</div>`;
+    return;
+  }
+  // Build a quick lookup for budget by project_id
+  const budgetByProject = new Map();
+  (budRes.data || []).forEach(b => budgetByProject.set(b.project_id, b));
+  state.projects = (projRes.data || []).map(p => ({
+    ...p,
+    _budget: budgetByProject.get(p.id) || null,
+  }));
+  populatePmFilter();
+  render();
+}
+
+function populatePmFilter() {
+  const pms = new Set();
+  state.projects.forEach(p => { if (p.albi_pm_name) pms.add(p.albi_pm_name); });
+  const sel = $('#pmFilter');
+  const current = sel.value;
+  sel.innerHTML = '<option value="all">All PMs</option>' +
+    [...pms].sort().map(pm => `<option value="${esc(pm)}">${esc(pm)}</option>`).join('');
+  sel.value = current;
+}
+
+function getFiltered() {
+  let items = state.projects;
+  if (state.pmFilter !== 'all') {
+    items = items.filter(p => (p.albi_pm_name || '') === state.pmFilter);
+  }
+  if (state.search) {
+    const q = state.search.toLowerCase();
+    items = items.filter(p =>
+      (p.albi_job_number || '').toLowerCase().includes(q) ||
+      (p.customer_name || '').toLowerCase().includes(q) ||
+      (p.property_address || '').toLowerCase().includes(q)
+    );
+  }
+  return items;
+}
+
+function render() {
+  const items = getFiltered();
+  // Bucket by status
+  const byStatus = {};
+  COLUMNS.forEach(c => byStatus[c] = []);
+  let untagged = 0;
+  items.forEach(p => {
+    const s = p.albi_status;
+    if (s && byStatus[s]) byStatus[s].push(p);
+    else untagged++;
+  });
+
+  // Top-bar totals
+  $('#totalsMeta').textContent = `${items.length} project${items.length === 1 ? '' : 's'}${untagged ? ` · ${untagged} not on board` : ''}`;
+
+  // Render columns
+  $('#board').innerHTML = COLUMNS.map(col => {
+    const projects = byStatus[col];
+    const estTotal = projects.reduce((s, p) => s + (Number(p.estimated_revenue) || 0), 0);
+    const actTotal = projects.reduce((s, p) => s + (Number(p.actual_revenue) || 0), 0);
+    return `
+      <div class="col" data-col="${esc(col)}">
+        <div class="col-head">
+          <div class="col-title">
+            <span>${esc(col)}</span>
+            <span class="col-count">${projects.length}</span>
+          </div>
+          <div class="col-totals">
+            Est: <b>${usd(estTotal)}</b><br>
+            Actual: <b>${usd(actTotal)}</b>
+          </div>
+        </div>
+        <div class="col-body" data-col-body="${esc(col)}">
+          ${projects.length === 0
+            ? '<div class="col-empty">No cards to display</div>'
+            : projects.map(renderCard).join('')}
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  wireDragAndDrop();
+}
+
+function renderCard(p) {
+  const b = p._budget;
+  const marginChip = (b && b.margin_pct != null) ? (() => {
+    const m = Number(b.margin_pct);
+    const cls = b.margin_health || (m >= 50 ? 'green' : m >= 30 ? 'yellow' : 'red');
+    const ico = cls === 'green' ? '🟢' : cls === 'yellow' ? '🟡' : '🔴';
+    return `<span class="card-margin-chip card-margin-${cls}" title="Budget ${usd(b.total_cost)} · Profit ${usd(b.gross_profit)}">${ico} ${m.toFixed(0)}%</span>`;
+  })() : '';
+
+  return `
+    <div class="card" draggable="true" data-id="${esc(p.id)}" data-status="${esc(p.albi_status || '')}">
+      <div class="card-job">${esc(p.albi_job_number || '—')}</div>
+      <div class="card-customer">Customer: <b>${esc(p.customer_name || '—')}</b></div>
+      <div class="card-row">Estimated Revenue:</div>
+      <div class="card-row revenue"><b>${usd(p.estimated_revenue)}</b>${marginChip}</div>
+      <div class="card-row">Actual Revenue:</div>
+      <div class="card-row revenue"><b>${usd(p.actual_revenue)}</b></div>
+      <div class="card-date">🕒 ${fmtDate(p.updated_at)}</div>
+    </div>
+  `;
+}
+
+function wireDragAndDrop() {
+  // Each card
+  document.querySelectorAll('.card').forEach(card => {
+    card.addEventListener('dragstart', (e) => {
+      card.classList.add('dragging');
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', card.dataset.id);
+      e.dataTransfer.setData('fromStatus', card.dataset.status);
+    });
+    card.addEventListener('dragend', () => {
+      card.classList.remove('dragging');
+      document.querySelectorAll('.col').forEach(c => c.classList.remove('drag-over'));
+    });
+    // Click to open project detail
+    card.addEventListener('click', (e) => {
+      if (!card.classList.contains('dragging')) {
+        window.open(`rebuild.html?p=${encodeURIComponent(card.dataset.id)}`, '_blank');
+      }
+    });
+  });
+
+  // Each column accepts drops
+  document.querySelectorAll('.col').forEach(col => {
+    col.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      col.classList.add('drag-over');
+    });
+    col.addEventListener('dragleave', (e) => {
+      // Only clear when leaving the column entirely (not entering a child)
+      if (e.currentTarget === e.target || !col.contains(e.relatedTarget)) {
+        col.classList.remove('drag-over');
+      }
+    });
+    col.addEventListener('drop', async (e) => {
+      e.preventDefault();
+      col.classList.remove('drag-over');
+      const id = e.dataTransfer.getData('text/plain');
+      const fromStatus = e.dataTransfer.getData('fromStatus');
+      const toStatus = col.dataset.col;
+      if (!id || toStatus === fromStatus) return;
+      await updateStatus(id, toStatus, fromStatus);
+    });
+  });
+}
+
+async function updateStatus(projectId, newStatus, oldStatus) {
+  // Optimistic update — move card immediately
+  const project = state.projects.find(p => p.id === projectId);
+  if (!project) return;
+  const previousStatus = project.albi_status;
+  project.albi_status = newStatus;
+  project.updated_at = new Date().toISOString();
+  render();
+
+  const { error } = await sb.from('rebuild_projects')
+    .update({ albi_status: newStatus, updated_at: new Date().toISOString() })
+    .eq('id', projectId);
+
+  if (error) {
+    // Rollback
+    project.albi_status = previousStatus;
+    render();
+    toast('Update failed: ' + error.message, true);
+    return;
+  }
+
+  // Log to audit trail
+  try {
+    await sb.from('rebuild_project_history').insert({
+      project_id: projectId,
+      action: 'status_change',
+      actor: state.userEmail || 'unknown',
+      actor_name: state.userName,
+      changes: { from: oldStatus || null, to: newStatus },
+    });
+  } catch (e) {
+    // History table may not exist or have different schema — don't fail the operation
+    console.warn('History log skipped:', e?.message);
+  }
+
+  toast(`Moved to "${newStatus}"`);
+}
+
+// Search + filter wiring
+$('#searchInput').addEventListener('input', (e) => {
+  state.search = e.target.value.trim();
+  render();
+});
+$('#pmFilter').addEventListener('change', (e) => {
+  state.pmFilter = e.target.value;
+  render();
+});
+
+// Realtime sync — pick up changes from other users / Albi imports
+sb.channel('status_board_projects')
+  .on('postgres_changes', { event: '*', schema: 'public', table: 'rebuild_projects' }, async () => {
+    await loadProjects();
+  })
+  .subscribe();
+
+loadProjects();
+</script>
+</body>
+</html>

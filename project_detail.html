@@ -143,6 +143,21 @@
     position: relative;
     z-index: 1;
   }
+  .hero .margin-chip {
+    display: inline-block;
+    font-size: 11px;
+    font-weight: 800;
+    padding: 4px 11px;
+    border-radius: 999px;
+    margin-top: 8px;
+    margin-left: 6px;
+    position: relative;
+    z-index: 1;
+    border: 1px solid rgba(255,255,255,.25);
+  }
+  .hero .margin-chip.margin-green { background: rgba(45,156,95,.85); color: #fff; }
+  .hero .margin-chip.margin-yellow { background: rgba(245,166,35,.85); color: #fff; }
+  .hero .margin-chip.margin-red { background: rgba(214,69,69,.85); color: #fff; }
 
   /* Contact action grid */
   .contact-grid {
@@ -662,6 +677,12 @@ const params = new URLSearchParams(window.location.search);
 const projectId = params.get('p');
 
 const esc = s => String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+function usdCompact(n) {
+  const v = Number(n) || 0;
+  const abs = Math.abs(v);
+  if (abs >= 1000) return (v < 0 ? '-' : '') + '$' + (Math.round(abs/100)/10).toFixed(1) + 'k';
+  return (v < 0 ? '-' : '') + '$' + Math.round(abs);
+}
 const fmtPhone = p => {
   if (!p) return '';
   const d = p.replace(/\D/g, '');
@@ -688,13 +709,14 @@ async function init() {
   state.project = project;
 
   // Pull counts in parallel for badges
-  const [phases, wos, sels, docs, msgs, rels] = await Promise.all([
+  const [phases, wos, sels, docs, msgs, rels, budget] = await Promise.all([
     sb.from('rebuild_phases').select('id, status', { count: 'exact', head: false }).eq('project_id', projectId),
     sb.from('rebuild_work_orders').select('id, status').eq('project_id', projectId),
     sb.from('rebuild_selections').select('id, status').eq('project_id', projectId),
     sb.from('rebuild_documents').select('id', { count: 'exact', head: true }).eq('project_id', projectId),
     sb.from('rebuild_messages').select('id', { count: 'exact', head: true }).eq('project_id', projectId),
     sb.from('rebuild_project_relationships').select('id', { count: 'exact', head: true }).eq('project_id', projectId).is('deleted_at', null),
+    sb.from('wo_budget_summaries').select('rcv, total_cost, gross_profit, margin_pct, margin_health').eq('project_id', projectId).maybeSingle(),
   ]);
 
   // Compute badge values
@@ -715,6 +737,7 @@ async function init() {
     docsTotal,
     msgsTotal,
     relTotal,
+    budget: budget?.data || null,
   });
 }
 
@@ -770,6 +793,16 @@ function render(p, counts) {
       <div class="customer">${esc(p.albi_job_number || '')}</div>
       ${p.property_address ? `<div style="font-size:12px;opacity:.8;margin-top:4px;position:relative;z-index:1;">${esc(p.property_address)}</div>` : ''}
       ${p.albi_status ? `<div class="status-chip">${esc(p.albi_status)}</div>` : ''}
+      ${counts.budget && counts.budget.margin_pct != null ? (() => {
+        const m = Number(counts.budget.margin_pct);
+        const cls = counts.budget.margin_health || (m >= 50 ? 'green' : m >= 30 ? 'yellow' : 'red');
+        const ico = cls === 'green' ? '🟢' : cls === 'yellow' ? '🟡' : '🔴';
+        return `
+          <div class="margin-chip margin-${cls}" title="Revenue ${usdCompact(counts.budget.rcv)} · Budget ${usdCompact(counts.budget.total_cost)} · Profit ${usdCompact(counts.budget.gross_profit)}">
+            ${ico} ${m.toFixed(0)}% margin · ${usdCompact(counts.budget.gross_profit)} profit
+          </div>
+        `;
+      })() : ''}
     </div>
 
     <div class="section-label section-label-row">

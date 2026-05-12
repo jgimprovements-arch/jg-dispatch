@@ -5005,6 +5005,46 @@ async function loadWoBudget() {
   state.woBudgetLoading = false;
 }
 
+// Recompute the cached wo_budget_summaries row for this project from current state.
+// Called from every place that mutates budgets: budget edits, phase reassign,
+// unassign moves, merges, reset merges, convert-to-WO.
+// Cheap: state.woBudget is already in memory, no DB reads needed for the math.
+async function refreshBudgetSummary() {
+  if (!sb || !state.activeProjectId || !state.woBudget) return;
+
+  const rollup = computeTradeRollup(state.woBudget);
+  const rcv = rollup.reduce((s, t) => s + t.revenue, 0);
+  const material = rollup.reduce((s, t) => s + t.material, 0);
+  const labor = rollup.reduce((s, t) => s + t.labor, 0);
+  const equipment = rollup.reduce((s, t) => s + t.equipment, 0);
+  const totalCost = material + labor + equipment;
+  const profit = rcv - totalCost;
+  const marginPct = rcv > 0 ? round2((profit / rcv) * 100) : null;
+
+  let marginHealth;
+  if (marginPct == null) marginHealth = 'unknown';
+  else if (marginPct >= 50) marginHealth = 'green';
+  else if (marginPct >= 30) marginHealth = 'yellow';
+  else marginHealth = 'red';
+
+  const upload = state.woBudget?.upload;
+  const { error } = await sb.from('wo_budget_summaries').upsert({
+    project_id: state.activeProjectId,
+    upload_id: upload?.id || null,
+    rcv: round2(rcv),
+    total_cost: round2(totalCost),
+    material_cost: round2(material),
+    labor_cost: round2(labor),
+    equipment_cost: round2(equipment),
+    gross_profit: round2(profit),
+    margin_pct: marginPct,
+    margin_health: marginHealth,
+    updated_at: new Date().toISOString(),
+  }, { onConflict: 'project_id' });
+  if (error) console.warn('Budget summary refresh failed:', error.message);
+}
+
+
 async function loadRelationships() {
   if (!sb || !state.activeProjectId) { state.relationships = []; return; }
   const { data, error } = await sb.from('rebuild_project_relationships')
@@ -10062,6 +10102,7 @@ function wireWoDetailModal(tradeKey) {
     toast(`✓ "${result.tradeLabel}" converted · WO total ${usdCompact(result.totalCost)}`);
     await loadWoBudget();
     await loadWorkOrders();
+    await refreshBudgetSummary();
     closeWoDetailModal();
     renderTabContent();
   });
@@ -10103,6 +10144,7 @@ function wireWoDetailModal(tradeKey) {
     });
     toast('Assignee saved');
     await loadWoBudget();
+    await refreshBudgetSummary();
     closeWoDetailModal();
     renderTabContent();
   });
@@ -10154,6 +10196,7 @@ function wireWoDetailModal(tradeKey) {
       }
       lastValue = val;
       await loadWoBudget();
+      await refreshBudgetSummary();
       const tradeLabel = MERGED_TRADE_GROUPS[tradeKey]?.label || (tradeKey === '__unassigned__' ? 'Unassigned' : tradeKey);
       closeWoDetailModal();
       renderTabContent();
@@ -10187,7 +10230,15 @@ function wireWoDetailModal(tradeKey) {
       }
       originalValue = inp.value;
       inp.classList.add('wobx-budget-override');
+      // Update local state so refreshBudgetSummary sees the new value
+      const kindToArray = { material: 'materials', labor: 'labor', equipment: 'equipment' };
+      const stateKey = kindToArray[kind];
+      if (stateKey && state.woBudget?.[stateKey]) {
+        const row = state.woBudget[stateKey].find(r => r.id === id);
+        if (row) row.budget_amount = newVal;
+      }
       updateModalTotalsLive();
+      refreshBudgetSummary();  // fire-and-forget; cache update doesn't block UI
     };
     inp.addEventListener('blur', save);
     inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); inp.blur(); } });
@@ -10469,6 +10520,7 @@ async function convertAllApproved() {
   // Refresh state
   await loadWoBudget();
   await loadWorkOrders();
+  await refreshBudgetSummary();
   renderTabContent();
 }
 
@@ -11151,6 +11203,7 @@ function wireWoBuilderControls() {
       if (error) { toast('Reset failed: ' + error.message, true); return; }
       state.tradeMerges = {};
       toast('Trade merges reset');
+      refreshBudgetSummary();
       renderTabContent();
     });
   }
@@ -11172,6 +11225,7 @@ async function applyTradeMerge(sourceKey, targetKey, sourceLabel, targetLabel) {
   if (error) { toast('Merge failed: ' + error.message, true); return; }
   state.tradeMerges[sourceKey] = targetKey;
   toast(`Merged ${sourceLabel} → ${targetLabel}`);
+  refreshBudgetSummary();  // fire-and-forget
   renderTabContent();
 }
 
