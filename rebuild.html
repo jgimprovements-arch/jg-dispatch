@@ -2917,11 +2917,11 @@
   /* Synthetic 'JG Purchased Materials' row */
   .wobx-trade-row.wobx-synthetic-row {
     background: rgba(245,166,35,.04);
-    cursor: default;
+    cursor: pointer;
     border-top: 2px solid rgba(245,166,35,.3);
   }
   .wobx-trade-row.wobx-synthetic-row:hover {
-    background: rgba(245,166,35,.06) !important;
+    background: rgba(245,166,35,.08) !important;
   }
   .wobx-trade-row.wobx-synthetic-row td:first-child b {
     color: var(--gold);
@@ -2938,6 +2938,60 @@
     text-transform: uppercase;
     letter-spacing: .3px;
     vertical-align: middle;
+  }
+
+  /* JG supplies note in trade detail modal */
+  .wobx-jg-supplies-note {
+    background: rgba(245,166,35,.08);
+    border-left: 3px solid var(--gold);
+    border-radius: 6px;
+    padding: 12px 16px;
+    font-size: 13px;
+    color: var(--navy);
+    margin-top: 14px;
+  }
+
+  /* JG Purchased Materials modal — totals strip */
+  .wobx-jg-totals-strip {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1px;
+    background: var(--line);
+    border-radius: 8px;
+    overflow: hidden;
+    margin: 0 0 18px 0;
+  }
+  .wobx-jg-total {
+    background: var(--card);
+    padding: 12px 14px;
+    text-align: center;
+  }
+  .wobx-jg-total-label {
+    font-size: 10px;
+    font-weight: 700;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: .4px;
+    margin-bottom: 4px;
+  }
+  .wobx-jg-total-value {
+    font-size: 18px;
+    font-weight: 800;
+    color: var(--navy);
+    font-variant-numeric: tabular-nums;
+  }
+  .wobx-jg-total-sub {
+    font-size: 10px;
+    color: var(--muted);
+    margin-top: 3px;
+    font-weight: 600;
+  }
+  .wobx-jg-vendor-hint {
+    flex: 1;
+    font-size: 11px;
+    color: var(--muted);
+    padding-left: 10px;
+    font-style: italic;
   }
   .wobx-trade-total-sub {
     font-size: 9px;
@@ -10063,9 +10117,15 @@ function renderWoDetailModal(tradeKey, tradeLabel, budget) {
         <div class="wobx-modal-body">
           ${renderTradeTotalsStrip(tradeKey, items, materials, labor, equipment, wo)}
           ${renderDetailSection('Estimate Line Items (Revenue)', 'item', items, isUnassigned, 'revenue', wo?.phase_id || null)}
-          ${renderDetailSection('Materials (reference — from Components PDF)', 'material', materials, isUnassigned)}
-          ${renderDetailSection('Labor (reference — from Components PDF)', 'labor', labor, isUnassigned)}
-          ${renderDetailSection('Equipment (reference — from Components PDF)', 'equipment', equipment, isUnassigned)}
+          ${wo?.materials_supplier === 'jg' ? `
+            <div class="wobx-jg-supplies-note">
+              📦 Materials moved to <b>JG Purchased Materials</b> bucket. Click that row in the main table to view the materials list.
+            </div>
+          ` : `
+            ${renderDetailSection('Materials (reference — from Components PDF)', 'material', materials, isUnassigned)}
+            ${renderDetailSection('Labor (reference — from Components PDF)', 'labor', labor, isUnassigned)}
+            ${renderDetailSection('Equipment (reference — from Components PDF)', 'equipment', equipment, isUnassigned)}
+          `}
         </div>
 
         <div class="wobx-modal-foot">
@@ -10708,6 +10768,131 @@ function closeWoDetailModal() {
   document.querySelectorAll('.wobx-modal-back').forEach(m => m.remove());
 }
 
+// JG Purchased Materials modal — shows all materials carved out from JG-supplies trades,
+// grouped by trade, sortable, with section totals. View-only for now.
+function openJgMaterialsModal() {
+  if (!state.woBudget) return;
+  closeWoDetailModal();
+
+  // Collect all materials from JG-supplied trades, group by trade
+  const wos = state.woBudget.wos || [];
+  const jgTrades = new Set(
+    wos.filter(w => w.materials_supplier === 'jg').map(w => w.trade_category)
+  );
+
+  const materialsByTrade = {};   // trade key → [{...material rows}]
+  let grandTotalXact = 0;
+  let totalMaterialsCount = 0;
+
+  (state.woBudget.materials || []).forEach(m => {
+    if (m.is_unassigned) return;
+    const tradeKey = mergedGroupFor(m.trade_category || 'general');
+    if (!jgTrades.has(tradeKey)) return;
+    if (!materialsByTrade[tradeKey]) materialsByTrade[tradeKey] = [];
+    materialsByTrade[tradeKey].push(m);
+    grandTotalXact += Number(m.total) || 0;
+    totalMaterialsCount += 1;
+  });
+
+  // Find the synthetic budget row to get the user's budget setting (if any)
+  const jgBudgetRow = wos.find(w => w.trade_category === '__jg_materials__');
+  const userBudget = (jgBudgetRow?.trade_budget != null) ? Number(jgBudgetRow.trade_budget) : null;
+  const displayBudget = userBudget != null ? userBudget : grandTotalXact;
+
+  // Build per-trade sections
+  const sortedTradeKeys = Object.keys(materialsByTrade).sort((a, b) => {
+    const aSort = MERGED_TRADE_GROUPS[a]?.sort ?? 100;
+    const bSort = MERGED_TRADE_GROUPS[b]?.sort ?? 100;
+    return aSort - bSort;
+  });
+
+  const sections = sortedTradeKeys.map(tradeKey => {
+    const tradeLabel = MERGED_TRADE_GROUPS[tradeKey]?.label || tradeKey;
+    const rows = materialsByTrade[tradeKey];
+    const tradeTotal = rows.reduce((s, r) => s + (Number(r.total) || 0), 0);
+
+    return `
+      <div class="wobx-detail-sec">
+        <div class="wobx-detail-sec-head">${esc(tradeLabel)} <span class="wobx-detail-total">${usdCompact(tradeTotal)}</span></div>
+        <table class="wobx-detail-table">
+          <thead>
+            <tr>
+              <th>Code · Description</th>
+              <th class="r">Qty</th>
+              <th class="r">Unit</th>
+              <th class="r">Unit Price</th>
+              <th class="r">Xact Total</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows.map(r => `
+              <tr>
+                <td>${esc(r.code || '')} — ${esc(r.description || '')}</td>
+                <td class="r">${r.quantity || ''}</td>
+                <td class="r">${esc(r.unit || '')}</td>
+                <td class="r">${r.unit_price ? usdCompact(r.unit_price) : '—'}</td>
+                <td class="r">${usdCompact(r.total)}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+    `;
+  }).join('');
+
+  const html = `
+    <div class="wobx-modal-back" id="wobx_modal_back">
+      <div class="wobx-modal">
+        <div class="wobx-modal-head">
+          <div>
+            <h3>📦 JG Purchased Materials</h3>
+            <div class="wobx-modal-sub">${totalMaterialsCount} materials across ${sortedTradeKeys.length} trade${sortedTradeKeys.length === 1 ? '' : 's'} · paid to vendors, not the sub</div>
+          </div>
+          <button class="wobx-modal-close" id="wobx_modal_close">×</button>
+        </div>
+
+        <div class="wobx-jg-totals-strip">
+          <div class="wobx-jg-total">
+            <div class="wobx-jg-total-label">Xact Total</div>
+            <div class="wobx-jg-total-value">${usdCompact(grandTotalXact)}</div>
+            <div class="wobx-jg-total-sub">${totalMaterialsCount} line items</div>
+          </div>
+          <div class="wobx-jg-total">
+            <div class="wobx-jg-total-label">Your Budget</div>
+            <div class="wobx-jg-total-value">${usdCompact(displayBudget)}</div>
+            <div class="wobx-jg-total-sub">${userBudget != null ? 'override set' : 'matches Xact'}</div>
+          </div>
+          <div class="wobx-jg-total">
+            <div class="wobx-jg-total-label">${userBudget != null && userBudget < grandTotalXact ? 'Savings vs Xact' : userBudget != null ? 'Over Xact' : '—'}</div>
+            <div class="wobx-jg-total-value" style="color:${userBudget != null && userBudget < grandTotalXact ? 'var(--green)' : 'var(--muted)'};">
+              ${userBudget != null ? usdCompact(grandTotalXact - userBudget) : '—'}
+            </div>
+          </div>
+        </div>
+
+        <div class="wobx-modal-body">
+          ${sections || '<div class="wobx-detail-empty" style="padding:20px;text-align:center;">No materials yet. Turn on "JG supplies materials" in any trade to populate this list.</div>'}
+        </div>
+
+        <div class="wobx-modal-foot">
+          <div class="wobx-jg-vendor-hint">
+            💡 Vendor assignment + Purchase Order generation coming soon — for now this is a view-only summary.
+          </div>
+          <button class="wobx-modal-done" id="wobx_modal_done">Done</button>
+        </div>
+      </div>
+    </div>
+  `;
+
+  document.body.insertAdjacentHTML('beforeend', html);
+
+  // Wire close handlers
+  const back = $('#wobx_modal_back');
+  $('#wobx_modal_close')?.addEventListener('click', closeWoDetailModal);
+  $('#wobx_modal_done')?.addEventListener('click', closeWoDetailModal);
+  back.addEventListener('click', (e) => { if (e.target.id === 'wobx_modal_back') closeWoDetailModal(); });
+}
+
 // Upsert helper for wo_builder_work_orders (uses upload_id + trade_category as natural key)
 // Prompt for a new phase name, create it, return the new phase ID (or null if cancelled)
 async function createNewPhasePrompt() {
@@ -11166,7 +11351,7 @@ function renderWoBuilderSection(budget) {
                 <tr class="wobx-trade-row ${isLocked ? 'wobx-locked' : ''} ${isSynthetic ? 'wobx-synthetic-row' : ''}" ${(isLocked || isSynthetic) ? '' : 'draggable="true"'} data-trade="${esc(t.category)}" data-trade-label="${esc(t.label)}" data-locked="${isLocked ? '1' : '0'}">
                   <td>
                     <b>${esc(t.label)}</b>${isLocked ? ' <span class="wobx-lock-pill">🔒 Locked</span>' : ''}${isSynthetic ? ' <span class="wobx-synthetic-pill">AUTO</span>' : ''}
-                    <div class="wobx-row-hint">${isSynthetic ? 'Materials carved out from JG-supplied trades · paid to vendors' : `${t.itemCount} items · click for detail${isLocked ? ' · WO created' : ' · drag to merge'}`}</div>
+                    <div class="wobx-row-hint">${isSynthetic ? 'Click to view materials list · paid to vendors' : `${t.itemCount} items · click for detail${isLocked ? ' · WO created' : ' · drag to merge'}`}</div>
                   </td>
                   <td class="r">${(t.hours && !isSynthetic) ? t.hours.toFixed(1) : '—'}</td>
                   <td class="r">${usdCompact(t.revenue)}${isSynthetic ? '<div class="wobx-row-hint" style="margin-top:2px;">carved from materials</div>' : ''}</td>
@@ -11684,8 +11869,11 @@ function wireWoBuilderControls() {
         row.dataset.justDragged = '0';
         return;
       }
-      // Synthetic rows (e.g. __jg_materials__) have no items to show — skip
-      if (row.classList.contains('wobx-synthetic-row')) return;
+      // Synthetic JG Purchased Materials row → its own modal
+      if (row.classList.contains('wobx-synthetic-row')) {
+        openJgMaterialsModal();
+        return;
+      }
       openWoDetailModal(row.dataset.trade, row.dataset.tradeLabel);
     });
 
