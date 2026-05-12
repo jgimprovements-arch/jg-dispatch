@@ -2630,6 +2630,17 @@
     background: #fff;
   }
   .wobx-budget-input:disabled { opacity: .5; }
+  .wobx-budget-input.wobx-budget-override {
+    background: rgba(232,93,4,.12);
+    border-color: rgba(232,93,4,.4);
+    font-weight: 700;
+  }
+  .wobx-trade-total-sub {
+    font-size: 9px;
+    color: var(--muted);
+    margin-top: 3px;
+    font-weight: 600;
+  }
 
   /* Per-row phase select */
   .wobx-phase-row-select {
@@ -9654,11 +9665,17 @@ function renderWoDetailModal(tradeKey, tradeLabel, budget) {
         `}
 
         <div class="wobx-modal-body">
-          ${renderTradeTotalsStrip(items, materials, labor, equipment)}
-          ${renderDetailSection('Estimate Line Items (Revenue)', 'item', items, isUnassigned, 'revenue')}
-          ${renderDetailSection('Materials', 'material', materials, isUnassigned)}
-          ${renderDetailSection('Labor', 'labor', labor, isUnassigned)}
-          ${renderDetailSection('Equipment', 'equipment', equipment, isUnassigned)}
+          ${(() => {
+            const tradeRevenue = sumField(items, 'line_total');
+            const targets = computeAutoTargetBudgets(tradeRevenue, materials, labor, equipment);
+            return `
+              ${renderTradeTotalsStrip(items, materials, labor, equipment)}
+              ${renderDetailSection('Estimate Line Items (Revenue)', 'item', items, isUnassigned, 'revenue', targets)}
+              ${renderDetailSection('Materials', 'material', materials, isUnassigned, null, targets)}
+              ${renderDetailSection('Labor', 'labor', labor, isUnassigned, null, targets)}
+              ${renderDetailSection('Equipment', 'equipment', equipment, isUnassigned, null, targets)}
+            `;
+          })()}
         </div>
 
         <div class="wobx-modal-foot">
@@ -9671,17 +9688,25 @@ function renderWoDetailModal(tradeKey, tradeLabel, budget) {
 
 function renderTradeTotalsStrip(items, materials, labor, equipment) {
   const revenue = sumField(items, 'line_total');
-  const budgetTotal = items.reduce((s, r) => {
-    const b = (r.budget_amount != null) ? Number(r.budget_amount) : Number(r.line_total || 0) * 0.5;
-    return s + b;
-  }, 0);
-  const actualCost = sumField(materials, 'total') + sumField(labor, 'total') + sumField(equipment, 'total');
-  const profit = revenue - actualCost;
+  // Compute the auto-target budget for this trade: 50% of revenue, distributed
+  // proportionally across material+labor+equipment based on their Xact totals.
+  // Then each row's budget defaults to its share, but the user can override per row.
+  const targets = computeAutoTargetBudgets(revenue, materials, labor, equipment);
+
+  function effectiveBudget(rows, kind) {
+    return rows.reduce((s, r) => {
+      const def = targets[kind].get(r.id) ?? 0;
+      return s + (r.budget_amount != null ? Number(r.budget_amount) : def);
+    }, 0);
+  }
+  const materialBudget = effectiveBudget(materials, 'material');
+  const laborBudget = effectiveBudget(labor, 'labor');
+  const equipmentBudget = effectiveBudget(equipment, 'equipment');
+  const totalBudget = materialBudget + laborBudget + equipmentBudget;
+  const profit = revenue - totalBudget;
   const margin = revenue > 0 ? (profit / revenue * 100) : 0;
   const cls = margin >= 50 ? 'green' : margin >= 30 ? 'yellow' : 'red';
   const ico = margin >= 50 ? '🟢' : margin >= 30 ? '🟡' : '🔴';
-  const budgetVsCost = budgetTotal - actualCost;
-  const budgetCls = budgetVsCost >= 0 ? 'green' : 'red';
 
   return `
     <div class="wobx-trade-totals">
@@ -9690,26 +9715,72 @@ function renderTradeTotalsStrip(items, materials, labor, equipment) {
         <div class="wobx-trade-total-value">${usdCompact(revenue)}</div>
       </div>
       <div class="wobx-trade-total">
-        <div class="wobx-trade-total-label">Budget (50% target)</div>
-        <div class="wobx-trade-total-value" id="wobx_budget_total">${usdCompact(budgetTotal)}</div>
+        <div class="wobx-trade-total-label">Planned Budget</div>
+        <div class="wobx-trade-total-value" id="wobx_budget_total">${usdCompact(totalBudget)}</div>
+        <div class="wobx-trade-total-sub">M ${usdCompact(materialBudget)} · L ${usdCompact(laborBudget)} · E ${usdCompact(equipmentBudget)}</div>
       </div>
       <div class="wobx-trade-total">
-        <div class="wobx-trade-total-label">Actual Cost</div>
-        <div class="wobx-trade-total-value">${usdCompact(actualCost)}</div>
-      </div>
-      <div class="wobx-trade-total">
-        <div class="wobx-trade-total-label">Budget vs Cost</div>
-        <div class="wobx-trade-total-value" style="color:${budgetVsCost >= 0 ? 'var(--green)' : 'var(--red)'};">${budgetVsCost >= 0 ? '+' : ''}${usdCompact(budgetVsCost)}</div>
+        <div class="wobx-trade-total-label">Profit</div>
+        <div class="wobx-trade-total-value" id="wobx_profit_total" style="color:${profit >= 0 ? 'var(--green)' : 'var(--red)'};">${usdCompact(profit)}</div>
       </div>
       <div class="wobx-trade-total wobx-trade-margin wobx-margin-${cls}">
         <div class="wobx-trade-total-label">Margin ${ico}</div>
-        <div class="wobx-trade-total-value">${margin.toFixed(1)}%</div>
+        <div class="wobx-trade-total-value" id="wobx_margin_total">${margin.toFixed(1)}%</div>
+        <div class="wobx-trade-total-sub">Target: 50%</div>
       </div>
     </div>
   `;
 }
 
-function renderDetailSection(title, kind, rows, isUnassigned, mode) {
+// Compute the per-line auto-target budget: 50% of trade revenue split across
+// material/labor/equipment proportionally to their Xact component totals.
+// Returns: { material: Map<rowId, $>, labor: Map<rowId, $>, equipment: Map<rowId, $> }
+function computeAutoTargetBudgets(revenue, materials, labor, equipment) {
+  const target = revenue * 0.5;
+  const xactMaterial = sumField(materials, 'total');
+  const xactLabor = sumField(labor, 'total');
+  const xactEquipment = sumField(equipment, 'total');
+  const xactTotal = xactMaterial + xactLabor + xactEquipment;
+
+  // Bucket-level share of the target
+  let bucketTargets;
+  if (xactTotal > 0) {
+    bucketTargets = {
+      material: target * (xactMaterial / xactTotal),
+      labor: target * (xactLabor / xactTotal),
+      equipment: target * (xactEquipment / xactTotal),
+    };
+  } else {
+    // No xact components — split evenly across the buckets that have rows
+    const buckets = [['material', materials], ['labor', labor], ['equipment', equipment]].filter(([_, r]) => r.length > 0);
+    bucketTargets = { material: 0, labor: 0, equipment: 0 };
+    if (buckets.length) {
+      const each = target / buckets.length;
+      buckets.forEach(([k]) => { bucketTargets[k] = each; });
+    }
+  }
+
+  function distributeBucket(rows, bucketKey) {
+    const map = new Map();
+    const bucketTarget = bucketTargets[bucketKey];
+    const bucketTotal = sumField(rows, 'total');
+    rows.forEach(r => {
+      const share = bucketTotal > 0 ? (Number(r.total) || 0) / bucketTotal : (1 / Math.max(rows.length, 1));
+      map.set(r.id, round2(bucketTarget * share));
+    });
+    return map;
+  }
+
+  return {
+    material: distributeBucket(materials, 'material'),
+    labor: distributeBucket(labor, 'labor'),
+    equipment: distributeBucket(equipment, 'equipment'),
+  };
+}
+
+function round2(n) { return Math.round(n * 100) / 100; }
+
+function renderDetailSection(title, kind, rows, isUnassigned, mode, targets) {
   if (!rows.length) {
     return `
       <div class="wobx-detail-sec">
@@ -9717,20 +9788,21 @@ function renderDetailSection(title, kind, rows, isUnassigned, mode) {
       </div>
     `;
   }
-  const sumKey = kind === 'item' ? 'line_total' : 'total';
-  const totalRev = sumField(rows, sumKey);
-  // Default budget = 50% of revenue for items, or actual cost for materials/labor/equipment
-  function budgetFor(r) {
-    if (r.budget_amount != null) return Number(r.budget_amount);
-    if (kind === 'item') return Number(r.line_total || 0) * 0.5;
-    return Number(r.total || 0);  // for material/labor/equipment, default budget = actual cost
-  }
-  const totalBudget = rows.reduce((s, r) => s + budgetFor(r), 0);
+  const isRevenue = kind === 'item';
+  const sumKey = isRevenue ? 'line_total' : 'total';
+  const totalAmount = sumField(rows, sumKey);
 
-  // Build phase options string (reused per row)
-  const phaseOpts = (state.phases || []).map(p =>
-    `<option value="${p.id}">${esc(p.phase_name)}</option>`
-  ).join('');
+  // For cost rows, compute the per-row default budget from targets map
+  function defaultBudgetFor(r) {
+    if (isRevenue) return null;
+    const targetMap = targets?.[kind];
+    return targetMap?.get(r.id) ?? Number(r.total || 0);
+  }
+  function effectiveBudgetFor(r) {
+    if (isRevenue) return null;
+    return r.budget_amount != null ? Number(r.budget_amount) : defaultBudgetFor(r);
+  }
+  const totalBudget = isRevenue ? null : rows.reduce((s, r) => s + (effectiveBudgetFor(r) || 0), 0);
 
   return `
     <div class="wobx-detail-sec">
@@ -9741,35 +9813,37 @@ function renderDetailSection(title, kind, rows, isUnassigned, mode) {
             <th>Description</th>
             <th class="r">Qty</th>
             <th class="r">Unit</th>
-            <th class="r">${kind === 'item' ? 'Revenue' : 'Cost'}</th>
-            ${kind === 'item' ? '<th class="r">Budget</th>' : ''}
+            <th class="r">${isRevenue ? 'Revenue' : 'Xact $'}</th>
+            ${isRevenue ? '' : '<th class="r">Budget</th>'}
             <th>Phase</th>
           </tr>
         </thead>
         <tbody>
           ${rows.map(r => {
-            const desc = kind === 'item'
+            const desc = isRevenue
               ? (esc(r.description) + (r.room ? ` <span class="wobx-room">(${esc(r.room)})</span>` : ''))
               : `${esc(r.code || '')} — ${esc(r.description || '')}`;
             const qty = kind === 'labor' ? (r.hours || 0) : (r.quantity || 0);
             const unit = kind === 'labor' ? 'HR' : (r.unit || '');
-            const lineAmount = kind === 'item' ? r.line_total : r.total;
+            const lineAmount = isRevenue ? r.line_total : r.total;
             const currentPhase = r.assigned_phase_id || '';
             const isUnassignedRow = !!r.is_unassigned;
-            const budget = budgetFor(r);
+            const budget = effectiveBudgetFor(r);
+            const isOverride = !isRevenue && r.budget_amount != null;
             return `
               <tr class="${isUnassignedRow ? 'wobx-unassigned-row' : ''}">
                 <td>${desc}</td>
                 <td class="r">${qty}</td>
                 <td class="r">${esc(unit)}</td>
                 <td class="r">${usdCompact(lineAmount)}</td>
-                ${kind === 'item' ? `
+                ${isRevenue ? '' : `
                   <td class="r">
-                    <input type="number" class="wobx-budget-input"
+                    <input type="number" class="wobx-budget-input ${isOverride ? 'wobx-budget-override' : ''}"
                            data-kind="${kind}" data-id="${esc(r.id)}"
-                           value="${budget.toFixed(2)}" step="1" min="0">
+                           data-default="${budget != null ? budget.toFixed(2) : ''}"
+                           value="${budget != null ? budget.toFixed(2) : ''}" step="1" min="0">
                   </td>
-                ` : ''}
+                `}
                 <td>
                   <select class="wobx-phase-row-select" data-kind="${kind}" data-id="${esc(r.id)}">
                     <option value="" ${!currentPhase && !isUnassignedRow ? 'selected' : ''}>— Default —</option>
@@ -9785,9 +9859,9 @@ function renderDetailSection(title, kind, rows, isUnassigned, mode) {
         </tbody>
         <tfoot>
           <tr class="wobx-section-totals">
-            <td colspan="${kind === 'item' ? 3 : 3}"><b>Section Total</b></td>
-            <td class="r"><b>${usdCompact(totalRev)}</b></td>
-            ${kind === 'item' ? `<td class="r"><b>${usdCompact(totalBudget)}</b></td>` : ''}
+            <td colspan="3"><b>Section Total</b></td>
+            <td class="r"><b>${usdCompact(totalAmount)}</b></td>
+            ${isRevenue ? '' : `<td class="r"><b>${usdCompact(totalBudget)}</b></td>`}
             <td></td>
           </tr>
         </tfoot>
@@ -9889,19 +9963,22 @@ function wireWoDetailModal(tradeKey) {
     });
   });
 
-  // Budget input on estimate items — debounced save on blur or Enter
+  // Budget input on cost rows (material/labor/equipment) — debounced save on blur or Enter
   document.querySelectorAll('.wobx-budget-input').forEach(inp => {
     let originalValue = inp.value;
     const save = async () => {
       if (inp.value === originalValue) return;
+      const kind = inp.dataset.kind;
       const id = inp.dataset.id;
       const newVal = parseFloat(inp.value);
       if (isNaN(newVal) || newVal < 0) {
         inp.value = originalValue;
         return;
       }
+      const tableName = tableForKind[kind];
+      if (!tableName) return;
       inp.disabled = true;
-      const { error } = await sb.from('wo_builder_estimate_items')
+      const { error } = await sb.from(tableName)
         .update({ budget_amount: newVal })
         .eq('id', id);
       inp.disabled = false;
@@ -9911,21 +9988,68 @@ function wireWoDetailModal(tradeKey) {
         return;
       }
       originalValue = inp.value;
-      // Refresh just the budget-total in the strip without full modal re-render
-      updateModalBudgetTotal();
+      inp.classList.add('wobx-budget-override');
+      updateModalTotalsLive();
     };
     inp.addEventListener('blur', save);
     inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); inp.blur(); } });
   });
 }
 
-// Recompute the budget total in the trade-totals strip live as user edits
-function updateModalBudgetTotal() {
+// Recompute Planned Budget / Profit / Margin in the trade-totals strip
+// live as the user edits individual budgets — no full re-render needed
+function updateModalTotalsLive() {
   const inputs = document.querySelectorAll('.wobx-budget-input');
-  let total = 0;
-  inputs.forEach(i => { total += parseFloat(i.value) || 0; });
-  const target = document.getElementById('wobx_budget_total');
-  if (target) target.textContent = usdCompact(total);
+  let totalBudget = 0;
+  let materialBudget = 0;
+  let laborBudget = 0;
+  let equipmentBudget = 0;
+  inputs.forEach(i => {
+    const v = parseFloat(i.value) || 0;
+    totalBudget += v;
+    const k = i.dataset.kind;
+    if (k === 'material') materialBudget += v;
+    else if (k === 'labor') laborBudget += v;
+    else if (k === 'equipment') equipmentBudget += v;
+  });
+
+  // Read revenue from the strip (cheaper than recomputing from rows)
+  const revenueEl = document.querySelector('.wobx-trade-totals .wobx-trade-total:first-child .wobx-trade-total-value');
+  const revenue = revenueEl ? parseUsd(revenueEl.textContent) : 0;
+  const profit = revenue - totalBudget;
+  const margin = revenue > 0 ? (profit / revenue * 100) : 0;
+
+  const budgetEl = document.getElementById('wobx_budget_total');
+  if (budgetEl) {
+    budgetEl.textContent = usdCompact(totalBudget);
+    const sub = budgetEl.nextElementSibling;
+    if (sub) sub.innerHTML = `M ${usdCompact(materialBudget)} · L ${usdCompact(laborBudget)} · E ${usdCompact(equipmentBudget)}`;
+  }
+  const profitEl = document.getElementById('wobx_profit_total');
+  if (profitEl) {
+    profitEl.textContent = usdCompact(profit);
+    profitEl.style.color = profit >= 0 ? 'var(--green)' : 'var(--red)';
+  }
+  const marginEl = document.getElementById('wobx_margin_total');
+  if (marginEl) marginEl.textContent = margin.toFixed(1) + '%';
+
+  // Update margin pill color
+  const marginCard = marginEl?.closest('.wobx-trade-margin');
+  if (marginCard) {
+    marginCard.classList.remove('wobx-margin-green', 'wobx-margin-yellow', 'wobx-margin-red');
+    const cls = margin >= 50 ? 'green' : margin >= 30 ? 'yellow' : 'red';
+    marginCard.classList.add('wobx-margin-' + cls);
+    // Update icon too
+    const labelEl = marginCard.querySelector('.wobx-trade-total-label');
+    if (labelEl) {
+      const ico = margin >= 50 ? '🟢' : margin >= 30 ? '🟡' : '🔴';
+      labelEl.innerHTML = `Margin ${ico}`;
+    }
+  }
+}
+
+function parseUsd(text) {
+  return Number(String(text).replace(/[^0-9.-]/g, '')) || 0;
 }
 
 function closeWoDetailModal() {
@@ -10021,14 +10145,18 @@ function renderWoBuilderSection(budget) {
   // Parsed — show summary + WO breakdown
   const u = budget.upload;
   const rcv = Number(u.replacement_cost_value) || 0;
-  const cost = Number(u.components_grand_total) || 0;
-  const profit = Number(u.gross_profit) || 0;
-  const margin = Number(u.gross_margin_pct) || 0;
+
+  // Build trade rollup first (so KPIs use budget-aware values)
+  const tradeRollup = computeTradeRollup(budget);
+  const totalBudget = tradeRollup.reduce((s, t) => s + t.cost, 0);
+  const totalMaterial = tradeRollup.reduce((s, t) => s + t.material, 0);
+  const totalLabor = tradeRollup.reduce((s, t) => s + t.labor, 0);
+  const totalEquipment = tradeRollup.reduce((s, t) => s + t.equipment, 0);
+  const totalRevenue = tradeRollup.reduce((s, t) => s + t.revenue, 0);
+  const profit = totalRevenue - totalBudget;
+  const margin = totalRevenue > 0 ? (profit / totalRevenue * 100) : 0;
   const marginHealth = margin >= 50 ? 'green' : margin >= 30 ? 'yellow' : 'red';
   const marginIcon = margin >= 50 ? '🟢' : margin >= 30 ? '🟡' : '🔴';
-
-  // Build trade rollup from items + labor + materials + equipment
-  const tradeRollup = computeTradeRollup(budget);
 
   return `
     <div class="wobx-card">
@@ -10042,21 +10170,21 @@ function renderWoBuilderSection(budget) {
 
       <div class="wobx-summary">
         <div class="wobx-kpi">
-          <div class="wobx-kpi-label">RCV (Revenue)</div>
+          <div class="wobx-kpi-label">Revenue</div>
           <div class="wobx-kpi-value">${usdCompact(rcv)}</div>
         </div>
         <div class="wobx-kpi">
-          <div class="wobx-kpi-label">Total Cost</div>
-          <div class="wobx-kpi-value" style="color:var(--text);">${usdCompact(cost)}</div>
+          <div class="wobx-kpi-label">Planned Budget</div>
+          <div class="wobx-kpi-value" style="color:var(--text);">${usdCompact(totalBudget)}</div>
           <div class="wobx-kpi-sub">
-            Materials ${usdCompact(u.components_materials_total || 0)} ·
-            Labor ${usdCompact(u.components_labor_total || 0)} ·
-            Equip ${usdCompact(u.components_equipment_total || 0)}
+            Materials ${usdCompact(totalMaterial)} ·
+            Labor ${usdCompact(totalLabor)} ·
+            Equip ${usdCompact(totalEquipment)}
           </div>
         </div>
         <div class="wobx-kpi">
           <div class="wobx-kpi-label">Gross Profit</div>
-          <div class="wobx-kpi-value" style="color:var(--green);">${usdCompact(profit)}</div>
+          <div class="wobx-kpi-value" style="color:${profit >= 0 ? 'var(--green)' : 'var(--red)'};">${usdCompact(profit)}</div>
         </div>
         <div class="wobx-kpi wobx-margin-${marginHealth}">
           <div class="wobx-kpi-label">Margin ${marginIcon}</div>
@@ -10076,10 +10204,10 @@ function renderWoBuilderSection(budget) {
               <th>Trade</th>
               <th class="r">Hours</th>
               <th class="r">Revenue</th>
-              <th class="r">Material</th>
-              <th class="r">Labor</th>
-              <th class="r">Equip</th>
-              <th class="r">Cost</th>
+              <th class="r">Mat Budget</th>
+              <th class="r">Labor Budget</th>
+              <th class="r">Equip Budget</th>
+              <th class="r">Total Budget</th>
               <th class="r">Profit</th>
               <th class="r">Margin</th>
               <th>Phase</th>
@@ -10167,55 +10295,56 @@ function mergedGroupFor(rawCategory) {
 }
 
 function computeTradeRollup(budget) {
-  const byTrade = {};
-
-  function bucket(key, label, sort) {
-    if (!byTrade[key]) {
-      byTrade[key] = { category: key, label, revenue: 0, material: 0, labor: 0, equipment: 0, hours: 0, sort, itemCount: 0 };
-    }
-    return byTrade[key];
-  }
+  // Group everything by merged trade first
+  const groups = {};
 
   function keyFor(rawCategory) {
     const groupKey = mergedGroupFor(rawCategory || 'general');
     const group = MERGED_TRADE_GROUPS[groupKey];
     return { key: groupKey, label: group.label, sort: group.sort };
   }
+  function getGroup(rawCategory) {
+    const k = keyFor(rawCategory);
+    if (!groups[k.key]) {
+      groups[k.key] = {
+        category: k.key, label: k.label, sort: k.sort,
+        items: [], materials: [], labor: [], equipment: [],
+      };
+    }
+    return groups[k.key];
+  }
 
-  // Revenue from estimate items (skip unassigned)
-  (budget.items || []).forEach(it => {
-    if (it.is_unassigned) return;
-    const k = keyFor(it.trade_category);
-    const b = bucket(k.key, k.label, k.sort);
-    b.revenue += Number(it.line_total) || 0;
-    b.itemCount += 1;
-  });
-  // Material cost (skip unassigned)
-  (budget.materials || []).forEach(m => {
-    if (m.is_unassigned) return;
-    const k = keyFor(m.trade_category);
-    bucket(k.key, k.label, k.sort).material += Number(m.total) || 0;
-  });
-  // Labor cost + hours (skip unassigned)
-  (budget.labor || []).forEach(l => {
-    if (l.is_unassigned) return;
-    const k = keyFor(l.trade_category);
-    const b = bucket(k.key, k.label, k.sort);
-    b.labor += Number(l.total) || 0;
-    b.hours += Number(l.hours) || 0;
-  });
-  // Equipment cost (skip unassigned)
-  (budget.equipment || []).forEach(e => {
-    if (e.is_unassigned) return;
-    const k = keyFor(e.trade_category);
-    bucket(k.key, k.label, k.sort).equipment += Number(e.total) || 0;
-  });
+  (budget.items || []).forEach(it => { if (!it.is_unassigned) getGroup(it.trade_category).items.push(it); });
+  (budget.materials || []).forEach(m => { if (!m.is_unassigned) getGroup(m.trade_category).materials.push(m); });
+  (budget.labor || []).forEach(l => { if (!l.is_unassigned) getGroup(l.trade_category).labor.push(l); });
+  (budget.equipment || []).forEach(e => { if (!e.is_unassigned) getGroup(e.trade_category).equipment.push(e); });
 
-  return Object.values(byTrade).map(t => {
-    t.cost = t.material + t.labor + t.equipment;
-    t.profit = t.revenue - t.cost;
-    t.suggestedPhaseId = matchPhaseForTrade(t.category);
-    return t;
+  // For each trade group, compute revenue + budget-based costs
+  return Object.values(groups).map(g => {
+    const revenue = sumField(g.items, 'line_total');
+    const targets = computeAutoTargetBudgets(revenue, g.materials, g.labor, g.equipment);
+
+    function effective(rows, kind) {
+      return rows.reduce((s, r) => {
+        const def = targets[kind].get(r.id) ?? 0;
+        return s + (r.budget_amount != null ? Number(r.budget_amount) : def);
+      }, 0);
+    }
+    const material = effective(g.materials, 'material');
+    const labor = effective(g.labor, 'labor');
+    const equipment = effective(g.equipment, 'equipment');
+    const hours = sumField(g.labor, 'hours');
+    const cost = material + labor + equipment;
+    const profit = revenue - cost;
+
+    return {
+      category: g.category,
+      label: g.label,
+      sort: g.sort,
+      itemCount: g.items.length,
+      revenue, material, labor, equipment, cost, profit, hours,
+      suggestedPhaseId: matchPhaseForTrade(g.category),
+    };
   }).sort((a, b) => (a.sort || 100) - (b.sort || 100));
 }
 
