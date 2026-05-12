@@ -11994,8 +11994,14 @@ function wireWoDetailModal(tradeKey) {
     await loadWorkOrders();
     await refreshBudgetSummary();
 
-    // After convert, prompt to schedule if not already scheduled
-    await ensurePhaseScheduledForTrade(tradeKey);
+    // After convert, propagate assignees from the WO Builder row down to the phase
+    // and prompt to schedule if not already scheduled
+    const wbAssignees = (state.woBudget?.wos || []).find(w => w.trade_category === tradeKey);
+    const assigneesPayload = wbAssignees ? {
+      subId: wbAssignees.assignee_type === 'sub' ? wbAssignees.assignee_sub_id : null,
+      empIds: wbAssignees.assignee_type === 'carpenter' ? (wbAssignees.assignee_employee_ids || []) : [],
+    } : null;
+    await ensurePhaseScheduledForTrade(tradeKey, assigneesPayload);
 
     closeWoDetailModal();
     renderTabContent();
@@ -12132,89 +12138,13 @@ function wireWoDetailModal(tradeKey) {
     }
 
     // Step 2: Schedule via the trade's mapped phase
-    // Reload BOTH phases and wo_builder so state is fresh
-    await loadPhases();
-    await loadWoBudget();
-    const wbWo = (state.woBudget?.wos || []).find(w => w.trade_category === tradeKey);
-    let phaseId = wbWo?.phase_id;
-    let phase = phaseId ? (state.phases || []).find(p => p.id === phaseId) : null;
-
-    // Fallback: if no explicit phase_id mapping, try matching by trade label
-    // (e.g. Framing → "Framing Repair", Drywall → "Drywall", etc.)
-    if (!phase) {
-      const tradeLabel = (MERGED_TRADE_GROUPS[tradeKey]?.label || tradeKey).toLowerCase();
-      phase = (state.phases || []).find(p => {
-        const name = (p.phase_name || '').toLowerCase();
-        // Bidirectional substring match: "framing" matches "framing repair", "drywall" matches "drywall"
-        return name === tradeLabel
-            || name.includes(tradeLabel)
-            || tradeLabel.includes(name);
-      });
-      if (phase) {
-        phaseId = phase.id;
-        // Persist the mapping back to wo_builder_work_orders so subsequent saves are fast
-        await upsertWoBuilderRow(tradeKey, { phase_id: phaseId, phase_id_user_set: false });
-      }
-    }
-
-    if (!phase) {
-      toast(`✓ Assignee saved. No matching phase — add one named like "${MERGED_TRADE_GROUPS[tradeKey]?.label || tradeKey}" to the Phase Schedule, or pick from the dropdown on the main trade table.`);
-      btn.disabled = false;
-      btn.textContent = 'Save';
-      await refreshBudgetSummary();
-      closeWoDetailModal();
-      renderTabContent();
-      return;
-    }
-
-    // If phase already has dates, we're good
-    if (phase.scheduled_start && phase.scheduled_end) {
-      toast(`✓ Saved. Scheduled to "${phase.phase_name}": ${phase.scheduled_start} → ${phase.scheduled_end}`);
-      btn.disabled = false;
-      btn.textContent = 'Save';
-      await refreshBudgetSummary();
-      closeWoDetailModal();
-      renderTabContent();
-      return;
-    }
-
-    // Phase has no dates — show date picker dialog (mobile-friendly)
-    const today = new Date().toISOString().slice(0, 10);
-    const picked = await JG.pickDateRange({
-      title: `Schedule "${phase.phase_name}"`,
-      subtitle: `${MERGED_TRADE_GROUPS[tradeKey]?.label || tradeKey} · pick the work window`,
-      defaultStart: today,
-      defaultEnd: today,
+    // The helper handles fuzzy phase match, date picking, AND propagating
+    // the WO-level assignees down to rebuild_phase_assignees rows.
+    await ensurePhaseScheduledForTrade(tradeKey, {
+      subId: t === 'sub' ? subId : null,
+      empIds: t === 'carpenter' ? empIds : [],
     });
 
-    if (!picked) {
-      // User cancelled — assignee is saved, schedule skipped
-      toast(`✓ Assignee saved. Schedule "${phase.phase_name}" later from the Phases tab.`);
-      btn.disabled = false;
-      btn.textContent = 'Save';
-      await refreshBudgetSummary();
-      closeWoDetailModal();
-      renderTabContent();
-      return;
-    }
-
-    const { startStr, endStr } = picked;
-
-    // Save phase dates
-    const { error: phaseErr } = await sb.from('rebuild_phases')
-      .update({ scheduled_start: startStr, scheduled_end: endStr })
-      .eq('id', phaseId);
-    if (phaseErr) {
-      toast(`✓ Assignee saved. Phase date save failed: ${phaseErr.message}`, true);
-      btn.disabled = false;
-      btn.textContent = 'Save';
-      await refreshBudgetSummary();
-      closeWoDetailModal();
-      renderTabContent();
-      return;
-    }
-
-    toast(`✓ Saved. "${phase.phase_name}" scheduled ${startStr} → ${endStr}`);
     btn.disabled = false;
     btn.textContent = 'Save';
     await loadPhases();
@@ -12660,7 +12590,8 @@ async function deleteConvertedWo(tradeKey) {
 // Ensure the phase mapped to a given trade has scheduled dates.
 // If no mapping, tries fuzzy name match. If no dates, prompts via date picker.
 // Returns true if scheduled (or already was), false if user skipped / no match found.
-async function ensurePhaseScheduledForTrade(tradeKey) {
+// If `assignees` is provided ({ subId, empIds }), also propagates them to rebuild_phase_assignees.
+async function ensurePhaseScheduledForTrade(tradeKey, assignees) {
   await loadPhases();
   await loadWoBudget();
   const wbWo = (state.woBudget?.wos || []).find(w => w.trade_category === tradeKey);
@@ -12685,8 +12616,17 @@ async function ensurePhaseScheduledForTrade(tradeKey) {
     return false;
   }
 
+  // Propagate WO assignees to the phase so Phase Schedule shows them
+  if (assignees) {
+    await syncPhaseAssigneesFromWo(phase.id, assignees);
+  }
+
   // Already scheduled
-  if (phase.scheduled_start && phase.scheduled_end) return true;
+  if (phase.scheduled_start && phase.scheduled_end) {
+    // Even if dates already set, reload phases so UI picks up the new assignees
+    if (assignees) await loadPhases();
+    return true;
+  }
 
   // Prompt for dates
   const today = new Date().toISOString().slice(0, 10);
@@ -12717,6 +12657,41 @@ async function ensurePhaseScheduledForTrade(tradeKey) {
     try { logToAlbi('phase_scheduled', `Phase "${phase.phase_name}" scheduled: ${picked.startStr} → ${picked.endStr}`); } catch (e) {}
   }
   return true;
+}
+
+// Propagate WO-level assignees down to rebuild_phase_assignees rows.
+// `assignees` = { subId: string|null, empIds: string[] }
+// This adds rows that aren't already present and removes ones no longer assigned at the WO level.
+async function syncPhaseAssigneesFromWo(phaseId, assignees) {
+  if (!sb || !phaseId) return;
+  const { subId, empIds } = assignees || {};
+  const wantedSubIds = new Set(subId ? [subId] : []);
+  const wantedEmpIds = new Set(empIds || []);
+
+  // Read current
+  const { data: existing } = await sb.from('rebuild_phase_assignees')
+    .select('id, assignee_type, sub_id, employee_id')
+    .eq('phase_id', phaseId);
+  const current = existing || [];
+
+  // Build new rows
+  const haveSubIds = new Set(current.filter(a => a.assignee_type === 'sub').map(a => a.sub_id));
+  const haveEmpIds = new Set(current.filter(a => a.assignee_type === 'carpenter').map(a => a.employee_id));
+
+  const subsToAdd = [...wantedSubIds].filter(id => !haveSubIds.has(id));
+  const empsToAdd = [...wantedEmpIds].filter(id => !haveEmpIds.has(id));
+  const newRows = [
+    ...subsToAdd.map(id => ({ phase_id: phaseId, assignee_type: 'sub', sub_id: id, assigned_by_email: state.pmEmail })),
+    ...empsToAdd.map(id => ({ phase_id: phaseId, assignee_type: 'carpenter', employee_id: id, assigned_by_email: state.pmEmail })),
+  ];
+  if (newRows.length) {
+    const { error } = await sb.from('rebuild_phase_assignees').insert(newRows);
+    if (error) console.error('Phase assignee insert error:', error);
+  }
+
+  // Note: deliberately NOT removing existing assignees that aren't in the WO list —
+  // a phase can have manually-added assignees that don't appear at the WO level.
+  // Only the Phase Schedule edit modal should manage removals.
 }
 
 async function convertTradeToWo(tradeKey) {
