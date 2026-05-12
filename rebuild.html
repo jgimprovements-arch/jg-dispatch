@@ -13066,15 +13066,29 @@ function renderWoBuilderSection(budget) {
                     <div class="wobx-row-hint">${isSynthetic ? 'Click to view materials list · paid to vendors' : `${t.itemCount} items · click for detail${isLocked ? ' · WO created' : ' · drag to merge'}`}</div>
                   </td>
                   <td class="r">${(t.hours && !isSynthetic) ? t.hours.toFixed(1) : '—'}</td>
-                  <td class="r">${usdCompact(t.revenue)}${isSynthetic ? '<div class="wobx-row-hint" style="margin-top:2px;">carved from materials</div>' : ''}</td>
+                  <td class="r">${usdCompact(t.revenue)}${isSynthetic ? '<div class="wobx-row-hint" style="margin-top:2px;">materials portion of contract</div>' : ''}</td>
                   <td class="r" onclick="event.stopPropagation();">
                     <input type="number" class="wobx-trade-budget-input ${t.budgetIsOverride ? 'wobx-budget-override' : ''}"
                            data-trade="${esc(t.category)}"
                            value="${t.budget.toFixed(2)}" step="1" min="0"
-                           ${isLocked ? 'disabled' : ''}>
-                    ${isSynthetic ? `<div class="wobx-row-hint" style="margin-top:2px;">Xact: ${usdCompact(t.xactMaterialsTotal)}</div>` : ''}
+                           ${isLocked ? 'disabled' : ''}
+                           title="${isSynthetic ? `Max materials spend to hit ${((t.targetMarginPct || 0.5) * 100).toFixed(0)}% margin · Xact benchmark: ${usdCompact(t.xactBenchmark)}` : ''}">
+                    ${isSynthetic ? `
+                      <div class="wobx-row-hint" style="margin-top:2px;">
+                        ${t.budgetIsOverride ? 'manual override' : `allowance @ ${((t.targetMarginPct || 0.5) * 100).toFixed(0)}% margin`}
+                      </div>
+                      <div class="wobx-row-hint" style="margin-top:1px;font-size:10px;">
+                        ${t.xactBenchmark > t.budget
+                          ? `<span style="color:var(--red);">Xact: ${usdCompact(t.xactBenchmark)} — ${usdCompact(t.xactBenchmark - t.budget)} over</span>`
+                          : `<span style="color:var(--green);">Xact: ${usdCompact(t.xactBenchmark)} — ${usdCompact(t.budget - t.xactBenchmark)} under</span>`
+                        }
+                      </div>
+                    ` : ''}
                   </td>
-                  <td class="r" style="color:${t.profit >= 0 ? 'var(--green)' : 'var(--red)'};">${usdCompact(t.profit)}</td>
+                  <td class="r" style="color:${t.profit >= 0 ? 'var(--green)' : 'var(--red)'};">
+                    ${usdCompact(t.profit)}
+                    ${isSynthetic ? `<div class="wobx-row-hint" style="margin-top:2px;">${t.profit >= 0 ? 'cushion if hit' : 'shortfall'}</div>` : ''}
+                  </td>
                   <td class="r"><span class="wobx-margin-pill wobx-margin-${cls}">${ico} ${m.toFixed(0)}%</span></td>
                   <td onclick="event.stopPropagation();">
                     ${isSynthetic ? '<span style="color:var(--muted);font-size:11px;">—</span>' : `
@@ -13239,14 +13253,46 @@ function computeTradeRollup(budget) {
   }).sort((a, b) => (a.sort || 100) - (b.sort || 100));
 
   // Add the synthetic JG Purchased Materials row if any trade is JG-supplied.
-  // Budget defaults to the Xact materials total (what we'd "expect" to spend),
-  // but is editable independently via wo_builder_work_orders row with category='__jg_materials__'.
+  // BUDGET MODEL: this row's "budget" represents the materials spend allowance
+  // that keeps the overall project at its target margin (default 50%).
+  // It is NOT a cost — actual material spend is tracked in Albi.
+  //
+  //   target_profit = total_project_revenue × target_margin
+  //   budget_allowance = (total_project_revenue − target_profit) − sum(other_trade_budgets)
+  //
+  // Profit on this row = revenue − budget_allowance (i.e. the cushion against the cap)
+  // The Xact materials total ($14,347 typically) is shown as a reference benchmark for
+  // negotiation: "if we negotiate vendors down to this allowance, we still hit margin."
   if (totalJgMaterialsCarvedOut > 0) {
     const jgWo = (budget.wos || []).find(w => w.trade_category === '__jg_materials__');
+
+    // Compute project-wide totals across all OTHER (non-JG-materials) trades
+    const otherRevenue = tradeRows.reduce((acc, r) => acc + (r.revenue || 0), 0);
+    const otherBudget = tradeRows.reduce((acc, r) => acc + (r.budget || 0), 0);
+    const projectRevenue = otherRevenue + totalJgMaterialsCarvedOut;
+
+    // Target margin — read from project settings or default to 50%
+    const targetMarginPct = (state.project?.target_margin_pct != null)
+      ? Number(state.project.target_margin_pct) / 100
+      : 0.5;
+
+    // Materials allowance = remaining budget capacity to hit target margin
+    const targetProfit = projectRevenue * targetMarginPct;
+    const totalBudgetCap = projectRevenue - targetProfit;
+    let computedAllowance = totalBudgetCap - otherBudget;
+    if (computedAllowance < 0) computedAllowance = 0;  // never negative
+
+    // If user manually overrode the materials budget, use their value;
+    // otherwise use the margin-target-based allowance.
     const jgBudget = (jgWo?.trade_budget != null)
       ? Number(jgWo.trade_budget)
-      : Number(totalJgXactMaterialsCost.toFixed(2));
+      : Number(computedAllowance.toFixed(2));
+
+    // Profit on this row = revenue (the materials portion of the contract) − the spend allowance
+    // If we stay under allowance → positive profit cushion
+    // If we exceed allowance → negative (we're eating into other trade margins)
     const jgProfit = totalJgMaterialsCarvedOut - jgBudget;
+
     tradeRows.push({
       category: '__jg_materials__',
       label: '📦 JG Purchased Materials',
@@ -13264,7 +13310,11 @@ function computeTradeRollup(budget) {
       profit: jgProfit,
       hours: 0,
       suggestedPhaseId: null,
-      isSynthetic: true,         // marker for renderers
+      isSynthetic: true,
+      // Margin-allowance metadata for renderers
+      marginAllowance: Number(computedAllowance.toFixed(2)),
+      targetMarginPct: targetMarginPct,
+      xactBenchmark: Number(totalJgXactMaterialsCost.toFixed(2)),
     });
   }
 
