@@ -2846,6 +2846,73 @@
   .wobx-trade-budget-input-modal:focus { outline: none; border-color: var(--orange); box-shadow: 0 0 0 3px rgba(232,93,4,.15); }
   .wobx-trade-budget-input-modal:disabled { opacity: .6; background: var(--bg); }
   .wobx-trade-budget-input-modal.wobx-budget-override { background: rgba(232,93,4,.06); }
+
+  /* Materials budget input (modal) — same style as trade budget input */
+  .wobx-trade-mat-budget-input-modal {
+    width: 90%;
+    margin: 0 auto;
+    text-align: center;
+    border: 2px solid var(--orange);
+    border-radius: 8px;
+    padding: 8px 10px;
+    font-size: 16px;
+    font-weight: 800;
+    font-family: inherit;
+    font-variant-numeric: tabular-nums;
+    background: #fff;
+    color: var(--navy);
+  }
+  .wobx-trade-mat-budget-input-modal:focus { outline: none; border-color: var(--orange); box-shadow: 0 0 0 3px rgba(232,93,4,.15); }
+  .wobx-trade-mat-budget-input-modal:disabled { opacity: .6; background: var(--bg); }
+  .wobx-trade-mat-budget-input-modal.wobx-budget-override { background: rgba(232,93,4,.06); }
+
+  /* Materials supplier toggle banner */
+  .wobx-materials-supplier {
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 10px 14px;
+    margin-bottom: 14px;
+  }
+  .wobx-materials-supplier label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--navy);
+    margin: 0;
+    text-transform: none;
+    letter-spacing: 0;
+  }
+  .wobx-materials-supplier input[type="checkbox"] {
+    width: 18px;
+    height: 18px;
+    accent-color: var(--orange);
+    cursor: pointer;
+  }
+  .wobx-supplier-hint {
+    font-size: 11px;
+    color: var(--muted);
+    margin-top: 4px;
+    margin-left: 26px;
+    line-height: 1.4;
+  }
+
+  /* 5-col grid when JG supplies (adds Materials Budget column) */
+  .wobx-trade-totals.with-mat {
+    grid-template-columns: repeat(5, 1fr) !important;
+  }
+
+  /* Inline materials marker on trade row */
+  .wobx-trade-mat-line {
+    font-size: 9px;
+    font-weight: 700;
+    color: var(--orange);
+    margin-top: 2px;
+    white-space: nowrap;
+  }
   .wobx-trade-total-sub {
     font-size: 9px;
     color: var(--muted);
@@ -9951,7 +10018,7 @@ function renderWoDetailModal(tradeKey, tradeLabel, budget) {
 
         <div class="wobx-modal-body">
           ${renderTradeTotalsStrip(tradeKey, items, materials, labor, equipment, wo)}
-          ${renderDetailSection('Estimate Line Items (Revenue)', 'item', items, isUnassigned, 'revenue')}
+          ${renderDetailSection('Estimate Line Items (Revenue)', 'item', items, isUnassigned, 'revenue', wo?.phase_id || null)}
           ${renderDetailSection('Materials (reference — from Components PDF)', 'material', materials, isUnassigned)}
           ${renderDetailSection('Labor (reference — from Components PDF)', 'labor', labor, isUnassigned)}
           ${renderDetailSection('Equipment (reference — from Components PDF)', 'equipment', equipment, isUnassigned)}
@@ -9974,23 +10041,51 @@ function renderWoDetailModal(tradeKey, tradeLabel, budget) {
 
 function renderTradeTotalsStrip(tradeKey, items, materials, labor, equipment, wo) {
   const revenue = sumField(items, 'line_total');
+  const xactMaterialsTotal = sumField(materials, 'total');
+  const materialsSupplier = wo?.materials_supplier || 'sub';
+  const jgSupplies = materialsSupplier === 'jg';
+
+  // Labor/sub budget — defaults to 50% of revenue
   const tradeBudget = (wo?.trade_budget != null)
     ? Number(wo.trade_budget)
     : Number((revenue * 0.5).toFixed(2));
-  const profit = revenue - tradeBudget;
+
+  // Materials budget — only relevant when JG supplies; defaults to Xact components materials total
+  const materialsBudget = jgSupplies
+    ? ((wo?.materials_budget != null) ? Number(wo.materials_budget) : Number(xactMaterialsTotal.toFixed(2)))
+    : 0;
+
+  const totalCost = tradeBudget + materialsBudget;
+  const profit = revenue - totalCost;
   const margin = revenue > 0 ? (profit / revenue * 100) : 0;
   const cls = margin >= 50 ? 'green' : margin >= 30 ? 'yellow' : 'red';
   const ico = margin >= 50 ? '🟢' : margin >= 30 ? '🟡' : '🔴';
   const isOverride = wo?.trade_budget != null;
+  const matBudgetOverride = wo?.materials_budget != null;
 
   return `
-    <div class="wobx-trade-totals">
+    <div class="wobx-materials-supplier">
+      <label>
+        <input type="checkbox"
+               id="wobx_jg_supplies"
+               data-trade="${esc(tradeKey)}"
+               ${jgSupplies ? 'checked' : ''}
+               ${wo?.is_locked ? 'disabled' : ''}>
+        <span>JG supplies materials separately</span>
+      </label>
+      <div class="wobx-supplier-hint">
+        ${jgSupplies
+          ? 'Materials purchased by JG \u2014 separate cost from the assignee\'s budget. Materials Budget field is enabled below.'
+          : 'Sub/carpenter provides materials \u2014 bundled into their budget below.'}
+      </div>
+    </div>
+    <div class="wobx-trade-totals ${jgSupplies ? 'with-mat' : ''}">
       <div class="wobx-trade-total">
         <div class="wobx-trade-total-label">Revenue</div>
         <div class="wobx-trade-total-value">${usdCompact(revenue)}</div>
       </div>
       <div class="wobx-trade-total wobx-trade-total-budget">
-        <div class="wobx-trade-total-label">Budget (what you'll pay)</div>
+        <div class="wobx-trade-total-label">${jgSupplies ? 'Labor Budget' : 'Budget (what you\'ll pay)'}</div>
         <input type="number"
                class="wobx-trade-budget-input-modal ${isOverride ? 'wobx-budget-override' : ''}"
                data-trade="${esc(tradeKey)}"
@@ -9998,6 +10093,18 @@ function renderTradeTotalsStrip(tradeKey, items, materials, labor, equipment, wo
                step="1" min="0"
                ${wo?.is_locked ? 'disabled' : ''}>
       </div>
+      ${jgSupplies ? `
+        <div class="wobx-trade-total wobx-trade-total-budget">
+          <div class="wobx-trade-total-label">Materials Budget</div>
+          <input type="number"
+                 class="wobx-trade-mat-budget-input-modal ${matBudgetOverride ? 'wobx-budget-override' : ''}"
+                 data-trade="${esc(tradeKey)}"
+                 value="${materialsBudget.toFixed(2)}"
+                 step="1" min="0"
+                 ${wo?.is_locked ? 'disabled' : ''}>
+          <div class="wobx-trade-total-sub">Xact: ${usdCompact(xactMaterialsTotal)}</div>
+        </div>
+      ` : ''}
       <div class="wobx-trade-total">
         <div class="wobx-trade-total-label">Profit</div>
         <div class="wobx-trade-total-value" id="wobx_profit_total" style="color:${profit >= 0 ? 'var(--green)' : 'var(--red)'};">${usdCompact(profit)}</div>
@@ -10057,7 +10164,7 @@ function computeAutoTargetBudgets(revenue, materials, labor, equipment) {
 
 function round2(n) { return Math.round(n * 100) / 100; }
 
-function renderDetailSection(title, kind, rows, isUnassigned, mode) {
+function renderDetailSection(title, kind, rows, isUnassigned, mode, tradeDefaultPhaseId) {
   if (!rows.length) {
     return `
       <div class="wobx-detail-sec">
@@ -10101,7 +10208,11 @@ function renderDetailSection(title, kind, rows, isUnassigned, mode) {
                 ${isRevenue ? `
                   <td>
                     <select class="wobx-phase-row-select" data-kind="${kind}" data-id="${esc(r.id)}">
-                      <option value="" ${!currentPhase && !isUnassignedRow ? 'selected' : ''}>— Default —</option>
+                      <option value="" ${!currentPhase && !isUnassignedRow ? 'selected' : ''}>
+                        ${tradeDefaultPhaseId
+                          ? '↳ ' + esc((state.phases || []).find(p => p.id === tradeDefaultPhaseId)?.phase_name || 'Default')
+                          : '— Default —'}
+                      </option>
                       ${(state.phases || []).map(p =>
                         `<option value="${p.id}" ${currentPhase === p.id ? 'selected' : ''}>${esc(p.phase_name)}</option>`
                       ).join('')}
@@ -10342,6 +10453,62 @@ function wireWoDetailModal(tradeKey) {
     inp.addEventListener('blur', save);
     inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); inp.blur(); } });
   });
+
+  // Materials budget input — saves to wo_builder_work_orders.materials_budget
+  document.querySelectorAll('.wobx-trade-mat-budget-input-modal').forEach(inp => {
+    let originalValue = inp.value;
+    const save = async () => {
+      if (inp.value === originalValue) return;
+      const tradeCategory = inp.dataset.trade;
+      const newVal = parseFloat(inp.value);
+      if (isNaN(newVal) || newVal < 0) { inp.value = originalValue; return; }
+      inp.disabled = true;
+      try {
+        await upsertWoBuilderRow(tradeCategory, { materials_budget: newVal });
+      } catch (e) {
+        toast('Save failed: ' + (e?.message || e), true);
+        inp.value = originalValue;
+        inp.disabled = false;
+        return;
+      }
+      inp.disabled = false;
+      originalValue = inp.value;
+      inp.classList.add('wobx-budget-override');
+      const wbWo = (state.woBudget?.wos || []).find(w => w.trade_category === tradeCategory);
+      if (wbWo) wbWo.materials_budget = newVal;
+      updateModalTotalsLive(tradeCategory);
+      refreshBudgetSummary();
+    };
+    inp.addEventListener('blur', save);
+    inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); inp.blur(); } });
+  });
+
+  // JG supplies materials checkbox — toggle materials_supplier between 'sub' and 'jg'
+  const jgSuppliesCheckbox = $('#wobx_jg_supplies');
+  if (jgSuppliesCheckbox) {
+    jgSuppliesCheckbox.addEventListener('change', async () => {
+      const tradeCategory = jgSuppliesCheckbox.dataset.trade;
+      const newSupplier = jgSuppliesCheckbox.checked ? 'jg' : 'sub';
+      jgSuppliesCheckbox.disabled = true;
+      try {
+        await upsertWoBuilderRow(tradeCategory, { materials_supplier: newSupplier });
+      } catch (e) {
+        toast('Save failed: ' + (e?.message || e), true);
+        jgSuppliesCheckbox.checked = !jgSuppliesCheckbox.checked;
+        jgSuppliesCheckbox.disabled = false;
+        return;
+      }
+      jgSuppliesCheckbox.disabled = false;
+      const wbWo = (state.woBudget?.wos || []).find(w => w.trade_category === tradeCategory);
+      if (wbWo) wbWo.materials_supplier = newSupplier;
+      // Re-render the modal so the materials budget field appears/disappears
+      const tradeLabel = MERGED_TRADE_GROUPS[tradeCategory]?.label || tradeCategory;
+      refreshBudgetSummary();
+      closeWoDetailModal();
+      renderTabContent();
+      setTimeout(() => openWoDetailModal(tradeCategory, tradeLabel), 50);
+    });
+  }
 }
 
 // Recompute Planned Budget / Profit / Margin in the trade-totals strip
@@ -10349,7 +10516,10 @@ function wireWoDetailModal(tradeKey) {
 function updateModalTotalsLive(tradeCategory) {
   // Read budget from the single trade-level input in the totals strip
   const budgetInput = document.querySelector('.wobx-trade-budget-input-modal');
-  const totalBudget = budgetInput ? (parseFloat(budgetInput.value) || 0) : 0;
+  const matBudgetInput = document.querySelector('.wobx-trade-mat-budget-input-modal');
+  const tradeBudget = budgetInput ? (parseFloat(budgetInput.value) || 0) : 0;
+  const matBudget = matBudgetInput ? (parseFloat(matBudgetInput.value) || 0) : 0;
+  const totalBudget = tradeBudget + matBudget;
 
   // Read revenue from the strip (cheaper than recomputing from rows)
   const revenueEl = document.querySelector('.wobx-trade-totals .wobx-trade-total:first-child .wobx-trade-total-value');
@@ -10412,10 +10582,20 @@ async function createNewPhasePrompt() {
 }
 
 // Build scope text for a converted WO from the trade's items + materials + labor
-function buildConvertedWoScope(tradeKey, tradeLabel, items, materials, labor, equipment) {
+function buildConvertedWoScope(tradeKey, tradeLabel, items, materials, labor, equipment, wo) {
+  const jgSupplies = wo?.materials_supplier === 'jg';
   const lines = [];
   lines.push(`Trade: ${tradeLabel}`);
   lines.push('');
+  if (jgSupplies) {
+    lines.push('** MATERIALS SUPPLIED BY JG RESTORATION **');
+    lines.push('Your scope covers labor only. JG will provide all materials at the jobsite.');
+    lines.push('');
+  } else {
+    lines.push('** SUB SUPPLIES MATERIALS **');
+    lines.push('Your bid covers labor AND materials.');
+    lines.push('');
+  }
   if (items.length) {
     lines.push('SCOPE OF WORK (from Xactimate estimate):');
     items.forEach(it => {
@@ -10527,13 +10707,13 @@ async function convertTradeToWo(tradeKey) {
 
   // Compute totals using budget overrides where set, auto-target where not
   const revenue = sumField(items, 'line_total');
-  // Total cost = trade-level budget (defaults to 50% of revenue if unset)
+  // WO total = trade_budget (what we pay the assignee). Materials budget (when JG supplies) goes to a vendor, not this WO.
   const totalCost = (wbWo.trade_budget != null)
     ? Number(wbWo.trade_budget)
     : Number((revenue * 0.5).toFixed(2));
 
   const tradeLabel = MERGED_TRADE_GROUPS[tradeKey]?.label || tradeKey;
-  const scopeText = buildConvertedWoScope(tradeKey, tradeLabel, items, materials, labor, equipment);
+  const scopeText = buildConvertedWoScope(tradeKey, tradeLabel, items, materials, labor, equipment, wbWo);
 
   // Get assignee details for contact info on the WO
   let assigneeName = '';
@@ -10744,7 +10924,7 @@ function renderWoBuilderSection(budget) {
   // Build trade rollup first (so KPIs use budget-aware values)
   const tradeRollup = computeTradeRollup(budget);
   const totalRevenue = tradeRollup.reduce((s, t) => s + t.revenue, 0);
-  const totalBudget = tradeRollup.reduce((s, t) => s + t.budget, 0);
+  const totalBudget = tradeRollup.reduce((s, t) => s + t.totalCost, 0);
   const profit = totalRevenue - totalBudget;
   const margin = totalRevenue > 0 ? (profit / totalRevenue * 100) : 0;
   const marginHealth = margin >= 50 ? 'green' : margin >= 30 ? 'yellow' : 'red';
@@ -10836,6 +11016,7 @@ function renderWoBuilderSection(budget) {
                            data-trade="${esc(t.category)}"
                            value="${t.budget.toFixed(2)}" step="1" min="0"
                            ${isLocked ? 'disabled' : ''}>
+                    ${t.jgSupplies ? `<div class="wobx-trade-mat-line">+ ${usdCompact(t.materialsBudget)} mat (JG)</div>` : ''}
                   </td>
                   <td class="r" style="color:${t.profit >= 0 ? 'var(--green)' : 'var(--red)'};">${usdCompact(t.profit)}</td>
                   <td class="r"><span class="wobx-margin-pill wobx-margin-${cls}">${ico} ${m.toFixed(0)}%</span></td>
@@ -10951,6 +11132,7 @@ function computeTradeRollup(budget) {
   return Object.values(groups).map(g => {
     const revenue = sumField(g.items, 'line_total');
     const hours = sumField(g.labor, 'hours');
+    const xactMaterialsTotal = sumField(g.materials, 'total');
 
     // Trade-level budget lives on wo_builder_work_orders.trade_budget.
     // Defaults to 50% of revenue when unset.
@@ -10959,7 +11141,14 @@ function computeTradeRollup(budget) {
       ? Number(wbWo.trade_budget)
       : Number((revenue * 0.5).toFixed(2));
 
-    const profit = revenue - tradeBudget;
+    // If JG supplies materials, add a separate materials cost to the trade
+    const jgSupplies = wbWo?.materials_supplier === 'jg';
+    const materialsBudget = jgSupplies
+      ? ((wbWo?.materials_budget != null) ? Number(wbWo.materials_budget) : Number(xactMaterialsTotal.toFixed(2)))
+      : 0;
+
+    const totalCost = tradeBudget + materialsBudget;
+    const profit = revenue - totalCost;
 
     return {
       category: g.category,
@@ -10968,6 +11157,9 @@ function computeTradeRollup(budget) {
       itemCount: g.items.length,
       revenue,
       budget: tradeBudget,
+      materialsBudget,
+      totalCost,
+      jgSupplies,
       budgetIsOverride: wbWo?.trade_budget != null,
       profit,
       hours,
