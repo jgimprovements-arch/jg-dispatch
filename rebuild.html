@@ -2433,6 +2433,11 @@
     justify-content: space-between;
     align-items: center;
   }
+  .wobx-trades-controls {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
   .wobx-trades-hint {
     font-size: 11px;
     font-weight: 600;
@@ -2440,8 +2445,56 @@
     text-transform: none;
     letter-spacing: 0;
   }
-  .wobx-trade-row { cursor: pointer; }
+  .wobx-reset-merges {
+    background: var(--bg);
+    color: var(--navy);
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: 4px 11px;
+    font-size: 11px;
+    font-weight: 700;
+    cursor: pointer;
+    font-family: inherit;
+    text-transform: none;
+    letter-spacing: 0;
+  }
+  .wobx-reset-merges:hover {
+    background: var(--orange);
+    color: #fff;
+    border-color: var(--orange);
+  }
+  .wobx-trade-row {
+    cursor: pointer;
+    transition: background .12s, box-shadow .12s;
+  }
   .wobx-trade-row:hover { background: rgba(232,93,4,.05) !important; }
+  .wobx-trade-row.wobx-dragging {
+    opacity: .4;
+    cursor: grabbing;
+  }
+  .wobx-trade-row.wobx-drop-target {
+    background: rgba(232,93,4,.15) !important;
+    box-shadow: inset 0 0 0 2px var(--orange);
+  }
+  .wobx-trade-row.wobx-drop-target td:first-child {
+    position: relative;
+  }
+  .wobx-trade-row.wobx-drop-target td:first-child::before {
+    content: "⬇ Drop to merge";
+    position: absolute;
+    top: -8px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--orange);
+    color: #fff;
+    font-size: 9px;
+    font-weight: 800;
+    padding: 2px 8px;
+    border-radius: 999px;
+    white-space: nowrap;
+    text-transform: uppercase;
+    letter-spacing: .3px;
+  }
   .wobx-row-hint {
     font-size: 10px;
     color: var(--muted);
@@ -3881,6 +3934,7 @@ const state = {
   woBudgetLoading: false,
   woBudgetParsing: false,
   woBudgetProgress: { stage: '', pct: 0 },
+  tradeMerges: {},        // { sourceTradeKey: targetTradeKey } — user-driven merges
   relationships: [],
   relSheetOpen: false,
   relEditingId: null,
@@ -4824,8 +4878,15 @@ async function loadPhases() {
 }
 
 async function loadWoBudget() {
-  if (!sb || !state.activeProjectId) { state.woBudget = null; return; }
+  if (!sb || !state.activeProjectId) { state.woBudget = null; state.tradeMerges = {}; return; }
   state.woBudgetLoading = true;
+
+  // Load user-defined trade merges for this project (independent of upload)
+  const { data: merges } = await sb.from('wo_builder_trade_merges')
+    .select('source_trade, target_trade')
+    .eq('project_id', state.activeProjectId);
+  state.tradeMerges = {};
+  (merges || []).forEach(m => { state.tradeMerges[m.source_trade] = m.target_trade; });
 
   // Get the current upload (if any)
   const { data: upload } = await sb.from('wo_builder_uploads')
@@ -10196,7 +10257,12 @@ function renderWoBuilderSection(budget) {
       <div class="wobx-trades">
         <div class="wobx-trades-title">
           <span>Work Orders by Trade</span>
-          <span class="wobx-trades-hint">Click any row for line-item detail</span>
+          <span class="wobx-trades-controls">
+            ${Object.keys(state.tradeMerges || {}).length ? `
+              <button class="wobx-reset-merges" id="wobx_reset_merges">↩ Reset Merges (${Object.keys(state.tradeMerges).length})</button>
+            ` : ''}
+            <span class="wobx-trades-hint">Click row for detail · Drag row onto another to merge</span>
+          </span>
         </div>
         <table class="wobx-trade-table">
           <thead>
@@ -10222,8 +10288,8 @@ function renderWoBuilderSection(budget) {
                 `<option value="${p.id}" ${t.suggestedPhaseId === p.id ? 'selected' : ''}>${esc(p.phase_name)}</option>`
               ).join('');
               return `
-                <tr class="wobx-trade-row" data-trade="${esc(t.category)}" data-trade-label="${esc(t.label)}">
-                  <td><b>${esc(t.label)}</b><div class="wobx-row-hint">${t.itemCount} items · click for detail</div></td>
+                <tr class="wobx-trade-row" draggable="true" data-trade="${esc(t.category)}" data-trade-label="${esc(t.label)}">
+                  <td><b>${esc(t.label)}</b><div class="wobx-row-hint">${t.itemCount} items · click for detail · drag to merge</div></td>
                   <td class="r">${t.hours ? t.hours.toFixed(1) : '—'}</td>
                   <td class="r">${usdCompact(t.revenue)}</td>
                   <td class="r">${usdCompact(t.material)}</td>
@@ -10288,10 +10354,30 @@ const MERGED_TRADE_GROUPS = {
 
 // Reverse lookup: raw category → merged group key
 function mergedGroupFor(rawCategory) {
-  for (const [groupKey, group] of Object.entries(MERGED_TRADE_GROUPS)) {
-    if (group.categories.includes(rawCategory)) return groupKey;
+  // Step 1: find the default merged group from MERGED_TRADE_GROUPS
+  let groupKey = 'general';
+  for (const [k, group] of Object.entries(MERGED_TRADE_GROUPS)) {
+    if (group.categories.includes(rawCategory)) { groupKey = k; break; }
   }
-  return 'general';
+  // Step 2: follow any user-defined merge chain (with safety cap)
+  return resolveTradeMerge(groupKey);
+}
+
+// Walk the user-merge chain — if A→B→C, A resolves to C
+function resolveTradeMerge(tradeKey) {
+  const merges = state.tradeMerges || {};
+  let current = tradeKey;
+  let hops = 0;
+  while (merges[current] && hops < 10) {
+    current = merges[current];
+    hops++;
+  }
+  return current;
+}
+
+// Get a display label for a trade key — uses MERGED_TRADE_GROUPS if known
+function tradeLabelForKey(key) {
+  return MERGED_TRADE_GROUPS[key]?.label || tradeLabelFor(key);
 }
 
 function computeTradeRollup(budget) {
@@ -10593,11 +10679,55 @@ function wireWoBuilderControls() {
     });
   });
 
-  // Click trade row → open detail popup
+  // Click trade row → open detail popup (skip if click was on a select/button or row was just dragged)
   document.querySelectorAll('.wobx-trade-row').forEach(row => {
     row.addEventListener('click', (e) => {
       if (e.target.closest('select, button')) return;
+      if (row.dataset.justDragged === '1') {
+        row.dataset.justDragged = '0';
+        return;
+      }
       openWoDetailModal(row.dataset.trade, row.dataset.tradeLabel);
+    });
+
+    // Drag handlers
+    row.addEventListener('dragstart', (e) => {
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', JSON.stringify({
+        trade: row.dataset.trade,
+        label: row.dataset.tradeLabel,
+      }));
+      row.classList.add('wobx-dragging');
+      row.dataset.justDragged = '1';
+    });
+    row.addEventListener('dragend', () => {
+      row.classList.remove('wobx-dragging');
+      document.querySelectorAll('.wobx-trade-row').forEach(r => r.classList.remove('wobx-drop-target'));
+    });
+    row.addEventListener('dragover', (e) => {
+      const dragging = document.querySelector('.wobx-trade-row.wobx-dragging');
+      if (!dragging || dragging === row) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      row.classList.add('wobx-drop-target');
+    });
+    row.addEventListener('dragleave', () => {
+      row.classList.remove('wobx-drop-target');
+    });
+    row.addEventListener('drop', async (e) => {
+      e.preventDefault();
+      row.classList.remove('wobx-drop-target');
+      let payload;
+      try { payload = JSON.parse(e.dataTransfer.getData('text/plain') || '{}'); } catch { return; }
+      const sourceKey = payload.trade;
+      const sourceLabel = payload.label;
+      const targetKey = row.dataset.trade;
+      const targetLabel = row.dataset.tradeLabel;
+      if (!sourceKey || sourceKey === targetKey) return;
+      // Confirm
+      const ok = confirm(`Merge "${sourceLabel}" into "${targetLabel}"?\n\nAll items, materials, labor, and equipment from "${sourceLabel}" will roll up under "${targetLabel}". You can undo with "Reset Merges".`);
+      if (!ok) return;
+      await applyTradeMerge(sourceKey, targetKey, sourceLabel, targetLabel);
     });
   });
 
@@ -10608,6 +10738,56 @@ function wireWoBuilderControls() {
       openWoDetailModal('__unassigned__', 'Unassigned');
     });
   }
+
+  // Reset all trade merges for this project
+  const resetBtn = $('#wobx_reset_merges');
+  if (resetBtn) {
+    resetBtn.addEventListener('click', async () => {
+      const count = Object.keys(state.tradeMerges || {}).length;
+      if (!count) return;
+      if (!confirm(`Reset ${count} trade merge${count === 1 ? '' : 's'} back to default groups?`)) return;
+      const { error } = await sb.from('wo_builder_trade_merges')
+        .delete()
+        .eq('project_id', state.activeProjectId);
+      if (error) { toast('Reset failed: ' + error.message, true); return; }
+      state.tradeMerges = {};
+      toast('Trade merges reset');
+      renderTabContent();
+    });
+  }
+}
+
+async function applyTradeMerge(sourceKey, targetKey, sourceLabel, targetLabel) {
+  // Prevent merge cycles (target merges back into source via chain)
+  const merges = { ...state.tradeMerges, [sourceKey]: targetKey };
+  if (wouldCreateCycle(merges)) {
+    toast('Cannot merge — would create a circular merge chain', true);
+    return;
+  }
+  const { error } = await sb.from('wo_builder_trade_merges').upsert({
+    project_id: state.activeProjectId,
+    source_trade: sourceKey,
+    target_trade: targetKey,
+    created_by_email: state.pmEmail,
+  }, { onConflict: 'project_id,source_trade' });
+  if (error) { toast('Merge failed: ' + error.message, true); return; }
+  state.tradeMerges[sourceKey] = targetKey;
+  toast(`Merged ${sourceLabel} → ${targetLabel}`);
+  renderTabContent();
+}
+
+function wouldCreateCycle(merges) {
+  // For each source, walk the chain — if we revisit a node, cycle
+  for (const start of Object.keys(merges)) {
+    let cur = start;
+    const seen = new Set();
+    while (merges[cur]) {
+      if (seen.has(cur)) return true;
+      seen.add(cur);
+      cur = merges[cur];
+    }
+  }
+  return false;
 }
 
 async function runWoBuilderParse(estimateFile, componentsFile) {
