@@ -162,6 +162,130 @@
     font-weight: 600;
   }
 
+  /* ─── Mobile Photo Lightbox ─── */
+  .mlb {
+    display: none;
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,.96);
+    z-index: 100000;
+    flex-direction: column;
+  }
+  .mlb.on { display: flex; }
+  .mlb-top {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 14px;
+    background: rgba(0,0,0,.7);
+    flex-shrink: 0;
+    padding-top: max(12px, env(safe-area-inset-top));
+  }
+  .mlb-btn {
+    background: rgba(255,255,255,.14);
+    color: #fff;
+    border: 0;
+    cursor: pointer;
+    font-size: 15px;
+    min-width: 44px;
+    height: 44px;
+    padding: 0 14px;
+    border-radius: 10px;
+    font-family: inherit;
+    font-weight: 700;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .mlb-btn:active { background: rgba(255,255,255,.28); }
+  .mlb-btn.primary { background: var(--orange, #e85d04); }
+  .mlb-btn.danger:active { background: rgba(214,69,69,.7); }
+  .mlb-caption {
+    flex: 1;
+    color: #fff;
+    font-size: 13px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+  .mlb-name {
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .mlb-counter { font-size: 11px; color: rgba(255,255,255,.6); }
+  .mlb-stage {
+    flex: 1;
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    min-height: 0;
+    touch-action: none;
+  }
+  .mlb-img {
+    max-width: 95%;
+    max-height: 95%;
+    object-fit: contain;
+    user-select: none;
+    -webkit-user-drag: none;
+    transition: transform .15s ease-out;
+  }
+  .mlb-fallback {
+    color: #fff;
+    flex-direction: column;
+    align-items: center;
+    gap: 14px;
+    padding: 40px;
+    text-align: center;
+  }
+  .mlb-fallback-name { font-size: 14px; font-weight: 600; word-break: break-all; max-width: 500px; }
+  .mlb-strip {
+    display: flex;
+    gap: 6px;
+    padding: 10px 12px;
+    overflow-x: auto;
+    background: rgba(0,0,0,.45);
+    flex-shrink: 0;
+    -webkit-overflow-scrolling: touch;
+  }
+  .mlb-strip::-webkit-scrollbar { display: none; }
+  .mlb-thumb {
+    flex-shrink: 0;
+    width: 52px;
+    height: 52px;
+    border-radius: 6px;
+    overflow: hidden;
+    cursor: pointer;
+    border: 2px solid transparent;
+    background: rgba(255,255,255,.06);
+    -webkit-tap-highlight-color: transparent;
+  }
+  .mlb-thumb.active { border-color: var(--orange, #e85d04); }
+  .mlb-thumb img { width: 100%; height: 100%; object-fit: cover; }
+  .mlb-thumb-fb {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    height: 100%;
+    font-size: 20px;
+    color: rgba(255,255,255,.5);
+  }
+  .mlb-bottom {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 12px;
+    background: rgba(0,0,0,.7);
+    flex-shrink: 0;
+    padding-bottom: max(12px, env(safe-area-inset-bottom));
+  }
+
   .doc-card-wrap {
     position: relative;
     margin-bottom: 8px;
@@ -1229,6 +1353,25 @@ function render() {
     });
   });
 
+  // Wire image card clicks → open lightbox (only on images)
+  document.querySelectorAll('[data-lb-doc]').forEach(el => {
+    el.addEventListener('click', (e) => {
+      e.preventDefault();
+      const id = el.dataset.lbDoc;
+      // Collect all image docs in their current display order for swipe navigation
+      const all = state.docs
+        .filter(d => /image/i.test(d.mime_type || '') || /\.(jpe?g|png|gif|webp|heic|heif)$/i.test(d.filename || ''))
+        .map(d => ({
+          docId: d.id,
+          url: d.file_url,
+          name: d.filename || 'photo',
+          category: d.category,
+        }));
+      const idx = all.findIndex(x => x.docId === id);
+      openMobileLightbox(all, idx >= 0 ? idx : 0);
+    });
+  });
+
   // Wire pencil markup buttons on image cards
   document.querySelectorAll('[data-markup-doc]').forEach(btn => {
     btn.addEventListener('click', (e) => {
@@ -1252,6 +1395,235 @@ function render() {
       await deleteDoc(doc);
     });
   });
+}
+
+// ─── Mobile Photo Lightbox ───
+// Renders photos with swipe navigation, action buttons, and a fallback for HEIC.
+function openMobileLightbox(images, startIdx) {
+  if (!images || !images.length) return;
+  let idx = startIdx || 0;
+  let zoom = 1, panX = 0, panY = 0;
+
+  let lb = document.getElementById('mobileLightbox');
+  if (!lb) {
+    lb = document.createElement('div');
+    lb.id = 'mobileLightbox';
+    lb.className = 'mlb';
+    document.body.appendChild(lb);
+  }
+
+  function isHeic(name) { return /\.(heic|heif)$/i.test(name || ''); }
+
+  lb.innerHTML = `
+    <div class="mlb-top">
+      <button class="mlb-btn" data-act="close">✕</button>
+      <div class="mlb-caption">
+        <span class="mlb-name"></span>
+        <span class="mlb-counter"></span>
+      </div>
+    </div>
+    <div class="mlb-stage">
+      <img class="mlb-img" alt="">
+      <div class="mlb-fallback" style="display:none;">
+        <div style="font-size:80px;opacity:.6;">📷</div>
+        <div class="mlb-fallback-name"></div>
+        <div style="color:rgba(255,255,255,.7);font-size:14px;max-width:400px;text-align:center;line-height:1.5;">
+          Preview not available — HEIC format can't be displayed in browser.
+        </div>
+        <button class="mlb-btn primary mlb-fallback-dl">📥 Download</button>
+      </div>
+    </div>
+    <div class="mlb-strip"></div>
+    <div class="mlb-bottom">
+      <button class="mlb-btn" data-act="markup">✏️ Markup</button>
+      <button class="mlb-btn" data-act="download">📥</button>
+      <button class="mlb-btn danger" data-act="delete">🗑</button>
+    </div>
+  `;
+
+  const imgEl = lb.querySelector('.mlb-img');
+  const fallbackEl = lb.querySelector('.mlb-fallback');
+  const fallbackName = lb.querySelector('.mlb-fallback-name');
+  const stageEl = lb.querySelector('.mlb-stage');
+  const strip = lb.querySelector('.mlb-strip');
+  const nameEl = lb.querySelector('.mlb-name');
+  const counterEl = lb.querySelector('.mlb-counter');
+
+  function applyTransform() {
+    imgEl.style.transform = `translate(${panX}px, ${panY}px) scale(${zoom})`;
+  }
+
+  function renderStrip() {
+    if (images.length <= 1) { strip.style.display = 'none'; return; }
+    strip.style.display = 'flex';
+    strip.innerHTML = images.map((im, i) => `
+      <div class="mlb-thumb ${i === idx ? 'active' : ''}" data-i="${i}">
+        ${isHeic(im.name)
+          ? '<div class="mlb-thumb-fb">📷</div>'
+          : `<img src="${im.url.replace('/storage/v1/object/public/', '/storage/v1/render/image/public/')}?width=120&height=120&resize=cover&quality=70" alt="" loading="lazy">`}
+      </div>
+    `).join('');
+    setTimeout(() => {
+      const active = strip.querySelector('.mlb-thumb.active');
+      if (active) active.scrollIntoView({ block: 'nearest', inline: 'center', behavior: 'smooth' });
+    }, 50);
+  }
+
+  function show() {
+    const cur = images[idx];
+    zoom = 1; panX = 0; panY = 0;
+    nameEl.textContent = cur.name + (cur.category ? ' · ' + cur.category : '');
+    counterEl.textContent = `${idx+1} / ${images.length}`;
+    if (isHeic(cur.name)) {
+      imgEl.style.display = 'none';
+      fallbackEl.style.display = 'flex';
+      fallbackName.textContent = cur.name;
+    } else {
+      imgEl.style.display = '';
+      fallbackEl.style.display = 'none';
+      imgEl.src = cur.url;
+      applyTransform();
+    }
+    renderStrip();
+  }
+
+  function nav(d) { idx = (idx + d + images.length) % images.length; show(); }
+  function close() {
+    lb.classList.remove('on');
+    document.removeEventListener('keydown', onKey);
+  }
+  const onKey = e => {
+    if (e.key === 'Escape') close();
+    else if (e.key === 'ArrowLeft') nav(-1);
+    else if (e.key === 'ArrowRight') nav(1);
+  };
+
+  async function doDelete() {
+    const cur = images[idx];
+    if (!cur.docId) return;
+    const doc = state.docs.find(d => d.id === cur.docId);
+    if (!doc) return;
+    if (!confirm(`Delete "${doc.filename}"?\n\nRemoves from platform, storage, and Albi. Cannot be undone.`)) return;
+    try {
+      await deleteDoc(doc);
+      images.splice(idx, 1);
+      if (!images.length) { close(); return; }
+      if (idx >= images.length) idx = images.length - 1;
+      show();
+    } catch (e) { toast('Delete failed: ' + (e.message || e)); }
+  }
+
+  function doDownload() {
+    const cur = images[idx];
+    const a = document.createElement('a');
+    a.href = cur.url;
+    a.download = cur.name;
+    a.target = '_blank';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  }
+
+  async function doMarkup() {
+    const cur = images[idx];
+    if (isHeic(cur.name)) { toast("Can't mark up HEIC images directly"); return; }
+    if (!cur.docId) return;
+    const doc = state.docs.find(d => d.id === cur.docId);
+    if (!doc) return;
+    close();
+    // Reuse the existing markup editor in this file
+    openMarkupEditorWithExistingDoc(doc);
+  }
+
+  // Wire button clicks
+  lb.querySelectorAll('[data-act]').forEach(el => {
+    el.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const a = el.dataset.act;
+      if (a === 'close') close();
+      else if (a === 'markup') doMarkup();
+      else if (a === 'download') doDownload();
+      else if (a === 'delete') doDelete();
+    });
+  });
+  lb.querySelector('.mlb-fallback-dl').addEventListener('click', doDownload);
+
+  // Strip thumbnail clicks
+  strip.addEventListener('click', e => {
+    const t = e.target.closest('.mlb-thumb');
+    if (t) { idx = parseInt(t.dataset.i, 10); show(); }
+  });
+
+  // Swipe / pinch — attached to STAGE so swipes work anywhere
+  let touchStartX = 0, touchStartY = 0, touchStartTime = 0;
+  let pinchDist = 0, pinchZoom = 1;
+  let panStart = null, isPanning = false;
+
+  stageEl.addEventListener('touchstart', e => {
+    if (e.target.closest('.mlb-btn')) return;
+    if (e.touches.length === 2) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX;
+      const dy = e.touches[0].clientY - e.touches[1].clientY;
+      pinchDist = Math.hypot(dx, dy);
+      pinchZoom = zoom;
+      panStart = null; isPanning = false;
+    } else if (e.touches.length === 1) {
+      touchStartX = e.touches[0].clientX;
+      touchStartY = e.touches[0].clientY;
+      touchStartTime = Date.now();
+      isPanning = false;
+      panStart = (zoom > 1) ? { x: touchStartX - panX, y: touchStartY - panY } : null;
+    }
+  }, { passive: true });
+
+  stageEl.addEventListener('touchmove', e => {
+    if (e.touches.length === 2 && pinchDist > 0) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX;
+      const dy = e.touches[0].clientY - e.touches[1].clientY;
+      const dist = Math.hypot(dx, dy);
+      zoom = Math.max(0.5, Math.min(6, pinchZoom * (dist / pinchDist)));
+      applyTransform();
+      e.preventDefault();
+    } else if (e.touches.length === 1 && panStart && zoom > 1) {
+      isPanning = true;
+      panX = e.touches[0].clientX - panStart.x;
+      panY = e.touches[0].clientY - panStart.y;
+      applyTransform();
+      e.preventDefault();
+    }
+  }, { passive: false });
+
+  stageEl.addEventListener('touchend', e => {
+    if (e.changedTouches.length === 1 && zoom <= 1 && !isPanning) {
+      const dx = e.changedTouches[0].clientX - touchStartX;
+      const dy = e.changedTouches[0].clientY - touchStartY;
+      const dt = Date.now() - touchStartTime;
+      if (Math.abs(dx) > 40 && Math.abs(dx) > Math.abs(dy) * 1.2 && dt < 600) {
+        nav(dx < 0 ? 1 : -1);
+      } else if (dy < -80 && Math.abs(dy) > Math.abs(dx) * 1.5) {
+        close();
+      }
+    }
+    pinchDist = 0;
+    panStart = null;
+    isPanning = false;
+  }, { passive: true });
+
+  // Double-tap to toggle zoom
+  let lastTap = 0;
+  imgEl.addEventListener('click', () => {
+    const now = Date.now();
+    if (now - lastTap < 300) {
+      zoom = zoom > 1 ? 1 : 2.2;
+      panX = 0; panY = 0;
+      applyTransform();
+    }
+    lastTap = now;
+  });
+
+  document.addEventListener('keydown', onKey);
+  show();
+  lb.classList.add('on');
 }
 
 async function deleteDoc(doc) {
@@ -1337,13 +1709,21 @@ function docCard(d) {
 
   return `
     <div class="doc-card-wrap">
-      <a href="${esc(d.file_url || '#')}" target="_blank" class="doc-card">
-        <div class="doc-thumb-wrap">${icon}</div>
-        <div class="doc-info">
-          <div class="doc-name">${esc(d.filename || 'Untitled')}</div>
-          <div class="doc-meta"><span class="doc-cat-pill">${esc(d.category || '')}</span>${fmtDate(d.uploaded_at)}${d.file_size_bytes ? ' · ' + fmtBytes(d.file_size_bytes) : ''}</div>
-        </div>
-      </a>
+      ${isImg
+        ? `<a href="#" class="doc-card" data-lb-doc="${d.id}">
+            <div class="doc-thumb-wrap">${icon}</div>
+            <div class="doc-info">
+              <div class="doc-name">${esc(d.filename || 'Untitled')}</div>
+              <div class="doc-meta"><span class="doc-cat-pill">${esc(d.category || '')}</span>${fmtDate(d.uploaded_at)}${d.file_size_bytes ? ' · ' + fmtBytes(d.file_size_bytes) : ''}</div>
+            </div>
+          </a>`
+        : `<a href="${esc(d.file_url || '#')}" target="_blank" class="doc-card">
+            <div class="doc-thumb-wrap">${icon}</div>
+            <div class="doc-info">
+              <div class="doc-name">${esc(d.filename || 'Untitled')}</div>
+              <div class="doc-meta"><span class="doc-cat-pill">${esc(d.category || '')}</span>${fmtDate(d.uploaded_at)}${d.file_size_bytes ? ' · ' + fmtBytes(d.file_size_bytes) : ''}</div>
+            </div>
+          </a>`}
       ${markupBtn}
       ${deleteBtn}
     </div>
