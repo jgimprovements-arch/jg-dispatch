@@ -2611,19 +2611,84 @@
     color: var(--muted);
     font-weight: 600;
   }
-  .wobx-row-action {
-    background: var(--bg);
+  /* Per-item budget input */
+  .wobx-budget-input {
+    width: 80px;
+    text-align: right;
     border: 1px solid var(--line);
-    color: var(--navy);
     border-radius: 5px;
-    padding: 3px 9px;
+    padding: 3px 6px;
     font-size: 11px;
-    font-weight: 700;
-    cursor: pointer;
     font-family: inherit;
+    font-variant-numeric: tabular-nums;
+    background: rgba(245,166,35,.06);
+    color: var(--text);
   }
-  .wobx-row-action:hover { background: var(--orange); color: #fff; border-color: var(--orange); }
-  .wobx-row-action:disabled { opacity: .5; cursor: wait; }
+  .wobx-budget-input:focus {
+    outline: none;
+    border-color: var(--orange);
+    background: #fff;
+  }
+  .wobx-budget-input:disabled { opacity: .5; }
+
+  /* Per-row phase select */
+  .wobx-phase-row-select {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    padding: 3px 6px;
+    font-size: 11px;
+    color: var(--text);
+    font-family: inherit;
+    max-width: 140px;
+  }
+  .wobx-phase-row-select:focus { outline: none; border-color: var(--orange); }
+  .wobx-phase-row-select:disabled { opacity: .5; }
+
+  /* Greyed unassigned rows */
+  .wobx-unassigned-row { background: rgba(245,166,35,.05); }
+  .wobx-unassigned-row td { color: var(--muted); }
+
+  /* Section totals row in tfoot */
+  .wobx-section-totals td {
+    border-bottom: 0 !important;
+    border-top: 1px solid var(--line);
+    padding-top: 8px !important;
+    color: var(--navy);
+  }
+
+  /* Trade-level totals strip at top of modal body */
+  .wobx-trade-totals {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 1px;
+    background: var(--line);
+    border-radius: 8px;
+    overflow: hidden;
+    margin-bottom: 18px;
+  }
+  .wobx-trade-total {
+    background: var(--card);
+    padding: 10px 12px;
+    text-align: center;
+  }
+  .wobx-trade-total-label {
+    font-size: 10px;
+    font-weight: 700;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: .4px;
+    margin-bottom: 4px;
+  }
+  .wobx-trade-total-value {
+    font-size: 15px;
+    font-weight: 800;
+    color: var(--navy);
+    font-variant-numeric: tabular-nums;
+  }
+  .wobx-trade-margin.wobx-margin-green .wobx-trade-total-value { color: var(--green); }
+  .wobx-trade-margin.wobx-margin-yellow .wobx-trade-total-value { color: var(--gold); }
+  .wobx-trade-margin.wobx-margin-red .wobx-trade-total-value { color: var(--red); }
 
   .wobx-modal-foot {
     padding: 12px 20px;
@@ -9589,6 +9654,7 @@ function renderWoDetailModal(tradeKey, tradeLabel, budget) {
         `}
 
         <div class="wobx-modal-body">
+          ${renderTradeTotalsStrip(items, materials, labor, equipment)}
           ${renderDetailSection('Estimate Line Items (Revenue)', 'item', items, isUnassigned, 'revenue')}
           ${renderDetailSection('Materials', 'material', materials, isUnassigned)}
           ${renderDetailSection('Labor', 'labor', labor, isUnassigned)}
@@ -9603,6 +9669,46 @@ function renderWoDetailModal(tradeKey, tradeLabel, budget) {
   `;
 }
 
+function renderTradeTotalsStrip(items, materials, labor, equipment) {
+  const revenue = sumField(items, 'line_total');
+  const budgetTotal = items.reduce((s, r) => {
+    const b = (r.budget_amount != null) ? Number(r.budget_amount) : Number(r.line_total || 0) * 0.5;
+    return s + b;
+  }, 0);
+  const actualCost = sumField(materials, 'total') + sumField(labor, 'total') + sumField(equipment, 'total');
+  const profit = revenue - actualCost;
+  const margin = revenue > 0 ? (profit / revenue * 100) : 0;
+  const cls = margin >= 50 ? 'green' : margin >= 30 ? 'yellow' : 'red';
+  const ico = margin >= 50 ? '🟢' : margin >= 30 ? '🟡' : '🔴';
+  const budgetVsCost = budgetTotal - actualCost;
+  const budgetCls = budgetVsCost >= 0 ? 'green' : 'red';
+
+  return `
+    <div class="wobx-trade-totals">
+      <div class="wobx-trade-total">
+        <div class="wobx-trade-total-label">Revenue</div>
+        <div class="wobx-trade-total-value">${usdCompact(revenue)}</div>
+      </div>
+      <div class="wobx-trade-total">
+        <div class="wobx-trade-total-label">Budget (50% target)</div>
+        <div class="wobx-trade-total-value" id="wobx_budget_total">${usdCompact(budgetTotal)}</div>
+      </div>
+      <div class="wobx-trade-total">
+        <div class="wobx-trade-total-label">Actual Cost</div>
+        <div class="wobx-trade-total-value">${usdCompact(actualCost)}</div>
+      </div>
+      <div class="wobx-trade-total">
+        <div class="wobx-trade-total-label">Budget vs Cost</div>
+        <div class="wobx-trade-total-value" style="color:${budgetVsCost >= 0 ? 'var(--green)' : 'var(--red)'};">${budgetVsCost >= 0 ? '+' : ''}${usdCompact(budgetVsCost)}</div>
+      </div>
+      <div class="wobx-trade-total wobx-trade-margin wobx-margin-${cls}">
+        <div class="wobx-trade-total-label">Margin ${ico}</div>
+        <div class="wobx-trade-total-value">${margin.toFixed(1)}%</div>
+      </div>
+    </div>
+  `;
+}
+
 function renderDetailSection(title, kind, rows, isUnassigned, mode) {
   if (!rows.length) {
     return `
@@ -9612,44 +9718,79 @@ function renderDetailSection(title, kind, rows, isUnassigned, mode) {
     `;
   }
   const sumKey = kind === 'item' ? 'line_total' : 'total';
-  const total = sumField(rows, sumKey);
-  const actionLabel = isUnassigned ? 'Add to WO' : 'Move to Unassigned';
-  const action = isUnassigned ? 'assign' : 'unassign';
+  const totalRev = sumField(rows, sumKey);
+  // Default budget = 50% of revenue for items, or actual cost for materials/labor/equipment
+  function budgetFor(r) {
+    if (r.budget_amount != null) return Number(r.budget_amount);
+    if (kind === 'item') return Number(r.line_total || 0) * 0.5;
+    return Number(r.total || 0);  // for material/labor/equipment, default budget = actual cost
+  }
+  const totalBudget = rows.reduce((s, r) => s + budgetFor(r), 0);
+
+  // Build phase options string (reused per row)
+  const phaseOpts = (state.phases || []).map(p =>
+    `<option value="${p.id}">${esc(p.phase_name)}</option>`
+  ).join('');
 
   return `
     <div class="wobx-detail-sec">
-      <div class="wobx-detail-sec-head">${esc(title)} <span class="wobx-detail-total">${usdCompact(total)}</span></div>
+      <div class="wobx-detail-sec-head">${esc(title)}</div>
       <table class="wobx-detail-table">
         <thead>
           <tr>
             <th>Description</th>
             <th class="r">Qty</th>
             <th class="r">Unit</th>
-            <th class="r">${kind === 'item' ? 'Line Total' : 'Cost'}</th>
-            <th>Action</th>
+            <th class="r">${kind === 'item' ? 'Revenue' : 'Cost'}</th>
+            ${kind === 'item' ? '<th class="r">Budget</th>' : ''}
+            <th>Phase</th>
           </tr>
         </thead>
         <tbody>
           ${rows.map(r => {
             const desc = kind === 'item'
-              ? (r.description + (r.room ? ` <span class="wobx-room">(${esc(r.room)})</span>` : ''))
+              ? (esc(r.description) + (r.room ? ` <span class="wobx-room">(${esc(r.room)})</span>` : ''))
               : `${esc(r.code || '')} — ${esc(r.description || '')}`;
             const qty = kind === 'labor' ? (r.hours || 0) : (r.quantity || 0);
             const unit = kind === 'labor' ? 'HR' : (r.unit || '');
-            const total = kind === 'item' ? r.line_total : r.total;
+            const lineAmount = kind === 'item' ? r.line_total : r.total;
+            const currentPhase = r.assigned_phase_id || '';
+            const isUnassignedRow = !!r.is_unassigned;
+            const budget = budgetFor(r);
             return `
-              <tr>
+              <tr class="${isUnassignedRow ? 'wobx-unassigned-row' : ''}">
                 <td>${desc}</td>
                 <td class="r">${qty}</td>
                 <td class="r">${esc(unit)}</td>
-                <td class="r">${usdCompact(total)}</td>
+                <td class="r">${usdCompact(lineAmount)}</td>
+                ${kind === 'item' ? `
+                  <td class="r">
+                    <input type="number" class="wobx-budget-input"
+                           data-kind="${kind}" data-id="${esc(r.id)}"
+                           value="${budget.toFixed(2)}" step="1" min="0">
+                  </td>
+                ` : ''}
                 <td>
-                  <button class="wobx-row-action" data-kind="${kind}" data-id="${esc(r.id)}" data-action="${action}">${actionLabel}</button>
+                  <select class="wobx-phase-row-select" data-kind="${kind}" data-id="${esc(r.id)}">
+                    <option value="" ${!currentPhase && !isUnassignedRow ? 'selected' : ''}>— Default —</option>
+                    ${(state.phases || []).map(p =>
+                      `<option value="${p.id}" ${currentPhase === p.id ? 'selected' : ''}>${esc(p.phase_name)}</option>`
+                    ).join('')}
+                    <option value="__unassigned__" ${isUnassignedRow ? 'selected' : ''}>📦 Unassigned</option>
+                  </select>
                 </td>
               </tr>
             `;
           }).join('')}
         </tbody>
+        <tfoot>
+          <tr class="wobx-section-totals">
+            <td colspan="${kind === 'item' ? 3 : 3}"><b>Section Total</b></td>
+            <td class="r"><b>${usdCompact(totalRev)}</b></td>
+            ${kind === 'item' ? `<td class="r"><b>${usdCompact(totalBudget)}</b></td>` : ''}
+            <td></td>
+          </tr>
+        </tfoot>
       </table>
     </div>
   `;
@@ -9707,42 +9848,84 @@ function wireWoDetailModal(tradeKey) {
     renderTabContent();
   });
 
-  // Action buttons (assign/unassign items)
-  document.querySelectorAll('.wobx-row-action').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      const kind = btn.dataset.kind;
-      const id = btn.dataset.id;
-      const action = btn.dataset.action;
-      const willUnassign = action === 'unassign';
-      const tableName = {
-        item: 'wo_builder_estimate_items',
-        material: 'wo_builder_component_materials',
-        labor: 'wo_builder_component_labor',
-        equipment: 'wo_builder_component_equipment',
-      }[kind];
+  const tableForKind = {
+    item: 'wo_builder_estimate_items',
+    material: 'wo_builder_component_materials',
+    labor: 'wo_builder_component_labor',
+    equipment: 'wo_builder_component_equipment',
+  };
+
+  // Phase dropdown on each row — '' = default, '__unassigned__' = bucket, otherwise phase UUID
+  document.querySelectorAll('.wobx-phase-row-select').forEach(sel => {
+    sel.addEventListener('change', async () => {
+      const kind = sel.dataset.kind;
+      const id = sel.dataset.id;
+      const val = sel.value;
+      const tableName = tableForKind[kind];
       if (!tableName) return;
-      btn.disabled = true;
-      btn.textContent = '…';
-      const { error } = await sb.from(tableName)
-        .update({ is_unassigned: willUnassign })
-        .eq('id', id);
+      const update = {};
+      if (val === '__unassigned__') {
+        update.is_unassigned = true;
+        update.assigned_phase_id = null;
+      } else if (val === '') {
+        update.is_unassigned = false;
+        update.assigned_phase_id = null;
+      } else {
+        update.is_unassigned = false;
+        update.assigned_phase_id = val;
+      }
+      sel.disabled = true;
+      const { error } = await sb.from(tableName).update(update).eq('id', id);
+      sel.disabled = false;
       if (error) {
         toast('Save failed: ' + error.message, true);
-        btn.disabled = false;
-        btn.textContent = willUnassign ? 'Move to Unassigned' : 'Add to WO';
         return;
       }
       await loadWoBudget();
-      // Refresh just the modal contents (don't close, user may want to move more)
-      closeWoDetailModal();
       const tradeLabel = MERGED_TRADE_GROUPS[tradeKey]?.label || (tradeKey === '__unassigned__' ? 'Unassigned' : tradeKey);
-      openWoDetailModal(tradeKey, tradeLabel);
-      // Also re-render the underlying table so totals update behind the modal
+      closeWoDetailModal();
       renderTabContent();
-      // Re-open after re-render (renderTabContent removed our modal node)
       setTimeout(() => openWoDetailModal(tradeKey, tradeLabel), 50);
     });
   });
+
+  // Budget input on estimate items — debounced save on blur or Enter
+  document.querySelectorAll('.wobx-budget-input').forEach(inp => {
+    let originalValue = inp.value;
+    const save = async () => {
+      if (inp.value === originalValue) return;
+      const id = inp.dataset.id;
+      const newVal = parseFloat(inp.value);
+      if (isNaN(newVal) || newVal < 0) {
+        inp.value = originalValue;
+        return;
+      }
+      inp.disabled = true;
+      const { error } = await sb.from('wo_builder_estimate_items')
+        .update({ budget_amount: newVal })
+        .eq('id', id);
+      inp.disabled = false;
+      if (error) {
+        toast('Save failed: ' + error.message, true);
+        inp.value = originalValue;
+        return;
+      }
+      originalValue = inp.value;
+      // Refresh just the budget-total in the strip without full modal re-render
+      updateModalBudgetTotal();
+    };
+    inp.addEventListener('blur', save);
+    inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); inp.blur(); } });
+  });
+}
+
+// Recompute the budget total in the trade-totals strip live as user edits
+function updateModalBudgetTotal() {
+  const inputs = document.querySelectorAll('.wobx-budget-input');
+  let total = 0;
+  inputs.forEach(i => { total += parseFloat(i.value) || 0; });
+  const target = document.getElementById('wobx_budget_total');
+  if (target) target.textContent = usdCompact(total);
 }
 
 function closeWoDetailModal() {
