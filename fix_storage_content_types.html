@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>JG · Fix Storage Content-Types</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 900px; margin: 0 auto; padding: 20px; color: #1a2138; }
+    h1 { color: #1a2138; }
+    .row { padding: 8px 12px; border-bottom: 1px solid #eee; display: grid; grid-template-columns: 1fr 100px 100px 120px; gap: 12px; align-items: center; font-size: 13px; }
+    .row.head { font-weight: 700; background: #f6f7fb; border-radius: 8px; padding: 10px 12px; }
+    .row.skipped { color: #888; }
+    .row.fixed { background: rgba(46,160,67,.08); }
+    .row.failed { background: rgba(214,69,69,.08); color: #d64545; }
+    .name { font-family: ui-monospace, monospace; font-size: 12px; word-break: break-all; }
+    .badge { padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 700; display: inline-block; }
+    .badge.octet { background: rgba(214,69,69,.15); color: #d64545; }
+    .badge.ok { background: rgba(46,160,67,.15); color: #2ea043; }
+    button { background: #e85d04; color: white; border: 0; padding: 10px 20px; border-radius: 8px; font-weight: 700; cursor: pointer; font-size: 14px; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .summary { background: #f6f7fb; padding: 12px 16px; border-radius: 8px; margin: 12px 0; }
+    .summary b { color: #1a2138; }
+  </style>
+</head>
+<body>
+  <h1>🔧 Fix Storage Content-Types</h1>
+  <p>Scans <code>rebuild-documents</code> for files with <code>application/octet-stream</code> content-type and re-stamps them with the correct MIME based on filename. This fixes images that were forcing downloads instead of displaying inline.</p>
+
+  <div class="summary" id="status">Click <b>Scan</b> to start.</div>
+
+  <button id="btn_scan">Scan</button>
+  <button id="btn_fix" disabled>Fix all broken files</button>
+
+  <div id="results" style="margin-top:18px;"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script>
+    const SB_URL = 'https://nuykvchgecpiuikoerze.supabase.co';
+    const SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im51eWt2Y2hnZWNwaXVpa29lcnplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDIwODI4NjYsImV4cCI6MjA1NzY1ODg2Nn0.iJSXkHZxBQbcc7-vAeZbVN3oOzNymeBpsXq6vmHcaUI';
+    const sb = supabase.createClient(SB_URL, SB_KEY);
+
+    function mimeFromFilename(filename) {
+      const ext = (filename || '').toLowerCase().split('.').pop();
+      const map = {
+        jpg:'image/jpeg', jpeg:'image/jpeg', png:'image/png', gif:'image/gif', webp:'image/webp', svg:'image/svg+xml',
+        bmp:'image/bmp', tif:'image/tiff', tiff:'image/tiff', heic:'image/heic', heif:'image/heif',
+        pdf:'application/pdf',
+        mp4:'video/mp4', mov:'video/quicktime', webm:'video/webm',
+        mp3:'audio/mpeg', m4a:'audio/mp4', wav:'audio/wav',
+        txt:'text/plain', csv:'text/csv',
+        doc:'application/msword', docx:'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        xls:'application/vnd.ms-excel', xlsx:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        ppt:'application/vnd.ms-powerpoint', pptx:'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+      };
+      return map[ext] || null;
+    }
+
+    let allDocs = [];
+    let toFix = [];
+
+    document.getElementById('btn_scan').addEventListener('click', async () => {
+      const btn = document.getElementById('btn_scan');
+      btn.disabled = true;
+      btn.textContent = 'Scanning…';
+      document.getElementById('results').innerHTML = '';
+      document.getElementById('status').innerHTML = 'Reading documents table…';
+
+      const { data: docs, error } = await sb.from('documents').select('id, filename, storage_path, file_url, mime_type');
+      if (error) {
+        document.getElementById('status').innerHTML = '<span style="color:red;">DB error: ' + error.message + '</span>';
+        btn.disabled = false; btn.textContent = 'Scan';
+        return;
+      }
+      allDocs = docs || [];
+      document.getElementById('status').innerHTML = `Found <b>${allDocs.length}</b> document rows. Probing storage content-types…`;
+
+      // For each doc, HEAD the public URL to check the current content-type
+      toFix = [];
+      let probed = 0;
+      const results = [];
+      for (const d of allDocs) {
+        probed++;
+        if (probed % 25 === 0) {
+          document.getElementById('status').innerHTML = `Probed ${probed} / ${allDocs.length}…`;
+        }
+        if (!d.file_url) { results.push({ doc: d, status: 'skip', reason: 'no file_url' }); continue; }
+        let currentType = '';
+        try {
+          const r = await fetch(d.file_url, { method: 'HEAD' });
+          currentType = r.headers.get('content-type') || '';
+        } catch (e) { results.push({ doc: d, status: 'skip', reason: 'HEAD failed' }); continue; }
+        const proposed = mimeFromFilename(d.filename);
+        const isOctet = currentType.startsWith('application/octet-stream');
+        if (isOctet && proposed) {
+          toFix.push({ doc: d, currentType, proposed });
+          results.push({ doc: d, status: 'broken', currentType, proposed });
+        } else {
+          results.push({ doc: d, status: 'ok', currentType });
+        }
+      }
+      renderResults(results);
+      document.getElementById('status').innerHTML = `Scan complete: <b>${toFix.length}</b> files need fixing out of <b>${allDocs.length}</b>.`;
+      btn.disabled = false; btn.textContent = 'Re-scan';
+      document.getElementById('btn_fix').disabled = toFix.length === 0;
+    });
+
+    function renderResults(results) {
+      const broken = results.filter(r => r.status === 'broken');
+      const ok = results.filter(r => r.status === 'ok');
+      const skip = results.filter(r => r.status === 'skip');
+      const html = `
+        <div class="row head"><div>Filename</div><div>Current</div><div>Fix to</div><div>Status</div></div>
+        ${broken.map(r => `
+          <div class="row" data-doc-id="${r.doc.id}">
+            <div class="name">${r.doc.filename}</div>
+            <div><span class="badge octet">octet</span></div>
+            <div><span class="badge ok">${r.proposed}</span></div>
+            <div class="status-cell">⚠️ Broken</div>
+          </div>
+        `).join('')}
+        ${ok.length ? `<div style="padding:14px 0;color:#888;">✓ ${ok.length} files already have correct content-types</div>` : ''}
+        ${skip.length ? `<div style="color:#888;">${skip.length} skipped (no URL or HEAD failed)</div>` : ''}
+      `;
+      document.getElementById('results').innerHTML = html;
+    }
+
+    document.getElementById('btn_fix').addEventListener('click', async () => {
+      const btn = document.getElementById('btn_fix');
+      btn.disabled = true;
+      btn.textContent = 'Fixing…';
+      let fixed = 0, failed = 0;
+      for (const item of toFix) {
+        const row = document.querySelector(`[data-doc-id="${item.doc.id}"] .status-cell`);
+        if (row) row.textContent = '⏳ Fixing…';
+        try {
+          // Download the existing file, re-upload with correct content-type via .update()
+          const r = await fetch(item.doc.file_url);
+          if (!r.ok) throw new Error('Fetch failed: ' + r.status);
+          const blob = await r.blob();
+          const newBlob = new Blob([blob], { type: item.proposed });
+          const { error } = await sb.storage.from('rebuild-documents').update(item.doc.storage_path, newBlob, {
+            contentType: item.proposed,
+            upsert: true,
+          });
+          if (error) throw new Error(error.message);
+          // Also update the mime_type in the documents row for consistency
+          await sb.from('documents').update({ mime_type: item.proposed }).eq('id', item.doc.id);
+          if (row) { row.textContent = '✓ Fixed'; row.parentElement.classList.add('fixed'); }
+          fixed++;
+        } catch (e) {
+          if (row) { row.textContent = '✗ ' + (e.message || e).slice(0, 40); row.parentElement.classList.add('failed'); }
+          failed++;
+        }
+        document.getElementById('status').innerHTML = `Fixed: <b>${fixed}</b> · Failed: <b>${failed}</b> · Remaining: <b>${toFix.length - fixed - failed}</b>`;
+      }
+      btn.disabled = false;
+      btn.textContent = `Done — ${fixed} fixed, ${failed} failed`;
+    });
+  </script>
+</body>
+</html>

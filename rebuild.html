@@ -6752,6 +6752,25 @@ async function renderPdfThumbnail(el) {
   }
 }
 
+// Best-effort MIME type from filename — iOS often gives empty file.type, especially for HEIC.
+// Returns image/jpeg, image/heic, application/pdf, etc.
+function mimeFromFilename(filename) {
+  const ext = (filename || '').toLowerCase().split('.').pop();
+  const map = {
+    jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif',
+    webp: 'image/webp', svg: 'image/svg+xml', bmp: 'image/bmp', tif: 'image/tiff', tiff: 'image/tiff',
+    heic: 'image/heic', heif: 'image/heif',
+    pdf: 'application/pdf',
+    mp4: 'video/mp4', mov: 'video/quicktime', webm: 'video/webm',
+    mp3: 'audio/mpeg', m4a: 'audio/mp4', wav: 'audio/wav',
+    txt: 'text/plain', csv: 'text/csv',
+    doc: 'application/msword', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    xls: 'application/vnd.ms-excel', xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    ppt: 'application/vnd.ms-powerpoint', pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  };
+  return map[ext] || 'application/octet-stream';
+}
+
 // Convert HEIC files to JPEG before upload so browsers can display thumbnails.
 // Returns the original File if not HEIC, or a new File with .jpg extension if converted.
 // Falls back to the original File if conversion fails (user gets unviewable thumbnail rather than upload failure).
@@ -6759,19 +6778,26 @@ async function convertHeicIfNeeded(file) {
   const name = (file.name || '').toLowerCase();
   const type = (file.type || '').toLowerCase();
   const isHeic = name.endsWith('.heic') || name.endsWith('.heif')
-               || type === 'image/heic' || type === 'image/heif';
+               || type === 'image/heic' || type === 'image/heif'
+               || type === 'image/heic-sequence' || type === 'image/heif-sequence';
   if (!isHeic) return file;
 
   try {
     const heic2any = await loadHeic2Any();
+    if (typeof heic2any !== 'function') {
+      throw new Error('heic2any did not load — check network');
+    }
     const blob = await heic2any({ blob: file, toType: 'image/jpeg', quality: 0.85 });
-    // heic2any may return a single Blob or an array (for multi-image HEIC); take first
     const jpgBlob = Array.isArray(blob) ? blob[0] : blob;
+    if (!jpgBlob || !jpgBlob.size) {
+      throw new Error('Conversion produced empty blob');
+    }
     const newName = file.name.replace(/\.(heic|heif)$/i, '.jpg');
     return new File([jpgBlob], newName, { type: 'image/jpeg', lastModified: file.lastModified });
   } catch (err) {
-    console.warn('HEIC conversion failed, uploading original:', err);
-    return file;
+    console.error('HEIC conversion FAILED for', file.name, err);
+    // Throw so the queue item shows the error instead of silently uploading an unviewable HEIC
+    throw new Error('HEIC conversion failed: ' + (err.message || err));
   }
 }
 
@@ -7076,8 +7102,14 @@ async function uploadDocument(file, category, skipPush) {
   const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
   const path = `projects/${state.activeProjectId}/${Date.now()}-${safeName}`;
 
+  // Force a real MIME type — iOS often gives empty file.type, which causes the browser
+  // to store octet-stream and serve as a download instead of displaying inline.
+  const detectedType = (file.type && file.type !== 'application/octet-stream')
+    ? file.type
+    : mimeFromFilename(file.name);
+
   const { error: upErr } = await sb.storage.from('rebuild-documents').upload(path, file, {
-    contentType: file.type || 'application/octet-stream',
+    contentType: detectedType,
     upsert: false,
   });
   if (upErr) throw new Error(upErr.message);
