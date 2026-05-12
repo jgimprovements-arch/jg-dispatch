@@ -8,7 +8,7 @@
     body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 1000px; margin: 0 auto; padding: 20px; color: #1a2138; background: #f6f7fb; }
     h1 { color: #1a2138; margin-bottom: 4px; }
     .sub { color: #6b7290; margin-bottom: 24px; font-size: 14px; }
-    .row { padding: 10px 14px; border-bottom: 1px solid #eef0f7; display: grid; grid-template-columns: 1fr 110px 110px 150px; gap: 12px; align-items: center; font-size: 13px; background: #fff; }
+    .row { padding: 10px 14px; border-bottom: 1px solid #eef0f7; display: grid; grid-template-columns: 1fr 110px 110px 200px; gap: 12px; align-items: center; font-size: 13px; background: #fff; }
     .row:nth-child(odd) { background: #fafbfd; }
     .row.head { font-weight: 700; background: #f0f2fa; border-radius: 8px 8px 0 0; padding: 12px 14px; font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: #6b7290; }
     .row.converted { background: rgba(46,160,67,.08); }
@@ -18,47 +18,107 @@
     .badge.heic { background: rgba(245,166,35,.18); color: #b06b06; }
     .badge.size { background: #eef0f7; color: #1a2138; font-variant-numeric: tabular-nums; }
     .badge.ok { background: rgba(46,160,67,.15); color: #2ea043; }
-    button { background: #e85d04; color: white; border: 0; padding: 10px 22px; border-radius: 8px; font-weight: 700; cursor: pointer; font-size: 14px; margin-right: 8px; }
+    button { background: #e85d04; color: white; border: 0; padding: 10px 22px; border-radius: 8px; font-weight: 700; cursor: pointer; font-size: 14px; margin-right: 8px; font-family: inherit; }
     button:disabled { opacity: 0.5; cursor: not-allowed; }
     button.secondary { background: #1a2138; }
     .summary { background: #fff; padding: 14px 18px; border-radius: 10px; margin: 12px 0 16px; border: 1px solid #eef0f7; }
     .summary b { color: #1a2138; }
+    .summary.err { background: rgba(214,69,69,.08); border-color: rgba(214,69,69,.3); color: #d64545; }
     .controls { display: flex; align-items: center; gap: 14px; margin: 14px 0; flex-wrap: wrap; }
     .control { display: flex; align-items: center; gap: 6px; font-size: 13px; color: #1a2138; }
     .control input[type="range"] { width: 100px; }
     .results { background: #fff; border-radius: 10px; overflow: hidden; border: 1px solid #eef0f7; }
     .progress { height: 6px; background: #eef0f7; border-radius: 3px; overflow: hidden; margin: 8px 0; }
     .progress-bar { height: 100%; background: #e85d04; transition: width 0.3s; }
+    .login-card { background: #fff; padding: 28px; border-radius: 10px; border: 1px solid #eef0f7; text-align: center; max-width: 460px; margin: 30px auto; }
+    .login-card p { color: #6b7290; line-height: 1.5; }
+    .login-card .auth-status { margin-top: 14px; padding: 10px 14px; background: #f6f7fb; border-radius: 8px; font-size: 13px; }
+    .login-card .auth-status.ok { background: rgba(46,160,67,.08); color: #2ea043; }
+    .login-card .auth-status.err { background: rgba(214,69,69,.08); color: #d64545; }
   </style>
 </head>
 <body>
   <h1>📸 Convert Legacy HEIC Files</h1>
-  <p class="sub">Finds every <code>.heic</code> / <code>.heif</code> file in your storage and converts it to JPEG in-place. The <code>documents</code> row's filename and mime_type are updated. Originals are replaced — be sure you want this before clicking Convert.</p>
+  <p class="sub">Finds every <code>.heic</code> / <code>.heif</code> file in your storage and converts it to JPEG in-place. The <code>documents</code> row's filename, storage_path, file_url, and mime_type are updated. The original HEIC is deleted from storage. Be sure you want this before clicking Convert.</p>
 
-  <div class="summary" id="status">Click <b>Scan</b> to start.</div>
-
-  <div class="controls">
-    <button id="btn_scan">Scan for HEIC files</button>
-    <button id="btn_convert" disabled class="secondary">Convert all (0)</button>
-    <div class="control">
-      JPEG quality:
-      <input type="range" id="quality" min="50" max="95" value="85">
-      <span id="quality_val">85</span>%
-    </div>
+  <div id="auth_panel" class="login-card" style="display:none;">
+    <h3 style="margin-top:0;">🔐 Authentication required</h3>
+    <p>This tool needs to be logged in to read your documents. Sign in with your JG Restoration Google account.</p>
+    <button id="btn_login">Sign in with Google</button>
+    <div id="auth_status" class="auth-status" style="display:none;"></div>
   </div>
 
-  <div class="progress" id="progress" style="display:none;"><div class="progress-bar" id="progress_bar" style="width:0%"></div></div>
-
-  <div id="results"></div>
+  <div id="main_panel" style="display:none;">
+    <div class="summary" id="status">Click <b>Scan</b> to start.</div>
+    <div class="controls">
+      <button id="btn_scan">Scan for HEIC files</button>
+      <button id="btn_convert" disabled class="secondary">Convert all (0)</button>
+      <div class="control">
+        JPEG quality:
+        <input type="range" id="quality" min="50" max="95" value="85">
+        <span id="quality_val">85</span>%
+      </div>
+      <div class="control" style="margin-left:auto;font-size:12px;color:#6b7290;">
+        Signed in as <b id="user_email"></b>
+        <button id="btn_logout" style="background:transparent;color:#6b7290;border:1px solid #eef0f7;padding:4px 10px;font-size:11px;margin-left:6px;">Sign out</button>
+      </div>
+    </div>
+    <div class="progress" id="progress" style="display:none;"><div class="progress-bar" id="progress_bar" style="width:0%"></div></div>
+    <div id="results"></div>
+  </div>
 
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <script src="https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js"></script>
   <script>
     const SB_URL = 'https://nuykvchgecpiuikoerze.supabase.co';
     const SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im51eWt2Y2hnZWNwaXVpa29lcnplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDIwODI4NjYsImV4cCI6MjA1NzY1ODg2Nn0.iJSXkHZxBQbcc7-vAeZbVN3oOzNymeBpsXq6vmHcaUI';
-    const sb = supabase.createClient(SB_URL, SB_KEY);
+
+    const sb = supabase.createClient(SB_URL, SB_KEY, {
+      auth: {
+        persistSession: true,
+        autoRefreshToken: true,
+        detectSessionInUrl: true,
+      }
+    });
 
     let allHeics = [];
+
+    async function checkAuth() {
+      const { data } = await sb.auth.getSession();
+      const session = data?.session;
+      if (session?.user) {
+        document.getElementById('user_email').textContent = session.user.email || '';
+        document.getElementById('auth_panel').style.display = 'none';
+        document.getElementById('main_panel').style.display = '';
+        return true;
+      } else {
+        document.getElementById('auth_panel').style.display = '';
+        document.getElementById('main_panel').style.display = 'none';
+        return false;
+      }
+    }
+
+    document.getElementById('btn_login').addEventListener('click', async () => {
+      const status = document.getElementById('auth_status');
+      status.style.display = '';
+      status.className = 'auth-status';
+      status.textContent = 'Redirecting to Google sign-in…';
+      const { error } = await sb.auth.signInWithOAuth({
+        provider: 'google',
+        options: { redirectTo: window.location.href }
+      });
+      if (error) {
+        status.className = 'auth-status err';
+        status.textContent = 'Sign-in error: ' + error.message;
+      }
+    });
+
+    document.getElementById('btn_logout').addEventListener('click', async () => {
+      await sb.auth.signOut();
+      location.reload();
+    });
+
+    sb.auth.onAuthStateChange((_event, _session) => checkAuth());
 
     document.getElementById('quality').addEventListener('input', e => {
       document.getElementById('quality_val').textContent = e.target.value;
@@ -76,6 +136,7 @@
       btn.disabled = true;
       btn.textContent = 'Scanning…';
       document.getElementById('results').innerHTML = '';
+      document.getElementById('status').className = 'summary';
       document.getElementById('status').innerHTML = 'Reading documents table…';
 
       const { data: docs, error } = await sb.from('documents')
@@ -83,7 +144,8 @@
         .or('filename.ilike.%.heic,filename.ilike.%.heif');
 
       if (error) {
-        document.getElementById('status').innerHTML = '<span style="color:#d64545;">DB error: ' + error.message + '</span>';
+        document.getElementById('status').className = 'summary err';
+        document.getElementById('status').innerHTML = 'DB error: ' + error.message + '<br><br>If this looks like a permissions error, try signing out and back in.';
         btn.disabled = false; btn.textContent = 'Scan for HEIC files';
         return;
       }
@@ -140,14 +202,12 @@
         if (statusCell) statusCell.textContent = '⏬ Downloading…';
 
         try {
-          // 1. Download the HEIC file
           const r = await fetch(doc.file_url);
           if (!r.ok) throw new Error('Download failed: HTTP ' + r.status);
           const heicBlob = await r.blob();
 
           if (statusCell) statusCell.textContent = '🔄 Converting…';
 
-          // 2. Convert to JPEG
           const jpgBlob = await window.heic2any({
             blob: heicBlob,
             toType: 'image/jpeg',
@@ -158,11 +218,9 @@
 
           if (statusCell) statusCell.textContent = '⏫ Re-uploading…';
 
-          // 3. New filename + new storage path
           const newFilename = doc.filename.replace(/\.(heic|heif)$/i, '.jpg');
           const newStoragePath = doc.storage_path.replace(/\.(heic|heif)$/i, '.jpg');
 
-          // 4. Upload JPEG to new path (don't overwrite HEIC yet — safer)
           const uploadBlob = new Blob([finalBlob], { type: 'image/jpeg' });
           const { error: upErr } = await sb.storage.from('rebuild-documents').upload(newStoragePath, uploadBlob, {
             contentType: 'image/jpeg',
@@ -170,11 +228,9 @@
           });
           if (upErr) throw new Error('Upload failed: ' + upErr.message);
 
-          // 5. Get new public URL
           const { data: urlData } = sb.storage.from('rebuild-documents').getPublicUrl(newStoragePath);
           const newFileUrl = urlData.publicUrl;
 
-          // 6. Update the documents row with new filename/path/url/mime
           const { error: dbErr } = await sb.from('documents').update({
             filename: newFilename,
             storage_path: newStoragePath,
@@ -184,20 +240,17 @@
           }).eq('id', doc.id);
           if (dbErr) throw new Error('DB update failed: ' + dbErr.message);
 
-          // 7. Delete the old HEIC file from storage
           await sb.storage.from('rebuild-documents').remove([doc.storage_path]);
 
-          // Mark success
           if (statusCell) statusCell.textContent = '✓ Done · ' + fmtSize(finalBlob.size);
           row.classList.add('converted');
-          // Update the row's data-doc-id reference so re-scan picks it up correctly
           row.querySelector('.name').textContent = newFilename;
-          row.querySelector('.badge.heic').textContent = 'JPG';
-          row.querySelector('.badge.heic').className = 'badge ok';
+          const typeBadge = row.querySelector('.badge.heic');
+          if (typeBadge) { typeBadge.textContent = 'JPG'; typeBadge.className = 'badge ok'; }
           done++;
         } catch (e) {
           console.error('Convert failed for', doc.filename, e);
-          if (statusCell) statusCell.textContent = '✗ ' + (e.message || e).slice(0, 50);
+          if (statusCell) statusCell.textContent = '✗ ' + (e.message || e).slice(0, 60);
           row.classList.add('failed');
           failed++;
         }
@@ -212,6 +265,9 @@
       btn.textContent = `Done — ${done} converted, ${failed} failed`;
       document.getElementById('btn_scan').disabled = false;
     });
+
+    // Init
+    checkAuth();
   </script>
 </body>
 </html>

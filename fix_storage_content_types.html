@@ -5,39 +5,65 @@
   <title>JG · Fix Storage Content-Types</title>
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 900px; margin: 0 auto; padding: 20px; color: #1a2138; }
-    h1 { color: #1a2138; }
-    .row { padding: 8px 12px; border-bottom: 1px solid #eee; display: grid; grid-template-columns: 1fr 100px 100px 120px; gap: 12px; align-items: center; font-size: 13px; }
-    .row.head { font-weight: 700; background: #f6f7fb; border-radius: 8px; padding: 10px 12px; }
-    .row.skipped { color: #888; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 1000px; margin: 0 auto; padding: 20px; color: #1a2138; background: #f6f7fb; }
+    h1 { color: #1a2138; margin-bottom: 4px; }
+    .sub { color: #6b7290; margin-bottom: 24px; font-size: 14px; }
+    .row { padding: 10px 14px; border-bottom: 1px solid #eef0f7; display: grid; grid-template-columns: 1fr 110px 110px 160px; gap: 12px; align-items: center; font-size: 13px; background: #fff; }
+    .row:nth-child(odd) { background: #fafbfd; }
+    .row.head { font-weight: 700; background: #f0f2fa; border-radius: 8px 8px 0 0; padding: 12px 14px; font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: #6b7290; }
     .row.fixed { background: rgba(46,160,67,.08); }
-    .row.failed { background: rgba(214,69,69,.08); color: #d64545; }
+    .row.failed { background: rgba(214,69,69,.08); }
     .name { font-family: ui-monospace, monospace; font-size: 12px; word-break: break-all; }
-    .badge { padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 700; display: inline-block; }
+    .badge { padding: 3px 9px; border-radius: 999px; font-size: 11px; font-weight: 700; display: inline-block; }
     .badge.octet { background: rgba(214,69,69,.15); color: #d64545; }
     .badge.ok { background: rgba(46,160,67,.15); color: #2ea043; }
-    button { background: #e85d04; color: white; border: 0; padding: 10px 20px; border-radius: 8px; font-weight: 700; cursor: pointer; font-size: 14px; }
+    button { background: #e85d04; color: white; border: 0; padding: 10px 22px; border-radius: 8px; font-weight: 700; cursor: pointer; font-size: 14px; margin-right: 8px; font-family: inherit; }
     button:disabled { opacity: 0.5; cursor: not-allowed; }
-    .summary { background: #f6f7fb; padding: 12px 16px; border-radius: 8px; margin: 12px 0; }
+    .summary { background: #fff; padding: 14px 18px; border-radius: 10px; margin: 12px 0 16px; border: 1px solid #eef0f7; }
     .summary b { color: #1a2138; }
+    .summary.err { background: rgba(214,69,69,.08); border-color: rgba(214,69,69,.3); color: #d64545; }
+    .controls { display: flex; align-items: center; gap: 14px; margin: 14px 0; flex-wrap: wrap; }
+    .results { background: #fff; border-radius: 10px; overflow: hidden; border: 1px solid #eef0f7; }
+    .progress { height: 6px; background: #eef0f7; border-radius: 3px; overflow: hidden; margin: 8px 0; }
+    .progress-bar { height: 100%; background: #e85d04; transition: width 0.3s; }
+    .login-card { background: #fff; padding: 28px; border-radius: 10px; border: 1px solid #eef0f7; text-align: center; max-width: 460px; margin: 30px auto; }
+    .login-card p { color: #6b7290; line-height: 1.5; }
+    .login-card .auth-status { margin-top: 14px; padding: 10px 14px; background: #f6f7fb; border-radius: 8px; font-size: 13px; }
+    .login-card .auth-status.err { background: rgba(214,69,69,.08); color: #d64545; }
   </style>
 </head>
 <body>
   <h1>🔧 Fix Storage Content-Types</h1>
-  <p>Scans <code>rebuild-documents</code> for files with <code>application/octet-stream</code> content-type and re-stamps them with the correct MIME based on filename. This fixes images that were forcing downloads instead of displaying inline.</p>
+  <p class="sub">Scans <code>rebuild-documents</code> for files served as <code>application/octet-stream</code> and re-stamps them with the correct MIME based on filename. Fixes images that were forcing downloads instead of displaying inline.</p>
 
-  <div class="summary" id="status">Click <b>Scan</b> to start.</div>
+  <div id="auth_panel" class="login-card" style="display:none;">
+    <h3 style="margin-top:0;">🔐 Authentication required</h3>
+    <p>Sign in with your JG Restoration Google account.</p>
+    <button id="btn_login">Sign in with Google</button>
+    <div id="auth_status" class="auth-status" style="display:none;"></div>
+  </div>
 
-  <button id="btn_scan">Scan</button>
-  <button id="btn_fix" disabled>Fix all broken files</button>
-
-  <div id="results" style="margin-top:18px;"></div>
+  <div id="main_panel" style="display:none;">
+    <div class="summary" id="status">Click <b>Scan</b> to start.</div>
+    <div class="controls">
+      <button id="btn_scan">Scan</button>
+      <button id="btn_fix" disabled>Fix all broken files</button>
+      <div style="margin-left:auto;font-size:12px;color:#6b7290;">
+        Signed in as <b id="user_email"></b>
+        <button id="btn_logout" style="background:transparent;color:#6b7290;border:1px solid #eef0f7;padding:4px 10px;font-size:11px;margin-left:6px;">Sign out</button>
+      </div>
+    </div>
+    <div class="progress" id="progress" style="display:none;"><div class="progress-bar" id="progress_bar" style="width:0%"></div></div>
+    <div id="results"></div>
+  </div>
 
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <script>
     const SB_URL = 'https://nuykvchgecpiuikoerze.supabase.co';
     const SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im51eWt2Y2hnZWNwaXVpa29lcnplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDIwODI4NjYsImV4cCI6MjA1NzY1ODg2Nn0.iJSXkHZxBQbcc7-vAeZbVN3oOzNymeBpsXq6vmHcaUI';
-    const sb = supabase.createClient(SB_URL, SB_KEY);
+    const sb = supabase.createClient(SB_URL, SB_KEY, {
+      auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true }
+    });
 
     function mimeFromFilename(filename) {
       const ext = (filename || '').toLowerCase().split('.').pop();
@@ -55,6 +81,37 @@
       return map[ext] || null;
     }
 
+    async function checkAuth() {
+      const { data } = await sb.auth.getSession();
+      const session = data?.session;
+      if (session?.user) {
+        document.getElementById('user_email').textContent = session.user.email || '';
+        document.getElementById('auth_panel').style.display = 'none';
+        document.getElementById('main_panel').style.display = '';
+        return true;
+      } else {
+        document.getElementById('auth_panel').style.display = '';
+        document.getElementById('main_panel').style.display = 'none';
+        return false;
+      }
+    }
+
+    document.getElementById('btn_login').addEventListener('click', async () => {
+      const status = document.getElementById('auth_status');
+      status.style.display = '';
+      status.textContent = 'Redirecting to Google sign-in…';
+      const { error } = await sb.auth.signInWithOAuth({
+        provider: 'google',
+        options: { redirectTo: window.location.href }
+      });
+      if (error) { status.className = 'auth-status err'; status.textContent = 'Sign-in error: ' + error.message; }
+    });
+    document.getElementById('btn_logout').addEventListener('click', async () => {
+      await sb.auth.signOut();
+      location.reload();
+    });
+    sb.auth.onAuthStateChange((_e, _s) => checkAuth());
+
     let allDocs = [];
     let toFix = [];
 
@@ -63,32 +120,31 @@
       btn.disabled = true;
       btn.textContent = 'Scanning…';
       document.getElementById('results').innerHTML = '';
+      document.getElementById('status').className = 'summary';
       document.getElementById('status').innerHTML = 'Reading documents table…';
 
       const { data: docs, error } = await sb.from('documents').select('id, filename, storage_path, file_url, mime_type');
       if (error) {
-        document.getElementById('status').innerHTML = '<span style="color:red;">DB error: ' + error.message + '</span>';
+        document.getElementById('status').className = 'summary err';
+        document.getElementById('status').innerHTML = 'DB error: ' + error.message;
         btn.disabled = false; btn.textContent = 'Scan';
         return;
       }
       allDocs = docs || [];
       document.getElementById('status').innerHTML = `Found <b>${allDocs.length}</b> document rows. Probing storage content-types…`;
 
-      // For each doc, HEAD the public URL to check the current content-type
       toFix = [];
       let probed = 0;
       const results = [];
       for (const d of allDocs) {
         probed++;
-        if (probed % 25 === 0) {
-          document.getElementById('status').innerHTML = `Probed ${probed} / ${allDocs.length}…`;
-        }
-        if (!d.file_url) { results.push({ doc: d, status: 'skip', reason: 'no file_url' }); continue; }
+        if (probed % 25 === 0) document.getElementById('status').innerHTML = `Probed ${probed} / ${allDocs.length}…`;
+        if (!d.file_url) { results.push({ doc: d, status: 'skip' }); continue; }
         let currentType = '';
         try {
           const r = await fetch(d.file_url, { method: 'HEAD' });
           currentType = r.headers.get('content-type') || '';
-        } catch (e) { results.push({ doc: d, status: 'skip', reason: 'HEAD failed' }); continue; }
+        } catch (e) { results.push({ doc: d, status: 'skip' }); continue; }
         const proposed = mimeFromFilename(d.filename);
         const isOctet = currentType.startsWith('application/octet-stream');
         if (isOctet && proposed) {
@@ -109,17 +165,19 @@
       const ok = results.filter(r => r.status === 'ok');
       const skip = results.filter(r => r.status === 'skip');
       const html = `
-        <div class="row head"><div>Filename</div><div>Current</div><div>Fix to</div><div>Status</div></div>
-        ${broken.map(r => `
-          <div class="row" data-doc-id="${r.doc.id}">
-            <div class="name">${r.doc.filename}</div>
-            <div><span class="badge octet">octet</span></div>
-            <div><span class="badge ok">${r.proposed}</span></div>
-            <div class="status-cell">⚠️ Broken</div>
-          </div>
-        `).join('')}
-        ${ok.length ? `<div style="padding:14px 0;color:#888;">✓ ${ok.length} files already have correct content-types</div>` : ''}
-        ${skip.length ? `<div style="color:#888;">${skip.length} skipped (no URL or HEAD failed)</div>` : ''}
+        <div class="results">
+          <div class="row head"><div>Filename</div><div>Current</div><div>Fix to</div><div>Status</div></div>
+          ${broken.map(r => `
+            <div class="row" data-doc-id="${r.doc.id}">
+              <div class="name">${r.doc.filename}</div>
+              <div><span class="badge octet">octet</span></div>
+              <div><span class="badge ok">${r.proposed}</span></div>
+              <div class="status-cell">⚠️ Broken</div>
+            </div>
+          `).join('')}
+        </div>
+        ${ok.length ? `<div style="padding:14px 0;color:#6b7290;font-size:13px;">✓ ${ok.length} files already have correct content-types</div>` : ''}
+        ${skip.length ? `<div style="color:#6b7290;font-size:13px;">${skip.length} skipped (no URL or HEAD failed)</div>` : ''}
       `;
       document.getElementById('results').innerHTML = html;
     }
@@ -128,12 +186,12 @@
       const btn = document.getElementById('btn_fix');
       btn.disabled = true;
       btn.textContent = 'Fixing…';
+      document.getElementById('progress').style.display = 'block';
       let fixed = 0, failed = 0;
       for (const item of toFix) {
         const row = document.querySelector(`[data-doc-id="${item.doc.id}"] .status-cell`);
         if (row) row.textContent = '⏳ Fixing…';
         try {
-          // Download the existing file, re-upload with correct content-type via .update()
           const r = await fetch(item.doc.file_url);
           if (!r.ok) throw new Error('Fetch failed: ' + r.status);
           const blob = await r.blob();
@@ -143,7 +201,6 @@
             upsert: true,
           });
           if (error) throw new Error(error.message);
-          // Also update the mime_type in the documents row for consistency
           await sb.from('documents').update({ mime_type: item.proposed }).eq('id', item.doc.id);
           if (row) { row.textContent = '✓ Fixed'; row.parentElement.classList.add('fixed'); }
           fixed++;
@@ -151,11 +208,16 @@
           if (row) { row.textContent = '✗ ' + (e.message || e).slice(0, 40); row.parentElement.classList.add('failed'); }
           failed++;
         }
-        document.getElementById('status').innerHTML = `Fixed: <b>${fixed}</b> · Failed: <b>${failed}</b> · Remaining: <b>${toFix.length - fixed - failed}</b>`;
+        const total = fixed + failed;
+        const pct = Math.round((total / toFix.length) * 100);
+        document.getElementById('progress_bar').style.width = pct + '%';
+        document.getElementById('status').innerHTML = `Fixed: <b>${fixed}</b> · Failed: <b>${failed}</b> · Remaining: <b>${toFix.length - total}</b>`;
       }
       btn.disabled = false;
       btn.textContent = `Done — ${fixed} fixed, ${failed} failed`;
     });
+
+    checkAuth();
   </script>
 </body>
 </html>
