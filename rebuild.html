@@ -9912,6 +9912,7 @@ function renderDetailSection(title, kind, rows, isUnassigned, mode, targets) {
                       `<option value="${p.id}" ${currentPhase === p.id ? 'selected' : ''}>${esc(p.phase_name)}</option>`
                     ).join('')}
                     <option value="__unassigned__" ${isUnassignedRow ? 'selected' : ''}>📦 Unassigned</option>
+                    <option value="__create__" style="font-style:italic;color:var(--orange);">+ Create new phase…</option>
                   </select>
                 </td>
               </tr>
@@ -9990,14 +9991,26 @@ function wireWoDetailModal(tradeKey) {
     equipment: 'wo_builder_component_equipment',
   };
 
-  // Phase dropdown on each row — '' = default, '__unassigned__' = bucket, otherwise phase UUID
+  // Phase dropdown on each row — '' = default, '__unassigned__' = bucket, '__create__' = new phase, otherwise phase UUID
   document.querySelectorAll('.wobx-phase-row-select').forEach(sel => {
+    let lastValue = sel.value;
     sel.addEventListener('change', async () => {
       const kind = sel.dataset.kind;
       const id = sel.dataset.id;
-      const val = sel.value;
+      let val = sel.value;
       const tableName = tableForKind[kind];
       if (!tableName) return;
+
+      // Handle create-new-phase first
+      if (val === '__create__') {
+        sel.value = lastValue;
+        const newId = await createNewPhasePrompt();
+        if (!newId) return;
+        val = newId;
+        // We need to re-render the modal so all dropdowns get the new option,
+        // but we'll also save the assignment first so the user's intent isn't lost
+      }
+
       const update = {};
       if (val === '__unassigned__') {
         update.is_unassigned = true;
@@ -10016,6 +10029,7 @@ function wireWoDetailModal(tradeKey) {
         toast('Save failed: ' + error.message, true);
         return;
       }
+      lastValue = val;
       await loadWoBudget();
       const tradeLabel = MERGED_TRADE_GROUPS[tradeKey]?.label || (tradeKey === '__unassigned__' ? 'Unassigned' : tradeKey);
       closeWoDetailModal();
@@ -10118,6 +10132,29 @@ function closeWoDetailModal() {
 }
 
 // Upsert helper for wo_builder_work_orders (uses upload_id + trade_category as natural key)
+// Prompt for a new phase name, create it, return the new phase ID (or null if cancelled)
+async function createNewPhasePrompt() {
+  const name = prompt('New phase name:');
+  if (!name || !name.trim()) return null;
+  const trimmed = name.trim();
+  const lastSeq = state.phases.length ? Math.max(...state.phases.map(p => p.sequence || 0)) : 0;
+  const newSeq = lastSeq + 10;
+  const { data, error } = await sb.from('rebuild_phases').insert({
+    project_id: state.activeProjectId,
+    sequence: newSeq,
+    phase_name: trimmed,
+    status: 'pending',
+  }).select().single();
+  if (error) {
+    toast('Phase create failed: ' + error.message, true);
+    return null;
+  }
+  // Refresh phases in state so subsequent renders see it
+  await loadPhases();
+  toast(`Phase "${trimmed}" created`);
+  return data?.id || null;
+}
+
 async function upsertWoBuilderRow(tradeCategory, fields) {
   const uploadId = state.woBudget?.upload?.id;
   if (!uploadId) return;
@@ -10302,6 +10339,7 @@ function renderWoBuilderSection(budget) {
                     <select class="wobx-phase-select" data-trade="${esc(t.category)}">
                       <option value="">—</option>
                       ${phaseOpts}
+                      <option value="__create__" style="font-style:italic;color:var(--orange);">+ Create new phase…</option>
                     </select>
                   </td>
                 </tr>
@@ -10671,10 +10709,20 @@ function wireWoBuilderControls() {
 
   // Phase dropdowns — when user picks a phase, save it
   document.querySelectorAll('.wobx-phase-select').forEach(sel => {
+    let lastValue = sel.value;
     sel.addEventListener('change', async (e) => {
       const trade = sel.dataset.trade;
-      const phaseId = sel.value || null;
+      let phaseId = sel.value || null;
+      if (phaseId === '__create__') {
+        sel.value = lastValue;  // revert visual selection until create completes
+        const newId = await createNewPhasePrompt();
+        if (!newId) return;  // user cancelled
+        phaseId = newId;
+        // Re-render so all dropdowns get the new option
+        renderTabContent();
+      }
       await upsertWoBuilderRow(trade, { phase_id: phaseId, phase_id_user_set: true });
+      lastValue = phaseId || '';
       toast('Phase mapping saved');
     });
   });
