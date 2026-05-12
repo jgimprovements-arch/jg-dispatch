@@ -2913,6 +2913,32 @@
     margin-top: 2px;
     white-space: nowrap;
   }
+
+  /* Synthetic 'JG Purchased Materials' row */
+  .wobx-trade-row.wobx-synthetic-row {
+    background: rgba(245,166,35,.04);
+    cursor: default;
+    border-top: 2px solid rgba(245,166,35,.3);
+  }
+  .wobx-trade-row.wobx-synthetic-row:hover {
+    background: rgba(245,166,35,.06) !important;
+  }
+  .wobx-trade-row.wobx-synthetic-row td:first-child b {
+    color: var(--gold);
+  }
+  .wobx-synthetic-pill {
+    display: inline-block;
+    background: var(--gold);
+    color: #fff;
+    font-size: 9px;
+    font-weight: 800;
+    padding: 2px 7px;
+    border-radius: 999px;
+    margin-left: 6px;
+    text-transform: uppercase;
+    letter-spacing: .3px;
+    vertical-align: middle;
+  }
   .wobx-trade-total-sub {
     font-size: 9px;
     color: var(--muted);
@@ -10058,28 +10084,25 @@ function renderWoDetailModal(tradeKey, tradeLabel, budget) {
 }
 
 function renderTradeTotalsStrip(tradeKey, items, materials, labor, equipment, wo) {
-  const revenue = sumField(items, 'line_total');
+  const grossRevenue = sumField(items, 'line_total');
   const xactMaterialsTotal = sumField(materials, 'total');
   const materialsSupplier = wo?.materials_supplier || 'sub';
   const jgSupplies = materialsSupplier === 'jg';
 
-  // Labor/sub budget — defaults to 50% of revenue
+  // When JG supplies, carve materials out of revenue
+  const materialsCarveOut = jgSupplies ? Math.min(xactMaterialsTotal, grossRevenue) : 0;
+  const revenue = grossRevenue - materialsCarveOut;
+
+  // Budget defaults to 50% of (carved) revenue
   const tradeBudget = (wo?.trade_budget != null)
     ? Number(wo.trade_budget)
     : Number((revenue * 0.5).toFixed(2));
 
-  // Materials budget — only relevant when JG supplies; defaults to Xact components materials total
-  const materialsBudget = jgSupplies
-    ? ((wo?.materials_budget != null) ? Number(wo.materials_budget) : Number(xactMaterialsTotal.toFixed(2)))
-    : 0;
-
-  const totalCost = tradeBudget + materialsBudget;
-  const profit = revenue - totalCost;
+  const profit = revenue - tradeBudget;
   const margin = revenue > 0 ? (profit / revenue * 100) : 0;
   const cls = margin >= 50 ? 'green' : margin >= 30 ? 'yellow' : 'red';
   const ico = margin >= 50 ? '🟢' : margin >= 30 ? '🟡' : '🔴';
   const isOverride = wo?.trade_budget != null;
-  const matBudgetOverride = wo?.materials_budget != null;
 
   return `
     <div class="wobx-materials-supplier">
@@ -10093,17 +10116,18 @@ function renderTradeTotalsStrip(tradeKey, items, materials, labor, equipment, wo
       </label>
       <div class="wobx-supplier-hint">
         ${jgSupplies
-          ? 'Materials purchased by JG \u2014 separate cost from the assignee\'s budget. Materials Budget field is enabled below.'
-          : 'Sub/carpenter provides materials \u2014 bundled into their budget below.'}
+          ? `Materials (\$${usdRound(materialsCarveOut)}) moved to <b>JG Purchased Materials</b> bucket. This card shows labor-only revenue and budget.`
+          : `Sub/carpenter provides materials \u2014 bundled into their budget below.`}
       </div>
     </div>
-    <div class="wobx-trade-totals ${jgSupplies ? 'with-mat' : ''}">
+    <div class="wobx-trade-totals">
       <div class="wobx-trade-total">
-        <div class="wobx-trade-total-label">Revenue</div>
+        <div class="wobx-trade-total-label">${jgSupplies ? 'Labor Revenue' : 'Revenue'}</div>
         <div class="wobx-trade-total-value">${usdCompact(revenue)}</div>
+        ${jgSupplies ? `<div class="wobx-trade-total-sub">Gross: ${usdCompact(grossRevenue)} − Mat: ${usdCompact(materialsCarveOut)}</div>` : ''}
       </div>
       <div class="wobx-trade-total wobx-trade-total-budget">
-        <div class="wobx-trade-total-label">${jgSupplies ? 'Labor Budget' : 'Budget (what you\'ll pay)'}</div>
+        <div class="wobx-trade-total-label">Budget (50% of labor)</div>
         <input type="number"
                class="wobx-trade-budget-input-modal ${isOverride ? 'wobx-budget-override' : ''}"
                data-trade="${esc(tradeKey)}"
@@ -10111,18 +10135,6 @@ function renderTradeTotalsStrip(tradeKey, items, materials, labor, equipment, wo
                step="1" min="0"
                ${wo?.is_locked ? 'disabled' : ''}>
       </div>
-      ${jgSupplies ? `
-        <div class="wobx-trade-total wobx-trade-total-budget">
-          <div class="wobx-trade-total-label">Materials Budget</div>
-          <input type="number"
-                 class="wobx-trade-mat-budget-input-modal ${matBudgetOverride ? 'wobx-budget-override' : ''}"
-                 data-trade="${esc(tradeKey)}"
-                 value="${materialsBudget.toFixed(2)}"
-                 step="1" min="0"
-                 ${wo?.is_locked ? 'disabled' : ''}>
-          <div class="wobx-trade-total-sub">Xact: ${usdCompact(xactMaterialsTotal)}</div>
-        </div>
-      ` : ''}
       <div class="wobx-trade-total">
         <div class="wobx-trade-total-label">Profit</div>
         <div class="wobx-trade-total-value" id="wobx_profit_total" style="color:${profit >= 0 ? 'var(--green)' : 'var(--red)'};">${usdCompact(profit)}</div>
@@ -10134,6 +10146,10 @@ function renderTradeTotalsStrip(tradeKey, items, materials, labor, equipment, wo
       </div>
     </div>
   `;
+}
+
+function usdRound(n) {
+  return Math.round(Number(n) || 0).toLocaleString();
 }
 
 // Kept for legacy callers but no longer used for the simplified per-trade budget
@@ -10813,6 +10829,7 @@ async function convertAllApproved() {
   const eligible = [];
   const skipped = [];
   for (const t of tradeRollup) {
+    if (t.isSynthetic) continue;  // synthetic rows can't be converted (no items, no assignee)
     const wbWo = (state.woBudget.wos || []).find(w => w.trade_category === t.category);
     if (wbWo?.is_locked) {
       skipped.push({ label: t.label, reason: 'already locked' });
@@ -10950,6 +10967,7 @@ function renderWoBuilderSection(budget) {
 
   // Count trades eligible for conversion (has assignee, not locked)
   const eligibleConvertCount = tradeRollup.reduce((n, t) => {
+    if (t.isSynthetic) return n;
     const wbWo = (budget.wos || []).find(w => w.trade_category === t.category);
     if (wbWo?.is_locked) return n;
     if (!wbWo || !wbWo.assignee_type || (!wbWo.assignee_sub_id && !wbWo.assignee_employee_id)) return n;
@@ -11021,29 +11039,32 @@ function renderWoBuilderSection(budget) {
               ).join('');
               const wbWo = (budget.wos || []).find(w => w.trade_category === t.category);
               const isLocked = !!wbWo?.is_locked;
+              const isSynthetic = !!t.isSynthetic;
               return `
-                <tr class="wobx-trade-row ${isLocked ? 'wobx-locked' : ''}" ${isLocked ? '' : 'draggable="true"'} data-trade="${esc(t.category)}" data-trade-label="${esc(t.label)}" data-locked="${isLocked ? '1' : '0'}">
+                <tr class="wobx-trade-row ${isLocked ? 'wobx-locked' : ''} ${isSynthetic ? 'wobx-synthetic-row' : ''}" ${(isLocked || isSynthetic) ? '' : 'draggable="true"'} data-trade="${esc(t.category)}" data-trade-label="${esc(t.label)}" data-locked="${isLocked ? '1' : '0'}">
                   <td>
-                    <b>${esc(t.label)}</b>${isLocked ? ' <span class="wobx-lock-pill">🔒 Locked</span>' : ''}
-                    <div class="wobx-row-hint">${t.itemCount} items · click for detail${isLocked ? ' · WO created' : ' · drag to merge'}</div>
+                    <b>${esc(t.label)}</b>${isLocked ? ' <span class="wobx-lock-pill">🔒 Locked</span>' : ''}${isSynthetic ? ' <span class="wobx-synthetic-pill">AUTO</span>' : ''}
+                    <div class="wobx-row-hint">${isSynthetic ? 'Materials carved out from JG-supplied trades · paid to vendors' : `${t.itemCount} items · click for detail${isLocked ? ' · WO created' : ' · drag to merge'}`}</div>
                   </td>
-                  <td class="r">${t.hours ? t.hours.toFixed(1) : '—'}</td>
-                  <td class="r">${usdCompact(t.revenue)}</td>
+                  <td class="r">${(t.hours && !isSynthetic) ? t.hours.toFixed(1) : '—'}</td>
+                  <td class="r">${usdCompact(t.revenue)}${isSynthetic ? '<div class="wobx-row-hint" style="margin-top:2px;">carved from materials</div>' : ''}</td>
                   <td class="r" onclick="event.stopPropagation();">
                     <input type="number" class="wobx-trade-budget-input ${t.budgetIsOverride ? 'wobx-budget-override' : ''}"
                            data-trade="${esc(t.category)}"
                            value="${t.budget.toFixed(2)}" step="1" min="0"
                            ${isLocked ? 'disabled' : ''}>
-                    ${t.jgSupplies ? `<div class="wobx-trade-mat-line">+ ${usdCompact(t.materialsBudget)} mat (JG)</div>` : ''}
+                    ${isSynthetic ? `<div class="wobx-row-hint" style="margin-top:2px;">Xact: ${usdCompact(t.xactMaterialsTotal)}</div>` : ''}
                   </td>
                   <td class="r" style="color:${t.profit >= 0 ? 'var(--green)' : 'var(--red)'};">${usdCompact(t.profit)}</td>
                   <td class="r"><span class="wobx-margin-pill wobx-margin-${cls}">${ico} ${m.toFixed(0)}%</span></td>
                   <td onclick="event.stopPropagation();">
-                    <select class="wobx-phase-select" data-trade="${esc(t.category)}" ${isLocked ? 'disabled' : ''}>
-                      <option value="">—</option>
-                      ${phaseOpts}
-                      <option value="__create__" style="font-style:italic;color:var(--orange);">+ Create new phase…</option>
-                    </select>
+                    ${isSynthetic ? '<span style="color:var(--muted);font-size:11px;">—</span>' : `
+                      <select class="wobx-phase-select" data-trade="${esc(t.category)}" ${isLocked ? 'disabled' : ''}>
+                        <option value="">—</option>
+                        ${phaseOpts}
+                        <option value="__create__" style="font-style:italic;color:var(--orange);">+ Create new phase…</option>
+                      </select>
+                    `}
                   </td>
                 </tr>
               `;
@@ -11147,36 +11168,49 @@ function computeTradeRollup(budget) {
   (budget.equipment || []).forEach(e => { if (!e.is_unassigned) getGroup(e.trade_category).equipment.push(e); });
 
   // For each trade group, compute revenue + a single trade-level budget
-  return Object.values(groups).map(g => {
-    const revenue = sumField(g.items, 'line_total');
+  // First pass — compute each trade row
+  let totalJgMaterialsCarvedOut = 0;       // total revenue $$ carved out across all JG-supplies trades
+  let totalJgXactMaterialsCost = 0;        // sum of Xact materials cost across affected trades
+
+  const tradeRows = Object.values(groups).map(g => {
+    const grossRevenue = sumField(g.items, 'line_total');
     const hours = sumField(g.labor, 'hours');
     const xactMaterialsTotal = sumField(g.materials, 'total');
 
-    // Trade-level budget lives on wo_builder_work_orders.trade_budget.
-    // Defaults to 50% of revenue when unset.
     const wbWo = (budget.wos || []).find(w => w.trade_category === g.category);
+    const jgSupplies = wbWo?.materials_supplier === 'jg';
+
+    // When JG supplies materials: carve the Xact materials cost out of revenue.
+    // This trade is now "labor-only" — the materials portion of revenue gets
+    // moved to the synthetic 'JG Purchased Materials' bucket below.
+    let revenue = grossRevenue;
+    let materialsCarveOut = 0;
+    if (jgSupplies) {
+      materialsCarveOut = Math.min(xactMaterialsTotal, grossRevenue);  // can't carve more than exists
+      revenue = grossRevenue - materialsCarveOut;
+      totalJgMaterialsCarvedOut += materialsCarveOut;
+      totalJgXactMaterialsCost += xactMaterialsTotal;
+    }
+
+    // Budget defaults to 50% of the (now possibly-reduced) revenue
     const tradeBudget = (wbWo?.trade_budget != null)
       ? Number(wbWo.trade_budget)
       : Number((revenue * 0.5).toFixed(2));
 
-    // If JG supplies materials, add a separate materials cost to the trade
-    const jgSupplies = wbWo?.materials_supplier === 'jg';
-    const materialsBudget = jgSupplies
-      ? ((wbWo?.materials_budget != null) ? Number(wbWo.materials_budget) : Number(xactMaterialsTotal.toFixed(2)))
-      : 0;
-
-    const totalCost = tradeBudget + materialsBudget;
-    const profit = revenue - totalCost;
+    const profit = revenue - tradeBudget;
 
     return {
       category: g.category,
       label: g.label,
       sort: g.sort,
       itemCount: g.items.length,
-      revenue,
+      grossRevenue,           // original (before carve-out) — for reference in modal
+      revenue,                // labor-only when JG supplies, full otherwise
+      materialsCarveOut,      // how much was moved to JG bucket from this trade
+      xactMaterialsTotal,     // for display
       budget: tradeBudget,
-      materialsBudget,
-      totalCost,
+      materialsBudget: 0,     // legacy field — no longer used per-trade; left for compatibility
+      totalCost: tradeBudget,
       jgSupplies,
       budgetIsOverride: wbWo?.trade_budget != null,
       profit,
@@ -11184,6 +11218,38 @@ function computeTradeRollup(budget) {
       suggestedPhaseId: matchPhaseForTrade(g.category),
     };
   }).sort((a, b) => (a.sort || 100) - (b.sort || 100));
+
+  // Add the synthetic JG Purchased Materials row if any trade is JG-supplied.
+  // Budget defaults to the Xact materials total (what we'd "expect" to spend),
+  // but is editable independently via wo_builder_work_orders row with category='__jg_materials__'.
+  if (totalJgMaterialsCarvedOut > 0) {
+    const jgWo = (budget.wos || []).find(w => w.trade_category === '__jg_materials__');
+    const jgBudget = (jgWo?.trade_budget != null)
+      ? Number(jgWo.trade_budget)
+      : Number(totalJgXactMaterialsCost.toFixed(2));
+    const jgProfit = totalJgMaterialsCarvedOut - jgBudget;
+    tradeRows.push({
+      category: '__jg_materials__',
+      label: '📦 JG Purchased Materials',
+      sort: 999,
+      itemCount: 0,
+      grossRevenue: totalJgMaterialsCarvedOut,
+      revenue: totalJgMaterialsCarvedOut,
+      materialsCarveOut: 0,
+      xactMaterialsTotal: totalJgXactMaterialsCost,
+      budget: jgBudget,
+      materialsBudget: 0,
+      totalCost: jgBudget,
+      jgSupplies: false,
+      budgetIsOverride: jgWo?.trade_budget != null,
+      profit: jgProfit,
+      hours: 0,
+      suggestedPhaseId: null,
+      isSynthetic: true,         // marker for renderers
+    });
+  }
+
+  return tradeRows;
 }
 
 const TRADE_LABEL_OVERRIDES = {
@@ -11488,11 +11554,13 @@ function wireWoBuilderControls() {
   // Click trade row → open detail popup (skip if click was on a select/button or row was just dragged)
   document.querySelectorAll('.wobx-trade-row').forEach(row => {
     row.addEventListener('click', (e) => {
-      if (e.target.closest('select, button')) return;
+      if (e.target.closest('select, button, input')) return;
       if (row.dataset.justDragged === '1') {
         row.dataset.justDragged = '0';
         return;
       }
+      // Synthetic rows (e.g. __jg_materials__) have no items to show — skip
+      if (row.classList.contains('wobx-synthetic-row')) return;
       openWoDetailModal(row.dataset.trade, row.dataset.tradeLabel);
     });
 
