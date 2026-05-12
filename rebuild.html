@@ -12669,9 +12669,14 @@ async function syncPhaseAssigneesFromWo(phaseId, assignees) {
   const wantedEmpIds = new Set(empIds || []);
 
   // Read current
-  const { data: existing } = await sb.from('rebuild_phase_assignees')
+  const { data: existing, error: readErr } = await sb.from('rebuild_phase_assignees')
     .select('id, assignee_type, sub_id, employee_id')
     .eq('phase_id', phaseId);
+  if (readErr) {
+    console.error('Phase assignee read error:', readErr);
+    toast('Could not check existing phase assignees: ' + readErr.message, true);
+    return;
+  }
   const current = existing || [];
 
   // Build new rows
@@ -12680,13 +12685,20 @@ async function syncPhaseAssigneesFromWo(phaseId, assignees) {
 
   const subsToAdd = [...wantedSubIds].filter(id => !haveSubIds.has(id));
   const empsToAdd = [...wantedEmpIds].filter(id => !haveEmpIds.has(id));
+  const assignedBy = state.pmEmail || state.userEmail || 'system@jg-restoration.com';
   const newRows = [
-    ...subsToAdd.map(id => ({ phase_id: phaseId, assignee_type: 'sub', sub_id: id, assigned_by_email: state.pmEmail })),
-    ...empsToAdd.map(id => ({ phase_id: phaseId, assignee_type: 'carpenter', employee_id: id, assigned_by_email: state.pmEmail })),
+    ...subsToAdd.map(id => ({ phase_id: phaseId, assignee_type: 'sub', sub_id: id, assigned_by_email: assignedBy })),
+    ...empsToAdd.map(id => ({ phase_id: phaseId, assignee_type: 'carpenter', employee_id: id, assigned_by_email: assignedBy })),
   ];
+  console.log('syncPhaseAssigneesFromWo', { phaseId, wantedSubIds: [...wantedSubIds], wantedEmpIds: [...wantedEmpIds], haveSubIds: [...haveSubIds], haveEmpIds: [...haveEmpIds], newRows });
   if (newRows.length) {
-    const { error } = await sb.from('rebuild_phase_assignees').insert(newRows);
-    if (error) console.error('Phase assignee insert error:', error);
+    const { error, data } = await sb.from('rebuild_phase_assignees').insert(newRows).select();
+    if (error) {
+      console.error('Phase assignee insert error:', error, 'attempted rows:', newRows);
+      toast('Phase assignee insert failed: ' + error.message, true);
+    } else {
+      console.log('Phase assignees inserted:', data);
+    }
   }
 
   // Note: deliberately NOT removing existing assignees that aren't in the WO list —
