@@ -6779,6 +6779,28 @@ async function loadSelections() {
     .eq('project_id', state.activeProjectId)
     .order('created_at', { ascending: false });
   state.selections = data || [];
+  // Auto-flip any WOs from 'awaiting_selections' → 'draft' if all attached selections are approved
+  if (Array.isArray(state.workOrders)) {
+    const woMap = new Map();
+    (state.selections || []).forEach(s => {
+      if (!s.work_order_id) return;
+      if (!woMap.has(s.work_order_id)) woMap.set(s.work_order_id, []);
+      woMap.get(s.work_order_id).push(s);
+    });
+    for (const [woId, sels] of woMap.entries()) {
+      const wo = state.workOrders.find(w => w.id === woId);
+      if (!wo || wo.status !== 'awaiting_selections') continue;
+      const allDone = sels.every(s => s.status === 'approved' || s.status === 'install_scheduled');
+      if (allDone && sels.length) {
+        await sb.from('rebuild_work_orders').update({ status: 'draft' }).eq('id', woId);
+        await sb.from('rebuild_work_order_history').insert({
+          work_order_id: woId, action: 'selections_complete', actor: state.pmEmail || 'system',
+          details: `All ${sels.length} selection(s) approved — WO returned to Draft for signature send`,
+        });
+        wo.status = 'draft';
+      }
+    }
+  }
 }
 
 async function loadMessages() {
@@ -12184,13 +12206,14 @@ async function loadWorkOrders() {
 // ═══════════════════ WORK ORDERS TAB ═══════════════════
 
 const WO_STATUS_META = {
-  draft:             { label: 'Draft',                 color: '#7884a0', bg: 'rgba(120,132,160,.12)' },
-  sent:              { label: 'Awaiting Signature',    color: '#e85d04', bg: 'rgba(232,93,4,.15)' },
-  signed:            { label: 'Signed',                color: '#2d9c5f', bg: 'rgba(45,156,95,.15)' },
-  converted_to_po:   { label: 'PO Issued · Awaiting Invoice', color: '#4a90e2', bg: 'rgba(74,144,226,.15)' },
-  invoice_received:  { label: 'Invoice Received',      color: '#2d9c5f', bg: 'rgba(45,156,95,.18)' },
-  superseded:        { label: 'Superseded',            color: '#7884a0', bg: 'rgba(120,132,160,.10)' },
-  cancelled:         { label: 'Cancelled',             color: '#d64545', bg: 'rgba(214,69,69,.12)' },
+  draft:                { label: 'Draft',                 color: '#7884a0', bg: 'rgba(120,132,160,.12)' },
+  awaiting_selections:  { label: 'Awaiting Selections',   color: '#b87900', bg: 'rgba(245,166,35,.18)' },
+  sent:                 { label: 'Awaiting Signature',    color: '#e85d04', bg: 'rgba(232,93,4,.15)' },
+  signed:               { label: 'Signed',                color: '#2d9c5f', bg: 'rgba(45,156,95,.15)' },
+  converted_to_po:      { label: 'PO Issued · Awaiting Invoice', color: '#4a90e2', bg: 'rgba(74,144,226,.15)' },
+  invoice_received:     { label: 'Invoice Received',      color: '#2d9c5f', bg: 'rgba(45,156,95,.18)' },
+  superseded:           { label: 'Superseded',            color: '#7884a0', bg: 'rgba(120,132,160,.10)' },
+  cancelled:            { label: 'Cancelled',             color: '#d64545', bg: 'rgba(214,69,69,.12)' },
 };
 
 // ─── Unassigned bucket (shown below the trade table) ───
@@ -14420,7 +14443,7 @@ function renderWorkOrdersTab() {
     const matchingWos = a.type === 'sub'
       ? wos.filter(w => w.sub_id === a.id)
       : wos.filter(w => w.employee_id === a.id);
-    const active = matchingWos.find(w => ['sent','signed','draft','converted_to_po','invoice_received'].includes(w.status));
+    const active = matchingWos.find(w => ['sent','signed','draft','awaiting_selections','converted_to_po','invoice_received'].includes(w.status));
     const sm = WO_STATUS_META[active?.status] || null;
     const icon = a.type === 'carpenter' ? '👷' : '🏢';
     const typeLabel = a.type === 'carpenter' ? 'JG Carpenter' : 'Subcontractor';
@@ -14446,6 +14469,9 @@ function renderWorkOrdersTab() {
           ${selCb}
           ${active && active.uses_selections_workflow
             ? `<button class="btn" data-wo-act="open-selections" data-wo-id="${active.id}">📋 Selections</button>`
+            : ''}
+          ${active && a.type === 'sub'
+            ? `<button class="btn ghost" data-wo-act="add-selection" data-wo-id="${active.id}" data-sub-id="${a.id}" title="Add a material selection to this WO">+ Selection</button>`
             : ''}
           ${active
             ? `<button class="btn" data-wo-act="open" data-wo-id="${active.id}">${active.status === 'draft' ? '✎ Continue' : 'View'}</button>`
@@ -14476,14 +14502,15 @@ function renderWorkOrdersTab() {
 // ─── Section A: Read-only Selections rollup (replaces old top-nav Selections tab) ───
 function renderSelectionsRollup() {
   const sels = state.selections || [];
+  const newBtn = `<button class="btn primary" id="sel_rollup_new" style="font-size:11px;padding:5px 12px;">+ New Selection</button>`;
   if (!sels.length) {
     return `
       <div class="sel-rollup">
         <div class="sel-rollup-head">
           <h3>📋 Material Selections</h3>
-          <span class="sel-rollup-count">none yet</span>
+          <div style="display:flex;align-items:center;gap:10px;"><span class="sel-rollup-count">none yet</span>${newBtn}</div>
         </div>
-        <div class="sel-rollup-empty">No selections yet — they appear here when a WO has the Selections workflow turned on.</div>
+        <div class="sel-rollup-empty">No selections yet — create one manually, or turn on the Selections workflow on a WO to track sub-supplied materials.</div>
       </div>
     `;
   }
@@ -14506,7 +14533,10 @@ function renderSelectionsRollup() {
     <div class="sel-rollup">
       <div class="sel-rollup-head">
         <h3>📋 Material Selections</h3>
-        <span class="sel-rollup-count">${pending} pending · ${approved} approved · $${Number(totalApproved).toLocaleString(undefined,{maximumFractionDigits:0})}</span>
+        <div style="display:flex;align-items:center;gap:10px;">
+          <span class="sel-rollup-count">${pending} pending · ${approved} approved · $${Number(totalApproved).toLocaleString(undefined,{maximumFractionDigits:0})}</span>
+          <button class="btn primary" id="sel_rollup_new" style="font-size:11px;padding:5px 12px;">+ New Selection</button>
+        </div>
       </div>
       <div class="sel-rollup-grid">
         ${sels.slice(0, 12).map(s => `
@@ -14524,6 +14554,7 @@ function renderSelectionsRollup() {
 
 // ─── Section C: Trade Consolidation panel ───
 function renderConsolidationPanel(budget) {
+  return ''; // Disabled per Josh's request — panel hidden, code preserved below
   if (!budget || !budget.upload || budget.upload.parse_status !== 'parsed') return '';
   if (typeof computeTradeRollup !== 'function') return '';
   const tradeRollup = computeTradeRollup(budget);
@@ -14785,6 +14816,53 @@ function openWoEditModal(woId) {
     <label>Payment Terms</label>
     <textarea id="wo_terms" rows="2" ${isReadOnly ? 'disabled' : ''}>${esc(wo.payment_terms || '')}</textarea>
 
+    ${(() => {
+      // ─── Material Selections section ───
+      const selsForWo = (state.selections || []).filter(s => s.work_order_id === wo.id);
+      const allApproved = selsForWo.length > 0 && selsForWo.every(s => s.status === 'approved' || s.status === 'install_scheduled');
+      const anyPending = selsForWo.some(s => !['approved','install_scheduled','rejected'].includes(s.status));
+      const statusLabel = {
+        draft:'Draft', awaiting_vendor:'Vendor', awaiting_pm_review:'PM Review',
+        awaiting_customer:'Customer', awaiting_customer_install:'Install Approval',
+        approved:'✓ Approved', install_scheduled:'✓ Install Set',
+        changes_requested:'⚠ Changes', rejected:'✕ Rejected',
+      };
+      const selRows = selsForWo.length
+        ? selsForWo.map(s => `
+            <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 10px;background:var(--bg);border:1px solid var(--line);border-radius:6px;font-size:12px;cursor:pointer;" data-wo-modal-sel="${esc(s.id)}">
+              <div>
+                <b>${esc(s.category || 'Selection')}</b>
+                ${s.vendor_name || s.vendor_sub?.company_name ? `<span style="color:var(--muted);"> · ${esc(s.vendor_sub?.company_name || s.vendor_name)}</span>` : ''}
+                ${s.total_cost ? `<span style="color:var(--muted);"> · $${Number(s.total_cost).toLocaleString(undefined,{maximumFractionDigits:0})}</span>` : ''}
+              </div>
+              <span style="font-size:10px;font-weight:700;color:var(--muted);">${statusLabel[s.status] || s.status}</span>
+            </div>
+          `).join('')
+        : '<div style="font-size:12px;color:var(--muted);font-style:italic;padding:8px 0;">No selections attached. Click "+ Add Selection" to create one.</div>';
+      return `
+        <div style="margin-top:18px;padding:12px 14px;background:rgba(245,166,35,.06);border:1px solid rgba(245,166,35,.30);border-radius:8px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+            <b style="font-size:13px;color:var(--navy);">📋 Material Selections</b>
+            <div style="display:flex;gap:6px;align-items:center;">
+              ${selsForWo.length ? `<span style="font-size:11px;color:var(--muted);">${selsForWo.length} attached${allApproved ? ' · all approved ✓' : anyPending ? ' · pending' : ''}</span>` : ''}
+              ${!isReadOnly ? `<button class="btn ghost" data-wo-modal-act="add-selection" style="font-size:11px;padding:4px 10px;">+ Add Selection</button>` : ''}
+            </div>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:4px;">${selRows}</div>
+          ${selsForWo.length && !isReadOnly ? `
+            <div style="margin-top:10px;padding-top:10px;border-top:1px solid rgba(245,166,35,.25);display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
+              <span style="font-size:11px;color:var(--muted);">
+                ${wo.status === 'draft' ? 'Send a selection request before sending the WO for signature.' :
+                  wo.status === 'awaiting_selections' ? '⏳ Waiting on sub to complete selections.' :
+                  'Selections are managed separately from the WO signature flow.'}
+              </span>
+              ${wo.status === 'draft' || wo.status === 'awaiting_selections' ? `<button class="btn primary" data-wo-modal-act="send-selection-request" style="font-size:11px;padding:5px 12px;">📧 Send Selection Request</button>` : ''}
+            </div>
+          ` : ''}
+        </div>
+      `;
+    })()}
+
     ${wo.status === 'sent' || wo.status === 'signed' ? `
       <div style="margin-top:14px;padding:10px 12px;background:var(--bg);border:1px solid var(--line);border-radius:8px;font-size:12px;">
         <b>Sub link:</b> <a href="${woUrl}" target="_blank" style="word-break:break-all;color:var(--orange);">${woUrl}</a>
@@ -14816,11 +14894,71 @@ function openWoEditModal(woId) {
   modal.querySelectorAll('[data-wo-modal-act]').forEach(btn => {
     btn.addEventListener('click', () => handleWoModalAction(btn.dataset.woModalAct, wo, woUrl));
   });
+  // Wire selection-row clicks
+  modal.querySelectorAll('[data-wo-modal-sel]').forEach(row => {
+    row.addEventListener('click', () => {
+      modal.classList.remove('on');
+      if (typeof openSelectionEditor === 'function') openSelectionEditor(row.dataset.woModalSel);
+    });
+  });
 }
 
 async function handleWoModalAction(act, wo, woUrl) {
   const modal = document.getElementById('modalWoEdit');
   if (act === 'close') { modal.classList.remove('on'); return; }
+  if (act === 'add-selection') {
+    await openNewSelectionFlow({ woId: wo.id, subId: wo.sub_id });
+    // Refresh the modal to show the new selection
+    modal.classList.remove('on');
+    setTimeout(() => openWoEditModal(wo.id), 300);
+    return;
+  }
+  if (act === 'send-selection-request') {
+    const selsForWo = (state.selections || []).filter(s => s.work_order_id === wo.id);
+    if (!selsForWo.length) { toast('Add at least one selection first', true); return; }
+    if (!wo.sent_to_email && !wo.sub?.email) { toast('Sub has no email on file', true); return; }
+    if (!confirm(`Send selection request email to ${wo.sub?.company_name || 'the sub'}?\n\nThey'll get a link to fill in material choices. The WO will move to "Awaiting Selections" status.`)) return;
+    const recipient = wo.sent_to_email || wo.sub?.email;
+    // Update WO status
+    await sb.from('rebuild_work_orders').update({ status: 'awaiting_selections' }).eq('id', wo.id);
+    await sb.from('rebuild_work_order_history').insert({
+      work_order_id: wo.id, action: 'selection_request_sent', actor: state.pmEmail,
+      details: `Selection request sent to ${recipient} for ${selsForWo.length} selection(s)`,
+    });
+    // Fire Zapier webhook for the email (uses existing pattern)
+    try {
+      const payload = {
+        type: 'selection_request',
+        wo_id: wo.id,
+        wo_number: wo.wo_number || '',
+        project_id: state.activeProjectId,
+        project_name: state.activeProject?.customer_name || '',
+        job_number: state.activeProject?.albi_job_number || '',
+        property_address: state.activeProject?.property_address || '',
+        sub_name: wo.sub?.company_name || '',
+        sub_contact: wo.sub?.primary_contact || '',
+        recipient_email: recipient,
+        selection_count: selsForWo.length,
+        selection_summary: selsForWo.map(s => `${s.category || 'Selection'}: ${s.status}`).join('\n'),
+        portal_url: `${location.origin}${location.pathname.replace(/[^/]*$/, '')}vendor.html?wo=${wo.accept_token}`,
+        sent_by: state.pmName || state.pmEmail,
+      };
+      const body = new URLSearchParams();
+      Object.entries(payload).forEach(([k,v]) => body.append(k, v == null ? '' : String(v)));
+      await fetch('https://hooks.zapier.com/hooks/catch/12651350/selection-request/', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: body.toString(),
+      });
+    } catch (e) {
+      console.warn('Zapier selection-request webhook failed:', e);
+    }
+    modal.classList.remove('on');
+    toast('✓ Selection request sent — WO now awaiting selections');
+    await loadWorkOrders();
+    renderDetail();
+    return;
+  }
   if (act === 'copy-link') {
     navigator.clipboard.writeText(woUrl).then(() => toast('Link copied'));
     return;
@@ -15534,6 +15672,7 @@ function wireWorkOrdersTab() {
       if (act === 'create') createOrOpenWorkOrder(btn.dataset.subId);
       else if (act === 'open') createOrOpenWorkOrder(null, btn.dataset.woId);
       else if (act === 'open-selections') openSelectionsForWo(btn.dataset.woId);
+      else if (act === 'add-selection') openNewSelectionFlow({ woId: btn.dataset.woId, subId: btn.dataset.subId });
       else if (act === 'history') {
         const subId = btn.dataset.subId;
         const empId = btn.dataset.employeeId;
@@ -15639,6 +15778,40 @@ function wireSelectionsRollup() {
   document.querySelectorAll('[data-sel-rollup-id]').forEach(card => {
     card.addEventListener('click', () => openSelectionEditor(card.dataset.selRollupId));
   });
+  const newBtn = document.getElementById('sel_rollup_new');
+  if (newBtn) newBtn.addEventListener('click', () => openNewSelectionFlow());
+  // + Selection buttons on sub rows
+  document.querySelectorAll('[data-wo-act="add-selection"]').forEach(btn => {
+    btn.addEventListener('click', () => openNewSelectionFlow({ woId: btn.dataset.woId, subId: btn.dataset.subId }));
+  });
+}
+
+// Create a new selection. Optionally pre-attached to a WO and/or sub.
+async function openNewSelectionFlow(opts = {}) {
+  const { woId = null, subId = null } = opts;
+  const wo = woId ? state.workOrders.find(w => w.id === woId) : null;
+  const insertRow = {
+    project_id: state.activeProjectId,
+    status: 'draft',
+    category: '',
+    created_by_email: state.pmEmail,
+  };
+  if (woId) {
+    insertRow.work_order_id = woId;
+    insertRow.triggered_from_wo = true;
+  }
+  if (subId || wo?.sub_id) {
+    insertRow.vendor_sub_id = subId || wo.sub_id;
+  }
+  const { data, error } = await sb.from('rebuild_selections').insert(insertRow).select();
+  if (error) { toast('Create failed: ' + error.message, true); return; }
+  await loadSelections();
+  if (typeof openSelectionEditor === 'function') {
+    openSelectionEditor(data[0].id);
+  } else {
+    toast('✓ Selection created — open it from the rollup to fill in details');
+    renderTabContent();
+  }
 }
 
 // Wire all consolidation-panel interactions (drag, multi-select, bulk add, create WO).
