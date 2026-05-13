@@ -6044,11 +6044,24 @@ async function loadEmployees() {
 // All active staff for to-do assignment (any role)
 async function loadAllStaff() {
   if (!sb) { state.allStaff = []; return; }
-  const { data } = await sb.from('employees')
-    .select('id, name, role, email, personal_email, phone, mobile_phone, active')
+  // Try with phone columns first, fall back if columns don't exist
+  let { data, error } = await sb.from('employees')
+    .select('id, name, role, email, personal_email, phone, active')
     .eq('active', true)
     .order('role')
     .order('name');
+  // If that failed (column missing), retry without phone
+  if (error) {
+    console.warn('[loadAllStaff] phone column missing, retrying without:', error.message);
+    const retry = await sb.from('employees')
+      .select('id, name, role, email, personal_email, active')
+      .eq('active', true)
+      .order('role')
+      .order('name');
+    data = retry.data;
+    error = retry.error;
+  }
+  if (error) console.error('[loadAllStaff]', error);
   state.allStaff = data || [];
 }
 
@@ -6905,7 +6918,7 @@ async function loadHistory() {
     sb.from('rebuild_work_order_history').select('*, work_order:rebuild_work_orders!inner(project_id, sub:rebuild_subs(company_name), version)').eq('work_order.project_id', projectId).order('created_at', { ascending: false }).limit(50),
     sb.from('rebuild_todo_history').select('*, todo:rebuild_todos!inner(project_id, title)').eq('todo.project_id', projectId).order('created_at', { ascending: false }).limit(50),
     selIds.length
-      ? sb.from('rebuild_selections_history').select('*').in('selection_id', selIds).order('created_at', { ascending: false }).limit(50)
+      ? sb.from('rebuild_selections_history').select('*').in('selection_id', selIds).order('created_at', { ascending: false }).limit(50).then(r => r.error ? { data: [] } : r)
       : Promise.resolve({ data: [] }),
     sb.from('rebuild_journal_entries').select('id, body, author_email, author_name, created_at, edited_at, deleted_at, phase_name').eq('project_id', projectId).order('created_at', { ascending: false }).limit(50),
   ]);
@@ -7409,7 +7422,6 @@ function renderRelationshipsTab() {
             <optgroup label="JG roles">
               <option value="tech">Tech</option>
               <option value="carpenter">Carpenter</option>
-              <option value="subcontractor">Subcontractor</option>
               <option value="estimator">Estimator</option>
               <option value="project_manager">Project Manager</option>
               <option value="office_admin">Office Admin</option>
@@ -7583,9 +7595,9 @@ function wireRelationshipsTab() {
     estimator: ['Estimator'],
     project_manager: ['Project Manager', 'PM'],
     office_admin: ['Office', 'Office Admin', 'Admin', 'Office Manager', 'Bookkeeper'],
-    // 'subcontractor' and 'other' get the full staff list
+    // 'other' gets the full staff list
   };
-  const JG_ROLES = new Set(['tech','carpenter','subcontractor','estimator','project_manager','office_admin','other']);
+  const JG_ROLES = new Set(['tech','carpenter','estimator','project_manager','office_admin','other']);
 
   const updateStaffPicker = () => {
     const roleSel = $('#rel_f_role');
@@ -7618,8 +7630,7 @@ function wireRelationshipsTab() {
     $('#rel_f_name').value = staff.name || '';
     if (staff.email) $('#rel_f_email').value = staff.email;
     else if (staff.personal_email) $('#rel_f_email').value = staff.personal_email;
-    const phone = staff.phone || staff.mobile_phone;
-    if (phone) $('#rel_f_phone').value = phone;
+    if (staff.phone) $('#rel_f_phone').value = staff.phone;
     $('#rel_f_company').value = 'JG Restoration';
   });
 
