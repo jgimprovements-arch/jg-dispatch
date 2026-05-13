@@ -16882,21 +16882,46 @@ function renderMessageRow(m) {
       ? `<span class="msg-status-rx">Received</span>`
       : '';
   const attachments = m.attachments || [];
-  const attachHtml = attachments.length ? `
+  // Twilio MMS media URLs may land on the message row instead of rebuild_message_attachments.
+  // Pick them up from media_urls or attachment_urls JSON/array columns if present.
+  const fallbackUrls = [];
+  ['media_urls','attachment_urls','sms_media_urls','media'].forEach(field => {
+    const val = m[field];
+    if (!val) return;
+    if (Array.isArray(val)) val.forEach(u => u && fallbackUrls.push(typeof u === 'string' ? u : (u.url || u.public_url)));
+    else if (typeof val === 'string') {
+      // Could be a JSON array or a comma-separated list
+      try {
+        const parsed = JSON.parse(val);
+        if (Array.isArray(parsed)) parsed.forEach(u => u && fallbackUrls.push(typeof u === 'string' ? u : (u.url || u.public_url)));
+        else if (parsed) fallbackUrls.push(parsed);
+      } catch {
+        val.split(',').forEach(u => { const trimmed = u.trim(); if (trimmed) fallbackUrls.push(trimmed); });
+      }
+    }
+  });
+  // Don't double-count anything already in attachments
+  const existingUrls = new Set(attachments.map(a => a.public_url));
+  const extras = fallbackUrls.filter(u => u && !existingUrls.has(u)).map(u => {
+    const name = decodeURIComponent((u.split('/').pop() || 'attachment').split('?')[0]);
+    return { public_url: u, file_name: name, file_size: null, _fallback: true };
+  });
+  const allAttachments = attachments.concat(extras);
+  const attachHtml = allAttachments.length ? `
     <div class="msg-att-list">
-      ${attachments.map(a => {
-        const isImg = /\.(jpg|jpeg|png|gif|webp|heic)$/i.test(a.file_name || '');
+      ${allAttachments.map(a => {
+        const isImg = /\.(jpg|jpeg|png|gif|webp|heic)$/i.test(a.file_name || '') || /\.(jpg|jpeg|png|gif|webp|heic)(\?|$)/i.test(a.public_url || '');
         if (isImg) {
           return `<span class="msg-att-chip msg-att-img">
-            <img src="${a.public_url}" data-lightbox-url="${a.public_url}" data-lightbox-name="${a.file_name}" loading="lazy" alt="${a.file_name}" style="width:48px;height:48px;object-fit:cover;border-radius:4px;cursor:pointer;">
-            <span style="margin-left:6px;">${a.file_name}</span>
-            <button class="msg-att-dl" data-url="${a.public_url}" data-name="${a.file_name}" title="Download">📥</button>
+            <img src="${a.public_url}" data-lightbox-url="${a.public_url}" data-lightbox-name="${esc(a.file_name)}" loading="lazy" alt="${esc(a.file_name)}" style="width:48px;height:48px;object-fit:cover;border-radius:4px;cursor:pointer;">
+            <a href="${a.public_url}" target="_blank" rel="noopener" style="margin-left:6px;text-decoration:none;color:var(--navy);font-weight:600;" title="Open in new tab">${esc(a.file_name)}</a>
+            <button class="msg-att-dl" data-url="${a.public_url}" data-name="${esc(a.file_name)}" title="Download">📥</button>
           </span>`;
         }
         return `<span class="msg-att-chip">
-          📎 ${a.file_name}
+          📎 <a href="${a.public_url}" target="_blank" rel="noopener" title="Open in new tab">${esc(a.file_name)}</a>
           ${a.file_size ? `<span style="color:var(--muted);">(${(a.file_size/1024).toFixed(0)} KB)</span>` : ''}
-          <button class="msg-att-dl" data-url="${a.public_url}" data-name="${a.file_name}" title="Download">📥</button>
+          <button class="msg-att-dl" data-url="${a.public_url}" data-name="${esc(a.file_name)}" title="Download">📥</button>
         </span>`;
       }).join('')}
     </div>` : '';
