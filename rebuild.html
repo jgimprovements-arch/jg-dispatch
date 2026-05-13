@@ -14875,6 +14875,7 @@ async function sendWorkOrderToSub(wo, woUrl) {
 // ─────────── FINANCIALS TAB ───────────
 
 const QB_REFRESH_WEBHOOK_KEY = 'jg_qb_refresh_webhook_url';
+const QB_REFRESH_AUTH_KEY    = 'jg_qb_refresh_auth_key';
 
 function getQbRefreshWebhook() {
   return localStorage.getItem(QB_REFRESH_WEBHOOK_KEY) || '';
@@ -14883,6 +14884,15 @@ function getQbRefreshWebhook() {
 function setQbRefreshWebhook(url) {
   if (url) localStorage.setItem(QB_REFRESH_WEBHOOK_KEY, url);
   else localStorage.removeItem(QB_REFRESH_WEBHOOK_KEY);
+}
+
+function getQbRefreshAuthKey() {
+  return localStorage.getItem(QB_REFRESH_AUTH_KEY) || '';
+}
+
+function setQbRefreshAuthKey(key) {
+  if (key) localStorage.setItem(QB_REFRESH_AUTH_KEY, key);
+  else localStorage.removeItem(QB_REFRESH_AUTH_KEY);
 }
 
 function fmtRel(when) {
@@ -15156,42 +15166,69 @@ function wireFinancialsTab() {
     const btn = document.getElementById('qb_refresh_now');
     btn.disabled = true;
     btn.textContent = '⏳ Refreshing…';
+
+    // Auth: Vercel proxy uses X-Refresh-Key header. Zapier doesn't need it.
+    const authKey = getQbRefreshAuthKey();
+    const isVercel = /vercel|jg-qb-proxy/i.test(url);
+
     try {
-      // Fire the Zapier webhook. CORS will likely block reading the response, so we use no-cors.
-      await fetch(url, {
+      const headers = { 'Content-Type': 'application/json' };
+      if (authKey && isVercel) headers['X-Refresh-Key'] = authKey;
+
+      // Vercel proxy supports CORS so we can read the response directly.
+      // Zapier webhooks don't, so we use no-cors and poll instead.
+      const fetchOpts = {
         method: 'POST',
-        mode: 'no-cors',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({
           albi_job_number: p.albi_job_number,
           project_id: p.id,
-          qb_customer_name: p.customer_name || '',   // Exact match for Zapier's QB Find Customer
+          qb_customer_name: p.customer_name || '',
           refreshed_by_email: state.pmEmail || state.userEmail || 'unknown',
         }),
-      });
-      // Poll Supabase for updated last_synced_at — Zap typically takes 10-30 sec
-      toast('Refresh triggered — checking back in 15 seconds…');
-      const before = state.qbActuals?.last_synced_at || null;
-      let attempts = 0;
-      const poll = async () => {
-        attempts++;
-        await loadQbActuals();
-        const now = state.qbActuals?.last_synced_at;
-        if (now && now !== before) {
-          toast('✓ QB data refreshed');
-          renderTabContent();
-        } else if (attempts < 6) {
-          setTimeout(poll, 8000);
-        } else {
-          toast('No update yet — check Zapier task history', true);
-          btn.disabled = false;
-          btn.textContent = '🔄 Refresh from QB';
-        }
       };
-      setTimeout(poll, 8000);
+      if (!isVercel) fetchOpts.mode = 'no-cors';
+
+      if (isVercel) {
+        // Direct call — we can read the response
+        const res = await fetch(url, fetchOpts);
+        if (!res.ok) {
+          let errBody;
+          try { errBody = await res.json(); } catch { errBody = { error: await res.text() }; }
+          throw new Error(`Refresh failed (${res.status}): ${errBody.error || 'Unknown error'}${errBody.hint ? ' · ' + errBody.hint : ''}`);
+        }
+        const data = await res.json();
+        const counts = data.counts || {};
+        const totalTxns = Object.values(counts).reduce((s, n) => s + (n || 0), 0);
+        toast(`✓ QB refreshed: ${totalTxns} txns pulled in ${data.duration_ms || '?'}ms`);
+        await loadQbActuals();
+        renderTabContent();
+      } else {
+        // Zapier path — fire and poll
+        await fetch(url, fetchOpts);
+        toast('Refresh triggered — checking back in 15 seconds…');
+        const before = state.qbActuals?.last_synced_at || null;
+        let attempts = 0;
+        const poll = async () => {
+          attempts++;
+          await loadQbActuals();
+          const now = state.qbActuals?.last_synced_at;
+          if (now && now !== before) {
+            toast('✓ QB data refreshed');
+            renderTabContent();
+          } else if (attempts < 6) {
+            setTimeout(poll, 8000);
+          } else {
+            toast('No update yet — check Zapier task history', true);
+            btn.disabled = false;
+            btn.textContent = '🔄 Refresh from QB';
+          }
+        };
+        setTimeout(poll, 8000);
+      }
     } catch (e) {
       console.error('Refresh failed:', e);
-      toast('Refresh trigger failed: ' + e.message, true);
+      toast('Refresh failed: ' + e.message, true);
       btn.disabled = false;
       btn.textContent = '🔄 Refresh from QB';
     }
@@ -15199,18 +15236,38 @@ function wireFinancialsTab() {
 
   // Webhook settings
   document.getElementById('qb_webhook_settings')?.addEventListener('click', () => {
-    const current = getQbRefreshWebhook();
+    const currentUrl = getQbRefreshWebhook();
+    const currentKey = getQbRefreshAuthKey();
     const url = prompt(
-      'Zapier QB Refresh Webhook URL:\n\n' +
-      'Paste the URL from your Zapier "Catch Hook" step.\n' +
-      'Example: https://hooks.zapier.com/hooks/catch/12651350/abc123/\n\n' +
+      'QB Refresh Endpoint URL:\n\n' +
+      'Paste the URL of your Vercel proxy or Zapier webhook.\n' +
+      'Vercel example: https://jg-qb-proxy.vercel.app/api/qb/refresh-project\n' +
+      'Zapier example: https://hooks.zapier.com/hooks/catch/12651350/abc123/\n\n' +
       'Leave blank to remove.',
-      current
+      currentUrl
     );
     if (url === null) return;
-    const trimmed = url.trim();
-    setQbRefreshWebhook(trimmed);
-    if (trimmed) toast('Webhook saved'); else toast('Webhook cleared');
+    const trimmedUrl = url.trim();
+    setQbRefreshWebhook(trimmedUrl);
+
+    if (trimmedUrl && /vercel|jg-qb-proxy/i.test(trimmedUrl)) {
+      // Vercel proxy needs an auth key
+      const key = prompt(
+        'Refresh Auth Key:\n\n' +
+        'Paste the REFRESH_KEY env var from your Vercel proxy.\n' +
+        'This is the shared secret that authorizes refresh requests.\n\n' +
+        'Leave blank to remove.',
+        currentKey
+      );
+      if (key !== null) {
+        setQbRefreshAuthKey(key.trim());
+      }
+    } else {
+      // Zapier endpoint — no key needed
+      setQbRefreshAuthKey('');
+    }
+
+    if (trimmedUrl) toast('Webhook saved'); else toast('Webhook cleared');
     renderTabContent();
   });
 
