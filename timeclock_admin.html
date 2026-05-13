@@ -380,11 +380,24 @@ function groupEntriesByDay(entries) {
 // All aggregation sites (payroll, exports, summaries) flow through here.
 // ──────────────────────────────────────────────────────────────────────────
 function dayMetrics(dayEntries, allBreaks) {
-  var ents = dayEntries || [];
-  if (!ents.length) return { actualMins:0, billableMins:0, manualBreakMins:0, autoBreakMins:0, totalBreakMins:0, firstIn:null, lastOut:null, hasOpen:false, anyEarly:false, anyApprovedEarly:false };
+  var entsRaw = dayEntries || [];
+  if (!entsRaw.length) return { actualMins:0, billableMins:0, manualBreakMins:0, autoBreakMins:0, totalBreakMins:0, firstIn:null, lastOut:null, hasOpen:false, anyEarly:false, anyApprovedEarly:false };
+
+  // Sort ascending by clock_in so firstIn/lastOut are always correct
+  // regardless of how the array was passed in.
+  var ents = entsRaw.slice().sort(function(a,b){
+    return new Date(a.clock_in) - new Date(b.clock_in);
+  });
 
   var firstIn = ents[0].clock_in;
-  var lastOutEnt = ents[ents.length - 1];
+  // lastOut should come from the entry with the LATEST clock_out, not just
+  // the last in chronological order. (Possible to clock in for a brief job
+  // AFTER a longer earlier one was already closed.)
+  var lastOutEnt = ents.reduce(function(latest, e){
+    if (!e.clock_out) return latest; // active entries handled by hasOpen below
+    if (!latest || !latest.clock_out) return e;
+    return new Date(e.clock_out) > new Date(latest.clock_out) ? e : latest;
+  }, null) || ents[ents.length - 1];
   var lastOut = lastOutEnt.clock_out;
   var hasOpen = ents.some(function(e){ return !e.clock_out; });
 
