@@ -7417,6 +7417,15 @@ function renderRelationshipsTab() {
             </optgroup>
           </select>
 
+          <!-- JG Staff picker — only shown when a JG role is selected -->
+          <div id="rel_staff_picker_wrap" style="display:none;margin-top:6px;padding:10px 12px;background:rgba(232,93,4,.06);border:1px solid rgba(232,93,4,.25);border-radius:6px;">
+            <label style="font-size:10px;font-weight:800;color:var(--orange);text-transform:uppercase;letter-spacing:.4px;margin:0 0 4px;display:block;">Pick from JG Staff</label>
+            <select id="rel_f_staff_picker" style="width:100%;border:1px solid var(--line);border-radius:6px;padding:7px 10px;font-size:13px;font-family:inherit;background:#fff;">
+              <option value="">— Pick a staff member to auto-fill —</option>
+            </select>
+            <div style="font-size:11px;color:var(--muted);margin-top:4px;">Pick someone to auto-fill their name, email, and phone below.</div>
+          </div>
+
           <label>Name * <span id="rel_from_dir_badge" style="display:none;background:rgba(74,144,226,.15);color:#4a90e2;padding:2px 8px;border-radius:999px;font-size:9px;font-weight:800;letter-spacing:.4px;text-transform:uppercase;margin-left:8px;vertical-align:middle;">📇 From Directory</span></label>
           <div style="position:relative;">
             <input type="text" id="rel_f_name" autocomplete="off" placeholder="Start typing for suggestions">
@@ -7566,6 +7575,56 @@ function wireRelationshipsTab() {
     nameInput.addEventListener('blur', () => setTimeout(() => $('#rel_autocomplete')?.classList.remove('on'), 200));
   }
 
+  // ─── JG Staff picker ───
+  // Role-to-staff-filter map: which employee roles match which relationship roles
+  const JG_ROLE_FILTER = {
+    tech: ['Tech', 'Technician'],
+    carpenter: ['Carpenter'],
+    estimator: ['Estimator'],
+    project_manager: ['Project Manager', 'PM'],
+    office_admin: ['Office', 'Office Admin', 'Admin', 'Office Manager', 'Bookkeeper'],
+    // 'subcontractor' and 'other' get the full staff list
+  };
+  const JG_ROLES = new Set(['tech','carpenter','subcontractor','estimator','project_manager','office_admin','other']);
+
+  const updateStaffPicker = () => {
+    const roleSel = $('#rel_f_role');
+    const wrap = $('#rel_staff_picker_wrap');
+    const picker = $('#rel_f_staff_picker');
+    if (!roleSel || !wrap || !picker) return;
+    const role = roleSel.value;
+    if (!JG_ROLES.has(role)) { wrap.style.display = 'none'; return; }
+    wrap.style.display = 'block';
+    // Filter staff by role match if we have a filter list
+    const allStaff = state.allStaff || [];
+    const filterList = JG_ROLE_FILTER[role];
+    const filtered = filterList
+      ? allStaff.filter(s => filterList.some(f => (s.role || '').toLowerCase().includes(f.toLowerCase())))
+      : allStaff;
+    // If filter returns nothing, fall back to full list
+    const finalList = filtered.length ? filtered : allStaff;
+    picker.innerHTML = '<option value="">— Pick a staff member to auto-fill —</option>' +
+      finalList.map(s => `<option value="${esc(s.id)}">${esc(s.name)}${s.role ? ' · ' + esc(s.role) : ''}</option>`).join('');
+    picker.value = '';
+  };
+
+  $('#rel_f_role')?.addEventListener('change', updateStaffPicker);
+
+  $('#rel_f_staff_picker')?.addEventListener('change', (e) => {
+    const staffId = e.target.value;
+    if (!staffId) return;
+    const staff = (state.allStaff || []).find(s => s.id === staffId);
+    if (!staff) return;
+    $('#rel_f_name').value = staff.name || '';
+    if (staff.email) $('#rel_f_email').value = staff.email;
+    else if (staff.personal_email) $('#rel_f_email').value = staff.personal_email;
+    if (staff.phone) $('#rel_f_phone').value = staff.phone;
+    $('#rel_f_company').value = 'JG Restoration';
+  });
+
+  // Initialize visibility once on wire
+  setTimeout(updateStaffPicker, 50);
+
   // Directory picker
   const dirClose = $('#rel_dir_close');
   if (dirClose) dirClose.addEventListener('click', relCloseDirectory);
@@ -7610,6 +7669,8 @@ function relOpenAddSheet() {
   $('#rel_f_primary').checked = false;
   $('#rel_sheet_back').classList.add('on');
   setTimeout(() => $('#rel_f_name').focus(), 100);
+  // Refresh JG staff picker (defined in wireRelationshipsTab scope, called via event listener)
+  $('#rel_f_role').dispatchEvent(new Event('change'));
 }
 
 function relOpenEditSheet(id) {
@@ -7630,6 +7691,7 @@ function relOpenEditSheet(id) {
   $('#rel_f_notes').value = r.notes || '';
   $('#rel_f_primary').checked = !!r.is_primary;
   $('#rel_sheet_back').classList.add('on');
+  $('#rel_f_role').dispatchEvent(new Event('change'));
 }
 
 function relCloseSheet() {
