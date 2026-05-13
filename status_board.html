@@ -57,6 +57,22 @@
     color: var(--text);
     cursor: pointer;
   }
+  .refresh-btn {
+    border: 1px solid var(--line);
+    background: var(--bg);
+    border-radius: 8px;
+    padding: 7px 12px;
+    font-size: 13px;
+    font-family: inherit;
+    color: var(--navy);
+    font-weight: 700;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .refresh-btn:hover { background: #fff; border-color: var(--orange); color: var(--orange); }
+  .refresh-btn:active { transform: scale(.97); }
+  .refresh-btn.is-loading { opacity: .6; cursor: wait; }
+  .refresh-btn.is-loading::after { content: ' …'; }
 
   /* Board container */
   .board {
@@ -225,6 +241,7 @@
   <h1>Status Board</h1>
   <span class="meta" id="totalsMeta">—</span>
   <div class="spacer"></div>
+  <button class="refresh-btn" id="refreshBtn" title="Refresh data from Albi sync">🔄 Refresh</button>
   <select class="pm-filter" id="pmFilter">
     <option value="all">All PMs</option>
   </select>
@@ -293,38 +310,25 @@ function fmtDate(iso) {
 }
 
 async function loadProjects() {
-  // Pull all Albi projects except Lost. We try `projects` first (all types),
-  // then fall back to `rebuild_projects` if it doesn't exist or returns nothing.
-  // 'Lost', 'Cancelled', and 'Dead' jobs are filtered out at the query level.
+  // Exclude Lost / Cancelled / Dead jobs at the query level.
+  // We pull from rebuild_projects (original table) — this table holds the synced Albi projects.
   const EXCLUDE_STATUSES = ['Lost', 'Lost Lead', 'Dead', 'Cancelled', 'Canceled', 'Declined'];
+  const excludeFilter = `("${EXCLUDE_STATUSES.join('","')}")`;
 
-  const cols = 'id, albi_project_id, albi_job_number, customer_name, property_address, albi_status, albi_pm_name, albi_pm_email, scope_amount, estimated_revenue, actual_revenue, updated_at, created_at';
-
-  // Try the broad `projects` table first
-  let projRes = await sb.from('projects')
-    .select(cols)
-    .not('albi_status', 'in', `(${EXCLUDE_STATUSES.map(s => '"' + s + '"').join(',')})`)
-    .order('albi_project_id', { ascending: false, nullsFirst: false })
-    .limit(5000);
-
-  // If that table doesn't exist OR returns 0, fall back to rebuild_projects
-  if (projRes.error || !projRes.data || projRes.data.length === 0) {
-    console.log('[status_board] projects table unavailable or empty, falling back to rebuild_projects', projRes.error?.message);
-    projRes = await sb.from('rebuild_projects')
-      .select(cols + ', albi_project_id_num')
-      .not('albi_status', 'in', `(${EXCLUDE_STATUSES.map(s => '"' + s + '"').join(',')})`)
+  const [projRes, budRes] = await Promise.all([
+    sb.from('rebuild_projects')
+      .select('id, albi_project_id, albi_job_number, customer_name, property_address, albi_status, albi_pm_name, albi_pm_email, scope_amount, estimated_revenue, actual_revenue, updated_at, created_at')
+      .not('albi_status', 'in', excludeFilter)
       .order('albi_project_id_num', { ascending: false, nullsFirst: false })
-      .limit(5000);
-  }
-
-  const budRes = await sb.from('wo_budget_summaries')
-    .select('project_id, rcv, total_cost, gross_profit, margin_pct, margin_health');
-
+      .limit(5000),
+    sb.from('wo_budget_summaries')
+      .select('project_id, rcv, total_cost, gross_profit, margin_pct, margin_health'),
+  ]);
   if (projRes.error) {
+    console.error('[status_board] load error', projRes.error);
     $('#board').innerHTML = `<div class="loading">Load failed: ${esc(projRes.error.message)}</div>`;
     return;
   }
-  // Build a quick lookup for budget by project_id
   const budgetByProject = new Map();
   (budRes.data || []).forEach(b => budgetByProject.set(b.project_id, b));
   state.projects = (projRes.data || []).map(p => ({
@@ -483,18 +487,9 @@ async function updateStatus(projectId, newStatus, oldStatus) {
   project.updated_at = new Date().toISOString();
   render();
 
-  // Write back to whichever table we loaded from. Try `projects` first, fall back.
-  let updateRes = await sb.from('projects')
+  const { error } = await sb.from('rebuild_projects')
     .update({ albi_status: newStatus, updated_at: new Date().toISOString() })
     .eq('id', projectId);
-
-  // If the projects table doesn't exist OR no rows matched, try rebuild_projects
-  if (updateRes.error || (updateRes.data && updateRes.data.length === 0 && updateRes.count === 0)) {
-    updateRes = await sb.from('rebuild_projects')
-      .update({ albi_status: newStatus, updated_at: new Date().toISOString() })
-      .eq('id', projectId);
-  }
-  const error = updateRes.error;
 
   if (error) {
     // Rollback
@@ -529,6 +524,21 @@ $('#searchInput').addEventListener('input', (e) => {
 $('#pmFilter').addEventListener('change', (e) => {
   state.pmFilter = e.target.value;
   render();
+});
+
+$('#refreshBtn').addEventListener('click', async () => {
+  const btn = $('#refreshBtn');
+  btn.classList.add('is-loading');
+  btn.disabled = true;
+  try {
+    await loadProjects();
+    toast('✓ Refreshed');
+  } catch (e) {
+    toast('Refresh failed: ' + (e?.message || e), true);
+  } finally {
+    btn.classList.remove('is-loading');
+    btn.disabled = false;
+  }
 });
 
 // Realtime sync — pick up changes from other users / Albi imports
