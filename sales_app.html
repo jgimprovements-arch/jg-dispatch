@@ -619,7 +619,16 @@ if ('serviceWorker' in navigator) {
 </script>
 <!-- Auth handled via redirect to sales.html -->
 </head>
-<body ontouchstart="saSwipeStart(event)" ontouchend="saSwipeEnd(event)">
+<body ontouchstart="saSwipeStart(event);ptrStart(event)" ontouchmove="ptrMove(event)" ontouchend="saSwipeEnd(event);ptrEnd(event)" ontouchcancel="ptrEnd(event)">
+
+<!-- Pull-to-refresh indicator. Fixed at top, hidden by default. Slides
+     down with the user's finger via ptrMove. Releases threshold = 70px.
+     Shows a spinning navy circle when refreshing. -->
+<div id="ptr-indicator" style="position:fixed;top:0;left:50%;transform:translate(-50%,-100%);width:44px;height:44px;background:#fff;border-radius:50%;box-shadow:0 4px 14px rgba(13,45,94,.25);display:flex;align-items:center;justify-content:center;z-index:1500;transition:transform .25s ease;pointer-events:none;">
+  <svg id="ptr-icon" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#0d2d5e" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="transition:transform .15s linear;">
+    <path d="M21 12a9 9 0 1 1-6.219-8.56"></path>
+  </svg>
+</div>
 
 <!-- No login screen - auth handled by redirect to sales.html -->
 
@@ -4878,7 +4887,7 @@ function renderRoutes() {
     var stops = route.stops || [];
     var done = stops.filter(function(s){ return s.completed; }).length;
     var startMins = 8*60;
-    var html = '<div class="route-card-full"><div class="route-card-hdr">';
+    var html = '<div class="route-card-full"><div class="route-card-hdr" style="padding-right:80px;">';
     // Show route name if available, otherwise the formatted date. When name
     // is present, date moves to the meta line.
     if (route.name) {
@@ -5354,12 +5363,35 @@ function openLogTouch(partnerId) {
 }
 
 function openLogTouchForStop(pid, pname) {
+  // Track which route/stop initiated this touch log so submitLogTouch
+  // can mark the stop as completed after a successful save. Looked up
+  // by scanning APP.routes for a stop matching the partner_id on today's
+  // route (or the earliest upcoming route, if multiple exist).
+  APP.ltRouteContext = null;
+  var today = new Date().toISOString().split('T')[0];
+  // Prefer a route dated today; otherwise nearest future route. We don't
+  // touch past routes — completing a stop on a 3-day-old route would be
+  // suspicious and probably wrong.
+  var candidates = (APP.routes || []).filter(function(r){
+    return (r.stops || []).some(function(s){ return s.partner_id === pid && !s.completed; });
+  }).filter(function(r){ return r.route_date >= today; });
+  if (candidates.length) {
+    candidates.sort(function(a, b){ return a.route_date.localeCompare(b.route_date); });
+    var route = candidates[0];
+    var stopIdx = route.stops.findIndex(function(s){ return s.partner_id === pid && !s.completed; });
+    if (stopIdx >= 0) {
+      APP.ltRouteContext = { routeId: route.id, stopIdx: stopIdx };
+    }
+  }
   openLogTouch(pid);
 }
 
 function closeLogTouch() {
   document.getElementById('log-touch-overlay').classList.remove('open');
   _navPopOverlay('log-touch-overlay');
+  // Clear any route context so cancelling doesn't carry over to the next
+  // touch logged from a non-route screen.
+  APP.ltRouteContext = null;
 }
 
 function ltSearch() {
@@ -5476,7 +5508,150 @@ async function submitLogTouch() {
     }
 
     renderHome();
+
+    // If this touch was logged from a route's Log button, mark the
+    // corresponding stop as completed on the route. Updates the local
+    // APP.routes state and pushes the change to Supabase. The whole stops
+    // array is patched as a single JSON value (it's stored as JSONB).
+    if (APP.ltRouteContext) {
+      try {
+        var ctx = APP.ltRouteContext;
+        var route = APP.routes.find(function(r){ return r.id === ctx.routeId; });
+        if (route && route.stops && route.stops[ctx.stopIdx]) {
+          route.stops[ctx.stopIdx].completed = true;
+          route.stops[ctx.stopIdx].completed_at = new Date().toISOString();
+          await fetch(SB_URL + '/rest/v1/sales_routes?id=eq.' + ctx.routeId, {
+            method: 'PATCH',
+            headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ stops: route.stops })
+          });
+          renderRoutes();
+        }
+      } catch(routeErr) {
+        // Touch is already saved; route update failure shouldn't block the user
+        console.error('route stop completion patch failed:', routeErr);
+      }
+      APP.ltRouteContext = null;
+    }
   } catch(e) { toast('Error saving touch'); }
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// ── PULL TO REFRESH ──────────────────────────────────────────────────────
+// Standard mobile gesture: drag down from the top of the page to reload
+// all data. State machine has three values:
+//   null      — not currently in a pull
+//   'tracking'— finger is down, page is scrolled to top, waiting for drag
+//   'pulling' — finger is dragging the indicator down
+// Indicator slides 1:1 with finger until past 100px, then resists for
+// damping. Threshold to trigger = 70px. While refreshing, indicator
+// stays parked at 60px and spins.
+// ══════════════════════════════════════════════════════════════════════════
+var _ptrState = null;
+var _ptrStartY = 0;
+var _ptrCurrentY = 0;
+var _ptrRefreshing = false;
+var PTR_THRESHOLD = 70;
+var PTR_PARK_POSITION = 60;
+
+function ptrStart(e) {
+  if (_ptrRefreshing) return;
+  // Don't trigger on inputs (keyboard pull-down would otherwise refresh)
+  var target = e.target;
+  if (target && target.closest && target.closest('input,textarea,select,button')) return;
+  // Don't trigger if any sheet is open — those have their own scroll
+  if (document.querySelector('.sheet-overlay.open')) return;
+  // Must be at the very top of the page
+  if (window.scrollY > 0) return;
+  if (!e.touches || !e.touches[0]) return;
+  _ptrState = 'tracking';
+  _ptrStartY = e.touches[0].clientY;
+  _ptrCurrentY = _ptrStartY;
+}
+
+function ptrMove(e) {
+  if (!_ptrState || _ptrRefreshing) return;
+  if (!e.touches || !e.touches[0]) return;
+  _ptrCurrentY = e.touches[0].clientY;
+  var dy = _ptrCurrentY - _ptrStartY;
+  // Cancel if user scrolled up or barely moved
+  if (dy < 0) {
+    _ptrState = null;
+    _ptrUpdateIndicator(0);
+    return;
+  }
+  if (dy < 8) return; // tiny movements ignored — let normal scroll work
+  // Once we're sure it's a downward drag, switch to pulling state and
+  // start visually tracking. We do NOT preventDefault — that would block
+  // the user's ability to scroll up if they change their mind. The
+  // indicator just slides over the page.
+  _ptrState = 'pulling';
+  // Damping past 100px so it feels natural to over-pull
+  var visible = dy <= 100 ? dy : 100 + Math.pow(dy - 100, 0.7);
+  _ptrUpdateIndicator(visible);
+}
+
+function ptrEnd() {
+  if (!_ptrState || _ptrRefreshing) {
+    _ptrState = null;
+    return;
+  }
+  var dy = _ptrCurrentY - _ptrStartY;
+  _ptrState = null;
+  if (dy >= PTR_THRESHOLD) {
+    _ptrTriggerRefresh();
+  } else {
+    _ptrUpdateIndicator(0);
+  }
+}
+
+function _ptrUpdateIndicator(pixelsVisible) {
+  var ind = document.getElementById('ptr-indicator');
+  if (!ind) return;
+  // Indicator starts at -100%, slides down as we pull. Rotate icon too
+  // so the user sees the arc spin while they drag.
+  ind.style.transition = pixelsVisible === 0 ? 'transform .25s ease' : 'none';
+  ind.style.transform = 'translate(-50%, ' + (pixelsVisible - 44) + 'px)';
+  var icon = document.getElementById('ptr-icon');
+  if (icon) {
+    var rotation = Math.min(360, (pixelsVisible / PTR_THRESHOLD) * 360);
+    icon.style.transform = 'rotate(' + rotation + 'deg)';
+  }
+}
+
+async function _ptrTriggerRefresh() {
+  _ptrRefreshing = true;
+  // Park indicator visible and start spinning
+  var ind = document.getElementById('ptr-indicator');
+  var icon = document.getElementById('ptr-icon');
+  if (ind) {
+    ind.style.transition = 'transform .2s ease';
+    ind.style.transform = 'translate(-50%, ' + (PTR_PARK_POSITION - 44) + 'px)';
+  }
+  if (icon) {
+    icon.style.transition = 'transform .6s linear';
+    // Continuous spin using infinite rotation
+    var spinAngle = 0;
+    icon.style.transform = 'rotate(0deg)';
+    var spinTimer = setInterval(function(){
+      spinAngle += 60;
+      icon.style.transform = 'rotate(' + spinAngle + 'deg)';
+    }, 100);
+    icon._spinTimer = spinTimer;
+  }
+  try {
+    await loadAll();
+  } catch(err) {
+    console.error('refresh failed:', err);
+  }
+  // Stop spinner, retract indicator
+  if (icon && icon._spinTimer) {
+    clearInterval(icon._spinTimer);
+    icon._spinTimer = null;
+  }
+  _ptrRefreshing = false;
+  _ptrUpdateIndicator(0);
+  toast('✓ Refreshed');
 }
 
 // ── NAV ───────────────────────────────────────────────────────────────────
