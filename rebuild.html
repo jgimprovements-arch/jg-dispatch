@@ -1606,6 +1606,43 @@
 
   /* ──── Messages tab ──── */
   .msg-wrap { display: flex; flex-direction: column; gap: 16px; }
+  .msg-subtab-bar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0 0 12px;
+    margin-bottom: 12px;
+    border-bottom: 1px solid var(--line);
+  }
+  .msg-subtab {
+    background: transparent;
+    border: 0;
+    border-bottom: 2px solid transparent;
+    padding: 8px 14px;
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--muted);
+    cursor: pointer;
+    font-family: inherit;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: -1px;
+  }
+  .msg-subtab:hover { color: var(--navy); }
+  .msg-subtab.on {
+    color: var(--orange);
+    border-bottom-color: var(--orange);
+  }
+  .msg-subtab-count {
+    background: var(--orange);
+    color: #fff;
+    font-size: 10px;
+    padding: 1px 7px;
+    border-radius: 10px;
+    font-weight: 700;
+  }
+  .msg-subtab:not(.on) .msg-subtab-count { background: var(--muted); }
   .msg-composer {
     background: var(--card);
     border: 1px solid var(--line);
@@ -9989,8 +10026,7 @@ function renderDetail() {
       <button class="${state.tab==='phases'?'on':''}" data-tab="phases">Phases <span class="badge">${state.phases.length}</span></button>
       <button class="${state.tab==='workorders'?'on':''}" data-tab="workorders">Work Orders ${(overdueSelections + (state.workOrders||[]).filter(w => w.status === 'sent').length) ? `<span class="badge">${overdueSelections + (state.workOrders||[]).filter(w => w.status === 'sent').length}</span>` : ''}</button>
       <button class="${state.tab==='financials'?'on':''}" data-tab="financials">Financials ${state.qbActuals?.invoice_balance > 0 ? `<span class="badge">AR</span>` : ''}</button>
-      <button class="${state.tab==='messages'?'on':''}" data-tab="messages">Messages</button>
-      <button class="${state.tab==='journal'?'on':''}" data-tab="journal">Journal ${(state.journalEntries||[]).filter(e => !e.deleted_at).length ? `<span class="badge">${state.journalEntries.filter(e=>!e.deleted_at).length}</span>` : ''}</button>
+      <button class="${state.tab==='messages'?'on':''}" data-tab="messages">Messages ${(state.journalEntries||[]).filter(e => !e.deleted_at).length ? `<span class="badge">${state.journalEntries.filter(e=>!e.deleted_at).length}</span>` : ''}</button>
       <button class="${state.tab==='todos'?'on':''}" data-tab="todos">To-Dos ${(state.todos||[]).filter(t => t.status === 'open' || t.status === 'in_progress').length ? `<span class="badge">${state.todos.filter(t => t.status === 'open' || t.status === 'in_progress').length}</span>` : ''}</button>
       <button class="${state.tab==='documents'?'on':''}" data-tab="documents">Documents</button>
       <button class="${state.tab==='audit'?'on':''}" data-tab="audit">Audit Trail</button>
@@ -10048,7 +10084,7 @@ function renderTabContent() {
   else if (state.tab === 'phases')      c.innerHTML = renderPhasesTab();
   else if (state.tab === 'selections') { state.tab = 'workorders'; if (typeof updateUrlHash === 'function') updateUrlHash(); c.innerHTML = renderWorkOrdersTab(); }
   else if (state.tab === 'messages') c.innerHTML = renderMessagesTab();
-  else if (state.tab === 'journal') c.innerHTML = renderJournalTab();
+  else if (state.tab === 'journal') { state.tab = 'messages'; state.messagesSubtab = 'journal'; if (typeof updateUrlHash === 'function') updateUrlHash(); c.innerHTML = renderMessagesTab(); }
   else if (state.tab === 'todos') c.innerHTML = renderTodosTab();
   else if (state.tab === 'workorders') c.innerHTML = renderWorkOrdersTab();
   else if (state.tab === 'financials') c.innerHTML = renderFinancialsTab();
@@ -10432,6 +10468,18 @@ function renderTabContent() {
 
   // Wire messages tab
   if (state.tab === 'messages') {
+    // Wire the Messages/Journal sub-tab bar
+    document.querySelectorAll('[data-msg-subtab]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        state.messagesSubtab = btn.dataset.msgSubtab;
+        renderTabContent();
+      });
+    });
+    // If Journal sub-tab is active, wire it and skip messages-specific wiring
+    if (state.messagesSubtab === 'journal') {
+      if (typeof wireJournalTab === 'function') wireJournalTab();
+      return;
+    }
     // Wire attachment image lightbox + downloads on message rows
     $$('.msg-att-list [data-lightbox-url]').forEach(el => el.addEventListener('click', e => {
       e.preventDefault();
@@ -16585,6 +16633,33 @@ function renderMessagesTab() {
   const p = state.activeProject;
   const msgs = state.messages;
 
+  // Sub-tab state: 'messages' (default) or 'journal'
+  if (!state.messagesSubtab) state.messagesSubtab = 'messages';
+  const subtab = state.messagesSubtab;
+
+  // Build the sub-tab bar — same row as the existing tabs but visually tighter
+  const journalCount = (state.journalEntries || []).filter(e => !e.deleted_at).length;
+  const msgCount = (state.messages || []).length;
+  const subtabBar = `
+    <div class="msg-subtab-bar">
+      <button class="msg-subtab ${subtab==='messages'?'on':''}" data-msg-subtab="messages">
+        💬 Messages ${msgCount ? `<span class="msg-subtab-count">${msgCount}</span>` : ''}
+      </button>
+      <button class="msg-subtab ${subtab==='journal'?'on':''}" data-msg-subtab="journal">
+        📓 Journal ${journalCount ? `<span class="msg-subtab-count">${journalCount}</span>` : ''}
+      </button>
+      <div style="flex:1;"></div>
+      <span style="font-size:11px;color:var(--muted);font-weight:600;">All entries log to Albi project timeline</span>
+    </div>
+  `;
+
+  // If journal sub-tab is active, return journal content with the bar on top
+  if (subtab === 'journal') {
+    const journalHtml = renderJournalTab();
+    return subtabBar + journalHtml;
+  }
+
+  // Otherwise render normal Messages tab content (with subtab bar on top)
   // Build sub options for the To dropdown — pull from assigned-on-this-project first, then full roster
   const assignedSubIds = new Set();
   state.phases.forEach(ph => (ph.assignees || []).forEach(a => {
@@ -16602,7 +16677,7 @@ function renderMessagesTab() {
     `</optgroup>`,
   ].join('');
 
-  return `
+  return subtabBar + `
     <div class="msg-wrap">
       <div class="msg-composer">
         <div class="msg-composer-head">
