@@ -161,7 +161,7 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;min
   <button class="tc-tab" id="tab-timesheets" onclick="showTab('timesheets',this)">📋 Timecards</button>
   <button class="tc-tab" id="tab-reports" onclick="showTab('reports',this)">📊 Reports</button>
   <button class="tc-tab" id="tab-routes" onclick="showTab('routes',this)">🗺 Routes & Live</button>
-  <button class="tc-tab" id="tab-commissions" onclick="showTab('commissions',this)">💵 Commissions</button>
+  <button class="tc-tab" id="tab-commissions" onclick="showTab('commissions',this)">💵 Approve Commissions</button>
   <button class="tc-tab" id="tab-timeoff" onclick="showTab('timeoff',this)">🏖 Time Off</button>
   <button class="tc-tab" id="tab-swaps" onclick="showTab('swaps',this)">🔄 Swaps</button>
   <button class="tc-tab" id="tab-archive" onclick="showTab('archive',this)">🗄 Archive</button>
@@ -1860,35 +1860,72 @@ function generateTimecardPDF(empName, periodLabel, approverName, approvedAt) {
   });
   y += 90;
 
-  // Entry detail table
-  var body = t.entries.map(function(e) {
-    var breaks = ST.breaks.filter(function(b){ return b.entry_id === e.id; });
-    var actual = e.duration_minutes || 0;
-    var bill = billableMins(e, breaks);
-    var bkMins = breaks.reduce(function(s,b){ return s + (b.duration_minutes||0); }, 0);
-    var fmtDt = function(iso) { var d=new Date(iso); return d.toLocaleDateString('en-US',{month:'numeric',day:'numeric',year:'2-digit'}); };
-    var fmtTm = function(iso) { if(!iso) return '-'; var d=new Date(iso); var h=d.getHours()%12||12; var m=d.getMinutes(); var ap=d.getHours()>=12?'PM':'AM'; return h+':'+(m<10?'0':'')+m+' '+ap; };
-    var fmtHM = function(mins) { return Math.floor(mins/60)+'h '+(mins%60)+'m'; };
+  // Per-DAY rollup table — matches the on-screen approved timecard modal exactly.
+  // Each row is one work day (span = first in → last out), not one punch.
+  var fmtTm = function(iso) { if(!iso) return '-'; var d=new Date(iso); var h=d.getHours()%12||12; var m=d.getMinutes(); var ap=d.getHours()>=12?'PM':'AM'; return h+':'+(m<10?'0':'')+m+' '+ap; };
+  var fmtHM = function(mins) { mins = Math.round(mins||0); return Math.floor(mins/60)+'h '+(mins%60)+'m'; };
+  var fmtDt = function(iso) { var d=new Date(iso); return d.toLocaleDateString('en-US',{month:'numeric',day:'numeric',year:'2-digit'}); };
+
+  // Group this period's entries by day, same as the modal does
+  var dayGroups = groupEntriesByDay(t.entries);
+  var dayKeys = Object.keys(dayGroups).sort(function(a,b){
+    // key format is "EmpName|YYYY-MM-DD" — sort by the date part
+    var da = a.split('|')[1], db = b.split('|')[1];
+    return da < db ? -1 : da > db ? 1 : 0;
+  });
+
+  var body = dayKeys.map(function(dk) {
+    var dayEntries = dayGroups[dk];
+    var dm = dayMetrics(dayEntries, ST.breaks);
+    var firstE = dayEntries[0];
+    var active = dm.hasOpen;
+
+    // Break display: show AUTO tag if an auto-break was applied
+    var breakStr;
+    if (dm.totalBreakMins === 0) breakStr = '-';
+    else if (dm.autoBreakMins > 0) breakStr = fmtHM(dm.totalBreakMins) + ' (auto)';
+    else breakStr = fmtHM(dm.totalBreakMins);
+
+    // Verified: all entries verified (active entries don't need verification)
+    var allVerified = dayEntries.every(function(e){ return e.self_verified || !e.clock_out; });
+    var verifiedStr = active ? '-' : (allVerified ? '\u2713' : 'unverified');
+
+    var punchCount = dayEntries.length + (dayEntries.length === 1 ? ' punch' : ' punches');
+
+    // Job column: if multiple jobs that day, list them; if one, just show it
+    var jobs = [];
+    dayEntries.forEach(function(e){
+      var jn = e.job_name || '-';
+      if (jobs.indexOf(jn) === -1) jobs.push(jn);
+    });
+    var jobStr = jobs.join(', ');
+    if (jobStr.length > 40) jobStr = jobStr.substring(0, 38) + '...';
+
     return [
-      fmtDt(e.clock_in),
-      fmtTm(e.clock_in),
-      fmtTm(e.clock_out),
-      fmtHM(actual),
-      bkMins ? fmtHM(bkMins) : '-',
-      fmtHM(bill),
-      (e.job_name || '-').substring(0, 30),
-      e.self_verified ? '✓' : ''
+      fmtDt(firstE.clock_in),
+      fmtTm(dm.firstIn),
+      active ? 'ACTIVE' : fmtTm(dm.lastOut),
+      fmtHM(dm.actualMins),
+      breakStr,
+      fmtHM(dm.billableMins),
+      punchCount,
+      jobStr,
+      verifiedStr
     ];
   });
 
   doc.autoTable({
     startY: y,
-    head: [['Date','Clock In','Clock Out','Actual','Break','Billable','Job','Verified']],
+    head: [['Date','Clock In','Clock Out','Actual','Break','Billable','Punches','Job','Verified']],
     body: body,
     theme: 'grid',
     styles: { fontSize: 8, cellPadding: 4 },
     headStyles: { fillColor: [13, 45, 94], textColor: 255, fontStyle: 'bold' },
     alternateRowStyles: { fillColor: [248, 249, 252] },
+    columnStyles: {
+      6: { cellWidth: 48 },   // Punches — keep narrow
+      8: { cellWidth: 44, halign: 'center' }  // Verified
+    },
     margin: { left: 40, right: 40 }
   });
 
@@ -2654,7 +2691,7 @@ function exportPayrollReport(periodLabel, byEmp, curPer) {
         });
         periodCommissions.forEach(function(c) {
           // c.type 'commission' → Commission earning; everything else → Bonus
-          var code = (c.type === 'commission' || c.commission_type === 'commission') ? 'COM' : 'BON';
+          var code = (c.type === 'commission') ? 'COM' : 'BON';
           var amt = parseFloat(c.amount || 0).toFixed(2);
           // null hours, dollar in Amount column
           paychexRows.push(_row(paychexId, code, null, c.earned_date, amt));
@@ -4656,7 +4693,7 @@ function openCommissionModal(editId) {
 
   var body = '';
   body += '<div class="form-row">';
-  body += '<div><label class="form-label">Employee *</label><select class="form-select" id="comm-emp">'+empOptions+'</select></div>';
+  body += '<div><label class="form-label">Employee *</label><select class="form-select" id="comm-emp" onchange="_commLoadPunches()">'+empOptions+'</select></div>';
   body += '<div><label class="form-label">Type *</label><select class="form-select" id="comm-type" onchange="_commTypeChanged()">';
   ['commission','bonus','referral','spiff'].forEach(function(t){
     var sel = existing && existing.type === t ? ' selected' : '';
@@ -4666,13 +4703,19 @@ function openCommissionModal(editId) {
   body += '</div>';
 
   body += '<div class="form-row">';
-  body += '<div><label class="form-label">Earned Date *</label><input type="date" class="form-input" id="comm-date" value="'+(existing ? existing.earned_date : new Date().toISOString().split('T')[0])+'"></div>';
+  body += '<div><label class="form-label">Earned Date *</label><input type="date" class="form-input" id="comm-date" value="'+(existing ? existing.earned_date : new Date().toISOString().split('T')[0])+'" onchange="_commLoadPunches()"></div>';
   body += '<div><label class="form-label">Status</label><select class="form-select" id="comm-status">';
   ['pending','approved','paid'].forEach(function(s){
     var sel = existing && existing.status === s ? ' selected' : (!existing && s==='pending' ? ' selected' : '');
     body += '<option value="'+s+'"'+sel+'>'+s.charAt(0).toUpperCase()+s.slice(1)+'</option>';
   });
   body += '</select></div>';
+  body += '</div>';
+
+  // ── Punch picker — ties this commission to a specific time entry ──
+  body += '<div><label class="form-label">Tied to Punch *</label>';
+  body += '<select class="form-select" id="comm-entry-id"><option value="">-- Select employee & date first --</option></select>';
+  body += '<div style="font-size:11px;color:var(--muted);margin-top:3px;">The specific punch this commission was earned on. Picking a job below will auto-select the matching punch.</div>';
   body += '</div>';
 
   // Commission calculator (shown only for type=commission)
@@ -4701,12 +4744,48 @@ function openCommissionModal(editId) {
 
   // Pre-load Albi jobs for the search
   ensureAlbiJobsLoaded();
+
+  // If editing, populate the punch picker with the saved entry preselected
+  if (existing) {
+    _commLoadPunches(existing.entry_id || null);
+  }
 }
 
 function _commTypeChanged() {
   var type = (document.getElementById('comm-type')||{}).value;
   var wrap = document.getElementById('comm-calc-wrap');
   if (wrap) wrap.style.display = type === 'commission' ? 'block' : 'none';
+}
+
+// Populate the punch picker based on the chosen employee + earned date.
+// Each option is a real time_entries row from that employee on that day.
+function _commLoadPunches(preselectEntryId) {
+  var sel = document.getElementById('comm-entry-id');
+  if (!sel) return;
+  var empName = (document.getElementById('comm-emp')||{}).value;
+  var dateStr = (document.getElementById('comm-date')||{}).value;
+  if (!empName || !dateStr) {
+    sel.innerHTML = '<option value="">-- Select employee & date first --</option>';
+    return;
+  }
+  // Find all punches for this employee on this date
+  var punches = (ST.entries || []).filter(function(e){
+    return e.employee_name === empName && _dayKey(e.clock_in) === dateStr;
+  }).sort(function(a,b){ return new Date(a.clock_in) - new Date(b.clock_in); });
+
+  if (!punches.length) {
+    sel.innerHTML = '<option value="">-- No punches found for that employee/date --</option>';
+    return;
+  }
+
+  var fmtT = function(iso){ if(!iso)return '?'; var d=new Date(iso),h=d.getHours()%12||12,m=d.getMinutes(),ap=d.getHours()>=12?'PM':'AM'; return h+':'+(m<10?'0':'')+m+ap; };
+  var html = '<option value="">-- Select a punch --</option>';
+  punches.forEach(function(e){
+    var label = fmtT(e.clock_in) + ' → ' + (e.clock_out ? fmtT(e.clock_out) : 'active') + '  •  ' + (e.job_name || 'No job');
+    var presel = (preselectEntryId && e.id === preselectEntryId) ? ' selected' : '';
+    html += '<option value="'+e.id+'"'+presel+'>'+label+'</option>';
+  });
+  sel.innerHTML = html;
 }
 
 function _commCalcAmount() {
@@ -4740,6 +4819,20 @@ function _pickCommJob(id, name) {
   document.getElementById('comm-job-name').value = name;
   document.getElementById('comm-job-search').value = name;
   document.getElementById('comm-job-dropdown').style.display = 'none';
+
+  // Auto-select the punch that matches this job (employee + date + job_id).
+  var empName = (document.getElementById('comm-emp')||{}).value;
+  var dateStr = (document.getElementById('comm-date')||{}).value;
+  if (empName && dateStr) {
+    var match = (ST.entries || []).filter(function(e){
+      return e.employee_name === empName
+        && _dayKey(e.clock_in) === dateStr
+        && String(e.job_id||'') === String(id);
+    }).sort(function(a,b){ return new Date(a.clock_in) - new Date(b.clock_in); })[0];
+    if (match) {
+      _commLoadPunches(match.id);  // reload picker with this punch preselected
+    }
+  }
 }
 
 async function saveCommission(existingId) {
@@ -4755,15 +4848,18 @@ async function saveCommission(existingId) {
   var jobName = (document.getElementById('comm-job-name')||{}).value || null;
   var revenue = parseFloat((document.getElementById('comm-revenue')||{}).value) || null;
   var rate = parseFloat((document.getElementById('comm-rate')||{}).value) || null;
+  var entryId = (document.getElementById('comm-entry-id')||{}).value || null;
 
   if (!empName) { alert('Select an employee'); return; }
   if (!earnedDate) { alert('Enter an earned date'); return; }
   if (!amount || amount <= 0) { alert('Enter a positive amount'); return; }
+  if (!entryId) { alert('Select which punch this commission is tied to.\n\nPick the employee and earned date first, then choose the punch (or pick a job in the calculator to auto-select it).'); return; }
 
   var emp = ST.employees.find(function(e){ return e.name === empName; });
   var payload = {
     employee_name: empName,
     employee_id: emp ? emp.id : null,
+    entry_id: entryId,
     type: type,
     amount: amount,
     description: desc || null,
@@ -4826,6 +4922,37 @@ async function approveCommission(id) {
     await loadAll();
     renderCommissions();
   } else { toast('Approval failed'); }
+}
+
+// Deny a commission — sets status to 'denied' (kept for audit, excluded from payroll).
+async function denyCommission(id) {
+  if (!_canEditCommissions()) { toast('Admin access required'); return; }
+  var c = (ST.commissions||[]).find(function(x){ return x.id === id; });
+  if (!c) return;
+  if (!confirm('Deny this commission?\n\n' + (c.description || c.type) + ' • $' + parseFloat(c.amount||0).toFixed(2) + ' for ' + c.employee_name + '\n\nIt stays on record as denied but will not be paid.')) return;
+  var r = await fetch(SB_URL + '/rest/v1/commissions?id=eq.' + id, {
+    method: 'PATCH',
+    headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status: 'denied', approved_by: getApprovedBy(), approved_at: new Date().toISOString() })
+  });
+  if (r.ok) {
+    toast('Commission denied');
+    logActivity('Commission Denied', c.employee_name + ' • ' + c.type + ' • $' + parseFloat(c.amount||0).toFixed(2), 'commissions', c.employee_name);
+    // Optimistic local update so the modal refreshes immediately
+    c.status = 'denied';
+    await loadAll();
+    if (typeof renderCommissions === 'function') renderCommissions();
+  } else { toast('Deny failed'); }
+}
+
+// Approve/deny commission from inside the day-detail modal, then refresh that modal.
+async function _commApproveFromDay(commId, empName, dayKey) {
+  await approveCommission(commId);
+  if (typeof _refreshDayDetailModal === 'function') _refreshDayDetailModal(empName, dayKey);
+}
+async function _commDenyFromDay(commId, empName, dayKey) {
+  await denyCommission(commId);
+  if (typeof _refreshDayDetailModal === 'function') _refreshDayDetailModal(empName, dayKey);
 }
 
 async function markCommissionPaid(id) {
@@ -10941,6 +11068,35 @@ function _openDayDetailModal(empName, dayKey) {
       actions = '<button class="btn btn-sm" onclick="closeModal();viewEntry(\''+e.id+'\')">View</button>';
     }
 
+    // ── Commission cell — match commissions to THIS punch by exact entry_id link ──
+    // Commissions now carry an entry_id FK, so this is an exact match — no guessing.
+    var punchComms = (ST.commissions || []).filter(function(c){
+      return c.entry_id && c.entry_id === e.id;
+    });
+
+    var commCell;
+    if (!punchComms.length) {
+      commCell = '<span style="font-size:11px;color:var(--muted);">—</span>';
+    } else {
+      commCell = punchComms.map(function(c){
+        var amt = parseFloat(c.amount || 0).toFixed(2);
+        var st = c.status || 'pending';
+        var stColor = st === 'approved' ? '#2e7d32' : st === 'denied' ? '#c62828' : st === 'paid' ? '#1565c0' : '#6a1b9a';
+        var block = '<div style="margin-bottom:4px;">';
+        block += '<div style="font-size:11px;font-weight:700;color:var(--navy);">$'+amt+' <span style="font-size:9px;color:'+stColor+';text-transform:uppercase;">'+st+'</span></div>';
+        block += '<div style="font-size:10px;color:var(--muted);">'+(c.description || c.type || 'Commission')+'</div>';
+        // Approve/Deny buttons only when pending and admin and timecard not locked
+        if (st === 'pending' && isAdmin() && !tcApproved) {
+          block += '<div style="display:flex;gap:4px;margin-top:3px;">';
+          block += '<button class="btn btn-sm" onclick="_commApproveFromDay(\''+c.id+'\',\''+escAttr(empName)+'\',\''+dayKey+'\')" style="background:#2e7d32;color:#fff;border-color:#2e7d32;font-size:10px;padding:2px 6px;">✓</button>';
+          block += '<button class="btn btn-sm" onclick="_commDenyFromDay(\''+c.id+'\',\''+escAttr(empName)+'\',\''+dayKey+'\')" style="background:#c62828;color:#fff;border-color:#c62828;font-size:10px;padding:2px 6px;">✗</button>';
+          block += '</div>';
+        }
+        block += '</div>';
+        return block;
+      }).join('');
+    }
+
     return '<tr style="'+rowBg+'">' +
       '<td class="mono"'+(early && !e.approved_early?' style="color:#c62828;font-weight:700;"':'')+'>'+fmt(e.clock_in)+'</td>' +
       '<td class="mono">'+(active?'<span class="badge badge-green">Active</span>':fmt(e.clock_out))+'</td>' +
@@ -10949,6 +11105,7 @@ function _openDayDetailModal(empName, dayKey) {
       '<td>'+(bkMins?fmtDur(bkMins):'-')+'</td>' +
       '<td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+(e.job_name||'-')+'</td>' +
       '<td style="text-align:center;">'+verifiedCellM+'</td>' +
+      '<td>'+commCell+'</td>' +
       '<td>'+actions+'</td>' +
     '</tr>';
   }).join('');
@@ -10964,7 +11121,7 @@ function _openDayDetailModal(empName, dayKey) {
 
   var bodyHtml = summary + breakNote +
     '<table class="tc-table" style="margin:0;">' +
-      '<thead><tr><th>Clock In</th><th>Clock Out</th><th>Actual</th><th>Billable</th><th>Break</th><th>Job</th><th>Verified</th><th>Actions</th></tr></thead>' +
+      '<thead><tr><th>Clock In</th><th>Clock Out</th><th>Actual</th><th>Billable</th><th>Break</th><th>Job</th><th>Verified</th><th>Commission</th><th>Actions</th></tr></thead>' +
       '<tbody>' + tableRows + '</tbody>' +
     '</table>' + bulkApproveBtn;
 
@@ -11020,12 +11177,17 @@ async function addOnCallBonus(entryId) {
   var commissionPayload = {
     employee_id: entry.employee_id,
     employee_name: entry.employee_name,
-    commission_type: 'on_call_bonus',
+    entry_id: entry.id,
+    type: 'on_call_bonus',
     amount: 50,
+    description: 'On-call response bonus',
     earned_date: entry.clock_in.split('T')[0],
     job_id: entry.job_id || null,
     job_name: entry.job_name || null,
     status: 'approved',
+    approved_by: getApprovedBy(),
+    approved_at: new Date().toISOString(),
+    created_by: getApprovedBy(),
     notes: 'On-call response — ' + dateLabel + ' ' + timeLabel
   };
 
@@ -11756,7 +11918,7 @@ function openTimecardDetail(empName) {
       var earnedD = c.earned_date ? new Date(c.earned_date+'T00:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric'}) : '—';
       h += '<div style="padding:10px 14px;background:'+bg+';border-left:3px solid '+color+';border-radius:6px;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">';
       h += '<div>';
-      h += '<div style="font-size:13px;font-weight:700;color:var(--navy);">'+(c.description || c.commission_type || 'Commission')+'</div>';
+      h += '<div style="font-size:13px;font-weight:700;color:var(--navy);">'+(c.description || c.type || 'Commission')+'</div>';
       h += '<div style="font-size:11px;color:var(--muted);margin-top:2px;">'+earnedD+(c.notes ? ' • ' + c.notes : '')+'</div>';
       h += '</div>';
       h += '<div style="display:flex;align-items:center;gap:10px;">';
