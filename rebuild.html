@@ -6991,23 +6991,26 @@ async function reconcilePhasesWithWoTrades() {
   );
   if (safeToDelete.length) {
     const ids = safeToDelete.map(p => p.id);
+    // Also exclude phases that have selections linked (install_phase_id) — RLS may block nullify
+    const { data: selRefs } = await sb.from('rebuild_selections').select('install_phase_id').in('install_phase_id', ids);
+    const blockedBySelection = new Set((selRefs || []).map(r => r.install_phase_id));
+    const finalIds = ids.filter(id => !blockedBySelection.has(id));
+    if (!finalIds.length) return;
     // Clear ALL dependent records first to avoid FK 409 conflicts.
-    // 9 tables reference rebuild_phases — delete child rows or null out the link.
-    await sb.from('rebuild_phase_assignees').delete().in('phase_id', ids);
-    await sb.from('rebuild_selections').update({ install_phase_id: null }).in('install_phase_id', ids);
-    await sb.from('rebuild_documents').update({ phase_id: null }).in('phase_id', ids);
-    await sb.from('rebuild_journal_entries').update({ phase_id: null }).in('phase_id', ids);
-    await sb.from('wo_builder_work_orders').update({ phase_id: null }).in('phase_id', ids);
-    await sb.from('wo_builder_estimate_items').update({ assigned_phase_id: null }).in('assigned_phase_id', ids);
-    await sb.from('wo_builder_component_materials').update({ assigned_phase_id: null }).in('assigned_phase_id', ids);
-    await sb.from('wo_builder_component_labor').update({ assigned_phase_id: null }).in('assigned_phase_id', ids);
-    await sb.from('wo_builder_component_equipment').update({ assigned_phase_id: null }).in('assigned_phase_id', ids);
+    await sb.from('rebuild_phase_assignees').delete().in('phase_id', finalIds);
+    await sb.from('rebuild_documents').update({ phase_id: null }).in('phase_id', finalIds);
+    await sb.from('rebuild_journal_entries').update({ phase_id: null }).in('phase_id', finalIds);
+    await sb.from('wo_builder_work_orders').update({ phase_id: null }).in('phase_id', finalIds);
+    await sb.from('wo_builder_estimate_items').update({ assigned_phase_id: null }).in('assigned_phase_id', finalIds);
+    await sb.from('wo_builder_component_materials').update({ assigned_phase_id: null }).in('assigned_phase_id', finalIds);
+    await sb.from('wo_builder_component_labor').update({ assigned_phase_id: null }).in('assigned_phase_id', finalIds);
+    await sb.from('wo_builder_component_equipment').update({ assigned_phase_id: null }).in('assigned_phase_id', finalIds);
     // Now delete the phases
-    const { error } = await sb.from('rebuild_phases').delete().in('id', ids);
+    const { error } = await sb.from('rebuild_phases').delete().in('id', finalIds);
     if (error) {
       console.warn('phase delete failed:', error);
     } else {
-      state.phases = (state.phases || []).filter(p => !ids.includes(p.id));
+      state.phases = (state.phases || []).filter(p => !finalIds.includes(p.id));
     }
   }
 }
