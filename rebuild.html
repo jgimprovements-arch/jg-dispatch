@@ -6946,7 +6946,7 @@ async function loadWoBudget() {
   state.woBudgetLoading = false;
 
   // Sync phases to match WO trades — only if phases are already loaded (not during parallel init)
-  if (state.phases !== undefined && state.activeProjectId) {
+  if (state.phases !== undefined && state.activeProjectId && state.woBudget) {
     await reconcilePhasesWithWoTrades();
   }
 }
@@ -6958,11 +6958,12 @@ async function loadWoBudget() {
 //   so renames are stable. Falls back to name match when no link column exists.
 async function reconcilePhasesWithWoTrades() {
   if (!sb || !state.activeProjectId) return;
-  // Use MERGED_TRADE_GROUPS as the canonical trade list — same source as the WO rail
-  // This guarantees phases always match the rail 1:1
-  const activeTrades = Object.entries(MERGED_TRADE_GROUPS)
-    .sort((a, b) => (a[1].sort || 99) - (b[1].sort || 99))
-    .map(([key, g]) => ({ category: key, label: g.label }));
+  // Use the same trade list as the WO rail — only trades that exist for this project
+  if (!state.woBudget) return;
+  const rollup = computeTradeRollup(state.woBudget);
+  const activeTrades = rollup
+    .filter(t => !t.isSynthetic)
+    .map(t => ({ category: t.category, label: t.label }));
 
   const wantedNames = new Set(activeTrades.map(t => t.label.trim().toLowerCase()));
   const existing = state.phases || [];
