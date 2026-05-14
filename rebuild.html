@@ -6991,14 +6991,18 @@ async function reconcilePhasesWithWoTrades() {
   );
   if (safeToDelete.length) {
     const ids = safeToDelete.map(p => p.id);
-    // Clear dependent records first to avoid FK 409 conflicts
-    // 1. phase assignees
+    // Clear ALL dependent records first to avoid FK 409 conflicts.
+    // 9 tables reference rebuild_phases — delete child rows or null out the link.
     await sb.from('rebuild_phase_assignees').delete().in('phase_id', ids);
-    // 2. unlink any wo_builder rows pointing at these phases
-    await sb.from('wo_builder_work_orders')
-      .update({ phase_id: null })
-      .in('phase_id', ids);
-    // 3. now delete the phases
+    await sb.from('rebuild_selections').update({ install_phase_id: null }).in('install_phase_id', ids);
+    await sb.from('rebuild_documents').update({ phase_id: null }).in('phase_id', ids);
+    await sb.from('rebuild_journal_entries').update({ phase_id: null }).in('phase_id', ids);
+    await sb.from('wo_builder_work_orders').update({ phase_id: null }).in('phase_id', ids);
+    await sb.from('wo_builder_estimate_items').update({ assigned_phase_id: null }).in('assigned_phase_id', ids);
+    await sb.from('wo_builder_component_materials').update({ assigned_phase_id: null }).in('assigned_phase_id', ids);
+    await sb.from('wo_builder_component_labor').update({ assigned_phase_id: null }).in('assigned_phase_id', ids);
+    await sb.from('wo_builder_component_equipment').update({ assigned_phase_id: null }).in('assigned_phase_id', ids);
+    // Now delete the phases
     const { error } = await sb.from('rebuild_phases').delete().in('id', ids);
     if (error) {
       console.warn('phase delete failed:', error);
