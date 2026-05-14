@@ -6946,7 +6946,7 @@ async function loadWoBudget() {
   state.woBudgetLoading = false;
 
   // Sync phases to match WO trades — only if phases are already loaded (not during parallel init)
-  if (state.phases && state.phases.length >= 0 && state.activeProjectId) {
+  if (state.phases !== undefined && state.activeProjectId) {
     await reconcilePhasesWithWoTrades();
   }
 }
@@ -6957,15 +6957,17 @@ async function loadWoBudget() {
 // - When a trade has a stored WO row, we use its id as the canonical key in rebuild_phases.wo_trade_category column
 //   so renames are stable. Falls back to name match when no link column exists.
 async function reconcilePhasesWithWoTrades() {
-  if (!sb || !state.activeProjectId || !state.woBudget) return;
-  const rollup = computeTradeRollup(state.woBudget);
-  const activeTrades = rollup.filter(t => !t.isSynthetic);
+  if (!sb || !state.activeProjectId) return; as the canonical trade list — same source as the WO rail
+  // This guarantees phases always match the rail 1:1
+  const activeTrades = Object.entries(MERGED_TRADE_GROUPS)
+    .sort((a, b) => (a[1].sort || 99) - (b[1].sort || 99))
+    .map(([key, g]) => ({ category: key, label: g.label }));
 
   const wantedNames = new Set(activeTrades.map(t => t.label.trim().toLowerCase()));
   const existing = state.phases || [];
   const existingNames = new Set(existing.map(p => (p.phase_name || '').trim().toLowerCase()));
 
-  // 1. Create missing phases for active trades not already present
+  // 1. Create missing phases
   const toCreate = activeTrades.filter(t => !existingNames.has(t.label.trim().toLowerCase()));
   if (toCreate.length) {
     const maxSort = existing.reduce((m, p) => Math.max(m, p.sort_order || 0), 0);
@@ -6980,8 +6982,7 @@ async function reconcilePhasesWithWoTrades() {
     else { state.phases = [...existing, ...(data || [])].sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0)); }
   }
 
-  // 2. Delete phases whose names don't match any active trade
-  //    Skip deletion if the phase has any scheduled dates, notes, or is in_progress/complete (safety)
+  // 2. Delete orphan phases (name doesn't match any WO trade) — only if safe (no dates/notes/progress)
   const orphans = (state.phases || []).filter(p => !wantedNames.has((p.phase_name || '').trim().toLowerCase()));
   const safeToDelete = orphans.filter(p =>
     !p.scheduled_start && !p.scheduled_end && !p.notes && (p.status === 'planned' || !p.status)
