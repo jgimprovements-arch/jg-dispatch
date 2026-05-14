@@ -13128,34 +13128,40 @@ function wireWoDetailModal(tradeKey) {
   $('#wobx_save_assignee')?.addEventListener('click', async () => {
     const btn = $('#wobx_save_assignee');
     const t = typeSel.value || null;
-    if (!t) {
-      toast('Pick an assignee type first', true);
-      return;
-    }
 
     let subId = null;
     let empIds = [];
-    if (t === 'sub') {
+    let clearAssignee = false;
+
+    if (!t) {
+      // No type selected — clear the assignee entirely
+      clearAssignee = true;
+    } else if (t === 'sub') {
       const subSel = $('#wobx_assignee_id');
       subId = subSel?.value || null;
       if (!subId) {
-        toast('Pick a subcontractor', true);
-        return;
+        // Type is sub but none picked — treat as clear
+        clearAssignee = true;
       }
     } else if (t === 'carpenter') {
       empIds = Array.from(document.querySelectorAll('#wobx_assignee_picker input[type="checkbox"]:checked'))
         .map(cb => cb.value);
       if (!empIds.length) {
-        toast('Pick at least one carpenter', true);
-        return;
+        // Type is carpenter but none checked — treat as clear (back to unassigned)
+        clearAssignee = true;
       }
     }
 
     btn.disabled = true;
     btn.textContent = 'Saving…';
 
-    // Save assignee
-    const result = await upsertWoBuilderRow(tradeKey, {
+    // Save assignee (or clear it)
+    const result = await upsertWoBuilderRow(tradeKey, clearAssignee ? {
+      assignee_type: null,
+      assignee_sub_id: null,
+      assignee_employee_id: null,
+      assignee_employee_ids: null,
+    } : {
       assignee_type: t,
       assignee_sub_id: t === 'sub' ? subId : null,
       assignee_employee_id: t === 'carpenter' ? empIds[0] : null,  // legacy single field — first carpenter
@@ -13172,8 +13178,8 @@ function wireWoDetailModal(tradeKey) {
     // The helper handles fuzzy phase match, date picking, AND propagating
     // the WO-level assignees down to rebuild_phase_assignees rows.
     await ensurePhaseScheduledForTrade(tradeKey, {
-      subId: t === 'sub' ? subId : null,
-      empIds: t === 'carpenter' ? empIds : [],
+      subId: clearAssignee ? null : (t === 'sub' ? subId : null),
+      empIds: clearAssignee ? [] : (t === 'carpenter' ? empIds : []),
     });
 
     btn.disabled = false;
