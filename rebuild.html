@@ -6943,6 +6943,52 @@ async function loadWoBudget() {
     wos: builderWos.data || [],
   };
   state.woBudgetLoading = false;
+
+  // Reconcile phases with WO trade names so the Schedule tab matches the WO list 1:1
+  await reconcilePhasesWithWoTrades();
+}
+
+// One-way sync: WO Builder dictates phase names.
+// - Active trades (items > 0) get a phase row by name
+// - Existing phases whose name doesn't match any active trade are deleted (PM cleans up manually if needed)
+// - When a trade has a stored WO row, we use its id as the canonical key in rebuild_phases.wo_trade_category column
+//   so renames are stable. Falls back to name match when no link column exists.
+async function reconcilePhasesWithWoTrades() {
+  if (!sb || !state.activeProjectId || !state.woBudget) return;
+  const rollup = computeTradeRollup(state.woBudget);
+  const activeTrades = rollup.filter(t => !t.isSynthetic && t.itemCount > 0);
+
+  const wantedNames = new Set(activeTrades.map(t => t.label.trim().toLowerCase()));
+  const existing = state.phases || [];
+  const existingNames = new Set(existing.map(p => (p.phase_name || '').trim().toLowerCase()));
+
+  // 1. Create missing phases for active trades not already present
+  const toCreate = activeTrades.filter(t => !existingNames.has(t.label.trim().toLowerCase()));
+  if (toCreate.length) {
+    const maxSort = existing.reduce((m, p) => Math.max(m, p.sort_order || 0), 0);
+    const inserts = toCreate.map((t, i) => ({
+      project_id: state.activeProjectId,
+      phase_name: t.label,
+      sort_order: maxSort + (i + 1) * 10,
+      status: 'planned',
+    }));
+    const { data, error } = await sb.from('rebuild_phases').insert(inserts).select();
+    if (error) { console.warn('phase create failed:', error); }
+    else { state.phases = [...existing, ...(data || [])].sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0)); }
+  }
+
+  // 2. Delete phases whose names don't match any active trade
+  //    Skip deletion if the phase has any scheduled dates, notes, or is in_progress/complete (safety)
+  const orphans = (state.phases || []).filter(p => !wantedNames.has((p.phase_name || '').trim().toLowerCase()));
+  const safeToDelete = orphans.filter(p =>
+    !p.scheduled_start && !p.scheduled_end && !p.notes && (p.status === 'planned' || !p.status)
+  );
+  if (safeToDelete.length) {
+    const ids = safeToDelete.map(p => p.id);
+    const { error } = await sb.from('rebuild_phases').delete().in('id', ids);
+    if (error) { console.warn('phase delete failed:', error); }
+    else { state.phases = (state.phases || []).filter(p => !ids.includes(p.id)); }
+  }
 }
 
 // Recompute the cached wo_budget_summaries row for this project from current state.
@@ -10325,132 +10371,86 @@ function renderTabContent() {
     wireRelationshipsTab();
   }
   if (state.tab === 'phases') {
-    // Helper: save a date field for a trade, creating the wo_builder_work_orders row if needed
-    const saveTradeDate = async (tradeCategory, field, value) => {
-      const updates = {};
-      updates[field] = value || null;
-      const result = await upsertWoBuilderRow(tradeCategory, updates);
-      if (!result.ok) {
-        toast('Save failed: ' + result.error);
-        return false;
-      }
-      // Update in-memory state
-      let wo = (state.woBudget?.wos || []).find(w => w.trade_category === tradeCategory);
-      if (wo) {
-        wo[field] = value || null;
-      } else {
-        // newly created — reload to capture full row
-        await loadWoBudget();
-      }
-      return true;
-    };
-
-    // Date inputs
-    $$('.wo-sched-start').forEach(inp => {
-      inp.addEventListener('change', async () => {
-        const ok = await saveTradeDate(inp.dataset.trade, 'start_date', inp.value);
-        if (ok) { renderDetail(); toast('Start date saved'); }
+    const addBtn = $('#btnAddPhase');
+    if (addBtn) addBtn.addEventListener('click', () => addNewPhase());
+    let _draggedId = null;
+    $$('.phase').forEach(row => {
+      const id = row.dataset.id;
+      row.style.cursor = 'pointer';
+      row.addEventListener('click', () => openPhaseEditor(id));
+      const editBtn = row.querySelector('[data-act="edit"]');
+      if (editBtn) editBtn.addEventListener('click', e => { e.stopPropagation(); openPhaseEditor(id); });
+      // WO warning chip clicks: stop bubbling, jump to Work Orders tab and open/create
+      row.querySelectorAll('.wo-warn-chip').forEach(chip => {
+        chip.addEventListener('click', e => {
+          e.stopPropagation();
+          const subIdToCreate = chip.dataset.woQuick;
+          const woIdToOpen = chip.dataset.woQuickOpen;
+          state.tab = 'workorders';
+          renderDetail();
+          // Wait a tick so the tab is rendered, then act
+          setTimeout(() => {
+            if (subIdToCreate) createOrOpenWorkOrder(subIdToCreate);
+            else if (woIdToOpen) createOrOpenWorkOrder(null, woIdToOpen);
+          }, 50);
+        });
       });
-    });
-    $$('.wo-sched-end').forEach(inp => {
-      inp.addEventListener('change', async () => {
-        const ok = await saveTradeDate(inp.dataset.trade, 'end_date', inp.value);
-        if (ok) { renderDetail(); toast('End date saved'); }
-      });
-    });
-
-    // Gantt bar drag (whole bar = move, edges = resize)
-    const ymd = d => d.toISOString().slice(0, 10);
-
-    $$('.wo-gantt-bar').forEach(bar => {
-      const track = bar.parentElement;
-      const tradeCategory = bar.dataset.trade;
-      const minMs = parseInt(track.dataset.minMs || '0', 10);
-      const totalMs = parseInt(track.dataset.totalMs || '0', 10);
-
-      let dragging = null; // { mode: 'move'|'left'|'right', startX, origLeftPx, origWidthPx, origStartDate, origEndDate, trackWidth }
-
-      const onMouseDown = (e, mode) => {
-        e.preventDefault();
+      const advBtn = row.querySelector('[data-act="advance"]');
+      if (advBtn) advBtn.addEventListener('click', e => { e.stopPropagation(); advancePhaseStatus(id); });
+      const delayBtn = row.querySelector('[data-act="delay"]');
+      if (delayBtn) delayBtn.addEventListener('click', e => { e.stopPropagation(); openDelayModal(id); });
+      const delBtn = row.querySelector('[data-act="delete"]');
+      if (delBtn) delBtn.addEventListener('click', async e => {
         e.stopPropagation();
-        const trackRect = track.getBoundingClientRect();
-        const barRect = bar.getBoundingClientRect();
-        dragging = {
-          mode,
-          startX: e.clientX,
-          origLeftPx: barRect.left - trackRect.left,
-          origWidthPx: barRect.width,
-          origStartDate: new Date(bar.dataset.start),
-          origEndDate: bar.dataset.end ? new Date(bar.dataset.end) : new Date(new Date(bar.dataset.start).getTime() + 86400000),
-          trackWidth: trackRect.width,
-        };
-        bar.classList.add('wo-gantt-dragging');
-        document.addEventListener('mousemove', onMouseMove);
-        document.addEventListener('mouseup', onMouseUp);
-      };
-
-      const onMouseMove = (e) => {
-        if (!dragging) return;
-        const deltaPx = e.clientX - dragging.startX;
-        const deltaMs = (deltaPx / dragging.trackWidth) * totalMs;
-        if (dragging.mode === 'move') {
-          const newLeft = dragging.origLeftPx + deltaPx;
-          bar.style.left = newLeft + 'px';
-          bar.style.width = dragging.origWidthPx + 'px';
-        } else if (dragging.mode === 'right') {
-          const newWidth = Math.max(8, dragging.origWidthPx + deltaPx);
-          bar.style.width = newWidth + 'px';
-        } else if (dragging.mode === 'left') {
-          const newLeft = dragging.origLeftPx + deltaPx;
-          const newWidth = Math.max(8, dragging.origWidthPx - deltaPx);
-          bar.style.left = newLeft + 'px';
-          bar.style.width = newWidth + 'px';
-        }
-      };
-
-      const onMouseUp = async (e) => {
-        if (!dragging) return;
-        const deltaPx = e.clientX - dragging.startX;
-        const deltaMs = Math.round((deltaPx / dragging.trackWidth) * totalMs / 86400000) * 86400000;
-        let newStart = dragging.origStartDate;
-        let newEnd = dragging.origEndDate;
-        if (dragging.mode === 'move') {
-          newStart = new Date(dragging.origStartDate.getTime() + deltaMs);
-          newEnd = new Date(dragging.origEndDate.getTime() + deltaMs);
-        } else if (dragging.mode === 'right') {
-          newEnd = new Date(dragging.origEndDate.getTime() + deltaMs);
-          if (newEnd <= newStart) newEnd = new Date(newStart.getTime() + 86400000);
-        } else if (dragging.mode === 'left') {
-          newStart = new Date(dragging.origStartDate.getTime() + deltaMs);
-          if (newStart >= newEnd) newStart = new Date(newEnd.getTime() - 86400000);
-        }
-        bar.classList.remove('wo-gantt-dragging');
-        document.removeEventListener('mousemove', onMouseMove);
-        document.removeEventListener('mouseup', onMouseUp);
-
-        const dragMode = dragging.mode;
-        dragging = null;
-
-        // Save and re-render
-        const updates = { start_date: ymd(newStart), end_date: ymd(newEnd) };
-        const result = await upsertWoBuilderRow(tradeCategory, updates);
-        if (!result.ok) {
-          toast('Save failed: ' + result.error);
-          return;
-        }
-        await loadWoBudget();
+        const ph = state.phases.find(p => p.id === id);
+        if (!ph) return;
+        if (!confirm(`Delete phase "${ph.phase_name}"?`)) return;
+        const phaseName = ph.phase_name;
+        // Optimistic remove
+        state.phases = state.phases.filter(p => p.id !== id);
         renderDetail();
-        toast('Schedule updated');
-      };
-
-      // Edge handlers
-      bar.querySelector('.wo-gantt-edge-left')?.addEventListener('mousedown', e => onMouseDown(e, 'left'));
-      bar.querySelector('.wo-gantt-edge-right')?.addEventListener('mousedown', e => onMouseDown(e, 'right'));
-      // Body handler (move) — only fires when not on an edge
-      bar.addEventListener('mousedown', e => {
-        if (e.target.classList.contains('wo-gantt-edge')) return;
-        onMouseDown(e, 'move');
+        if (sb) await sb.from('rebuild_phases').delete().eq('id', id);
+        logToAlbi('phase_deleted', `Phase "${phaseName}" removed from schedule`);
+        notifyCustomerOfChange(`The "${phaseName}" phase has been removed from your project schedule.`);
+        toast('Phase deleted');
+        loadHistory();
       });
+
+      // Drag handlers
+      row.addEventListener('dragstart', e => {
+        _draggedId = id;
+        row.classList.add('dragging');
+        e.dataTransfer.effectAllowed = 'move';
+      });
+      row.addEventListener('dragend', () => {
+        row.classList.remove('dragging');
+        $$('.phase').forEach(r => r.classList.remove('drag-over-top','drag-over-bottom'));
+      });
+      row.addEventListener('dragover', e => {
+        e.preventDefault();
+        if (id === _draggedId) return;
+        const rect = row.getBoundingClientRect();
+        const above = e.clientY < rect.top + rect.height / 2;
+        $$('.phase').forEach(r => r.classList.remove('drag-over-top','drag-over-bottom'));
+        row.classList.add(above ? 'drag-over-top' : 'drag-over-bottom');
+      });
+      row.addEventListener('dragleave', () => {
+        row.classList.remove('drag-over-top','drag-over-bottom');
+      });
+      row.addEventListener('drop', e => {
+        e.preventDefault();
+        if (!_draggedId || _draggedId === id) return;
+        const rect = row.getBoundingClientRect();
+        const above = e.clientY < rect.top + rect.height / 2;
+        reorderPhase(_draggedId, id, above);
+      });
+    });
+    // Calendar bar clicks open phase editor
+    $$('.cal-row').forEach(row => {
+      const id = row.dataset.phase;
+      if (!id) return;
+      row.style.cursor = 'pointer';
+      row.addEventListener('click', () => openPhaseEditor(id));
     });
   }
 
@@ -10909,154 +10909,21 @@ function renderPhasesTab() {
   const calBtn = state.activeProjectId
     ? `<a href="calendar.html?project=${state.activeProjectId}" target="_blank" class="btn-cal-open" title="View this project highlighted on the company-wide calendar">📅 Open in Calendar</a>`
     : '';
-
-  // WO-driven: use trade rollup to surface every trade with items
-  const budget = state.woBudget;
-  if (!budget) {
-    return `
-      <div style="display:flex;justify-content:flex-end;margin:0 0 10px;">${calBtn}</div>
-      <div class="empty" style="padding:30px;">
-        <p>Upload Xact estimate & components PDFs on the Work Orders tab to populate the schedule.</p>
-      </div>
-    `;
-  }
-  const rollup = computeTradeRollup(budget);
-  const activeTrades = rollup.filter(t => !t.isSynthetic && t.itemCount > 0);
-  if (!activeTrades.length) {
-    return `
-      <div style="display:flex;justify-content:flex-end;margin:0 0 10px;">${calBtn}</div>
-      <div class="empty" style="padding:30px;">
-        <p>No trades with items yet. Add work to the Work Orders tab to populate this schedule.</p>
-      </div>
-    `;
-  }
-
-  // Pair each trade with its WO row (if one exists) so we can read start_date / end_date.
-  // PM can schedule before a WO is converted — wo row is created lazily on first date save.
-  const rows = activeTrades.map(t => {
-    const wo = (budget.wos || []).find(w => w.trade_category === t.category);
-    return {
-      trade_category: t.category,
-      label: t.label,
-      itemCount: t.itemCount,
-      revenue: t.revenue,
-      wo: wo || null,
-      start_date: wo?.start_date || null,
-      end_date: wo?.end_date || null,
-      is_locked: !!wo?.is_locked,
-    };
-  });
-
+  if (!state.phases.length) return `<div class="empty" style="padding:30px;">
+    <p>No phases on this project. Phases auto-populate from the loss-type template when the project syncs from Albi.</p>
+  </div>`;
   return `
-    <div style="display:flex;justify-content:flex-end;margin:0 0 10px;">${calBtn}</div>
+    <div style="display:flex;justify-content:flex-end;margin:0 0 10px;">
+      ${calBtn}
+    </div>
     <div class="section-head">
-      <h3>Work Order Schedule</h3>
-      <div style="font-size:12px;color:var(--muted);">Set dates per trade — they'll appear on the timeline below</div>
+      <h3>Phase Schedule</h3>
+      <button class="btn" id="btnAddPhase">+ Add Phase</button>
     </div>
     <div class="phase-list">
-      ${rows.map(r => woScheduleRowHtml(r)).join('')}
+      ${state.phases.map(ph => phaseRowHtml(ph)).join('')}
     </div>
-    ${renderWoCalendarView(rows)}
-  `;
-}
-
-function woScheduleRowHtml(r) {
-  const isLate = r.end_date && new Date() > new Date(r.end_date);
-  return `
-    <div class="phase phase-row" data-trade="${esc(r.trade_category)}">
-      <div class="phase-row-head" style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 14px;">
-        <div class="phase-name" style="display:flex;align-items:center;gap:8px;">
-          <span class="phase-icon">🔧</span>
-          <b>${esc(r.label)}</b>
-          <span style="color:var(--muted);font-size:12px;">${r.itemCount} item${r.itemCount===1?'':'s'} · ${usdCompact(r.revenue)}</span>
-          ${r.is_locked ? '<span class="wobx-lock-pill">🔒 Locked</span>' : ''}
-          ${isLate ? '<span class="phase-late-pill">⚠ Overdue</span>' : ''}
-        </div>
-        <div class="phase-dates" style="display:flex;gap:10px;">
-          <label class="phase-date-label" style="display:flex;flex-direction:column;font-size:11px;color:var(--muted);">
-            Start
-            <input type="date" class="wo-sched-start" data-trade="${esc(r.trade_category)}" value="${r.start_date || ''}">
-          </label>
-          <label class="phase-date-label" style="display:flex;flex-direction:column;font-size:11px;color:var(--muted);">
-            End
-            <input type="date" class="wo-sched-end" data-trade="${esc(r.trade_category)}" value="${r.end_date || ''}">
-          </label>
-        </div>
-      </div>
-    </div>
-  `;
-}
-
-function renderWoCalendarView(rows) {
-  const scheduled = (rows || []).filter(r => r.start_date);
-  if (!scheduled.length) {
-    return `
-      <div class="section-head" style="margin-top:24px;">
-        <h3>Calendar / Timeline</h3>
-      </div>
-      <div class="empty" style="padding:24px;">
-        <p>No scheduled WOs yet. Set start dates above to see them on the timeline.</p>
-      </div>`;
-  }
-  // Timeline window
-  const dates = scheduled.flatMap(r => {
-    const s = new Date(r.start_date);
-    const e = r.end_date ? new Date(r.end_date) : new Date(s.getTime() + 86400000);
-    return [s, e];
-  });
-  let minDate = new Date(Math.min(...dates));
-  let maxDate = new Date(Math.max(...dates));
-  minDate = new Date(minDate.getTime() - 2 * 86400000);
-  maxDate = new Date(maxDate.getTime() + 2 * 86400000);
-  const totalMs = maxDate - minDate;
-  const totalDays = Math.ceil(totalMs / 86400000);
-  const showEveryN = totalDays > 60 ? 7 : (totalDays > 30 ? 3 : 1);
-
-  const headers = [];
-  for (let i = 0; i <= totalDays; i++) {
-    const d = new Date(minDate.getTime() + i * 86400000);
-    const showLabel = i % showEveryN === 0;
-    headers.push(`<div class="cal-day-header ${showLabel ? '' : 'hidden-label'}">${showLabel ? d.toLocaleDateString('en-US', {month:'short', day:'numeric'}) : '·'}</div>`);
-  }
-
-  const sortedRows = [...scheduled].sort((a, b) => new Date(a.start_date) - new Date(b.start_date));
-  const bars = sortedRows.map(r => {
-    const start = new Date(r.start_date);
-    const end = r.end_date ? new Date(r.end_date) : new Date(start.getTime() + 86400000);
-    const leftPct = ((start - minDate) / totalMs) * 100;
-    const widthPct = ((end - start) / totalMs) * 100;
-    const isLate = new Date() > end;
-    return `
-      <div class="cal-row" data-trade="${esc(r.trade_category)}">
-        <div class="cal-row-label">${esc(r.label)}</div>
-        <div class="cal-row-bar-track" data-min-ms="${minDate.getTime()}" data-total-ms="${totalMs}">
-          <div class="cal-row-bar wo-gantt-bar ${isLate ? 'cal-bar-late' : ''}"
-               data-trade="${esc(r.trade_category)}"
-               data-start="${r.start_date}"
-               data-end="${r.end_date || ''}"
-               style="left:${leftPct}%;width:${Math.max(widthPct, 1)}%;"
-               title="${esc(r.label)}: ${r.start_date}${r.end_date ? ' → ' + r.end_date : ''}">
-            <span class="wo-gantt-edge wo-gantt-edge-left" data-edge="left"></span>
-            <span class="cal-bar-text">${esc(r.label)}</span>
-            <span class="wo-gantt-edge wo-gantt-edge-right" data-edge="right"></span>
-          </div>
-        </div>
-      </div>
-    `;
-  }).join('');
-
-  return `
-    <div class="section-head" style="margin-top:24px;">
-      <h3>Calendar / Timeline</h3>
-      <div style="font-size:12px;color:var(--muted);">Drag bars to move · Drag edges to resize · Click to edit dates</div>
-    </div>
-    <div class="cal-wrap">
-      <div class="cal-headers">
-        <div class="cal-row-label cal-headers-spacer"></div>
-        <div class="cal-headers-row">${headers.join('')}</div>
-      </div>
-      ${bars}
-    </div>
+    ${renderCalendarView()}
   `;
 }
 
