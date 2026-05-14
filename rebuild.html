@@ -6971,22 +6971,22 @@ async function reconcilePhasesWithWoTrades() {
   // 1. Create missing phases
   const toCreate = activeTrades.filter(t => !existingNames.has(t.label.trim().toLowerCase()));
   if (toCreate.length) {
-    const maxSort = existing.reduce((m, p) => Math.max(m, p.sort_order || 0), 0);
+    const maxSeq = existing.reduce((m, p) => Math.max(m, p.sequence || 0), 0);
     const inserts = toCreate.map((t, i) => ({
       project_id: state.activeProjectId,
       phase_name: t.label,
-      sort_order: maxSort + (i + 1) * 10,
-      status: 'planned',
+      sequence: maxSeq + (i + 1) * 10,
+      status: 'pending',
     }));
     const { data, error } = await sb.from('rebuild_phases').insert(inserts).select();
     if (error) { console.warn('phase create failed:', error); }
-    else { state.phases = [...existing, ...(data || [])].sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0)); }
+    else { state.phases = [...existing, ...(data || [])].sort((a, b) => (a.sequence || 0) - (b.sequence || 0)); }
   }
 
-  // 2. Delete orphan phases (name doesn't match any WO trade) — only if safe (no dates/notes/progress)
+  // 2. Delete orphan phases — only if safe (no dates, no notes, status is pending)
   const orphans = (state.phases || []).filter(p => !wantedNames.has((p.phase_name || '').trim().toLowerCase()));
   const safeToDelete = orphans.filter(p =>
-    !p.scheduled_start && !p.scheduled_end && !p.notes && (p.status === 'planned' || !p.status)
+    !p.scheduled_start && !p.scheduled_end && !p.notes && (p.status === 'pending' || !p.status)
   );
   if (safeToDelete.length) {
     const ids = safeToDelete.map(p => p.id);
