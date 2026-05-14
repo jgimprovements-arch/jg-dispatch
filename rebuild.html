@@ -6065,6 +6065,35 @@ const toast = msg => {
   setTimeout(() => t.classList.remove('on'), 2400);
 };
 
+// Lightweight picker — promise resolves with chosen value or null on cancel
+function pickFromList(title, options) {
+  return new Promise(resolve => {
+    const back = document.createElement('div');
+    back.className = 'modal-back on';
+    back.style.cssText = 'position:fixed;inset:0;background:rgba(13,45,94,.6);z-index:9999;display:flex;align-items:center;justify-content:center;';
+    back.innerHTML = `
+      <div style="background:#fff;border-radius:12px;padding:20px;max-width:380px;width:90%;max-height:80vh;overflow:auto;box-shadow:0 20px 60px rgba(0,0,0,.3);">
+        <div style="font-weight:700;font-size:15px;color:var(--navy);margin-bottom:12px;">${esc(title)}</div>
+        <div class="pick-list" style="display:flex;flex-direction:column;gap:6px;">
+          ${options.map(o => `<button class="pick-btn" data-val="${esc(o.value)}" style="padding:10px 12px;border:1px solid var(--line);background:#fff;border-radius:8px;text-align:left;cursor:pointer;font-size:14px;color:var(--navy);">${esc(o.label)}</button>`).join('')}
+        </div>
+        <div style="text-align:right;margin-top:14px;">
+          <button class="pick-cancel" style="padding:6px 14px;border:1px solid var(--line);background:#fff;border-radius:6px;cursor:pointer;font-size:13px;color:var(--muted);">Cancel</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(back);
+    const done = (v) => { back.remove(); resolve(v); };
+    back.querySelectorAll('.pick-btn').forEach(b => {
+      b.addEventListener('mouseenter', () => b.style.background = '#f7f9fc');
+      b.addEventListener('mouseleave', () => b.style.background = '#fff');
+      b.addEventListener('click', () => done(b.dataset.val));
+    });
+    back.querySelector('.pick-cancel').addEventListener('click', () => done(null));
+    back.addEventListener('click', e => { if (e.target === back) done(null); });
+  });
+}
+
 // ──── PM badge ────
 // PM email is shown in sidebar.js footer (sb-user). No in-page badge needed.
 
@@ -10254,86 +10283,42 @@ function renderTabContent() {
     wireRelationshipsTab();
   }
   if (state.tab === 'phases') {
-    const addBtn = $('#btnAddPhase');
-    if (addBtn) addBtn.addEventListener('click', () => addNewPhase());
-    let _draggedId = null;
-    $$('.phase').forEach(row => {
-      const id = row.dataset.id;
-      row.style.cursor = 'pointer';
-      row.addEventListener('click', () => openPhaseEditor(id));
-      const editBtn = row.querySelector('[data-act="edit"]');
-      if (editBtn) editBtn.addEventListener('click', e => { e.stopPropagation(); openPhaseEditor(id); });
-      // WO warning chip clicks: stop bubbling, jump to Work Orders tab and open/create
-      row.querySelectorAll('.wo-warn-chip').forEach(chip => {
-        chip.addEventListener('click', e => {
-          e.stopPropagation();
-          const subIdToCreate = chip.dataset.woQuick;
-          const woIdToOpen = chip.dataset.woQuickOpen;
-          state.tab = 'workorders';
-          renderDetail();
-          // Wait a tick so the tab is rendered, then act
-          setTimeout(() => {
-            if (subIdToCreate) createOrOpenWorkOrder(subIdToCreate);
-            else if (woIdToOpen) createOrOpenWorkOrder(null, woIdToOpen);
-          }, 50);
-        });
-      });
-      const advBtn = row.querySelector('[data-act="advance"]');
-      if (advBtn) advBtn.addEventListener('click', e => { e.stopPropagation(); advancePhaseStatus(id); });
-      const delayBtn = row.querySelector('[data-act="delay"]');
-      if (delayBtn) delayBtn.addEventListener('click', e => { e.stopPropagation(); openDelayModal(id); });
-      const delBtn = row.querySelector('[data-act="delete"]');
-      if (delBtn) delBtn.addEventListener('click', async e => {
-        e.stopPropagation();
-        const ph = state.phases.find(p => p.id === id);
-        if (!ph) return;
-        if (!confirm(`Delete phase "${ph.phase_name}"?`)) return;
-        const phaseName = ph.phase_name;
-        // Optimistic remove
-        state.phases = state.phases.filter(p => p.id !== id);
-        renderDetail();
-        if (sb) await sb.from('rebuild_phases').delete().eq('id', id);
-        logToAlbi('phase_deleted', `Phase "${phaseName}" removed from schedule`);
-        notifyCustomerOfChange(`The "${phaseName}" phase has been removed from your project schedule.`);
-        toast('Phase deleted');
-        loadHistory();
-      });
+    // Wire WO date inputs — save start_date / end_date on change
+    const saveWoDate = async (woId, field, value) => {
+      const updates = {};
+      updates[field] = value || null;
+      const { error } = await sb.from('wo_builder_work_orders').update(updates).eq('id', woId);
+      if (error) {
+        toast('Save failed: ' + error.message);
+        return false;
+      }
+      // Update in-memory state so the timeline reflects immediately
+      const wo = (state.woBudget?.wos || []).find(w => w.id === woId);
+      if (wo) wo[field] = value || null;
+      return true;
+    };
 
-      // Drag handlers
-      row.addEventListener('dragstart', e => {
-        _draggedId = id;
-        row.classList.add('dragging');
-        e.dataTransfer.effectAllowed = 'move';
-      });
-      row.addEventListener('dragend', () => {
-        row.classList.remove('dragging');
-        $$('.phase').forEach(r => r.classList.remove('drag-over-top','drag-over-bottom'));
-      });
-      row.addEventListener('dragover', e => {
-        e.preventDefault();
-        if (id === _draggedId) return;
-        const rect = row.getBoundingClientRect();
-        const above = e.clientY < rect.top + rect.height / 2;
-        $$('.phase').forEach(r => r.classList.remove('drag-over-top','drag-over-bottom'));
-        row.classList.add(above ? 'drag-over-top' : 'drag-over-bottom');
-      });
-      row.addEventListener('dragleave', () => {
-        row.classList.remove('drag-over-top','drag-over-bottom');
-      });
-      row.addEventListener('drop', e => {
-        e.preventDefault();
-        if (!_draggedId || _draggedId === id) return;
-        const rect = row.getBoundingClientRect();
-        const above = e.clientY < rect.top + rect.height / 2;
-        reorderPhase(_draggedId, id, above);
+    $$('.wo-sched-start').forEach(inp => {
+      inp.addEventListener('change', async () => {
+        const woId = inp.dataset.woId;
+        const ok = await saveWoDate(woId, 'start_date', inp.value);
+        if (ok) {
+          // Re-render to refresh the Gantt
+          renderDetail();
+          toast('Start date saved');
+        }
       });
     });
-    // Calendar bar clicks open phase editor
-    $$('.cal-row').forEach(row => {
-      const id = row.dataset.phase;
-      if (!id) return;
-      row.style.cursor = 'pointer';
-      row.addEventListener('click', () => openPhaseEditor(id));
+
+    $$('.wo-sched-end').forEach(inp => {
+      inp.addEventListener('change', async () => {
+        const woId = inp.dataset.woId;
+        const ok = await saveWoDate(woId, 'end_date', inp.value);
+        if (ok) {
+          renderDetail();
+          toast('End date saved');
+        }
+      });
     });
   }
 
@@ -10792,21 +10777,138 @@ function renderPhasesTab() {
   const calBtn = state.activeProjectId
     ? `<a href="calendar.html?project=${state.activeProjectId}" target="_blank" class="btn-cal-open" title="View this project highlighted on the company-wide calendar">📅 Open in Calendar</a>`
     : '';
-  if (!state.phases.length) return `<div class="empty" style="padding:30px;">
-    <p>No phases on this project. Phases auto-populate from the loss-type template when the project syncs from Albi.</p>
-  </div>`;
+
+  // Only show converted WOs from wo_builder_work_orders
+  const allWos = state.woBudget?.wos || [];
+  const convertedWos = allWos.filter(w => w.is_locked);
+
+  if (!convertedWos.length) {
+    return `
+      <div style="display:flex;justify-content:flex-end;margin:0 0 10px;">
+        ${calBtn}
+      </div>
+      <div class="empty" style="padding:30px;">
+        <p>No Work Orders converted yet. Go to <b>Work Orders</b> tab → click a trade → "Convert to Work Order" to add it to the schedule.</p>
+      </div>
+    `;
+  }
+
+  // Sort by start date (null start dates at the bottom)
+  const sorted = [...convertedWos].sort((a, b) => {
+    if (!a.start_date && !b.start_date) return 0;
+    if (!a.start_date) return 1;
+    if (!b.start_date) return -1;
+    return new Date(a.start_date) - new Date(b.start_date);
+  });
+
   return `
     <div style="display:flex;justify-content:flex-end;margin:0 0 10px;">
       ${calBtn}
     </div>
     <div class="section-head">
-      <h3>Phase Schedule</h3>
-      <button class="btn" id="btnAddPhase">+ Add Phase</button>
+      <h3>Work Order Schedule</h3>
+      <div style="font-size:12px;color:var(--muted);">Set dates per WO — they'll appear on the timeline below</div>
     </div>
     <div class="phase-list">
-      ${state.phases.map(ph => phaseRowHtml(ph)).join('')}
+      ${sorted.map(w => woScheduleRowHtml(w)).join('')}
     </div>
-    ${renderCalendarView()}
+    ${renderWoCalendarView(convertedWos)}
+  `;
+}
+
+function woScheduleRowHtml(w) {
+  const tradeLabel = MERGED_TRADE_GROUPS[w.trade_category]?.label || w.trade_category;
+  const isLate = w.end_date && new Date() > new Date(w.end_date);
+  return `
+    <div class="phase-row" data-wo-id="${esc(w.id)}">
+      <div class="phase-row-head">
+        <div class="phase-name">
+          <span class="phase-icon">🔧</span>
+          <b>${esc(tradeLabel)}</b>
+          ${w.title && w.title !== tradeLabel ? ` <span style="color:var(--muted);font-size:12px;">· ${esc(w.title)}</span>` : ''}
+          ${isLate ? '<span class="phase-late-pill">⚠ Overdue</span>' : ''}
+        </div>
+      </div>
+      <div class="phase-dates">
+        <label class="phase-date-label">
+          Start
+          <input type="date" class="wo-sched-start" data-wo-id="${esc(w.id)}" value="${w.start_date || ''}">
+        </label>
+        <label class="phase-date-label">
+          End
+          <input type="date" class="wo-sched-end" data-wo-id="${esc(w.id)}" value="${w.end_date || ''}">
+        </label>
+      </div>
+    </div>
+  `;
+}
+
+function renderWoCalendarView(wos) {
+  const scheduled = (wos || []).filter(w => w.start_date);
+  if (!scheduled.length) {
+    return `
+      <div class="section-head" style="margin-top:24px;">
+        <h3>Calendar / Timeline</h3>
+      </div>
+      <div class="empty" style="padding:24px;">
+        <p>No scheduled WOs yet. Set start dates above to see them on the timeline.</p>
+      </div>`;
+  }
+
+  // Determine timeline window
+  const dates = scheduled.flatMap(w => {
+    const s = new Date(w.start_date);
+    const e = w.end_date ? new Date(w.end_date) : new Date(s.getTime() + 86400000);
+    return [s, e];
+  });
+  let minDate = new Date(Math.min(...dates));
+  let maxDate = new Date(Math.max(...dates));
+  minDate = new Date(minDate.getTime() - 2 * 86400000);
+  maxDate = new Date(maxDate.getTime() + 2 * 86400000);
+  const totalMs = maxDate - minDate;
+  const totalDays = Math.ceil(totalMs / 86400000);
+  const showEveryN = totalDays > 60 ? 7 : (totalDays > 30 ? 3 : 1);
+
+  // Column headers
+  const headers = [];
+  for (let i = 0; i <= totalDays; i++) {
+    const d = new Date(minDate.getTime() + i * 86400000);
+    const showLabel = i % showEveryN === 0;
+    headers.push(`<div class="cal-day-header ${showLabel ? '' : 'hidden-label'}">${showLabel ? d.toLocaleDateString('en-US', {month:'short', day:'numeric'}) : '·'}</div>`);
+  }
+
+  // Bars — sort by start date
+  const sortedWos = [...scheduled].sort((a, b) => new Date(a.start_date) - new Date(b.start_date));
+  const bars = sortedWos.map(w => {
+    const start = new Date(w.start_date);
+    const end = w.end_date ? new Date(w.end_date) : new Date(start.getTime() + 86400000);
+    const leftPct = ((start - minDate) / totalMs) * 100;
+    const widthPct = ((end - start) / totalMs) * 100;
+    const isLate = new Date() > end;
+    const tradeLabel = MERGED_TRADE_GROUPS[w.trade_category]?.label || w.trade_category;
+    return `
+      <div class="cal-row">
+        <div class="cal-row-label">${esc(tradeLabel)}</div>
+        <div class="cal-row-bar-track">
+          <div class="cal-row-bar ${isLate ? 'cal-bar-late' : ''}" style="left:${leftPct}%;width:${Math.max(widthPct, 1)}%;" title="${esc(tradeLabel)}: ${w.start_date}${w.end_date ? ' → ' + w.end_date : ''}">
+            <span class="cal-bar-text">${esc(tradeLabel)}</span>
+          </div>
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  return `
+    <div class="section-head" style="margin-top:24px;">
+      <h3>Calendar / Timeline</h3>
+    </div>
+    <div class="cal-wrap">
+      <div class="cal-headers">
+        <div class="cal-row-label cal-headers-spacer"></div>
+        <div class="cal-headers-row">${headers.join('')}</div>
+      </div>
+      ${bars}
+    </div>
   `;
 }
 
@@ -12643,7 +12745,14 @@ function renderWoDetailModal(tradeKey, tradeLabel, budget) {
 
         <div class="wobx-modal-body">
           ${renderTradeTotalsStrip(tradeKey, items, materials, labor, equipment, wo)}
-          ${renderDetailSection('Estimate Line Items (Revenue)', 'item', items, isUnassigned, 'revenue', wo?.phase_id || null)}
+          ${(() => {
+            // Compute trades that currently have items (same as rail), so dropdown matches the rail.
+            const rollup = computeTradeRollup(budget);
+            const existingTradeKeys = rollup
+              .filter(t => !t.isSynthetic)
+              .map(t => t.category);
+            return renderDetailSection('Estimate Line Items (Revenue)', 'item', items, isUnassigned, 'revenue', wo?.phase_id || null, existingTradeKeys);
+          })()}
           ${wo?.materials_supplier === 'jg' ? `
             <div class="wobx-jg-supplies-note">
               📦 Materials moved to <b>JG Purchased Materials</b> bucket. Click that row in the main table to view the materials list.
@@ -12785,7 +12894,7 @@ function computeAutoTargetBudgets(revenue, materials, labor, equipment) {
 
 function round2(n) { return Math.round(n * 100) / 100; }
 
-function renderDetailSection(title, kind, rows, isUnassigned, mode, tradeDefaultPhaseId) {
+function renderDetailSection(title, kind, rows, isUnassigned, mode, tradeDefaultPhaseId, existingTradeKeys) {
   if (!rows.length) {
     return `
       <div class="wobx-detail-sec">
@@ -12829,13 +12938,13 @@ function renderDetailSection(title, kind, rows, isUnassigned, mode, tradeDefault
                 ${isRevenue ? `
                   <td>
                     <select class="wobx-trade-row-select" data-kind="${kind}" data-id="${esc(r.id)}" data-current-trade="${esc(r.trade_category || '')}">
-                      ${Object.entries(MERGED_TRADE_GROUPS)
-                        .sort((a, b) => (a[1].sort || 99) - (b[1].sort || 99))
-                        .map(([key, g]) => {
-                          const isCurrent = (r.trade_category || '') && g.categories.includes(r.trade_category);
-                          return `<option value="${esc(g.categories[0])}" data-merged-key="${esc(key)}" ${isCurrent ? 'selected' : ''}>${esc(g.label)}</option>`;
-                        }).join('')}
+                      ${(existingTradeKeys || []).map(key => {
+                        const g = MERGED_TRADE_GROUPS[key] || { label: key, categories: [key] };
+                        const isCurrent = g.categories.includes(r.trade_category);
+                        return `<option value="${esc(g.categories[0])}" data-merged-key="${esc(key)}" ${isCurrent ? 'selected' : ''}>${esc(g.label)}</option>`;
+                      }).join('')}
                       <option value="__unassigned__" ${isUnassignedRow ? 'selected' : ''}>📦 Unassigned</option>
+                      <option value="__create__" style="font-style:italic;color:var(--orange);">+ Create new WO…</option>
                     </select>
                   </td>
                 ` : ''}
@@ -13070,10 +13179,26 @@ function wireWoDetailModal(tradeKey) {
       const tableName = tableForKind[kind];
       if (!tableName) return;
 
+      // "+ Create new WO..." — let user pick from unused trades
+      if (val === '__create__') {
+        sel.value = lastValue;
+        const rollup = computeTradeRollup(state.woBudget);
+        const usedKeys = new Set(rollup.filter(t => !t.isSynthetic).map(t => t.category));
+        const unused = Object.entries(MERGED_TRADE_GROUPS)
+          .filter(([k]) => !usedKeys.has(k))
+          .sort((a, b) => (a[1].sort || 99) - (b[1].sort || 99));
+        if (!unused.length) {
+          toast('All trades are already in use.');
+          return;
+        }
+        const choice = await pickFromList('Create new Work Order — pick a trade:', unused.map(([k, g]) => ({ value: g.categories[0], label: g.label })));
+        if (!choice) return;
+        val = choice;
+      }
+
       const update = {};
       if (val === '__unassigned__') {
         update.is_unassigned = true;
-        // leave trade_category as-is so it can be re-routed later
       } else {
         update.is_unassigned = false;
         update.trade_category = val;
