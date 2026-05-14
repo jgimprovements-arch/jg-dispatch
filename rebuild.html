@@ -16382,11 +16382,67 @@ function renderJournalTab() {
     </div>
   `;
 
-  const feed = entries.length === 0 ? `
-    <div class="empty" style="padding:40px 20px;text-align:center;color:var(--muted);">
-      No journal entries yet. Start the timeline.
-    </div>
-  ` : entries.map(e => renderJournalEntry(e, canEdit)).join('');
+  const feed = (() => {
+    // Merge journal entries + all messages into one chronological feed
+    const journalItems = entries.map(e => ({
+      type: 'journal',
+      date: new Date(e.created_at),
+      data: e,
+    }));
+    const msgItems = (state.messages || []).map(m => ({
+      type: 'message',
+      date: new Date(m.created_at),
+      data: m,
+    }));
+    const merged = [...journalItems, ...msgItems].sort((a, b) => b.date - a.date);
+    if (!merged.length) {
+      return `<div class="empty" style="padding:40px 20px;text-align:center;color:var(--muted);">
+        No journal entries or messages yet. Start the timeline.
+      </div>`;
+    }
+    return merged.map(item => {
+      if (item.type === 'journal') return renderJournalEntry(item.data, canEdit);
+      // Render message as a journal-style card
+      const m = item.data;
+      const dirIcon = m.direction === 'inbound' ? '⇠' : '⇢';
+      const channelIcon = m.channel === 'sms' ? '📱' : m.channel === 'email' ? '✉' : '📝';
+      const channelLabel = m.channel === 'internal_note' ? 'Note' : (m.channel || '').toUpperCase();
+      const who = m.direction === 'inbound'
+        ? (m.sent_by_name || 'Unknown')
+        : (m.recipient_name || 'Unknown');
+      const sender = m.sent_by_name || m.sent_by_email || 'platform';
+      const bodyPreview = (m.body || '').replace(/</g, '&lt;').replace(/\n/g, '<br>');
+      const atts = m.attachments || [];
+      const attHtml = atts.length ? `
+        <div class="jr-att-grid" style="margin-top:6px;">
+          ${atts.map(a => {
+            const isImg = /\.(jpg|jpeg|png|gif|webp|heic)$/i.test(a.file_name || '') || /\.(jpg|jpeg|png|gif|webp|heic)(\?|$)/i.test(a.public_url || '');
+            if (isImg) {
+              return `<a href="${a.public_url}" target="_blank" rel="noopener" class="jr-att-thumb" title="${esc(a.file_name)}">
+                <img src="${a.public_url}" loading="lazy" style="width:60px;height:60px;object-fit:cover;border-radius:4px;">
+              </a>`;
+            }
+            return `<a href="${a.public_url}" target="_blank" rel="noopener" class="jr-att-file" title="${esc(a.file_name)}">📎 ${esc(a.file_name)}</a>`;
+          }).join('')}
+        </div>
+      ` : '';
+      return `
+        <div class="jr-entry" style="border-left:3px solid ${m.direction === 'inbound' ? 'var(--orange)' : 'var(--green)'};">
+          <div class="jr-head">
+            <span class="jr-author">${dirIcon} ${channelIcon} ${esc(who)}</span>
+            <span class="jr-tag" style="font-size:10px;">${channelLabel}</span>
+            <span class="jr-time">${fmtRelative(m.created_at)}</span>
+          </div>
+          ${m.subject ? `<div style="font-weight:700;font-size:13px;margin:4px 0;">${esc(m.subject)}</div>` : ''}
+          <div class="jr-body">${bodyPreview}</div>
+          ${attHtml}
+          <div class="jr-meta" style="margin-top:4px;font-size:11px;color:var(--muted);">
+            by ${esc(sender)}${m.recipient_phone ? ' · ' + fmtPhone(m.recipient_phone) : ''}${m.recipient_email ? ' · ' + esc(m.recipient_email) : ''}
+          </div>
+        </div>
+      `;
+    }).join('');
+  })();
 
   return `
     <div class="jr-wrap">
