@@ -3375,7 +3375,7 @@
   }
 
   /* Per-row phase select */
-  .wobx-phase-row-select {
+  .wobx-trade-row-select {
     background: var(--card);
     border: 1px solid var(--line);
     border-radius: 5px;
@@ -3385,8 +3385,8 @@
     font-family: inherit;
     max-width: 140px;
   }
-  .wobx-phase-row-select:focus { outline: none; border-color: var(--orange); }
-  .wobx-phase-row-select:disabled { opacity: .5; }
+  .wobx-trade-row-select:focus { outline: none; border-color: var(--orange); }
+  .wobx-trade-row-select:disabled { opacity: .5; }
 
   /* Greyed unassigned rows */
   .wobx-unassigned-row { background: rgba(245,166,35,.05); }
@@ -12807,7 +12807,7 @@ function renderDetailSection(title, kind, rows, isUnassigned, mode, tradeDefault
             <th class="r">Qty</th>
             <th class="r">Unit</th>
             <th class="r">${isRevenue ? 'Revenue' : 'Xact $'}</th>
-            ${isRevenue ? '<th>Phase</th>' : ''}
+            ${isRevenue ? '<th>Trade</th>' : ''}
           </tr>
         </thead>
         <tbody>
@@ -12828,17 +12828,14 @@ function renderDetailSection(title, kind, rows, isUnassigned, mode, tradeDefault
                 <td class="r">${usdCompact(lineAmount)}</td>
                 ${isRevenue ? `
                   <td>
-                    <select class="wobx-phase-row-select" data-kind="${kind}" data-id="${esc(r.id)}">
-                      <option value="" ${!currentPhase && !isUnassignedRow ? 'selected' : ''}>
-                        ${tradeDefaultPhaseId
-                          ? '↳ ' + esc((state.phases || []).find(p => p.id === tradeDefaultPhaseId)?.phase_name || 'Default')
-                          : '— Default —'}
-                      </option>
-                      ${(state.phases || []).map(p =>
-                        `<option value="${p.id}" ${currentPhase === p.id ? 'selected' : ''}>${esc(p.phase_name)}</option>`
-                      ).join('')}
+                    <select class="wobx-trade-row-select" data-kind="${kind}" data-id="${esc(r.id)}" data-current-trade="${esc(r.trade_category || '')}">
+                      ${Object.entries(MERGED_TRADE_GROUPS)
+                        .sort((a, b) => (a[1].sort || 99) - (b[1].sort || 99))
+                        .map(([key, g]) => {
+                          const isCurrent = (r.trade_category || '') && g.categories.includes(r.trade_category);
+                          return `<option value="${esc(g.categories[0])}" data-merged-key="${esc(key)}" ${isCurrent ? 'selected' : ''}>${esc(g.label)}</option>`;
+                        }).join('')}
                       <option value="__unassigned__" ${isUnassignedRow ? 'selected' : ''}>📦 Unassigned</option>
-                      <option value="__create__" style="font-style:italic;color:var(--orange);">+ Create new phase…</option>
                     </select>
                   </td>
                 ` : ''}
@@ -13064,7 +13061,7 @@ function wireWoDetailModal(tradeKey) {
   };
 
   // Phase dropdown on each row — '' = default, '__unassigned__' = bucket, '__create__' = new phase, otherwise phase UUID
-  document.querySelectorAll('.wobx-phase-row-select').forEach(sel => {
+  document.querySelectorAll('.wobx-trade-row-select').forEach(sel => {
     let lastValue = sel.value;
     sel.addEventListener('change', async () => {
       const kind = sel.dataset.kind;
@@ -13073,32 +13070,20 @@ function wireWoDetailModal(tradeKey) {
       const tableName = tableForKind[kind];
       if (!tableName) return;
 
-      // Handle create-new-phase first
-      if (val === '__create__') {
-        sel.value = lastValue;
-        const newId = await createNewPhasePrompt();
-        if (!newId) return;
-        val = newId;
-        // We need to re-render the modal so all dropdowns get the new option,
-        // but we'll also save the assignment first so the user's intent isn't lost
-      }
-
       const update = {};
       if (val === '__unassigned__') {
         update.is_unassigned = true;
-        update.assigned_phase_id = null;
-      } else if (val === '') {
-        update.is_unassigned = false;
-        update.assigned_phase_id = null;
+        // leave trade_category as-is so it can be re-routed later
       } else {
         update.is_unassigned = false;
-        update.assigned_phase_id = val;
+        update.trade_category = val;
       }
       sel.disabled = true;
       const { error } = await sb.from(tableName).update(update).eq('id', id);
       sel.disabled = false;
       if (error) {
         toast('Save failed: ' + error.message, true);
+        sel.value = lastValue;
         return;
       }
       lastValue = val;
