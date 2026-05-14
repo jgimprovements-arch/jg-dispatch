@@ -10797,6 +10797,7 @@ function renderTabContent() {
     const bodyEl = $('#msg_body');
 
     state.stagedAttachments = [];
+    state.staffSenders = staffSenders;
     state.stagedDocAttachments = []; // existing docs from rebuild_documents to attach by URL
 
     const renderStaged = () => {
@@ -17163,6 +17164,35 @@ function renderMessagesTab() {
     `</optgroup>`,
   ].join('');
 
+  // Build staff sender options from JG team in relationships + employees
+  const staffSenders = [];
+  // PM first (default)
+  const pmName = p.albi_pm || 'Project Manager';
+  const pmEmail = p.albi_pm_email || state.pmEmail || 'info@jg-restoration.com';
+  const pmPhone = p.albi_pm_phone || '';
+  staffSenders.push({ name: pmName, email: pmEmail, phone: pmPhone, isDefault: true });
+  // Add other JG staff from relationships
+  const jgRels = (state.relationships || []).filter(r =>
+    r.role && (r.role.includes('jg') || r.role.includes('JG') || r.role === 'project_manager' || r.role === 'estimator' || r.role === 'office')
+    && r.display_name
+  );
+  jgRels.forEach(r => {
+    if (r.email && r.email.toLowerCase() !== pmEmail.toLowerCase()) {
+      staffSenders.push({ name: r.display_name, email: r.email || '', phone: r.phone || '' });
+    }
+  });
+  // Add employees not already in the list
+  const seenEmails = new Set(staffSenders.map(s => (s.email || '').toLowerCase()));
+  (state.employees || []).forEach(e => {
+    if (e.email && !seenEmails.has(e.email.toLowerCase())) {
+      staffSenders.push({ name: e.name, email: e.email, phone: e.phone || '' });
+      seenEmails.add(e.email.toLowerCase());
+    }
+  });
+  const fromOptions = staffSenders.map((s, i) =>
+    `<option value="${i}" ${s.isDefault ? 'selected' : ''}>${esc(s.name)}${s.email ? ' · ' + esc(s.email) : ''}</option>`
+  ).join('');
+
   return subtabBar + `
     <div class="msg-wrap">
       <div class="msg-composer">
@@ -17181,6 +17211,12 @@ function renderMessagesTab() {
               <select id="msg_channel">
                 <option value="sms">📱 SMS</option>
                 <option value="email">✉ Email</option>
+              </select>
+            </div>
+            <div>
+              <label>From</label>
+              <select id="msg_from">
+                ${fromOptions}
               </select>
             </div>
           </div>
@@ -17347,8 +17383,12 @@ async function sendMessage() {
     if (channel === 'email' && !recipient.email) { toast('No email on file for that recipient'); return; }
   }
 
-  const fromEmail = p.albi_pm_email || state.pmEmail || 'info@jg-restoration.com';
-  const fromName = p.albi_pm_name || 'JG Restoration';
+  // Get selected sender from the From dropdown
+  const fromIdx = parseInt($('#msg_from')?.value || '0', 10);
+  const selectedSender = (state.staffSenders || [])[fromIdx] || {};
+  const fromEmail = selectedSender.email || p.albi_pm_email || state.pmEmail || 'info@jg-restoration.com';
+  const fromName = selectedSender.name || p.albi_pm_name || 'JG Restoration';
+  const fromPhone = selectedSender.phone || '';
 
   // Insert into Supabase first (source of truth)
   const insertRow = {
@@ -17437,7 +17477,7 @@ async function sendMessage() {
             .map(line => line.trim() ? `<p style="margin:0 0 12px;font-size:15px;line-height:1.5;color:#1a2540;">${line}</p>` : '')
             .join('');
           const pmFirst = (fromName || 'JG Restoration').split(' ')[0];
-          const pmPhone = p.albi_pm_phone ? fmtPhone(p.albi_pm_phone) : '(920) 428-4200';
+          const pmPhone = fromPhone ? fmtPhone(fromPhone) : (p.albi_pm_phone ? fmtPhone(p.albi_pm_phone) : '(920) 428-4200');
           return buildBrandedEmail({
             preheader: subject || `Update on ${p.albi_job_number || 'your project'}`,
             headline: '',
