@@ -10797,7 +10797,6 @@ function renderTabContent() {
     const bodyEl = $('#msg_body');
 
     state.stagedAttachments = [];
-    state.staffSenders = staffSenders;
     state.stagedDocAttachments = []; // existing docs from rebuild_documents to attach by URL
 
     const renderStaged = () => {
@@ -17165,12 +17164,12 @@ function renderMessagesTab() {
   ].join('');
 
   // Build staff sender options from JG team in relationships + employees
-  const staffSenders = [];
+  state.staffSenders = [];
   // PM first (default)
   const pmName = p.albi_pm || 'Project Manager';
   const pmEmail = p.albi_pm_email || state.pmEmail || 'info@jg-restoration.com';
   const pmPhone = p.albi_pm_phone || '';
-  staffSenders.push({ name: pmName, email: pmEmail, phone: pmPhone, isDefault: true });
+  state.staffSenders.push({ name: pmName, email: pmEmail, phone: pmPhone, role: 'Project Manager', isDefault: true });
   // Add other JG staff from relationships
   const jgRels = (state.relationships || []).filter(r =>
     r.role && (r.role.includes('jg') || r.role.includes('JG') || r.role === 'project_manager' || r.role === 'estimator' || r.role === 'office')
@@ -17178,18 +17177,19 @@ function renderMessagesTab() {
   );
   jgRels.forEach(r => {
     if (r.email && r.email.toLowerCase() !== pmEmail.toLowerCase()) {
-      staffSenders.push({ name: r.display_name, email: r.email || '', phone: r.phone || '' });
+      const roleLabel = (r.role || '').replace(/_/g, ' ').replace(/\bjg\b/gi, '').trim();
+      state.staffSenders.push({ name: r.display_name, email: r.email || '', phone: r.phone || '', role: roleLabel || 'Team Member' });
     }
   });
   // Add employees not already in the list
-  const seenEmails = new Set(staffSenders.map(s => (s.email || '').toLowerCase()));
+  const seenEmails = new Set(state.staffSenders.map(s => (s.email || '').toLowerCase()));
   (state.employees || []).forEach(e => {
     if (e.email && !seenEmails.has(e.email.toLowerCase())) {
-      staffSenders.push({ name: e.name, email: e.email, phone: e.phone || '' });
+      state.staffSenders.push({ name: e.name, email: e.email, phone: e.phone || '', role: e.role || 'Team Member' });
       seenEmails.add(e.email.toLowerCase());
     }
   });
-  const fromOptions = staffSenders.map((s, i) =>
+  const fromOptions = state.staffSenders.map((s, i) =>
     `<option value="${i}" ${s.isDefault ? 'selected' : ''}>${esc(s.name)}${s.email ? ' · ' + esc(s.email) : ''}</option>`
   ).join('');
 
@@ -17476,15 +17476,41 @@ async function sendMessage() {
           const bodyHtml = restLines
             .map(line => line.trim() ? `<p style="margin:0 0 12px;font-size:15px;line-height:1.5;color:#1a2540;">${line}</p>` : '')
             .join('');
-          const pmFirst = (fromName || 'JG Restoration').split(' ')[0];
-          const pmPhone = fromPhone ? fmtPhone(fromPhone) : (p.albi_pm_phone ? fmtPhone(p.albi_pm_phone) : '(920) 428-4200');
+          const senderName = fromName || 'JG Restoration';
+          const senderTitle = selectedSender.role || selectedSender.title || '';
+          const senderPhone = fromPhone ? fmtPhone(fromPhone) : (p.albi_pm_phone ? fmtPhone(p.albi_pm_phone) : '(920) 428-4200');
+          const senderEmail = fromEmail || 'info@jg-restoration.com';
+          const signatureHtml = `
+            <div style="margin-top:24px;padding-top:16px;border-top:1px solid #e5e7eb;">
+              <table cellpadding="0" cellspacing="0" border="0" style="font-family:Arial,sans-serif;">
+                <tr>
+                  <td style="padding-right:14px;vertical-align:top;">
+                    <img src="https://jgimprovements-arch.github.io/jg-dispatch/logo.png" alt="JG Restoration" width="80" style="border-radius:6px;">
+                  </td>
+                  <td style="vertical-align:top;">
+                    <div style="font-weight:700;font-size:14px;color:#0d2d5e;">${esc(senderName)}</div>
+                    ${senderTitle ? `<div style="font-size:13px;color:#7884a0;margin-top:2px;">${esc(senderTitle)}</div>` : ''}
+                    <div style="font-size:13px;color:#0d2d5e;margin-top:6px;font-weight:600;">JG Restoration</div>
+                    <div style="font-size:12px;color:#7884a0;">Fire · Water · Mold · Reconstruction</div>
+                    <div style="margin-top:6px;font-size:13px;">
+                      <a href="tel:${senderPhone.replace(/\D/g,'')}" style="color:#e85d04;text-decoration:none;">${senderPhone}</a>
+                      ${senderEmail !== 'info@jg-restoration.com' ? ` · <a href="mailto:${senderEmail}" style="color:#e85d04;text-decoration:none;">${esc(senderEmail)}</a>` : ''}
+                    </div>
+                    <div style="margin-top:4px;font-size:12px;">
+                      <a href="https://jg-restoration.com" style="color:#7884a0;text-decoration:none;">jg-restoration.com</a>
+                    </div>
+                  </td>
+                </tr>
+              </table>
+            </div>
+          `;
           return buildBrandedEmail({
             preheader: subject || `Update on ${p.albi_job_number || 'your project'}`,
             headline: '',
             intro: introLine,
-            bodyHtml,
-            signoffName: `${pmFirst}<br><span style="color:#7884a0;font-weight:400;font-size:13px;">JG Restoration</span>`,
-            signoffPhone: pmPhone,
+            bodyHtml: bodyHtml + signatureHtml,
+            signoffName: '',
+            signoffPhone: '',
           });
         })()
       : body;
