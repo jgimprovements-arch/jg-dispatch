@@ -11042,68 +11042,72 @@ function _openDayDetailModal(empName, dayKey) {
     var rowBg = (early && !e.approved_early) ? 'background:rgba(198,40,40,.04);' : '';
 
     var tcApproved = getApprovalStatus(periodLabelFor(e.clock_in), e.employee_name) === 'approved';
-    // Verified status cell — green check if verified, Approve button if not
+
+    // ── Verified cell: small grey checkbox (unverified) or green ✓ (verified) ──
     var verifiedCellM;
     if (e.self_verified) {
-      verifiedCellM = '<span title="Verified — click to unverify" style="color:#2e7d32;font-size:18px;font-weight:700;cursor:pointer;" onclick="toggleVerified(\''+e.id+'\',false);_refreshDayDetailModal(\''+escAttr(empName)+'\',\''+dayKey+'\')">✓</span>';
+      verifiedCellM = '<span title="Click to unverify" style="color:#2e7d32;font-size:16px;font-weight:700;cursor:pointer;" onclick="toggleVerified(\''+e.id+'\',false);_refreshDayDetailModal(\''+escAttr(empName)+'\',\''+dayKey+'\')">✓</span>';
     } else if (active) {
       verifiedCellM = '<span style="color:var(--muted);font-size:11px;">—</span>';
     } else if (tcApproved) {
       verifiedCellM = '<span style="font-size:10px;color:var(--muted);">🔒</span>';
     } else if (isAdmin()) {
-      verifiedCellM = '<button class="btn btn-sm" onclick="toggleVerified(\''+e.id+'\',true);_refreshDayDetailModal(\''+escAttr(empName)+'\',\''+dayKey+'\')" style="background:#2e7d32;color:#fff;border-color:#2e7d32;font-size:11px;" title="Approve / mark verified">✓ Approve</button>';
+      verifiedCellM = '<span title="Click to verify" style="color:#9e9e9e;font-size:16px;cursor:pointer;" onclick="toggleVerified(\''+e.id+'\',true);_refreshDayDetailModal(\''+escAttr(empName)+'\',\''+dayKey+'\')">☐</span>';
     } else {
-      verifiedCellM = '<span style="color:#c62828;font-size:11px;">unverified</span>';
+      verifiedCellM = '<span style="color:#c62828;font-size:10px;">unverified</span>';
     }
 
+    // ── Actions: compact row of Edit, Breaks, Delete ──
     var actions;
     if (tcApproved) {
-      actions = '<span style="font-size:10px;color:var(--muted);">🔒 Locked</span>';
+      actions = '<span style="font-size:10px;color:var(--muted);">🔒</span>';
     } else if (isAdmin()) {
-      actions = '<button class="btn btn-sm" onclick="closeModal();editEntry(\''+e.id+'\')">Edit</button> ' +
-                '<button class="btn btn-sm" onclick="closeModal();openBreakEditor(\''+e.id+'\')" style="background:#f5a623;color:#fff;border-color:#f5a623;font-size:14px;" title="Edit breaks">🥪</button> ' +
-                '<button class="btn btn-sm" onclick="closeModal();openSplitEntry(\''+e.id+'\')" style="background:#0d2d5e;color:#fff;border-color:#0d2d5e;" title="Split">✂️</button> ' +
-                '<button class="btn btn-sm" onclick="closeModal();deleteEntry(\''+e.id+'\')" style="background:#c62828;color:#fff;border-color:#c62828;" title="Delete">🗑</button>';
+      actions = '<div style="display:flex;gap:3px;flex-wrap:nowrap;">' +
+        '<button class="btn btn-sm" onclick="closeModal();editEntry(\''+e.id+'\')" style="font-size:10px;padding:2px 6px;">Edit</button>' +
+        '<button class="btn btn-sm" onclick="closeModal();openBreakEditor(\''+e.id+'\')" style="background:#f5a623;color:#fff;border-color:#f5a623;font-size:11px;padding:2px 4px;" title="Breaks">🥪</button>' +
+        '<button class="btn btn-sm" onclick="closeModal();deleteEntry(\''+e.id+'\')" style="background:#c62828;color:#fff;border-color:#c62828;font-size:11px;padding:2px 4px;" title="Delete">🗑</button>' +
+      '</div>';
     } else {
-      actions = '<button class="btn btn-sm" onclick="closeModal();viewEntry(\''+e.id+'\')">View</button>';
+      actions = '';
     }
 
-    // ── Commission cell — match commissions to THIS punch by exact entry_id link ──
-    // Commissions now carry an entry_id FK, so this is an exact match — no guessing.
+    // ── Commission cell — exact entry_id match + manual after-hours bonus ──
     var punchComms = (ST.commissions || []).filter(function(c){
       return c.entry_id && c.entry_id === e.id;
     });
-
-    // Check if this specific punch is on-call and needs a bonus
-    var isOnCallNeedsBonus = e.on_call_status === 'yes' && !e.on_call_bonus_id;
-    var isOnCallPaid = e.on_call_status === 'yes' && e.on_call_bonus_id;
+    // After-hours check: show $50 bonus button on ANY after-hours punch
+    // that doesn't already have a bonus. Admin decides manually which
+    // punches earn a bonus (handles multiple call-outs same day).
+    var isAfterHrs = isAfterHoursAdmin(e.clock_in);
+    var hasBonusAlready = e.on_call_bonus_id || punchComms.some(function(c){ return c.type === 'on_call_bonus'; });
 
     var commCell;
-    if (!punchComms.length && !isOnCallNeedsBonus) {
-      commCell = isOnCallPaid
-        ? '<span style="font-size:11px;color:#2e7d32;">✓ $50 paid</span>'
-        : '<span style="font-size:11px;color:var(--muted);">—</span>';
-    } else if (!punchComms.length && isOnCallNeedsBonus) {
-      // No commission created yet — show the + $50 Bonus button on THIS punch
-      commCell = '<button class="btn btn-sm" onclick="addOnCallBonus(\''+e.id+'\');setTimeout(function(){_refreshDayDetailModal(\''+escAttr(empName)+'\',\''+dayKey+'\');},800);" style="background:#2e7d32;color:#fff;border-color:#2e7d32;font-size:10px;">+ $50 Bonus</button>';
-    } else {
+    if (punchComms.length) {
+      // Commission(s) exist on this punch — show amount + status + approve/deny
       commCell = punchComms.map(function(c){
         var amt = parseFloat(c.amount || 0).toFixed(2);
         var st = c.status || 'pending';
-        var stColor = st === 'approved' ? '#2e7d32' : st === 'denied' ? '#c62828' : st === 'paid' ? '#1565c0' : '#6a1b9a';
-        var block = '<div style="margin-bottom:4px;">';
-        block += '<div style="font-size:11px;font-weight:700;color:var(--navy);">$'+amt+' <span style="font-size:9px;color:'+stColor+';text-transform:uppercase;">'+st+'</span></div>';
-        block += '<div style="font-size:10px;color:var(--muted);">'+(c.description || c.type || 'Commission')+'</div>';
-        // Approve/Deny buttons only when pending and admin and timecard not locked
+        var stColor = st === 'approved' ? '#2e7d32' : st === 'denied' ? '#c62828' : st === 'paid' ? '#1565c0' : '#e65100';
+        var block = '<div style="font-size:11px;line-height:1.4;">';
+        block += '<div style="font-weight:700;">$'+amt+'</div>';
+        block += '<div style="font-size:9px;color:'+stColor+';text-transform:uppercase;font-weight:600;">'+st+'</div>';
         if (st === 'pending' && isAdmin() && !tcApproved) {
-          block += '<div style="display:flex;gap:4px;margin-top:3px;">';
-          block += '<button class="btn btn-sm" onclick="_commApproveFromDay(\''+c.id+'\',\''+escAttr(empName)+'\',\''+dayKey+'\')" style="background:#2e7d32;color:#fff;border-color:#2e7d32;font-size:10px;padding:2px 6px;">✓</button>';
-          block += '<button class="btn btn-sm" onclick="_commDenyFromDay(\''+c.id+'\',\''+escAttr(empName)+'\',\''+dayKey+'\')" style="background:#c62828;color:#fff;border-color:#c62828;font-size:10px;padding:2px 6px;">✗</button>';
+          block += '<div style="display:flex;gap:3px;margin-top:2px;">';
+          block += '<button class="btn btn-sm" onclick="_commApproveFromDay(\''+c.id+'\',\''+escAttr(empName)+'\',\''+dayKey+'\')" style="background:#2e7d32;color:#fff;border-color:#2e7d32;font-size:9px;padding:1px 5px;">Approve</button>';
+          block += '<button class="btn btn-sm" onclick="_commDenyFromDay(\''+c.id+'\',\''+escAttr(empName)+'\',\''+dayKey+'\')" style="background:#c62828;color:#fff;border-color:#c62828;font-size:9px;padding:1px 5px;">Deny</button>';
           block += '</div>';
         }
         block += '</div>';
         return block;
       }).join('');
+    } else if (isAfterHrs && !hasBonusAlready && isAdmin() && !tcApproved) {
+      // After-hours punch with no bonus yet — show manual add button
+      commCell = '<button class="btn btn-sm" onclick="addOnCallBonus(\''+e.id+'\');setTimeout(function(){_refreshDayDetailModal(\''+escAttr(empName)+'\',\''+dayKey+'\');},800);" style="background:#2e7d32;color:#fff;border-color:#2e7d32;font-size:9px;padding:2px 6px;">+ $50 Bonus</button>';
+    } else if (hasBonusAlready && !punchComms.length) {
+      // Bonus paid but commission row linked elsewhere (legacy)
+      commCell = '<span style="font-size:10px;color:#2e7d32;">✓ $50 paid</span>';
+    } else {
+      commCell = '<span style="font-size:11px;color:var(--muted);">—</span>';
     }
 
     return '<tr style="'+rowBg+'">' +
@@ -11112,9 +11116,9 @@ function _openDayDetailModal(empName, dayKey) {
       '<td>'+fmtDur(actual)+'</td>' +
       '<td>'+fmtDur(bill)+'</td>' +
       '<td>'+(bkMins?fmtDur(bkMins):'-')+'</td>' +
-      '<td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+(e.job_name||'-')+'</td>' +
+      '<td style="max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;">'+(e.job_name||'-')+'</td>' +
       '<td style="text-align:center;">'+verifiedCellM+'</td>' +
-      '<td>'+commCell+'</td>' +
+      '<td style="min-width:90px;">'+commCell+'</td>' +
       '<td>'+actions+'</td>' +
     '</tr>';
   }).join('');
