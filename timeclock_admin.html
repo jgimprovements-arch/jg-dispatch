@@ -4984,11 +4984,54 @@ async function deleteCommission(id) {
     headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
   });
   if (r.ok) {
+    // If this was an on-call bonus, clear on_call_bonus_id on the linked time entry
+    if (c.type === 'on_call_bonus' && c.entry_id) {
+      await fetch(SB_URL + '/rest/v1/time_entries?id=eq.' + c.entry_id, {
+        method: 'PATCH',
+        headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ on_call_bonus_id: null })
+      });
+      // Also clear locally
+      var localEntry = (ST.entries||[]).find(function(e){ return e.id === c.entry_id; });
+      if (localEntry) localEntry.on_call_bonus_id = null;
+    }
     toast('✓ Entry deleted');
     logActivity('Commission Deleted', c.employee_name + ' • ' + c.type + ' • $' + parseFloat(c.amount).toFixed(2), 'commissions', c.employee_name);
     await loadAll();
     renderCommissions();
   } else { toast('Delete failed'); }
+}
+
+// Remove an on-call bonus directly from the day-detail card.
+// Deletes the commission row AND clears on_call_bonus_id on the time entry.
+async function removeOnCallBonus(entryId, empName, dayKey) {
+  if (!isAdmin()) { toast('Admin access required'); return; }
+  var entry = (ST.entries||[]).find(function(e){ return e.id === entryId; });
+  if (!entry) return;
+  // Find the commission row linked to this entry
+  var comm = (ST.commissions||[]).find(function(c){ return c.entry_id === entryId && c.type === 'on_call_bonus'; });
+  if (!confirm('Remove the $50 on-call bonus from this punch?')) return;
+
+  // Delete the commission row if it exists
+  if (comm) {
+    await fetch(SB_URL + '/rest/v1/commissions?id=eq.' + comm.id, {
+      method: 'DELETE',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+    });
+    logActivity('On-Call Bonus Removed', entry.employee_name + ' • $' + parseFloat(comm.amount||50).toFixed(2), 'commissions', entry.employee_name);
+  }
+
+  // Clear on_call_bonus_id on the time entry
+  await fetch(SB_URL + '/rest/v1/time_entries?id=eq.' + entryId, {
+    method: 'PATCH',
+    headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ on_call_bonus_id: null })
+  });
+  entry.on_call_bonus_id = null;
+
+  toast('✓ Bonus removed');
+  await loadAll();
+  _refreshDayDetailModal(empName, dayKey);
 }
 
 // ── TIME OFF REQUESTS (admin approval) ────────────────────────────────────
@@ -11104,8 +11147,11 @@ function _openDayDetailModal(empName, dayKey) {
       // After-hours punch with no bonus yet — show manual add button
       commCell = '<button class="btn btn-sm" onclick="addOnCallBonus(\''+e.id+'\');setTimeout(function(){_refreshDayDetailModal(\''+escAttr(empName)+'\',\''+dayKey+'\');},800);" style="background:#2e7d32;color:#fff;border-color:#2e7d32;font-size:9px;padding:2px 6px;">+ $50 Bonus</button>';
     } else if (hasBonusAlready && !punchComms.length) {
-      // Bonus paid but commission row linked elsewhere (legacy)
-      commCell = '<span style="font-size:10px;color:#2e7d32;">✓ $50 paid</span>';
+      // Bonus exists on this punch — show paid label + remove button
+      commCell = '<div style="font-size:11px;line-height:1.4;">' +
+        '<div style="color:#2e7d32;font-weight:700;">✓ $50 paid</div>' +
+        (isAdmin() && !tcApproved ? '<button class="btn btn-sm" onclick="removeOnCallBonus(\''+e.id+'\',\''+escAttr(empName)+'\',\''+dayKey+'\')" style="background:#c62828;color:#fff;border-color:#c62828;font-size:9px;padding:1px 5px;margin-top:2px;">Remove</button>' : '') +
+      '</div>';
     } else {
       commCell = '<span style="font-size:11px;color:var(--muted);">—</span>';
     }
