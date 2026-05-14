@@ -15136,6 +15136,71 @@ function suggestedWoAmount(sub) {
     .reduce((sum, s) => sum + Number(s.total_cost), 0) || null;
 }
 
+// History modal — lists all WOs for an assignee with open + delete actions
+function openWoHistoryModal(wos) {
+  document.querySelectorAll('.wo-history-modal-back').forEach(m => m.remove());
+  const sorted = [...wos].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+  const rowsHtml = sorted.map(w => {
+    const created = new Date(w.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+    const statusColor = w.status === 'draft' ? 'var(--muted)' : w.status === 'sent' ? 'var(--orange)' : 'var(--green)';
+    return `
+      <div class="wo-hist-row" style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 12px;border:1px solid var(--line);border-radius:8px;margin-bottom:6px;">
+        <div>
+          <div style="font-weight:700;color:var(--navy);">WO #${esc(w.wo_number || w.version || '—')} <span style="font-weight:500;color:${statusColor};font-size:12px;">${esc(w.status || 'draft')}</span></div>
+          <div style="font-size:12px;color:var(--muted);">Created ${created}${w.total_amount ? ' · ' + usdCompact(w.total_amount) : ''}</div>
+        </div>
+        <div style="display:flex;gap:6px;">
+          <button class="btn" data-wo-hist-open="${esc(w.id)}">Open</button>
+          <button class="btn ghost" data-wo-hist-del="${esc(w.id)}" style="color:var(--red);border-color:var(--red);">🗑 Delete</button>
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  const back = document.createElement('div');
+  back.className = 'wo-history-modal-back';
+  back.style.cssText = 'position:fixed;inset:0;background:rgba(13,45,94,.6);z-index:9998;display:flex;align-items:center;justify-content:center;';
+  back.innerHTML = `
+    <div style="background:#fff;border-radius:12px;padding:20px;max-width:480px;width:92%;max-height:80vh;overflow:auto;box-shadow:0 20px 60px rgba(0,0,0,.3);">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
+        <div style="font-weight:700;font-size:16px;color:var(--navy);">Work Order History</div>
+        <button class="wo-hist-close" style="background:none;border:none;font-size:20px;cursor:pointer;color:var(--muted);">×</button>
+      </div>
+      ${rowsHtml || '<div style="color:var(--muted);padding:20px;text-align:center;">No work orders.</div>'}
+    </div>
+  `;
+  document.body.appendChild(back);
+
+  const close = () => back.remove();
+  back.querySelector('.wo-hist-close').addEventListener('click', close);
+  back.addEventListener('click', e => { if (e.target === back) close(); });
+
+  back.querySelectorAll('[data-wo-hist-open]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      close();
+      createOrOpenWorkOrder(null, btn.dataset.woHistOpen);
+    });
+  });
+  back.querySelectorAll('[data-wo-hist-del]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const woId = btn.dataset.woHistDel;
+      const wo = state.workOrders.find(w => w.id === woId);
+      if (!confirm(`Delete WO #${wo?.wo_number || wo?.version || ''}? This cannot be undone.`)) return;
+      const { error } = await sb.from('rebuild_work_orders').delete().eq('id', woId);
+      if (error) { toast('Delete failed: ' + error.message); return; }
+      state.workOrders = state.workOrders.filter(w => w.id !== woId);
+      toast('Work Order deleted');
+      close();
+      renderDetail();
+      // Reopen if there are still WOs left
+      const remaining = state.workOrders.filter(w =>
+        (wo.sub_id && w.sub_id === wo.sub_id) || (wo.employee_id && w.employee_id === wo.employee_id)
+      );
+      if (remaining.length) setTimeout(() => openWoHistoryModal(remaining), 100);
+    });
+  });
+}
+
 async function createOrOpenWorkOrder(subId, existingWoId) {
   let wo = null;
   if (existingWoId) {
@@ -16120,7 +16185,7 @@ function wireWorkOrdersTab() {
         const label = wo?.sub_name || wo?.employee_name || 'this Work Order';
         if (!confirm(`Delete ${label}? This cannot be undone.`)) return;
         (async () => {
-          const { error } = await sb.from('work_orders').delete().eq('id', woId);
+          const { error } = await sb.from('rebuild_work_orders').delete().eq('id', woId);
           if (error) { toast('Delete failed: ' + error.message); return; }
           state.workOrders = state.workOrders.filter(w => w.id !== woId);
           toast('Work Order deleted');
@@ -16133,8 +16198,7 @@ function wireWorkOrdersTab() {
         const matching = subId
           ? state.workOrders.filter(w => w.sub_id === subId)
           : state.workOrders.filter(w => w.employee_id === empId);
-        const recent = matching.sort((a,b) => new Date(b.created_at) - new Date(a.created_at))[0];
-        if (recent) createOrOpenWorkOrder(null, recent.id);
+        openWoHistoryModal(matching);
       }
     });
   });
