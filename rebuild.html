@@ -14263,6 +14263,15 @@ function computeTradeRollup(budget) {
   let totalJgMaterialsCarvedOut = 0;       // total revenue $$ carved out across all JG-supplies trades
   let totalJgXactMaterialsCost = 0;        // sum of Xact materials cost across affected trades
 
+  // Build reverse merge map: targetKey → [sourceLabel, ...]
+  const merges = state.tradeMerges || {};
+  const mergedSources = {};
+  for (const [srcKey, tgtKey] of Object.entries(merges)) {
+    const resolved = resolveTradeMerge(srcKey);
+    if (!mergedSources[resolved]) mergedSources[resolved] = new Set();
+    mergedSources[resolved].add(MERGED_TRADE_GROUPS[srcKey]?.label || srcKey);
+  }
+
   const tradeRows = Object.values(groups).map(g => {
     const grossRevenue = sumField(g.items, 'line_total');
     const hours = sumField(g.labor, 'hours');
@@ -14271,28 +14280,30 @@ function computeTradeRollup(budget) {
     const wbWo = (budget.wos || []).find(w => w.trade_category === g.category);
     const jgSupplies = wbWo?.materials_supplier === 'jg';
 
-    // When JG supplies materials: carve the Xact materials cost out of revenue.
-    // This trade is now "labor-only" — the materials portion of revenue gets
-    // moved to the synthetic 'JG Purchased Materials' bucket below.
     let revenue = grossRevenue;
     let materialsCarveOut = 0;
     if (jgSupplies) {
-      materialsCarveOut = Math.min(xactMaterialsTotal, grossRevenue);  // can't carve more than exists
+      materialsCarveOut = Math.min(xactMaterialsTotal, grossRevenue);
       revenue = grossRevenue - materialsCarveOut;
       totalJgMaterialsCarvedOut += materialsCarveOut;
       totalJgXactMaterialsCost += xactMaterialsTotal;
     }
 
-    // Budget defaults to 50% of the (now possibly-reduced) revenue
     const tradeBudget = (wbWo?.trade_budget != null)
       ? Number(wbWo.trade_budget)
       : Number((revenue * 0.5).toFixed(2));
 
     const profit = revenue - tradeBudget;
 
+    // Combined label showing all merged source trades
+    const sources = mergedSources[g.category];
+    const combinedLabel = sources && sources.size
+      ? g.label + ' / ' + [...sources].join(' / ')
+      : g.label;
+
     return {
       category: g.category,
-      label: g.label,
+      label: combinedLabel,
       sort: g.sort,
       itemCount: g.items.length,
       grossRevenue,           // original (before carve-out) — for reference in modal
