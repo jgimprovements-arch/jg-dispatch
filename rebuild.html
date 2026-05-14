@@ -14920,6 +14920,9 @@ function renderWorkOrdersTab() {
               ? `<button class="btn primary" data-wo-act="create" data-sub-id="${a.id}">+ Create WO</button>`
               : `<span class="wo-no-create-hint">Create from WO Builder</span>`}
           ${matchingWos.length > 1 ? `<button class="btn ghost" data-wo-act="history" data-${a.type === 'sub' ? 'sub' : 'employee'}-id="${a.id}">History (${matchingWos.length})</button>` : ''}
+          ${!active && !matchingWos.length
+            ? `<button class="btn ghost" data-wo-act="remove-assignee" data-assignee-type="${a.type}" data-assignee-id="${a.id}" title="Remove from this project's Work Orders" style="color:var(--red);border-color:var(--red);">✕ Remove</button>`
+            : ''}
         </div>
       </div>
     `;
@@ -16189,6 +16192,36 @@ function wireWorkOrdersTab() {
           if (error) { toast('Delete failed: ' + error.message); return; }
           state.workOrders = state.workOrders.filter(w => w.id !== woId);
           toast('Work Order deleted');
+          renderDetail();
+        })();
+      }
+      else if (act === 'remove-assignee') {
+        const assigneeType = btn.dataset.assigneeType; // 'sub' or 'carpenter'
+        const assigneeId = btn.dataset.assigneeId;
+        const isCarp = assigneeType === 'carpenter';
+        if (!confirm('Remove this person from the project\'s Work Orders? This unassigns them from all phases and trades.')) return;
+        (async () => {
+          // 1. Remove from phase assignments
+          const phaseAssignQuery = sb.from('rebuild_phase_assignees').delete();
+          if (isCarp) {
+            await phaseAssignQuery.eq('employee_id', assigneeId).eq('assignee_type', 'carpenter');
+          } else {
+            await sb.from('rebuild_phase_assignees').delete().eq('sub_id', assigneeId).eq('assignee_type', 'sub');
+          }
+          // 2. Clear from WO Builder rows (assignee_employee_id / assignee_sub_id)
+          const col = isCarp ? 'assignee_employee_id' : 'assignee_sub_id';
+          const { data: wbRows } = await sb.from('wo_builder_work_orders')
+            .select('id')
+            .eq('project_id', state.activeProjectId)
+            .eq(col, assigneeId);
+          if (wbRows && wbRows.length) {
+            await sb.from('wo_builder_work_orders')
+              .update({ assignee_type: null, assignee_sub_id: null, assignee_employee_id: null })
+              .in('id', wbRows.map(r => r.id));
+          }
+          toast('Removed from Work Orders');
+          await loadPhases();
+          await loadWoBudget();
           renderDetail();
         })();
       }
