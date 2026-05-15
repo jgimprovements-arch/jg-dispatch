@@ -13028,6 +13028,29 @@ function wireWoDetailModal(tradeKey) {
   $('#wobx_modal_convert')?.addEventListener('click', async () => {
     const btn = $('#wobx_modal_convert');
     const tradeLabel = MERGED_TRADE_GROUPS[tradeKey]?.label || tradeKey;
+
+    // Auto-save the assignee from the form before converting
+    const typeSel = $('#wobx_assignee_type');
+    const t = typeSel?.value || null;
+    if (t) {
+      let subId = null;
+      let empIds = [];
+      if (t === 'sub') {
+        subId = $('#wobx_assignee_id')?.value || null;
+      } else if (t === 'carpenter') {
+        empIds = Array.from(document.querySelectorAll('#wobx_assignee_picker input[type="checkbox"]:checked')).map(cb => cb.value);
+      }
+      if (subId || empIds.length) {
+        await upsertWoBuilderRow(tradeKey, {
+          assignee_type: t,
+          assignee_sub_id: t === 'sub' ? subId : null,
+          assignee_employee_id: t === 'carpenter' ? empIds[0] : null,
+          assignee_employee_ids: t === 'carpenter' ? empIds : null,
+        });
+        await loadWoBudget();
+      }
+    }
+
     if (!confirm(`Convert "${tradeLabel}" to a Work Order?\n\n• Creates a real Work Order in the WO list\n• Locks the budget — no more edits to this trade\n• Items, materials, labor, and equipment all roll into the WO scope`)) return;
     btn.disabled = true;
     btn.textContent = 'Converting…';
@@ -13204,8 +13227,8 @@ function wireWoDetailModal(tradeKey) {
     btn.textContent = 'Save';
     await loadPhases();
     await refreshBudgetSummary();
-    closeWoDetailModal();
-    renderTabContent();
+    toast('Assignee saved ✓');
+    // Stay in the modal — don't close
   });
 
   const tableForKind = {
