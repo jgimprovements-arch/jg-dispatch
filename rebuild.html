@@ -11576,8 +11576,9 @@ async function openSelectionEditor(selectionId) {
     if (!state.activeProject?.customer_email) { toast('No customer email on file'); return; }
     sendSelectionToCustomer(fresh.id);
   };
-  // Hide the send button when editing (avoids confusion — they can use the row button)
-  if (!isNew) sendBtn.style.display = 'none'; else sendBtn.style.display = '';
+  // Show/hide based on whether selection has data worth sending
+  sendBtn.style.display = '';
+  vendorBtn.style.display = '';
 
   // Inject "Save & Send to Vendor" button
   let vendorBtn = foot.querySelector('#eph_save_send_vendor');
@@ -11605,10 +11606,20 @@ async function openSelectionEditor(selectionId) {
     const fresh = state.selections.find(x => x.category === cat);
     if (!fresh) { toast('Saved but could not locate to send'); return; }
 
-    // Get vendor email — from linked sub or custom vendor field
+    // Get vendor email — from linked sub, relationships, or custom vendor field
     const vendorSub = fresh.sub_id ? (state.subs || []).find(s => s.id === fresh.sub_id) : null;
-    const vendorEmail = vendorSub?.email || fresh.vendor_email || null;
-    const vendorName = vendorSub?.company_name || fresh.vendor_name || 'Vendor';
+    let vendorEmail = vendorSub?.email || fresh.vendor_email || null;
+    let vendorName = vendorSub?.company_name || fresh.vendor_name || 'Vendor';
+    // Fallback: check relationships for this sub's email
+    if (!vendorEmail && fresh.sub_id) {
+      const rel = (state.relationships || []).find(r => r.directory_contact_id === fresh.sub_id || r.display_name === vendorName);
+      if (rel?.email) vendorEmail = rel.email;
+    }
+    // Fallback: check relationships by vendor name
+    if (!vendorEmail && vendorName && vendorName !== 'Vendor') {
+      const rel = (state.relationships || []).find(r => (r.display_name || '').toLowerCase() === vendorName.toLowerCase() || (r.company || '').toLowerCase() === vendorName.toLowerCase());
+      if (rel?.email) vendorEmail = rel.email;
+    }
     if (!vendorEmail) {
       toast('No vendor email on file — add it to the sub roster or vendor field first');
       return;
@@ -11700,7 +11711,6 @@ async function openSelectionEditor(selectionId) {
       toast('Send failed: ' + e.message);
     }
   };
-  vendorBtn.style.display = ''; // always show
 
   openModal('modalEditPhase');
 }
