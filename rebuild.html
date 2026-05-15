@@ -11579,6 +11579,129 @@ async function openSelectionEditor(selectionId) {
   // Hide the send button when editing (avoids confusion — they can use the row button)
   if (!isNew) sendBtn.style.display = 'none'; else sendBtn.style.display = '';
 
+  // Inject "Save & Send to Vendor" button
+  let vendorBtn = foot.querySelector('#eph_save_send_vendor');
+  if (!vendorBtn) {
+    vendorBtn = document.createElement('button');
+    vendorBtn.id = 'eph_save_send_vendor';
+    vendorBtn.className = 'btn primary';
+    vendorBtn.style.background = '#6366f1';
+    vendorBtn.style.borderColor = '#6366f1';
+    vendorBtn.textContent = '📦 Save & Send to Vendor';
+    foot.appendChild(vendorBtn);
+  }
+  vendorBtn.onclick = async () => {
+    // Trigger save first
+    await new Promise(resolve => {
+      const origSave = $('#eph_save').onclick;
+      $('#eph_save').onclick = async () => {
+        await origSave();
+        resolve();
+      };
+      $('#eph_save').click();
+    });
+    await loadSelections();
+    const cat = $('#sel_category')?.value?.trim();
+    const fresh = state.selections.find(x => x.category === cat);
+    if (!fresh) { toast('Saved but could not locate to send'); return; }
+
+    // Get vendor email — from linked sub or custom vendor field
+    const vendorSub = fresh.sub_id ? (state.subs || []).find(s => s.id === fresh.sub_id) : null;
+    const vendorEmail = vendorSub?.email || fresh.vendor_email || null;
+    const vendorName = vendorSub?.company_name || fresh.vendor_name || 'Vendor';
+    if (!vendorEmail) {
+      toast('No vendor email on file — add it to the sub roster or vendor field first');
+      return;
+    }
+
+    // Build email payload
+    const p = state.activeProject;
+    const fromIdx = parseInt($('#msg_from')?.value || '0', 10);
+    const sender = (state.staffSenders || [])[fromIdx] || {};
+    const fromEmail = sender.email || state.pmEmail || 'info@jg-restoration.com';
+    const fromName = sender.name || p.albi_pm || 'JG Restoration';
+    const subject = `Material Selection — ${fresh.category || 'Selection'} — ${p.albi_job_number || p.customer_name || 'Project'}`;
+
+    const bodyLines = [
+      `Hi ${vendorName},`,
+      '',
+      `We have a material selection that needs to be ordered/shipped for our project: ${p.customer_name || ''} (${p.albi_job_number || ''}).`,
+      '',
+      `Selection: ${fresh.category || '—'}`,
+      fresh.sku ? `SKU / Product #: ${fresh.sku}` : '',
+      fresh.quantity ? `Quantity: ${fresh.quantity}${fresh.unit ? ' ' + fresh.unit : ''}` : '',
+      fresh.total_cost ? `Quoted Total: $${Number(fresh.total_cost).toLocaleString(undefined, {minimumFractionDigits:2})}` : '',
+      fresh.vendor_due_date ? `Needed by: ${fresh.vendor_due_date}` : '',
+      fresh.description ? `\nDescription:\n${fresh.description}` : '',
+      fresh.pm_notes ? `\nPM Notes:\n${fresh.pm_notes}` : '',
+      '',
+      `Please confirm receipt and expected delivery timeline.`,
+      '',
+      `Thanks,`,
+      fromName,
+      'JG Restoration',
+      '(920) 428-4200',
+    ].filter(l => l !== '').join('\n');
+
+    // Send via MESSAGE_HOOK (same as outbound messages)
+    const payload = {
+      project_id: p.id,
+      channel: 'email',
+      direction: 'outbound',
+      recipient_type: 'sub',
+      recipient_sub_id: fresh.sub_id || null,
+      recipient_name: vendorName,
+      recipient_email: vendorEmail,
+      from_email: fromEmail,
+      from_name: fromName,
+      subject,
+      body: bodyLines,
+      to_email: vendorEmail,
+    };
+
+    try {
+      // Insert message record
+      const { data: msgData, error: msgErr } = await sb.from('rebuild_messages').insert({
+        project_id: p.id,
+        direction: 'outbound',
+        channel: 'email',
+        status: 'sent',
+        subject,
+        body: bodyLines,
+        recipient_type: 'sub',
+        recipient_sub_id: fresh.sub_id || null,
+        recipient_name: vendorName,
+        recipient_email: vendorEmail,
+        sent_by_name: fromName,
+        sent_by_email: fromEmail,
+      }).select();
+
+      // Fire the Zapier webhook to actually send the email
+      await fetch(MESSAGE_HOOK, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+
+      // Update selection status to vendor_ordered
+      await sb.from('rebuild_selections').update({
+        status: 'vendor_ordered',
+        vendor_ordered_at: new Date().toISOString(),
+      }).eq('id', fresh.id);
+
+      // Log to Albi
+      logToAlbi('selection_sent_to_vendor', `📦 Selection "${fresh.category}" sent to vendor ${vendorName} (${vendorEmail})`);
+
+      toast(`✓ Selection sent to ${vendorName}`);
+      await loadSelections();
+      closeModal('modalEditPhase');
+      renderDetail();
+    } catch (e) {
+      toast('Send failed: ' + e.message);
+    }
+  };
+  vendorBtn.style.display = ''; // always show
+
   openModal('modalEditPhase');
 }
 
