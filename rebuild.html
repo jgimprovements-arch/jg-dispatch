@@ -11221,7 +11221,7 @@ function renderSelectionRow(s) {
         ${s.status === 'awaiting_vendor' ? `<button class="btn" data-act="copy-vendor" data-id="${s.id}">🔗 Copy Vendor Link</button>` : ''}
         ${s.status === 'awaiting_vendor' ? `<button class="btn" data-act="email-vendor" data-id="${s.id}">✉ Email Vendor</button>` : ''}
         ${(s.status === 'draft' || s.status === 'changes_requested') ? `<button class="btn" data-act="send-vendor" data-id="${s.id}">→ Send to Vendor</button>` : ''}
-        ${(s.status === 'draft' || s.status === 'changes_requested' || s.status === 'awaiting_vendor') && s.total_cost ? `<button class="btn primary" data-act="send-customer" data-id="${s.id}">→ Send to Customer for Approval</button>` : ''}
+        ${(s.status === 'awaiting_pm_review' || s.status === 'approved' || s.status === 'install_scheduled') && s.total_cost ? `<button class="btn primary" data-act="send-customer" data-id="${s.id}">→ Send to Customer for Approval</button>` : ''}
         ${s.status === 'awaiting_customer' ? `<button class="btn" data-act="copy-customer" data-id="${s.id}">🔗 Copy Customer Link</button>` : ''}
         ${s.status === 'awaiting_customer_install' ? `<button class="btn" data-act="copy-install" data-id="${s.id}">🔗 Copy Install Approval Link</button>` : ''}
         ${s.status === 'install_scheduled' && !s.sub_notified_at ? `<button class="btn primary" data-act="notify-sub" data-id="${s.id}">→ Notify Sub</button>` : ''}
@@ -11588,9 +11588,13 @@ async function openSelectionEditor(selectionId) {
     vendorBtn.textContent = '📦 Save & Send to Vendor';
     foot.appendChild(vendorBtn);
   }
-  // Show both send buttons
-  sendBtn.style.display = '';
-  vendorBtn.style.display = '';
+  // Show both send buttons based on selection status
+  // Send to Vendor: show for draft, pending, changes_requested (before vendor has it)
+  const vendorSendStatuses = new Set(['draft', 'pending', 'changes_requested', '']);
+  vendorBtn.style.display = (isNew || vendorSendStatuses.has(s.status || '')) ? '' : 'none';
+  // Send to Customer: show only AFTER vendor has returned (awaiting_pm_review, vendor_priced, approved, etc.)
+  const customerSendStatuses = new Set(['awaiting_pm_review', 'vendor_priced', 'approved', 'vendor_ordered']);
+  sendBtn.style.display = (!isNew && customerSendStatuses.has(s.status || '') && s.total_cost) ? '' : 'none';
 
   vendorBtn.onclick = async () => {
     // Trigger save first
@@ -11607,13 +11611,14 @@ async function openSelectionEditor(selectionId) {
     const fresh = state.selections.find(x => x.category === cat);
     if (!fresh) { toast('Saved but could not locate to send'); return; }
 
-    // Get vendor email — from linked sub, relationships, or custom vendor field
-    const vendorSub = fresh.sub_id ? (state.subs || []).find(s => s.id === fresh.sub_id) : null;
+    // Get vendor email — from linked vendor sub, relationships, or custom vendor field
+    const vendorSubId = fresh.vendor_sub_id || fresh.sub_id || null;
+    const vendorSub = vendorSubId ? (state.subs || []).find(s => s.id === vendorSubId) : null;
     let vendorEmail = vendorSub?.email || fresh.vendor_email || null;
     let vendorName = vendorSub?.company_name || fresh.vendor_name || 'Vendor';
     // Fallback: check relationships for this sub's email
-    if (!vendorEmail && fresh.sub_id) {
-      const rel = (state.relationships || []).find(r => r.directory_contact_id === fresh.sub_id || r.display_name === vendorName);
+    if (!vendorEmail && vendorSubId) {
+      const rel = (state.relationships || []).find(r => r.directory_contact_id === vendorSubId || r.display_name === vendorName);
       if (rel?.email) vendorEmail = rel.email;
     }
     // Fallback: check relationships by vendor name
