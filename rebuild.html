@@ -14356,7 +14356,6 @@ function renderWoBuilderSection(budget) {
         </span>
       </div>
     </div>
-    ${renderCoSection(budget, u)}
   `;
 }
 
@@ -14386,8 +14385,24 @@ async function loadChangeOrders() {
   }
 }
 
-function renderCoSection(budget, upload) {
+function renderCoSection() {
+  const p = state.activeProject || {};
+  const contractSigned = !!p.contract_signed_at;
   const cos = state.changeOrders || [];
+
+  if (!contractSigned) {
+    return `
+      <div class="wobx-co-section" style="margin-top:16px;border-top:2px solid var(--line);padding-top:16px;">
+        <div class="wobx-trades-title">
+          <span style="color:var(--muted);">🔒 Change Orders</span>
+          <button class="btn primary" id="markContractSignedBtn" style="font-size:12px;padding:5px 14px;">✓ Mark Contract Signed</button>
+        </div>
+        <div style="padding:14px 0;color:var(--muted);font-size:13px;">
+          Change Orders are locked until the customer contract is signed.
+        </div>
+      </div>
+    `;
+  }
   const coStatusMeta = {
     draft:             { lbl: 'Draft',              color: 'var(--muted)' },
     sent_to_customer:  { lbl: 'Awaiting Customer',  color: 'var(--gold)' },
@@ -14461,11 +14476,13 @@ function renderCoSection(budget, upload) {
     `;
   }).join('');
 
+  const signedDate = new Date(p.contract_signed_at).toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' });
   return `
     <div class="wobx-co-section">
       <div class="wobx-trades-title" style="margin-top:16px;border-top:2px solid var(--line);padding-top:16px;">
-        <span>Change Orders</span>
+        <span>Change Orders <span style="font-size:11px;color:var(--green);font-weight:600;margin-left:8px;">✓ Contract signed ${signedDate}</span></span>
         <span style="display:flex;gap:8px;align-items:center;">
+          <button class="btn ghost" id="markContractUnsignedBtn" style="font-size:11px;padding:4px 10px;color:var(--muted);">↩ Unmark</button>
           <button class="btn primary" id="wobx_new_co" style="font-size:12px;padding:5px 12px;">+ Upload Change Order</button>
         </span>
       </div>
@@ -15088,6 +15105,38 @@ function wireWoBuilderControls() {
     newCoBtn.addEventListener('click', () => openCoUploadModal());
   }
 
+  // Mark Contract Signed
+  const markSignedBtn = $('#markContractSignedBtn');
+  if (markSignedBtn) {
+    markSignedBtn.addEventListener('click', async () => {
+      if (!state.activeProjectId) return;
+      const now = new Date().toISOString();
+      const { error } = await sb.from('rebuild_projects')
+        .update({ contract_signed_at: now })
+        .eq('id', state.activeProjectId);
+      if (error) { toast('Failed to mark contract signed: ' + error.message); return; }
+      if (state.activeProject) state.activeProject.contract_signed_at = now;
+      toast('✓ Contract marked as signed');
+      renderDetail();
+    });
+  }
+
+  // Unmark Contract Signed
+  const unmarkSignedBtn = $('#markContractUnsignedBtn');
+  if (unmarkSignedBtn) {
+    unmarkSignedBtn.addEventListener('click', async () => {
+      if (!state.activeProjectId) return;
+      if (!confirm('Remove the contract signed date? Change Orders will be hidden again.')) return;
+      const { error } = await sb.from('rebuild_projects')
+        .update({ contract_signed_at: null })
+        .eq('id', state.activeProjectId);
+      if (error) { toast('Failed: ' + error.message); return; }
+      if (state.activeProject) state.activeProject.contract_signed_at = null;
+      toast('Contract signed date removed');
+      renderDetail();
+    });
+  }
+
   // CO toggle collapse
   document.querySelectorAll('.wobx-co-toggle').forEach(btn => {
     btn.addEventListener('click', e => {
@@ -15486,6 +15535,9 @@ function renderWorkOrdersTab() {
   const wos = state.workOrders || [];
   const budget = state.woBudget || null;
 
+  // Section CO: Change Orders — gated on contract_signed_at, always first
+  const coHtml = renderCoSection();
+
   // Section A: Read-only Selections rollup (replaces old top-nav Selections tab)
   const rollupHtml = renderSelectionsRollup();
 
@@ -15608,7 +15660,7 @@ function renderWorkOrdersTab() {
     `;
   }).join('');
 
-  return rollupHtml + builderHtml + consolidationHtml + `
+  return coHtml + rollupHtml + builderHtml + consolidationHtml + `
     <div class="wo-wrap">
       <div class="wo-header">
         <div>
@@ -16756,7 +16808,7 @@ function wireFinancialsTab() {
         body: JSON.stringify({
           albi_job_number: p.albi_job_number,
           project_id: p.id,
-          qb_customer_name: p.albi_job_number || '',
+          qb_customer_name: p.customer_name || '',
           refreshed_by_email: state.pmEmail || state.userEmail || 'unknown',
         }),
       };
