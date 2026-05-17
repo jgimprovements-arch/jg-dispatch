@@ -8248,8 +8248,8 @@ function renderDocumentsTab() {
   const cosSigned = !!p.cos_signed_at;
   const cosSignedDate = cosSigned ? new Date(p.cos_signed_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : null;
   const cosBtn = cosSigned
-    ? `<span style="font-size:12px;color:var(--green);font-weight:600;">✓ COS signed ${cosSignedDate}</span>`
-    : `<button class="btn-pill-orange" id="btnSendCos">📋 Send COS</button>`;
+    ? `<span style="font-size:12px;color:var(--green);font-weight:600;">✓ COS signed ${cosSignedDate}</span> <button class="btn-pill-orange" id="btnPrintCos" style="font-size:11px;padding:4px 10px;">🖨 Print Blank</button>`
+    : `<button class="btn-pill-orange" id="btnSendCos">📋 Send COS</button> <button class="btn-pill-orange" id="btnPrintCos" style="font-size:11px;padding:4px 10px;">🖨 Print Blank</button>`;
 
   return `
     <div class="section-head">
@@ -9504,6 +9504,134 @@ function generateWorkOrderPdf(wo) {
   toast(`✓ Downloaded ${filename}`);
 }
 
+function generatePrintCosPdf(p) {
+  if (!window.jspdf) { toast('PDF library not loaded yet', true); return; }
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ unit: 'pt', format: 'letter' });
+  const pageW = doc.internal.pageSize.getWidth();
+  const pageH = doc.internal.pageSize.getHeight();
+  const margin = 48;
+  let y = margin;
+
+  const fmtDate = d => d ? new Date(d + 'T00:00:00').toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }) : '';
+  const today = new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
+
+  // Header
+  doc.setFillColor(13, 45, 94);
+  doc.rect(0, 0, pageW, 70, 'F');
+  doc.setTextColor(255, 255, 255);
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(18);
+  doc.text('JG Restoration', margin, 36);
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(9);
+  doc.setTextColor(245, 166, 35);
+  doc.text('FIRE · WATER · MOLD · RECONSTRUCTION', margin, 52);
+  doc.setTextColor(255, 255, 255); doc.setFontSize(13);
+  doc.text('CERTIFICATE OF SATISFACTION', pageW - margin, 36, { align: 'right' });
+  doc.setFontSize(8);
+  doc.text(today, pageW - margin, 52, { align: 'right' });
+  y = 92;
+
+  // Info grid
+  const fields = [
+    ['Customer', p.customer_name || ''],
+    ['Insurance Company', p.insurance_company || ''],
+    ["Today's Date", today],
+    ['Date of Loss', fmtDate(p.date_of_loss)],
+    ['Claim #', p.claim_number || ''],
+    ['Property Address', p.property_address || ''],
+    ['Start Date', ''],
+    ['Completion Date', ''],
+  ];
+  const colW = (pageW - margin * 2) / 2;
+  fields.forEach(([label, val], i) => {
+    const col = i % 2;
+    const row = Math.floor(i / 2);
+    const x = margin + col * colW;
+    const cellY = y + row * 44;
+    doc.setDrawColor(200, 206, 218);
+    doc.setFillColor(244, 246, 251);
+    doc.roundedRect(x + (col ? 4 : 0), cellY, colW - 4, 38, 3, 3, 'FD');
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(7.5); doc.setTextColor(120, 132, 160);
+    doc.text(label.toUpperCase(), x + (col ? 12 : 8), cellY + 12);
+    doc.setFont('helvetica', val ? 'bold' : 'normal'); doc.setFontSize(10); doc.setTextColor(val ? 13 : 160, val ? 45 : 160, val ? 94 : 160);
+    doc.text(val || '________________________________', x + (col ? 12 : 8), cellY + 28);
+  });
+  y += Math.ceil(fields.length / 2) * 44 + 16;
+
+  // Body sections
+  const sections = [
+    ['SATISFACTION STATEMENT', 'I, the undersigned Customer, hereby certify that JG Restoration (JJ Greil Enterprises LLC), its installer, and any subcontractors have furnished all F&I Goods and provided all Installation Services as specified in the Contract and that all work required by the Contract (and any approved change order) as well as any item identified in the post completion checklist has been completed to my satisfaction.'],
+    ['AUTHORIZATION TO PAY', 'I, the undersigned Customer, hereby authorize direct payment for these services from the insurance company to be made directly to JG Restoration. This Certificate of Satisfaction constitutes my acceptance of the completed scope of work agreed to in the original construction contract and acknowledges my agreement with full payment of my insurance proceeds to JG Restoration.'],
+    ["WAIVER OF LIEN", "Upon receipt by the undersigned of a check from JG Restoration or its affiliate on behalf of the customer, and when the check has been properly endorsed and has been paid by the bank upon which it is drawn, this document shall become effective to waive, relinquish, and forever release all liens and all rights and claims of liens that the undersigned now has or may from now on have for any and all labor and/or materials furnished. The undersigned agrees to cause the prompt release of any liens filed against the premises by any subcontractor, laborer, mechanic or material supplier. The undersigned further agrees to pay any costs, expenses and attorney's fees incurred by the customer and JG Restoration arising from or related to such liens."],
+    ['LIMITED WARRANTY', 'Upon receipt of payment in full for Installation Services, and effective as of the date of this signed Certificate of Satisfaction, Customer is provided a Limited One (1) Year Workmanship Warranty on all work performed by Contractor and full Material Manufacturer Warranty on all materials furnished and installed.'],
+  ];
+
+  sections.forEach(([heading, text]) => {
+    if (y > pageH - margin - 60) { doc.addPage(); y = margin; }
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(9); doc.setTextColor(13, 45, 94);
+    doc.text(heading, margin, y); y += 13;
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(40, 40, 40);
+    const lines = doc.splitTextToSize(text, pageW - margin * 2);
+    lines.forEach(line => {
+      if (y > pageH - margin - 30) { doc.addPage(); y = margin; }
+      doc.text(line, margin, y); y += 12;
+    });
+    y += 10;
+  });
+
+  // Witness line
+  if (y > pageH - margin - 160) { doc.addPage(); y = margin; }
+  y += 8;
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(10); doc.setTextColor(13, 45, 94);
+  doc.text('WITNESS OUR HAND(S) BELOW ON THIS _______ DAY OF _________________________, _________.', margin, y);
+  y += 24;
+
+  // Signature columns
+  const halfW = (pageW - margin * 2 - 20) / 2;
+  const sigRows = [
+    { label: "CONTRACTOR'S AUTHORIZED REPRESENTATIVE", x: margin },
+    { label: '**CUSTOMER', x: margin + halfW + 20 },
+  ];
+  sigRows.forEach(({ label, x }) => {
+    doc.setFillColor(244, 246, 251);
+    doc.setDrawColor(200, 206, 218);
+    doc.roundedRect(x, y, halfW, 110, 4, 4, 'FD');
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(7.5); doc.setTextColor(120, 132, 160);
+    doc.text(label, x + 10, y + 14);
+    // Signature line
+    doc.setDrawColor(13, 45, 94);
+    doc.line(x + 10, y + 60, x + halfW - 10, y + 60);
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(80, 80, 80);
+    doc.text('Signature', x + 10, y + 70);
+    // Print name — pre-fill customer name on right side
+    doc.line(x + 10, y + 92, x + halfW - 10, y + 92);
+    if (label === '**CUSTOMER' && p.customer_name) {
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(9); doc.setTextColor(13, 45, 94);
+      doc.text(p.customer_name, x + 10, y + 88);
+    }
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(80, 80, 80);
+    doc.text('Print Name', x + 10, y + 102);
+  });
+  y += 120;
+
+  // Footnote
+  doc.setFont('helvetica', 'italic'); doc.setFontSize(8); doc.setTextColor(120, 132, 160);
+  doc.text('**By signing this Certificate of Satisfaction, you are not waiving any warranty rights you may have under the Contract.', margin, y);
+
+  // Footer on all pages
+  const pageCount = doc.internal.getNumberOfPages();
+  for (let i = 1; i <= pageCount; i++) {
+    doc.setPage(i);
+    doc.setFontSize(7); doc.setTextColor(120, 132, 160);
+    doc.text('JG Restoration · JJ Greil Enterprises LLC · Appleton (920) 428-4200 · Stevens Point (715) 600-3883 · info@jg-restoration.com', pageW / 2, pageH - 24, { align: 'center' });
+    doc.text('Page ' + i + ' of ' + pageCount, pageW - margin, pageH - 24, { align: 'right' });
+  }
+
+  const safeJob = (p.albi_job_number || 'COS').replace(/[^a-zA-Z0-9._-]/g, '_');
+  doc.save('COS_' + safeJob + '_blank.pdf');
+  toast('\u2713 COS downloaded');
+}
+
 async function generateProjectReportPdf({ sections, docIds, reportTitle, coverPhotoUrl }) {
   const { jsPDF } = window.jspdf;
   const doc = new jsPDF({ orientation: 'p', unit: 'mm', format: 'letter' });
@@ -10547,8 +10675,6 @@ function renderTabContent() {
         const missing = [];
         if (!p.customer_name) missing.push('Customer Name');
         if (!p.property_address) missing.push('Property Address');
-        if (!p.insurance_company) missing.push('Insurance Company');
-        if (!p.claim_number) missing.push('Claim #');
         if (!p.customer_email) missing.push('Customer Email');
         if (missing.length) {
           alert('Missing required fields before sending COS:\n\n\u2022 ' + missing.join('\n\u2022 ') + '\n\nPlease update the project details first.');
@@ -10603,6 +10729,15 @@ function renderTabContent() {
           cosBtnEl.disabled = false;
           cosBtnEl.textContent = '\ud83d\udccb Send COS';
         }
+      });
+    }
+
+    // Print blank COS (pre-filled, wet signature lines)
+    const printCosBtn = $('#btnPrintCos');
+    if (printCosBtn) {
+      printCosBtn.addEventListener('click', () => {
+        const p = state.activeProject || {};
+        generatePrintCosPdf(p);
       });
     }
 
