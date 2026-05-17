@@ -8244,10 +8244,18 @@ function renderDocumentsTab() {
   }
 
   // Grid view
+  const p = state.activeProject || {};
+  const cosSigned = !!p.cos_signed_at;
+  const cosSignedDate = cosSigned ? new Date(p.cos_signed_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : null;
+  const cosBtn = cosSigned
+    ? `<span style="font-size:12px;color:var(--green);font-weight:600;">✓ COS signed ${cosSignedDate}</span>`
+    : `<button class="btn-pill-orange" id="btnSendCos">📋 Send COS</button>`;
+
   return `
     <div class="section-head">
       <h3>Project Documents</h3>
       <div style="display:flex;gap:8px;align-items:center;">
+        ${cosBtn}
         <button class="btn-pill-orange" id="btnBuildReport">📑 Build PDF Report</button>
       </div>
     </div>
@@ -10529,6 +10537,74 @@ function renderTabContent() {
   if (state.tab === 'documents') {
     let activeUploadCat = null;
     const fileInput = $('#docFileInput');
+
+    // Send COS button
+    const cosBtnEl = $('#btnSendCos');
+    if (cosBtnEl) {
+      cosBtnEl.addEventListener('click', async () => {
+        const p = state.activeProject;
+        if (!p) return;
+        const missing = [];
+        if (!p.customer_name) missing.push('Customer Name');
+        if (!p.property_address) missing.push('Property Address');
+        if (!p.insurance_company) missing.push('Insurance Company');
+        if (!p.claim_number) missing.push('Claim #');
+        if (!p.customer_email) missing.push('Customer Email');
+        if (missing.length) {
+          alert('Missing required fields before sending COS:\n\n\u2022 ' + missing.join('\n\u2022 ') + '\n\nPlease update the project details first.');
+          return;
+        }
+        if (!confirm('Send Certificate of Satisfaction to ' + p.customer_name + ' at ' + p.customer_email + '?')) return;
+        cosBtnEl.disabled = true;
+        cosBtnEl.textContent = 'Sending…';
+        try {
+          const token = crypto.randomUUID();
+          const { error: tokErr } = await sb.from('rebuild_projects')
+            .update({ cos_token: token, cos_sent_at: new Date().toISOString() })
+            .eq('id', p.id);
+          if (tokErr) throw tokErr;
+          if (state.activeProject) {
+            state.activeProject.cos_token = token;
+            state.activeProject.cos_sent_at = new Date().toISOString();
+          }
+          const cosUrl = 'https://jgimprovements-arch.github.io/jg-dispatch/cos.html?t=' + token;
+          const MESSAGE_HOOK = 'https://hooks.zapier.com/hooks/catch/12653197/uvugxag/';
+          const pmFirst = (p.albi_pm_name || 'JG Restoration').split(' ')[0];
+          const custFirst = (p.customer_name || 'there').split(' ')[0];
+          await fetch(MESSAGE_HOOK, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              channel: 'email',
+              to_email: p.customer_email,
+              from_email: 'info@jg-restoration.com',
+              from_name: p.albi_pm_name || 'JG Restoration',
+              recipient_name: p.customer_name,
+              recipient_type: 'customer',
+              subject: 'Certificate of Satisfaction \u00b7 ' + (p.albi_job_number || 'Your Project'),
+              body: buildBrandedEmail({
+                preheader: 'Please review and sign your Certificate of Satisfaction',
+                headline: 'Your Project is Complete!',
+                intro: 'Hi ' + custFirst + ',',
+                bodyHtml: '<p>Your restoration project at <strong>' + (p.property_address || 'your property') + '</strong> is complete.</p><p>Please review and sign your Certificate of Satisfaction. This confirms the work was completed to your satisfaction and authorizes final payment from your insurance company to JG Restoration.</p>',
+                ctaLabel: 'Review & Sign Certificate',
+                ctaUrl: cosUrl,
+                signoffName: p.albi_pm_name || 'JG Restoration',
+              }),
+              attachment_count: 0,
+              attachment_urls: '',
+            }),
+            mode: 'no-cors',
+          });
+          toast('\u2713 Certificate of Satisfaction sent to ' + p.customer_email);
+          renderDetail();
+        } catch (e) {
+          toast('Failed to send COS: ' + e.message);
+          cosBtnEl.disabled = false;
+          cosBtnEl.textContent = '\ud83d\udccb Send COS';
+        }
+      });
+    }
 
     // External link edit + toggle handlers
     $$('[data-edit-link]').forEach(btn => {
