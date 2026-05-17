@@ -15179,15 +15179,24 @@ function openCoUploadModal() {
   back.style.cssText = 'position:fixed;inset:0;background:rgba(13,45,94,.6);z-index:9998;display:flex;align-items:center;justify-content:center;';
   const defaultTitle = `CO #${coNum} — ${new Date().toLocaleDateString('en-US',{month:'short',year:'numeric'})}`;
   back.innerHTML = `
-    <div style="background:#fff;border-radius:12px;padding:24px;max-width:520px;width:92%;box-shadow:0 20px 60px rgba(0,0,0,.3);">
+    <div style="background:#fff;border-radius:12px;padding:24px;max-width:560px;width:92%;box-shadow:0 20px 60px rgba(0,0,0,.3);">
       <div style="font-weight:700;font-size:16px;color:var(--navy);margin-bottom:4px;">Upload Change Order #${coNum}</div>
-      <div style="font-size:13px;color:var(--muted);margin-bottom:16px;">Upload a new Xact estimate PDF. New or changed items become the CO additions.</div>
+      <div style="font-size:13px;color:var(--muted);margin-bottom:16px;">Upload both the new Estimate PDF and Components PDF from Xactimate. New or changed line items become the CO additions.</div>
       <label style="font-size:12px;font-weight:600;color:var(--navy);">CO Title</label>
       <input id="co_title_input" style="width:100%;padding:8px;border:1px solid var(--line);border-radius:6px;font-size:13px;margin:4px 0 12px;box-sizing:border-box;" value="${defaultTitle}">
-      <label style="font-size:12px;font-weight:600;color:var(--navy);">New Xact Estimate PDF</label>
-      <div id="co_drop_area" style="border:2px dashed var(--line);border-radius:8px;padding:24px;text-align:center;margin:6px 0 16px;cursor:pointer;color:var(--muted);font-size:13px;">
-        Drop estimate PDF here or click to browse
-        <input type="file" id="co_file_input" accept=".pdf" style="display:none">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px;">
+        <div>
+          <label style="font-size:12px;font-weight:600;color:var(--navy);">Estimate PDF</label>
+          <div id="co_est_drop" style="border:2px dashed var(--line);border-radius:8px;padding:16px;text-align:center;cursor:pointer;color:var(--muted);font-size:12px;margin-top:4px;min-height:60px;display:flex;align-items:center;justify-content:center;">
+            Drop or click<input type="file" id="co_est_input" accept=".pdf" style="display:none">
+          </div>
+        </div>
+        <div>
+          <label style="font-size:12px;font-weight:600;color:var(--navy);">Components PDF</label>
+          <div id="co_comp_drop" style="border:2px dashed var(--line);border-radius:8px;padding:16px;text-align:center;cursor:pointer;color:var(--muted);font-size:12px;margin-top:4px;min-height:60px;display:flex;align-items:center;justify-content:center;">
+            Drop or click<input type="file" id="co_comp_input" accept=".pdf" style="display:none">
+          </div>
+        </div>
       </div>
       <div id="co_parse_status" style="font-size:12px;color:var(--muted);margin-bottom:12px;min-height:18px;"></div>
       <div style="display:flex;gap:8px;justify-content:flex-end;">
@@ -15197,35 +15206,36 @@ function openCoUploadModal() {
     </div>
   `;
   document.body.appendChild(back);
-  let selectedFile = null;
-  const dropArea = back.querySelector('#co_drop_area');
-  const fileInput = back.querySelector('#co_file_input');
+  let estFile = null, compFile = null;
   const processBtn = back.querySelector('#co_process_btn');
   const statusEl = back.querySelector('#co_parse_status');
-  dropArea.addEventListener('click', () => fileInput.click());
-  dropArea.addEventListener('dragover', e => { e.preventDefault(); dropArea.style.borderColor = 'var(--orange)'; });
-  dropArea.addEventListener('dragleave', () => { dropArea.style.borderColor = 'var(--line)'; });
-  dropArea.addEventListener('drop', e => {
-    e.preventDefault();
-    dropArea.style.borderColor = 'var(--line)';
-    if (e.dataTransfer.files[0]) handleCoFile(e.dataTransfer.files[0]);
-  });
-  fileInput.addEventListener('change', () => { if (fileInput.files[0]) handleCoFile(fileInput.files[0]); });
-  function handleCoFile(f) {
-    selectedFile = f;
-    dropArea.innerHTML = `<span style="color:var(--navy);">✓ ${f.name}</span><input type="file" id="co_file_input" accept=".pdf" style="display:none">`;
-    processBtn.disabled = false;
+
+  function wireSlot(dropId, inputId, onFile) {
+    const drop = back.querySelector('#' + dropId);
+    const input = back.querySelector('#' + inputId);
+    drop.addEventListener('click', () => input.click());
+    drop.addEventListener('dragover', e => { e.preventDefault(); drop.style.borderColor = 'var(--orange)'; });
+    drop.addEventListener('dragleave', () => { drop.style.borderColor = 'var(--line)'; });
+    drop.addEventListener('drop', e => { e.preventDefault(); drop.style.borderColor = 'var(--line)'; if (e.dataTransfer.files[0]) onFile(e.dataTransfer.files[0], drop); });
+    input.addEventListener('change', () => { if (input.files[0]) onFile(input.files[0], drop); });
   }
+  function markFile(file, drop) {
+    drop.innerHTML = `<span style="color:var(--navy);font-size:11px;">✓ ${file.name}</span>`;
+  }
+  wireSlot('co_est_drop', 'co_est_input', (f, drop) => { estFile = f; markFile(f, drop); checkReady(); });
+  wireSlot('co_comp_drop', 'co_comp_input', (f, drop) => { compFile = f; markFile(f, drop); checkReady(); });
+  function checkReady() { processBtn.disabled = !(estFile && compFile); }
+
   back.querySelector('#co_cancel_btn').addEventListener('click', () => back.remove());
   back.addEventListener('click', e => { if (e.target === back) back.remove(); });
   processBtn.addEventListener('click', async () => {
-    if (!selectedFile) return;
+    if (!estFile || !compFile) return;
     processBtn.disabled = true;
     processBtn.textContent = 'Processing...';
     statusEl.style.color = 'var(--muted)';
     try {
       const title = back.querySelector('#co_title_input').value.trim() || defaultTitle;
-      await processCoUpload(selectedFile, coNum, title, budget, statusEl);
+      await processCoUpload(estFile, compFile, coNum, title, budget, statusEl);
       back.remove();
       await loadChangeOrders();
       await loadWoBudget();
@@ -15240,33 +15250,46 @@ function openCoUploadModal() {
   });
 }
 
-async function processCoUpload(file, coNum, title, budget, statusEl) {
-  // Parse the PDF via Vercel proxy (same as original estimate upload)
-  statusEl.textContent = 'Parsing estimate PDF...';
-  const formData = new FormData();
-  formData.append('file', file);
-  formData.append('type', 'estimate');
+
+async function processCoUpload(estimateFile, componentsFile, coNum, title, budget, statusEl) {
+  // Use the same parser module as the original estimate upload
+  statusEl.textContent = 'Parsing estimate + components PDFs...';
   let newItems = [];
   try {
+    const mod = await import('./wo-builder-parser.js');
+    // Parse the new estimate to get line items for diffing
+    const result = await mod.parseAndStoreXactPDFs(sb, state.activeProjectId, estimateFile, componentsFile, {
+      onProgress: (stage, pct) => { statusEl.textContent = `${stage} (${pct}%)`; },
+      uploadedByEmail: state.pmEmail,
+      uploadedByName: state.pmName,
+      dryRun: true, // parse only — don't store to DB yet, we need to diff first
+    });
+    newItems = result?.items || result?.lineItems || [];
+  } catch (parseErr) {
+    // Fallback: if parser doesn't support dryRun, use Vercel proxy directly
+    console.warn('Parser dryRun not supported, falling back to proxy:', parseErr.message);
+    statusEl.textContent = 'Parsing estimate PDF via proxy...';
+    const formData = new FormData();
+    formData.append('file', estimateFile);
+    formData.append('type', 'estimate');
     const res = await fetch('https://jg-proxy-v2.vercel.app/api/parse-pdf', { method: 'POST', body: formData });
     if (!res.ok) throw new Error('PDF parse failed: ' + res.status);
     const parsed = await res.json();
     newItems = parsed.lineItems || parsed.items || parsed.estimate_items || [];
-  } catch (e) {
-    throw new Error('PDF parse failed — ' + e.message);
   }
-  if (!newItems.length) throw new Error('No line items found. Check the file is an Xact estimate PDF.');
+
+  if (!newItems.length) throw new Error('No line items found. Check the files are Xact PDFs.');
 
   statusEl.textContent = `Found ${newItems.length} items. Diffing against original...`;
 
-  // Build lookup of original items by description
+  // Build lookup of original items by description (case-insensitive)
   const origLookup = {};
   (budget.items || []).forEach(item => {
     const key = (item.description || '').trim().toLowerCase();
     origLookup[key] = item;
   });
 
-  // Diff — identify new items and changed amounts
+  // Diff
   const coItems = [];
   let totalDelta = 0;
   newItems.forEach(item => {
@@ -15274,33 +15297,13 @@ async function processCoUpload(file, coNum, title, budget, statusEl) {
     const orig = origLookup[key];
     const newAmt = Number(item.line_total || item.total || item.amount || 0);
     if (!orig) {
-      // New item not in original
-      coItems.push({
-        description: item.description || key,
-        qty: item.qty || null,
-        unit: item.unit || null,
-        original_amount: 0,
-        new_amount: newAmt,
-        trade_category: item.trade_category || item.category || 'general',
-        is_new: true,
-        is_unassigned: true,
-      });
+      coItems.push({ description: item.description || key, qty: item.qty || null, unit: item.unit || null, original_amount: 0, new_amount: newAmt, trade_category: item.trade_category || item.category || 'general', is_new: true, is_unassigned: true });
       totalDelta += newAmt;
     } else {
       const origAmt = Number(orig.line_total || orig.total || orig.amount || 0);
       const delta = newAmt - origAmt;
       if (Math.abs(delta) > 0.01) {
-        // Same item, changed amount
-        coItems.push({
-          description: item.description || key,
-          qty: item.qty || null,
-          unit: item.unit || null,
-          original_amount: origAmt,
-          new_amount: newAmt,
-          trade_category: item.trade_category || item.category || orig.trade_category || 'general',
-          is_new: false,
-          is_unassigned: true,
-        });
+        coItems.push({ description: item.description || key, qty: item.qty || null, unit: item.unit || null, original_amount: origAmt, new_amount: newAmt, trade_category: item.trade_category || item.category || orig.trade_category || 'general', is_new: false, is_unassigned: true });
         totalDelta += delta;
       }
     }
@@ -15308,9 +15311,8 @@ async function processCoUpload(file, coNum, title, budget, statusEl) {
 
   if (!coItems.length) throw new Error('No new or changed items found. The new estimate appears identical to the original.');
 
-  statusEl.textContent = `${coItems.length} CO items found (+${usdCompact(totalDelta)}). Saving...`;
+  statusEl.textContent = `${coItems.length} CO items (+${usdCompact(totalDelta)}). Saving...`;
 
-  // Create CO record
   const { data: coData, error: coErr } = await sb.from('rebuild_change_orders').insert({
     project_id: state.activeProjectId,
     co_number: coNum,
@@ -15320,15 +15322,14 @@ async function processCoUpload(file, coNum, title, budget, statusEl) {
     total_delta: totalDelta,
     created_by: state.pmEmail,
   }).select().single();
-  if (coErr) throw new Error('Failed to create CO record: ' + coErr.message);
+  if (coErr) throw new Error('Failed to create CO: ' + coErr.message);
 
-  // Insert CO line items
-  const inserts = coItems.map(item => ({ ...item, co_id: coData.id }));
-  const { error: itemErr } = await sb.from('rebuild_co_line_items').insert(inserts);
+  const { error: itemErr } = await sb.from('rebuild_co_line_items').insert(coItems.map(i => ({ ...i, co_id: coData.id })));
   if (itemErr) throw new Error('Failed to save CO items: ' + itemErr.message);
 
   statusEl.textContent = 'Done!';
 }
+
 
 function openCoPdfPreview(co) {
   const items = state.coLineItems[co.id] || [];
