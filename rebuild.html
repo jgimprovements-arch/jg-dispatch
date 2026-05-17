@@ -1820,6 +1820,19 @@
   .msg-att-dl:hover { background: rgba(13,45,94,.08); }
   .msg-row .msg-att-list { margin-top: 8px; margin-bottom: 0; }
 
+  /* ──── Change Orders ──── */
+  .wobx-co-section { padding: 0 16px 16px; }
+  .wobx-co-card { border: 1px solid var(--line); border-radius: 8px; margin-bottom: 10px; overflow: hidden; }
+  .wobx-co-card-head { display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; background: rgba(13,45,94,.02); border-bottom: 1px solid var(--line); flex-wrap: wrap; gap: 8px; }
+  .wobx-co-title { font-weight: 700; color: var(--navy); font-size: 14px; }
+  .wobx-co-badge { background: var(--orange); color: #fff; font-size: 10px; font-weight: 700; padding: 1px 6px; border-radius: 20px; letter-spacing: .3px; }
+  .wobx-co-toggle { background: none; border: none; cursor: pointer; font-size: 16px; color: var(--muted); padding: 0; transition: transform .2s; }
+  .wobx-co-toggle.collapsed { transform: rotate(-90deg); }
+  .wobx-co-body { padding: 0 14px 14px; }
+  .wobx-co-body.hidden { display: none; }
+  .wobx-co-trade-row { cursor: pointer; }
+  .wobx-co-trade-row:hover td { background: rgba(232,93,4,.04); }
+
   /* ──── WO Schedule (phases tab) ──── */
   .cal-wrap { background: #fff; border: 1px solid var(--line); border-radius: 8px; padding: 12px; margin-top: 10px; }
   .cal-headers { display: flex; align-items: center; margin-bottom: 8px; }
@@ -5292,6 +5305,8 @@ const state = {
   woBudgetLoading: false,
   woBudgetParsing: false,
   woBudgetProgress: { stage: '', pct: 0 },
+  changeOrders: [],       // rebuild_change_orders for active project
+  coLineItems: {},        // { co_id: [line items] }
   tradeMerges: {},        // { sourceTradeKey: targetTradeKey } — user-driven merges
   relationships: [],
   relSheetOpen: false,
@@ -6789,7 +6804,7 @@ async function selectProject(id) {
   if (!state.activeProject) return;
   pushRecentProject(id);
   updateUrlHash();
-  await Promise.all([loadPhases(), loadSelections(), loadMessages(), loadHistory(), loadDocuments(), loadJournalEntries(), loadTodos(), loadWorkOrders(), loadRelationships(), loadWoBudget(), loadQbActuals()]);
+  await Promise.all([loadPhases(), loadSelections(), loadMessages(), loadHistory(), loadDocuments(), loadJournalEntries(), loadTodos(), loadWorkOrders(), loadRelationships(), loadWoBudget(), loadQbActuals(), loadChangeOrders()]);
   await reconcilePhasesWithWoTrades(); // sync phase names to match WO trades
   renderDetail();
 }
@@ -14233,6 +14248,21 @@ function renderWoBuilderSection(budget) {
           <div class="wobx-kpi-value">${margin.toFixed(1)}%</div>
           <div class="wobx-kpi-sub">Target: 50%</div>
         </div>
+        ${(() => {
+          const signedCos = (state.changeOrders || []).filter(c => ['customer_signed','sent_to_sub','sub_signed','complete'].includes(c.status));
+          if (!signedCos.length) return '';
+          const coDelta = signedCos.reduce((s, c) => s + Number(c.total_delta || 0), 0);
+          return `
+            <div class="wobx-kpi" style="border-left:2px solid var(--orange);padding-left:10px;">
+              <div class="wobx-kpi-label">CO Delta</div>
+              <div class="wobx-kpi-value" style="color:var(--orange);">+${usdCompact(coDelta)}</div>
+            </div>
+            <div class="wobx-kpi">
+              <div class="wobx-kpi-label">Total w/ COs</div>
+              <div class="wobx-kpi-value" style="font-weight:700;">${usdCompact(totalRevenue + coDelta)}</div>
+            </div>
+          `;
+        })()}
       </div>
 
       <div class="wobx-trades">
@@ -14325,6 +14355,121 @@ function renderWoBuilderSection(budget) {
           ${u.uploaded_by_name ? ` · uploaded by ${esc(u.uploaded_by_name)}` : ''}
         </span>
       </div>
+    </div>
+    ${renderCoSection(budget, u)}
+  `;
+}
+
+// ──── CHANGE ORDERS ────
+
+async function loadChangeOrders() {
+  if (!sb || !state.activeProjectId) { state.changeOrders = []; state.coLineItems = {}; return; }
+  const { data: cos } = await sb.from('rebuild_change_orders')
+    .select('*, sub:rebuild_subs(company_name, email)')
+    .eq('project_id', state.activeProjectId)
+    .order('co_number');
+  state.changeOrders = cos || [];
+
+  // Load line items for all COs
+  state.coLineItems = {};
+  if (state.changeOrders.length) {
+    const coIds = state.changeOrders.map(c => c.id);
+    const { data: items } = await sb.from('rebuild_co_line_items')
+      .select('*')
+      .in('co_id', coIds)
+      .order('is_new', { ascending: false })
+      .order('delta_amount', { ascending: false });
+    (items || []).forEach(item => {
+      if (!state.coLineItems[item.co_id]) state.coLineItems[item.co_id] = [];
+      state.coLineItems[item.co_id].push(item);
+    });
+  }
+}
+
+function renderCoSection(budget, upload) {
+  const cos = state.changeOrders || [];
+  const coStatusMeta = {
+    draft:             { lbl: 'Draft',              color: 'var(--muted)' },
+    sent_to_customer:  { lbl: 'Awaiting Customer',  color: 'var(--gold)' },
+    customer_signed:   { lbl: 'Customer Signed',    color: 'var(--orange)' },
+    sent_to_sub:       { lbl: 'Awaiting Sub',       color: 'var(--gold)' },
+    sub_signed:        { lbl: 'Sub Signed',         color: 'var(--orange)' },
+    complete:          { lbl: 'Complete',            color: 'var(--green)' },
+  };
+
+  const cosHtml = cos.map(co => {
+    const items = state.coLineItems[co.id] || [];
+    const meta = coStatusMeta[co.status] || { lbl: co.status, color: 'var(--muted)' };
+    const tradeGroups = {};
+    items.forEach(item => {
+      const trade = item.trade_category || 'general';
+      if (!tradeGroups[trade]) tradeGroups[trade] = [];
+      tradeGroups[trade].push(item);
+    });
+
+    const tradeRowsHtml = Object.entries(tradeGroups).map(([trade, its]) => {
+      const label = MERGED_TRADE_GROUPS[trade]?.label || trade;
+      const delta = its.reduce((s, i) => s + (Number(i.delta_amount) || 0), 0);
+      return `
+        <tr class="wobx-co-trade-row" data-co-id="${esc(co.id)}" data-trade="${esc(trade)}">
+          <td><b>${esc(label)}</b> <span class="wobx-co-badge">CO#${co.co_number}</span></td>
+          <td class="r">${its.length} item${its.length===1?'':'s'}</td>
+          <td class="r" style="color:var(--green);font-weight:700;">+${usdCompact(delta)}</td>
+          <td></td>
+          <td></td>
+          <td></td>
+          <td></td>
+        </tr>
+      `;
+    }).join('');
+
+    const canSendCustomer = co.status === 'draft';
+    const canSendSub = co.status === 'customer_signed';
+    const isUnlocked = ['customer_signed', 'sent_to_sub', 'sub_signed', 'complete'].includes(co.status);
+
+    return `
+      <div class="wobx-co-card" data-co-id="${esc(co.id)}">
+        <div class="wobx-co-card-head">
+          <div style="display:flex;align-items:center;gap:10px;">
+            <button class="wobx-co-toggle" data-co-id="${esc(co.id)}" title="Expand/collapse">▾</button>
+            <span class="wobx-co-title">CO #${co.co_number} — ${esc(co.title || 'Change Order')}</span>
+            <span class="wobx-status-pill" style="background:${meta.color}20;color:${meta.color};border:1px solid ${meta.color}40;font-size:11px;padding:2px 8px;border-radius:20px;">${meta.lbl}</span>
+            <span style="color:var(--green);font-weight:700;">+${usdCompact(co.total_delta)}</span>
+          </div>
+          <div style="display:flex;gap:6px;">
+            ${canSendCustomer ? `<button class="btn primary" data-co-act="send-customer" data-co-id="${esc(co.id)}">✉ Send to Customer</button>` : ''}
+            ${canSendSub ? `<button class="btn primary" data-co-act="send-sub" data-co-id="${esc(co.id)}">✉ Send to Sub</button>` : ''}
+            ${isUnlocked ? `<span style="font-size:12px;color:var(--green);">✓ Items unlocked in WO Builder</span>` : ''}
+            <button class="btn ghost" data-co-act="view-pdf" data-co-id="${esc(co.id)}">📄 View CO</button>
+            <button class="btn ghost" data-co-act="mark-customer-signed" data-co-id="${esc(co.id)}" ${co.status !== 'sent_to_customer' ? 'style="display:none"' : ''}>✓ Mark Customer Signed</button>
+            <button class="btn ghost" data-co-act="edit" data-co-id="${esc(co.id)}" ${co.status !== 'draft' ? 'style="display:none"' : ''}>✎ Edit</button>
+            <button class="btn ghost" data-co-act="delete" data-co-id="${esc(co.id)}" style="color:var(--red);border-color:var(--red);" ${co.status !== 'draft' ? 'style="display:none"' : ''}>🗑</button>
+          </div>
+        </div>
+        <div class="wobx-co-body" data-co-body="${esc(co.id)}">
+          ${items.length ? `
+            <table class="wobx-trade-table" style="margin-top:8px;">
+              <thead><tr>
+                <th>Trade</th><th class="r">Items</th><th class="r">Delta</th>
+                <th></th><th></th><th></th><th></th>
+              </tr></thead>
+              <tbody>${tradeRowsHtml}</tbody>
+            </table>
+          ` : `<div style="padding:16px;color:var(--muted);font-size:13px;">No line items yet. Upload a change order estimate to populate.</div>`}
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  return `
+    <div class="wobx-co-section">
+      <div class="wobx-trades-title" style="margin-top:16px;border-top:2px solid var(--line);padding-top:16px;">
+        <span>Change Orders</span>
+        <span style="display:flex;gap:8px;align-items:center;">
+          <button class="btn primary" id="wobx_new_co" style="font-size:12px;padding:5px 12px;">+ Upload Change Order</button>
+        </span>
+      </div>
+      ${cos.length ? cosHtml : `<div style="padding:16px 0;color:var(--muted);font-size:13px;">No change orders yet. Click "+ Upload Change Order" to add a supplement estimate.</div>`}
     </div>
   `;
 }
@@ -14936,6 +15081,339 @@ function wireWoBuilderControls() {
       renderTabContent();
     });
   }
+
+  // Wire Change Order buttons
+  const newCoBtn = $('#wobx_new_co');
+  if (newCoBtn) {
+    newCoBtn.addEventListener('click', () => openCoUploadModal());
+  }
+
+  // CO toggle collapse
+  document.querySelectorAll('.wobx-co-toggle').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      const coId = btn.dataset.coId;
+      const body = document.querySelector(`[data-co-body="${coId}"]`);
+      if (body) {
+        body.classList.toggle('hidden');
+        btn.classList.toggle('collapsed');
+      }
+    });
+  });
+
+  // CO action buttons
+  document.querySelectorAll('[data-co-act]').forEach(btn => {
+    btn.addEventListener('click', async e => {
+      e.stopPropagation();
+      const act = btn.dataset.coAct;
+      const coId = btn.dataset.coId;
+      const co = (state.changeOrders || []).find(c => c.id === coId);
+      if (!co) return;
+
+      if (act === 'delete') {
+        if (!confirm(`Delete CO #${co.co_number}? This cannot be undone.`)) return;
+        await sb.from('rebuild_change_orders').delete().eq('id', coId);
+        await loadChangeOrders();
+        toast('Change Order deleted');
+        renderTabContent();
+
+      } else if (act === 'send-customer') {
+        // Email customer the CO for DocuSign
+        const p = state.activeProject;
+        if (!p.customer_email) { toast('No customer email on file'); return; }
+        const { error } = await sb.from('rebuild_change_orders')
+          .update({ status: 'sent_to_customer' })
+          .eq('id', coId);
+        if (error) { toast('Failed: ' + error.message); return; }
+        // Log to Albi
+        logToAlbi('co_sent_to_customer', `CO #${co.co_number} sent to customer for signature`);
+        toast(`CO #${co.co_number} marked as sent to customer`);
+        await loadChangeOrders();
+        renderTabContent();
+
+      } else if (act === 'mark-customer-signed') {
+        const name = prompt('Customer name (for record):') || 'Customer';
+        const { error } = await sb.from('rebuild_change_orders')
+          .update({ status: 'customer_signed', customer_signed_at: new Date().toISOString(), customer_signed_name: name })
+          .eq('id', coId);
+        if (error) { toast('Failed: ' + error.message); return; }
+        // Unlock CO items in WO Builder by clearing is_unassigned
+        await sb.from('rebuild_co_line_items')
+          .update({ is_unassigned: false })
+          .eq('co_id', coId);
+        await loadChangeOrders();
+        await loadWoBudget();
+        toast(`CO #${co.co_number} customer signature recorded — items now available in WO Builder`);
+        renderTabContent();
+
+      } else if (act === 'send-sub') {
+        const { error } = await sb.from('rebuild_change_orders')
+          .update({ status: 'sent_to_sub' })
+          .eq('id', coId);
+        if (error) { toast('Failed: ' + error.message); return; }
+        logToAlbi('co_sent_to_sub', `CO #${co.co_number} sent to sub for signature`);
+        toast(`CO #${co.co_number} marked as sent to sub`);
+        await loadChangeOrders();
+        renderTabContent();
+
+      } else if (act === 'view-pdf') {
+        openCoPdfPreview(co);
+
+      } else if (act === 'edit') {
+        openCoEditModal(co);
+      }
+    });
+  });
+}
+
+
+// ──── CHANGE ORDER UPLOAD + DIFF ────
+
+function openCoUploadModal() {
+  const budget = state.woBudget;
+  if (!budget) { toast('Upload a base estimate first before creating a Change Order'); return; }
+  const coNum = (state.changeOrders || []).length + 1;
+  document.querySelectorAll('.co-upload-modal-back').forEach(m => m.remove());
+  const back = document.createElement('div');
+  back.className = 'co-upload-modal-back';
+  back.style.cssText = 'position:fixed;inset:0;background:rgba(13,45,94,.6);z-index:9998;display:flex;align-items:center;justify-content:center;';
+  const defaultTitle = `CO #${coNum} — ${new Date().toLocaleDateString('en-US',{month:'short',year:'numeric'})}`;
+  back.innerHTML = `
+    <div style="background:#fff;border-radius:12px;padding:24px;max-width:520px;width:92%;box-shadow:0 20px 60px rgba(0,0,0,.3);">
+      <div style="font-weight:700;font-size:16px;color:var(--navy);margin-bottom:4px;">Upload Change Order #${coNum}</div>
+      <div style="font-size:13px;color:var(--muted);margin-bottom:16px;">Upload a new Xact estimate PDF. New or changed items become the CO additions.</div>
+      <label style="font-size:12px;font-weight:600;color:var(--navy);">CO Title</label>
+      <input id="co_title_input" style="width:100%;padding:8px;border:1px solid var(--line);border-radius:6px;font-size:13px;margin:4px 0 12px;box-sizing:border-box;" value="${defaultTitle}">
+      <label style="font-size:12px;font-weight:600;color:var(--navy);">New Xact Estimate PDF</label>
+      <div id="co_drop_area" style="border:2px dashed var(--line);border-radius:8px;padding:24px;text-align:center;margin:6px 0 16px;cursor:pointer;color:var(--muted);font-size:13px;">
+        Drop estimate PDF here or click to browse
+        <input type="file" id="co_file_input" accept=".pdf" style="display:none">
+      </div>
+      <div id="co_parse_status" style="font-size:12px;color:var(--muted);margin-bottom:12px;min-height:18px;"></div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;">
+        <button class="btn" id="co_cancel_btn">Cancel</button>
+        <button class="btn primary" id="co_process_btn" disabled>Process & Diff</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(back);
+  let selectedFile = null;
+  const dropArea = back.querySelector('#co_drop_area');
+  const fileInput = back.querySelector('#co_file_input');
+  const processBtn = back.querySelector('#co_process_btn');
+  const statusEl = back.querySelector('#co_parse_status');
+  dropArea.addEventListener('click', () => fileInput.click());
+  dropArea.addEventListener('dragover', e => { e.preventDefault(); dropArea.style.borderColor = 'var(--orange)'; });
+  dropArea.addEventListener('dragleave', () => { dropArea.style.borderColor = 'var(--line)'; });
+  dropArea.addEventListener('drop', e => {
+    e.preventDefault();
+    dropArea.style.borderColor = 'var(--line)';
+    if (e.dataTransfer.files[0]) handleCoFile(e.dataTransfer.files[0]);
+  });
+  fileInput.addEventListener('change', () => { if (fileInput.files[0]) handleCoFile(fileInput.files[0]); });
+  function handleCoFile(f) {
+    selectedFile = f;
+    dropArea.innerHTML = `<span style="color:var(--navy);">✓ ${f.name}</span><input type="file" id="co_file_input" accept=".pdf" style="display:none">`;
+    processBtn.disabled = false;
+  }
+  back.querySelector('#co_cancel_btn').addEventListener('click', () => back.remove());
+  back.addEventListener('click', e => { if (e.target === back) back.remove(); });
+  processBtn.addEventListener('click', async () => {
+    if (!selectedFile) return;
+    processBtn.disabled = true;
+    processBtn.textContent = 'Processing...';
+    statusEl.style.color = 'var(--muted)';
+    try {
+      const title = back.querySelector('#co_title_input').value.trim() || defaultTitle;
+      await processCoUpload(selectedFile, coNum, title, budget, statusEl);
+      back.remove();
+      await loadChangeOrders();
+      await loadWoBudget();
+      renderTabContent();
+      toast(`CO #${coNum} created — review the change items below`);
+    } catch (err) {
+      statusEl.style.color = 'var(--red)';
+      statusEl.textContent = 'Error: ' + err.message;
+      processBtn.disabled = false;
+      processBtn.textContent = 'Process & Diff';
+    }
+  });
+}
+
+async function processCoUpload(file, coNum, title, budget, statusEl) {
+  // Parse the PDF via Vercel proxy (same as original estimate upload)
+  statusEl.textContent = 'Parsing estimate PDF...';
+  const formData = new FormData();
+  formData.append('file', file);
+  formData.append('type', 'estimate');
+  let newItems = [];
+  try {
+    const res = await fetch('https://jg-proxy-v2.vercel.app/api/parse-pdf', { method: 'POST', body: formData });
+    if (!res.ok) throw new Error('PDF parse failed: ' + res.status);
+    const parsed = await res.json();
+    newItems = parsed.lineItems || parsed.items || parsed.estimate_items || [];
+  } catch (e) {
+    throw new Error('PDF parse failed — ' + e.message);
+  }
+  if (!newItems.length) throw new Error('No line items found. Check the file is an Xact estimate PDF.');
+
+  statusEl.textContent = `Found ${newItems.length} items. Diffing against original...`;
+
+  // Build lookup of original items by description
+  const origLookup = {};
+  (budget.items || []).forEach(item => {
+    const key = (item.description || '').trim().toLowerCase();
+    origLookup[key] = item;
+  });
+
+  // Diff — identify new items and changed amounts
+  const coItems = [];
+  let totalDelta = 0;
+  newItems.forEach(item => {
+    const key = (item.description || '').trim().toLowerCase();
+    const orig = origLookup[key];
+    const newAmt = Number(item.line_total || item.total || item.amount || 0);
+    if (!orig) {
+      // New item not in original
+      coItems.push({
+        description: item.description || key,
+        qty: item.qty || null,
+        unit: item.unit || null,
+        original_amount: 0,
+        new_amount: newAmt,
+        trade_category: item.trade_category || item.category || 'general',
+        is_new: true,
+        is_unassigned: true,
+      });
+      totalDelta += newAmt;
+    } else {
+      const origAmt = Number(orig.line_total || orig.total || orig.amount || 0);
+      const delta = newAmt - origAmt;
+      if (Math.abs(delta) > 0.01) {
+        // Same item, changed amount
+        coItems.push({
+          description: item.description || key,
+          qty: item.qty || null,
+          unit: item.unit || null,
+          original_amount: origAmt,
+          new_amount: newAmt,
+          trade_category: item.trade_category || item.category || orig.trade_category || 'general',
+          is_new: false,
+          is_unassigned: true,
+        });
+        totalDelta += delta;
+      }
+    }
+  });
+
+  if (!coItems.length) throw new Error('No new or changed items found. The new estimate appears identical to the original.');
+
+  statusEl.textContent = `${coItems.length} CO items found (+${usdCompact(totalDelta)}). Saving...`;
+
+  // Create CO record
+  const { data: coData, error: coErr } = await sb.from('rebuild_change_orders').insert({
+    project_id: state.activeProjectId,
+    co_number: coNum,
+    title,
+    status: 'draft',
+    base_upload_id: budget.upload?.id || null,
+    total_delta: totalDelta,
+    created_by: state.pmEmail,
+  }).select().single();
+  if (coErr) throw new Error('Failed to create CO record: ' + coErr.message);
+
+  // Insert CO line items
+  const inserts = coItems.map(item => ({ ...item, co_id: coData.id }));
+  const { error: itemErr } = await sb.from('rebuild_co_line_items').insert(inserts);
+  if (itemErr) throw new Error('Failed to save CO items: ' + itemErr.message);
+
+  statusEl.textContent = 'Done!';
+}
+
+function openCoPdfPreview(co) {
+  const items = state.coLineItems[co.id] || [];
+  const p = state.activeProject;
+  const rowsHtml = items.map(item => {
+    const origFmt = item.original_amount > 0 ? '$' + Number(item.original_amount).toLocaleString(undefined,{minimumFractionDigits:2}) : '—';
+    const newFmt = '$' + Number(item.new_amount).toLocaleString(undefined,{minimumFractionDigits:2});
+    const delta = Number(item.delta_amount || (item.new_amount - item.original_amount));
+    const deltaFmt = (delta >= 0 ? '+' : '') + '$' + Math.abs(delta).toLocaleString(undefined,{minimumFractionDigits:2});
+    return `<tr>
+      <td style="padding:6px 8px;border-bottom:1px solid #e5e7eb;font-size:13px;">${esc(item.description)}</td>
+      <td style="padding:6px 8px;border-bottom:1px solid #e5e7eb;text-align:right;color:#7884a0;">${origFmt}</td>
+      <td style="padding:6px 8px;border-bottom:1px solid #e5e7eb;text-align:right;">${newFmt}</td>
+      <td style="padding:6px 8px;border-bottom:1px solid #e5e7eb;text-align:right;color:${delta >= 0 ? '#16a34a' : '#dc2626'};font-weight:700;">${deltaFmt}</td>
+    </tr>`;
+  }).join('');
+
+  const back = document.createElement('div');
+  back.style.cssText = 'position:fixed;inset:0;background:rgba(13,45,94,.6);z-index:9998;display:flex;align-items:center;justify-content:center;overflow:auto;padding:20px;';
+  back.innerHTML = `
+    <div style="background:#fff;border-radius:12px;padding:28px;max-width:720px;width:100%;max-height:90vh;overflow:auto;box-shadow:0 20px 60px rgba(0,0,0,.3);">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:20px;">
+        <div>
+          <img src="https://jgimprovements-arch.github.io/jg-dispatch/logo.png" height="40" style="margin-bottom:8px;display:block;">
+          <div style="font-size:20px;font-weight:700;color:#0d2d5e;">CHANGE ORDER #${co.co_number}</div>
+          <div style="font-size:13px;color:#7884a0;">${esc(co.title || '')}</div>
+        </div>
+        <button id="co_pdf_close" style="background:none;border:none;font-size:24px;cursor:pointer;color:#7884a0;line-height:1;">×</button>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:20px;font-size:13px;padding:12px;background:#f7f9fc;border-radius:8px;">
+        <div><span style="color:#7884a0;font-size:11px;text-transform:uppercase;letter-spacing:.5px;">Project</span><br><b>${esc(p.albi_job_number || '—')}</b></div>
+        <div><span style="color:#7884a0;font-size:11px;text-transform:uppercase;letter-spacing:.5px;">Customer</span><br><b>${esc(p.customer_name || '—')}</b></div>
+        <div><span style="color:#7884a0;font-size:11px;text-transform:uppercase;letter-spacing:.5px;">Property</span><br><b>${esc(p.address || '—')}</b></div>
+        <div><span style="color:#7884a0;font-size:11px;text-transform:uppercase;letter-spacing:.5px;">Date</span><br><b>${new Date().toLocaleDateString()}</b></div>
+      </div>
+      <table style="width:100%;border-collapse:collapse;margin-bottom:16px;">
+        <thead>
+          <tr style="background:#f7f9fc;">
+            <th style="padding:8px;text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#7884a0;border-bottom:2px solid #e5e7eb;">Description</th>
+            <th style="padding:8px;text-align:right;font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#7884a0;border-bottom:2px solid #e5e7eb;">Original</th>
+            <th style="padding:8px;text-align:right;font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#7884a0;border-bottom:2px solid #e5e7eb;">New</th>
+            <th style="padding:8px;text-align:right;font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#7884a0;border-bottom:2px solid #e5e7eb;">Delta</th>
+          </tr>
+        </thead>
+        <tbody>${rowsHtml}</tbody>
+        <tfoot>
+          <tr style="background:#f0fdf4;">
+            <td colspan="3" style="padding:12px 8px;font-weight:700;font-size:15px;color:#0d2d5e;">Total Change Order</td>
+            <td style="padding:12px 8px;text-align:right;font-weight:700;font-size:15px;color:#16a34a;">+$${Number(co.total_delta).toLocaleString(undefined,{minimumFractionDigits:2})}</td>
+          </tr>
+        </tfoot>
+      </table>
+      <div style="margin-top:28px;border-top:1px solid #e5e7eb;padding-top:20px;">
+        <p style="font-size:12px;color:#7884a0;margin-bottom:20px;">By signing below, all parties agree to the change in scope and price described above. All other terms of the original Restoration Services Agreement remain in effect.</p>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:32px;">
+          <div>
+            <div style="font-weight:700;font-size:13px;margin-bottom:12px;color:#0d2d5e;">Contractor — JG Restoration</div>
+            <div style="border-bottom:1.5px solid #0d2d5e;margin-bottom:6px;height:36px;"></div>
+            <div style="font-size:12px;color:#7884a0;">Signature &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Date: ___________</div>
+          </div>
+          <div>
+            <div style="font-weight:700;font-size:13px;margin-bottom:12px;color:#0d2d5e;">Customer — ${esc(p.customer_name || '')}</div>
+            <div style="border-bottom:1.5px solid #0d2d5e;margin-bottom:6px;height:36px;"></div>
+            <div style="font-size:12px;color:#7884a0;">Signature &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Date: ___________</div>
+          </div>
+        </div>
+      </div>
+      <div style="text-align:center;margin-top:24px;">
+        <button class="btn primary" onclick="window.print()">🖨 Print / Save as PDF</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(back);
+  back.querySelector('#co_pdf_close').addEventListener('click', () => back.remove());
+  back.addEventListener('click', e => { if (e.target === back) back.remove(); });
+}
+
+function openCoEditModal(co) {
+  const title = prompt('Edit CO title:', co.title || '');
+  if (title === null) return;
+  sb.from('rebuild_change_orders').update({ title }).eq('id', co.id).then(async () => {
+    await loadChangeOrders();
+    renderTabContent();
+    toast('CO title updated');
+  });
 }
 
 async function applyTradeMerge(sourceKey, targetKey, sourceLabel, targetLabel) {
