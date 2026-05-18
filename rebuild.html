@@ -8393,7 +8393,7 @@ function renderDocRow(d) {
           ${d.signature_status !== 'signed' ? `<button class="doc-menu-item doc-rename" data-id="${d.id}"><span class="doc-menu-icon">✏️</span> Rename</button>` : ''}
           <button class="doc-menu-item doc-dl" data-id="${d.id}"><span class="doc-menu-icon">📥</span> Download</button>
           ${d.push_status !== 'sent' ? `<button class="doc-menu-item doc-retry" data-id="${d.id}"><span class="doc-menu-icon">↻</span> Retry Albi push</button>` : ''}
-          ${d.signature_status !== 'signed' ? `<button class="doc-menu-item doc-menu-danger doc-del" data-id="${d.id}"><span class="doc-menu-icon">✕</span> Delete</button>` : `<span class="doc-menu-item" style="color:var(--muted);cursor:default;opacity:.5;"><span class="doc-menu-icon">🔒</span> Locked — signed</span>`}
+          ${d.signature_status !== 'signed' ? `<button class="doc-menu-item doc-menu-danger doc-del" data-id="${d.id}"><span class="doc-menu-icon">✕</span> Delete</button>` : getUserRole() === 'admin' ? `<button class="doc-menu-item doc-menu-danger doc-reset-sig" data-id="${d.id}"><span class="doc-menu-icon">↺</span> Reset Signature</button>` : `<span class="doc-menu-item" style="color:var(--muted);cursor:default;opacity:.5;"><span class="doc-menu-icon">🔒</span> Locked — signed</span>`}
         </div>
         ${d.signature_status === 'signed' ? '<span class="sig-badge signed">✓ Signed</span>' : d.signature_status === 'pending' ? '<span class="sig-badge pending">Signature Needed</span>' : ''}
         <span class="doc-card-albi">${albiBadge}</span>
@@ -11229,6 +11229,38 @@ function renderTabContent() {
       if (error) { toast('Failed: ' + error.message); return; }
       toast('Signature status cleared');
       await loadDocuments(); renderDetail();
+    }));
+
+    // Reset Signature (admin only) — clears signature data and generates a fresh unsigned doc
+    $$('.doc-reset-sig').forEach(btn => btn.addEventListener('click', async e => {
+      e.stopPropagation();
+      document.querySelectorAll('.doc-menu:not([hidden])').forEach(m => m.hidden = true);
+      if (getUserRole() !== 'admin') { toast('Admin only'); return; }
+      const d = state.documents.find(x => x.id === btn.dataset.id);
+      if (!d) return;
+      const confirm1 = confirm(
+        'Reset signature on "' + (d.filename || 'this document') + '"?\n\n' +
+        'This will:\n• Clear the signed status\n• Revoke the signature token\n• Allow a new signature request to be sent\n\nThis cannot be undone.'
+      );
+      if (!confirm1) return;
+      toast('Resetting…');
+      try {
+        const { error } = await sb.from('rebuild_documents').update({
+          signature_status: 'none',
+          signature_token: null,
+          signature_sent_at: null,
+          signature_sent_to_email: null,
+          signature_sent_to_name: null,
+          signed_at: null,
+          signed_by_name: null,
+          signed_ip: null,
+          signed_pdf_url: null,
+          push_status: 'skipped',
+        }).eq('id', btn.dataset.id);
+        if (error) throw error;
+        toast('\u2713 Signature reset — you can now send a new signature request');
+        await loadDocuments(); renderDetail();
+      } catch (err) { toast('Reset failed: ' + err.message); }
     }));
 
     $$('.doc-retry').forEach(btn => btn.addEventListener('click', async e => {
