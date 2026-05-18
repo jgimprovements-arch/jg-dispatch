@@ -491,9 +491,9 @@ async function buildSignedPdf(doc, custSigDataUrl) {
 
 async function savePdf(doc, blob) {
   const p = doc.project || {};
-  const base = clean(doc.filename).replace(/\.pdf$/i,'');
-  const filename = base + '_SIGNED.pdf';
-  const path = 'projects/' + doc.project_id + '/' + Date.now() + '-' + filename;
+  // Keep the same clean filename — no _SIGNED suffix, just replaces in place
+  const filename = clean(doc.filename);
+  const path = 'projects/' + doc.project_id + '/' + Date.now() + '-signed-' + filename;
 
   const { error } = await sb.storage.from('rebuild-documents').upload(path, blob, { contentType:'application/pdf' });
   if (error) { console.error('Upload error:', error); return null; }
@@ -501,31 +501,35 @@ async function savePdf(doc, blob) {
   const { data } = sb.storage.from('rebuild-documents').getPublicUrl(path);
   const url = data.publicUrl;
 
-  const { data: row } = await sb.from('rebuild_documents').insert({
-    project_id: doc.project_id, category:'Customer Documents', filename,
-    file_url: url, file_size_bytes: blob.size, mime_type:'application/pdf',
-    uploaded_by_email:'sign-system@jg-restoration.com', push_status:'pending',
-    signature_status:'signed', signed_at: doc.signed_at,
-    signed_by_name: doc.signed_by_name, signed_pdf_url: url,
-  }).select();
+  // UPDATE the original document record — replace file URL, mark signed
+  // This replaces the doc in-place so the folder shows one signed file, not two
+  await sb.from('rebuild_documents').update({
+    file_url: url,
+    file_size_bytes: blob.size,
+    signature_status: 'signed',
+    signed_at: doc.signed_at,
+    signed_by_name: doc.signed_by_name,
+    signed_pdf_url: url,
+    push_status: 'pending',
+    uploaded_by_email: 'sign-system@jg-restoration.com',
+  }).eq('id', doc.id);
 
   // Push to Albi
-  const docId = row?.[0]?.id;
-  if (docId && p.albi_project_id) {
+  if (p.albi_project_id) {
     try {
       await fetch(ALBI_HOOK, {
         method:'POST', mode:'no-cors',
         headers:{'Content-Type':'application/json'},
         body: JSON.stringify({
-          document_id:docId, project_id:doc.project_id,
-          albi_project_id:p.albi_project_id, albi_job_number:p.albi_job_number,
-          category:'Customer Documents', filename, file_url:url, mime_type:'application/pdf',
-          notes:'Signed by '+doc.signed_by_name+' on '+new Date(doc.signed_at).toLocaleDateString(),
+          document_id: doc.id, project_id: doc.project_id,
+          albi_project_id: p.albi_project_id, albi_job_number: p.albi_job_number,
+          category: doc.category || 'Customer Documents', filename, file_url: url, mime_type:'application/pdf',
+          notes:'Electronically signed by '+doc.signed_by_name+' on '+new Date(doc.signed_at).toLocaleDateString(),
         }),
       });
-      await sb.from('rebuild_documents').update({ push_status:'sent', pushed_to_albi_at: new Date().toISOString() }).eq('id', docId);
+      await sb.from('rebuild_documents').update({ push_status:'sent', pushed_to_albi_at: new Date().toISOString() }).eq('id', doc.id);
     } catch(e) {
-      await sb.from('rebuild_documents').update({ push_status:'failed' }).eq('id', docId);
+      await sb.from('rebuild_documents').update({ push_status:'failed' }).eq('id', doc.id);
     }
   }
   return url;
