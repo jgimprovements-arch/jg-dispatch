@@ -8511,14 +8511,24 @@ function showReportError(msg) {
 const PDFJS_WORKER_PRIMARY = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 const PDFJS_WORKER_BACKUP  = 'https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
 
+function _thumbFail(el, shortMsg, fullMsg) {
+  el.dataset.thumbRendered = '0';
+  el.title = fullMsg || shortMsg;
+  // Replace the "PDF" fallback span with the actual reason, visible in-card.
+  const span = el.querySelector('.doc-thumb-pdf-fallback, .doc-recent-pdf-fallback, .rb-doc-pdf-fallback');
+  if (span) {
+    span.textContent = shortMsg;
+    span.style.cssText = 'font-size:10px;color:#c0392b;font-weight:600;text-align:center;line-height:1.2;padding:4px;display:block;';
+  }
+}
+
 async function renderPdfThumbnail(el) {
   if (el.dataset.thumbRendered === '1') return;
   const url = el.dataset.pdfThumb;
   if (!url) return;
 
   if (!window.pdfjsLib) {
-    el.dataset.thumbRendered = '0';
-    el.title = 'PDF preview unavailable (pdf.js not loaded)';
+    _thumbFail(el, 'pdf.js not loaded', 'PDF preview unavailable (pdf.js library failed to load from CDN)');
     console.warn('PDF thumb skipped: pdfjsLib not loaded', url);
     return;
   }
@@ -8531,15 +8541,13 @@ async function renderPdfThumbnail(el) {
   try {
     const resp = await fetch(url, { mode: 'cors', credentials: 'omit', cache: 'force-cache' });
     if (!resp.ok) {
-      el.dataset.thumbRendered = '0';
-      el.title = `PDF preview failed: HTTP ${resp.status}`;
+      _thumbFail(el, 'HTTP ' + resp.status, 'PDF preview failed: server returned HTTP ' + resp.status + ' for ' + url);
       console.warn('PDF thumb fetch HTTP error', resp.status, url);
       return;
     }
     bytes = await resp.arrayBuffer();
   } catch (fetchErr) {
-    el.dataset.thumbRendered = '0';
-    el.title = 'PDF preview failed: network/CORS blocked';
+    _thumbFail(el, 'CORS blocked', 'PDF preview failed: network/CORS blocked fetching ' + url);
     console.warn('PDF thumb fetch blocked (CORS/network)', url, fetchErr);
     return;
   }
@@ -8580,8 +8588,7 @@ async function renderPdfThumbnail(el) {
     el.title = '';
     el.classList.add('doc-thumb-pdf-rendered', 'doc-recent-pdf', 'rendered');
   } catch (e) {
-    el.dataset.thumbRendered = '0';
-    el.title = 'PDF preview failed: could not render';
+    _thumbFail(el, 'render error', 'PDF preview failed: pdf.js could not render ' + url);
     console.warn('PDF thumb render failed (post-fetch)', url, e);
   }
 }
@@ -11225,7 +11232,11 @@ function renderTabContent() {
       window._docMenuClickWired = true;
     }
     // Render PDF thumbnails (first page) into PDF tiles
-    $$('[data-pdf-thumb]').forEach(el => renderPdfThumbnail(el));
+    // RBTHUMB_DIAG_v1 — deploy confirmation + visibility into trigger
+    const _thumbEls = $$('[data-pdf-thumb]');
+    console.log('%c[RBTHUMB_DIAG_v1] documents tab rendered. PDF cards found: ' + _thumbEls.length
+      + ' | pdfjsLib loaded: ' + (!!window.pdfjsLib), 'background:#1a3a5c;color:#fff;padding:2px 6px;');
+    _thumbEls.forEach(el => renderPdfThumbnail(el));
     // Lightbox triggers — image thumbs in folder list and recent strip
     $$('[data-lightbox-doc]').forEach(el => el.addEventListener('click', e => {
       e.preventDefault();
