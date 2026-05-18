@@ -5531,7 +5531,29 @@ JG.openLightbox = function(images, startIdx) {
       </style></head><body>
       <h2>${cur.name}${cur.category ? ' · ' + cur.category : ''}</h2>
       <img src="${cur.url}" onload="setTimeout(() => { window.print(); window.close(); }, 400)" onerror="document.body.innerHTML += '<p>Image failed to load.</p>'">
-      </body></html>
+      
+<!-- Send for Signature Modal -->
+<div id="modalSendSig" style="display:none;position:fixed;inset:0;background:rgba(13,45,94,.55);backdrop-filter:blur(3px);z-index:9999;align-items:center;justify-content:center;padding:20px">
+  <div style="background:#fff;border-radius:14px;width:100%;max-width:420px;box-shadow:0 20px 60px rgba(13,45,94,.25);overflow:hidden">
+    <div style="background:#0d2d5e;padding:16px 22px;display:flex;align-items:center;justify-content:space-between">
+      <h2 style="color:#fff;font-size:15px;font-weight:700;margin:0">Send for Signature</h2>
+      <button onclick="document.getElementById('modalSendSig').style.display='none'" style="background:none;border:none;color:rgba(255,255,255,.7);font-size:22px;cursor:pointer;line-height:1">×</button>
+    </div>
+    <div style="padding:22px;display:flex;flex-direction:column;gap:14px">
+      <div id="sendSigDocName" style="background:#f4f6fb;border-radius:8px;padding:10px 14px;font-size:13px;color:#7884a0;font-weight:600"></div>
+      <div>
+        <label style="font-size:11px;font-weight:700;color:#7884a0;text-transform:uppercase;letter-spacing:.4px;display:block;margin-bottom:5px">Recipient Name</label>
+        <input id="sendSigName" type="text" placeholder="Full name" style="width:100%;border:1.5px solid #e3e7f0;border-radius:7px;padding:10px 12px;font-size:14px;font-family:inherit;color:#1a2540">
+      </div>
+      <div>
+        <label style="font-size:11px;font-weight:700;color:#7884a0;text-transform:uppercase;letter-spacing:.4px;display:block;margin-bottom:5px">Recipient Email</label>
+        <input id="sendSigEmail" type="email" placeholder="email@example.com" style="width:100%;border:1.5px solid #e3e7f0;border-radius:7px;padding:10px 12px;font-size:14px;font-family:inherit;color:#1a2540">
+      </div>
+      <button id="btnSendSigConfirm" style="width:100%;padding:13px;border-radius:999px;font-size:14px;font-weight:700;cursor:pointer;border:none;background:#e85d04;color:#fff;font-family:inherit;margin-top:4px">Send Signature Request ↗</button>
+    </div>
+  </div>
+</div>
+</body></html>
     `);
     w.document.close();
   }
@@ -8393,7 +8415,12 @@ function renderDocRow(d) {
           ${d.signature_status !== 'signed' ? `<button class="doc-menu-item doc-rename" data-id="${d.id}"><span class="doc-menu-icon">✏️</span> Rename</button>` : ''}
           <button class="doc-menu-item doc-dl" data-id="${d.id}"><span class="doc-menu-icon">📥</span> Download</button>
           ${d.push_status !== 'sent' ? `<button class="doc-menu-item doc-retry" data-id="${d.id}"><span class="doc-menu-icon">↻</span> Retry Albi push</button>` : ''}
-          ${d.signature_status !== 'signed' ? `<button class="doc-menu-item doc-menu-danger doc-del" data-id="${d.id}"><span class="doc-menu-icon">✕</span> Delete</button>` : getUserRole() === 'admin' ? `<button class="doc-menu-item doc-menu-danger doc-reset-sig" data-id="${d.id}"><span class="doc-menu-icon">↺</span> Reset Signature</button>` : `<span class="doc-menu-item" style="color:var(--muted);cursor:default;opacity:.5;"><span class="doc-menu-icon">🔒</span> Locked — signed</span>`}
+          ${d.signature_status !== 'signed'
+            ? `<button class="doc-menu-item doc-menu-danger doc-del" data-id="${d.id}"><span class="doc-menu-icon">✕</span> Delete</button>`
+            : getUserRole() === 'admin'
+              ? `<button class="doc-menu-item doc-reset-sig" data-id="${d.id}"><span class="doc-menu-icon">↺</span> Reset Signature</button>
+                 <button class="doc-menu-item doc-menu-danger doc-del" data-id="${d.id}"><span class="doc-menu-icon">✕</span> Delete</button>`
+              : `<span class="doc-menu-item" style="color:var(--muted);cursor:default;opacity:.5;"><span class="doc-menu-icon">🔒</span> Locked — signed</span>`}
         </div>
         ${d.signature_status === 'signed' ? '<span class="sig-badge signed">✓ Signed</span>' : d.signature_status === 'pending' ? '<span class="sig-badge pending">Signature Needed</span>' : ''}
         <span class="doc-card-albi">${albiBadge}</span>
@@ -11067,6 +11094,16 @@ function renderTabContent() {
       });
     }
 
+
+    // Close send-sig modal on backdrop click
+    document.getElementById('modalSendSig').addEventListener('click', function(e) {
+      if (e.target === this) this.style.display = 'none';
+    });
+    // Allow Enter key in email field to submit
+    document.getElementById('sendSigEmail').addEventListener('keydown', function(e) {
+      if (e.key === 'Enter') document.getElementById('btnSendSigConfirm').click();
+    });
+
     // Print blank COS
     const printCosBtn = $('#btnPrintCos');
     if (printCosBtn) {
@@ -11137,18 +11174,33 @@ function renderTabContent() {
       const idx = all.findIndex(x => x._kind === 'doc' && x.url === state.documents.find(d => d.id === id)?.file_url);
       JG.openLightbox(all, idx >= 0 ? idx : 0);
     }));
-    // Send for Signature
+    // Send for Signature — open modal
     $$('.doc-send-sig').forEach(btn => btn.addEventListener('click', async e => {
       e.stopPropagation();
+      btn.closest('.doc-menu').hidden = true;
       const d = state.documents.find(x => x.id === btn.dataset.id);
       if (!d) return;
       const p = state.activeProject || {};
-      const recipientName = prompt('Recipient name:', p.customer_name || '');
-      if (!recipientName) return;
-      const recipientEmail = prompt('Recipient email:', p.customer_email || '');
-      if (!recipientEmail || !recipientEmail.includes('@')) { toast('Invalid email'); return; }
-      btn.closest('.doc-menu').hidden = true;
-      toast('Sending signature request…');
+      // Populate and show modal
+      const modal = document.getElementById('modalSendSig');
+      document.getElementById('sendSigDocName').textContent = cleanFilename(d.filename);
+      document.getElementById('sendSigName').value = p.customer_name || '';
+      document.getElementById('sendSigEmail').value = p.customer_email || '';
+      modal.style.display = 'flex';
+      document.getElementById('sendSigName').focus();
+
+      // Wire confirm button (replace any old listener)
+      const confirmBtn = document.getElementById('btnSendSigConfirm');
+      const newConfirm = confirmBtn.cloneNode(true);
+      confirmBtn.parentNode.replaceChild(newConfirm, confirmBtn);
+      newConfirm.addEventListener('click', async () => {
+        const recipientName = document.getElementById('sendSigName').value.trim();
+        const recipientEmail = document.getElementById('sendSigEmail').value.trim();
+        if (!recipientName) { document.getElementById('sendSigName').focus(); return; }
+        if (!recipientEmail || !recipientEmail.includes('@')) { document.getElementById('sendSigEmail').focus(); return; }
+        modal.style.display = 'none';
+        newConfirm.disabled = true;
+        toast('Sending signature request…');
       try {
         const token = crypto.randomUUID();
         const { error: tokErr } = await sb.from('rebuild_documents').update({
@@ -11209,8 +11261,10 @@ function renderTabContent() {
           mode: 'no-cors',
         });
         toast('✓ Signature request sent to ' + recipientEmail);
+        newConfirm.disabled = false;
         await loadDocuments(); renderDetail();
-      } catch (err) { toast('Failed: ' + err.message); }
+      } catch (err) { toast('Failed: ' + err.message); newConfirm.disabled = false; }
+      });
     }));
 
     // Mark as Signed (manual)
