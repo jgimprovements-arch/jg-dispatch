@@ -95,6 +95,7 @@
 <div id="main"><div class="full-page error-state" style="color:var(--muted);">Loading…</div></div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
 <script type="module">
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 const SB_URL = 'https://nuykvchgecpiuikoerze.supabase.co';
@@ -353,90 +354,122 @@ async function emailSignedCopy(doc, signedUrl, signerName) {
 }
 
 async function generateSignedPdf(doc, customerSigDataUrl) {
-  if (!window.jspdf) { console.error('jsPDF not loaded'); return null; }
+  const { PDFDocument, rgb, StandardFonts } = window.PDFLib;
   const { jsPDF } = window.jspdf;
-  const pdf = new jsPDF({ unit: 'pt', format: 'letter' });
-  const pageW = pdf.internal.pageSize.getWidth();
-  const pageH = pdf.internal.pageSize.getHeight();
-  const margin = 48;
-  let y = margin;
   const p = doc.project || {};
   const title = friendlyDocTitle(doc.filename);
+
+  // ── Step 1: fetch and load the original PDF ──────────────────
+  let origPdfDoc = null;
+  try {
+    const resp = await fetch(doc.file_url);
+    const origBytes = await resp.arrayBuffer();
+    origPdfDoc = await PDFDocument.load(origBytes, { ignoreEncryption: true });
+  } catch (e) {
+    console.warn('Could not load original PDF, building signature-only doc:', e);
+  }
+
+  // ── Step 2: build the signature page with jsPDF ───────────────
+  const sigPdf = new jsPDF({ unit: 'pt', format: 'letter' });
+  const pageW = sigPdf.internal.pageSize.getWidth();
+  const pageH = sigPdf.internal.pageSize.getHeight();
+  const margin = 48;
+  let y = margin;
   const hw = (pageW - margin * 2) / 2 - 8;
 
-  // Header
-  pdf.setFillColor(13, 45, 94);
-  pdf.rect(0, 0, pageW, 70, 'F');
-  try { pdf.addImage(JG_LOGO_IMG, 'JPEG', margin - 10, 3, 88, 64); } catch(e) {}
-  pdf.setTextColor(255, 255, 255);
-  pdf.setFont('helvetica', 'bold'); pdf.setFontSize(16);
-  pdf.text('JG Restoration', margin + 84, 34);
-  pdf.setFont('helvetica', 'normal'); pdf.setFontSize(8);
-  pdf.setTextColor(245, 166, 35);
-  pdf.text('FIRE · WATER · MOLD · RECONSTRUCTION', margin + 84, 50);
-  pdf.setTextColor(255, 255, 255); pdf.setFontSize(9);
-  pdf.text('1720 N Silverspring Dr, Appleton WI 54913  ·  920-428-4200', pageW - margin, 34, { align: 'right' });
-  pdf.text('info@jg-restoration.com', pageW - margin, 50, { align: 'right' });
+  // Header band
+  sigPdf.setFillColor(13,45,94); sigPdf.rect(0,0,pageW,70,'F');
+  try { sigPdf.addImage(JG_LOGO_IMG,'JPEG',margin-10,3,88,64); } catch(e){}
+  sigPdf.setTextColor(255,255,255); sigPdf.setFont('helvetica','bold'); sigPdf.setFontSize(16);
+  sigPdf.text('JG Restoration', margin+84, 34);
+  sigPdf.setFont('helvetica','normal'); sigPdf.setFontSize(8); sigPdf.setTextColor(245,166,35);
+  sigPdf.text('FIRE · WATER · MOLD · RECONSTRUCTION', margin+84, 50);
+  sigPdf.setTextColor(255,255,255); sigPdf.setFontSize(9);
+  sigPdf.text('1720 N Silverspring Dr, Appleton WI 54913  ·  920-428-4200', pageW-margin, 34, {align:'right'});
+  sigPdf.text('info@jg-restoration.com', pageW-margin, 50, {align:'right'});
   y = 90;
 
-  // Title
-  pdf.setFont('helvetica', 'bold'); pdf.setFontSize(14); pdf.setTextColor(13, 45, 94);
-  pdf.text(title, pageW / 2, y, { align: 'center' }); y += 22;
+  // Title + info
+  sigPdf.setFont('helvetica','bold'); sigPdf.setFontSize(13); sigPdf.setTextColor(13,45,94);
+  sigPdf.text('EXECUTION PAGE', pageW/2, y, {align:'center'}); y += 6;
+  sigPdf.setFont('helvetica','normal'); sigPdf.setFontSize(10); sigPdf.setTextColor(120,132,160);
+  sigPdf.text(title, pageW/2, y+12, {align:'center'}); y += 28;
 
-  // Info fields
   const drawField = (label, value, x, fy, w) => {
-    pdf.setFont('helvetica', 'bold'); pdf.setFontSize(8); pdf.setTextColor(120, 132, 160);
-    pdf.text(label, x, fy);
-    pdf.setFont('helvetica', value ? 'bold' : 'normal'); pdf.setFontSize(10);
-    pdf.setTextColor(value ? 13 : 180, value ? 45 : 180, value ? 94 : 180);
-    pdf.text(value || '________________________________', x, fy + 13);
-    pdf.setDrawColor(220, 224, 234); pdf.line(x, fy + 16, x + w, fy + 16);
+    sigPdf.setFont('helvetica','bold'); sigPdf.setFontSize(7.5); sigPdf.setTextColor(120,132,160);
+    sigPdf.text(label, x, fy);
+    sigPdf.setFont('helvetica', value?'bold':'normal'); sigPdf.setFontSize(10);
+    sigPdf.setTextColor(value?13:180, value?45:180, value?94:180);
+    sigPdf.text(value||'________________________________', x, fy+13);
+    sigPdf.setDrawColor(220,224,234); sigPdf.line(x, fy+16, x+w, fy+16);
   };
-  drawField('CUSTOMER NAME', p.customer_name || '', margin, y, hw);
-  drawField('DATE', new Date(doc.signed_at).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }), margin + hw + 16, y, hw); y += 36;
-  drawField('PROPERTY ADDRESS', p.property_address || '', margin, y, pageW - margin * 2); y += 36;
+  drawField('CUSTOMER NAME', p.customer_name||'', margin, y, hw);
+  drawField('DATE SIGNED', new Date(doc.signed_at).toLocaleDateString('en-US',{month:'long',day:'numeric',year:'numeric'}), margin+hw+16, y, hw); y+=36;
+  drawField('PROPERTY ADDRESS', p.property_address||'', margin, y, pageW-margin*2); y+=36;
+  if (p.albi_job_number) { drawField('PROJECT NUMBER', p.albi_job_number, margin, y, hw); y+=36; }
+  y+=8;
 
   // Execution block
-  y += 10;
-  pdf.setFillColor(240, 250, 244); pdf.setDrawColor(45, 156, 95);
-  pdf.roundedRect(margin, y, pageW - margin * 2, 140, 6, 6, 'FD');
-  pdf.setFont('helvetica', 'bold'); pdf.setFontSize(9); pdf.setTextColor(45, 156, 95);
-  pdf.text('FULLY EXECUTED — BOTH PARTIES HAVE SIGNED', margin + 14, y + 16);
+  sigPdf.setFillColor(240,250,244); sigPdf.setDrawColor(45,156,95);
+  sigPdf.roundedRect(margin, y, pageW-margin*2, 148, 6, 6, 'FD');
+  sigPdf.setFont('helvetica','bold'); sigPdf.setFontSize(9); sigPdf.setTextColor(45,156,95);
+  sigPdf.text('FULLY EXECUTED — BOTH PARTIES HAVE SIGNED', margin+14, y+16);
+  const colW = (pageW-margin*2-28)/2;
 
-  // JG signature column
-  const colW = (pageW - margin * 2 - 20) / 2;
-  pdf.setFont('helvetica', 'bold'); pdf.setFontSize(8); pdf.setTextColor(120, 132, 160);
-  pdf.text('JG RESTORATION (PRE-SIGNED)', margin + 14, y + 32);
-  try { pdf.addImage(JG_SIGNATURE_IMG, 'PNG', margin + 14, y + 38, 120, 20); } catch(e) {}
-  pdf.setDrawColor(13, 45, 94); pdf.line(margin + 14, y + 68, margin + 14 + colW - 10, y + 68);
-  pdf.setFont('helvetica', 'bold'); pdf.setFontSize(9); pdf.setTextColor(13, 45, 94);
-  pdf.text(JG_SIGNER_NAME, margin + 14, y + 80);
-  pdf.setFont('helvetica', 'normal'); pdf.setFontSize(8); pdf.setTextColor(80, 80, 80);
-  pdf.text('Authorized Representative', margin + 14, y + 90);
+  // JG side
+  sigPdf.setFont('helvetica','bold'); sigPdf.setFontSize(7.5); sigPdf.setTextColor(120,132,160);
+  sigPdf.text('JG RESTORATION (PRE-SIGNED)', margin+14, y+30);
+  try { sigPdf.addImage(JG_SIGNATURE_IMG,'PNG',margin+14,y+36,110,22); } catch(e){}
+  sigPdf.setDrawColor(13,45,94); sigPdf.line(margin+14, y+66, margin+14+colW, y+66);
+  sigPdf.setFont('helvetica','bold'); sigPdf.setFontSize(9); sigPdf.setTextColor(13,45,94);
+  sigPdf.text(JG_SIGNER_NAME, margin+14, y+78);
+  sigPdf.setFont('helvetica','normal'); sigPdf.setFontSize(8); sigPdf.setTextColor(80,80,80);
+  sigPdf.text('Authorized Representative, JJ Greil Enterprises LLC', margin+14, y+89);
 
-  // Customer signature column
-  const cx = margin + 14 + colW + 10;
-  pdf.setFont('helvetica', 'bold'); pdf.setFontSize(8); pdf.setTextColor(120, 132, 160);
-  pdf.text('CUSTOMER SIGNATURE', cx, y + 32);
-  try { pdf.addImage(customerSigDataUrl, 'PNG', cx, y + 36, 140, 28); } catch(e) {}
-  pdf.setDrawColor(13, 45, 94); pdf.line(cx, y + 68, cx + colW - 10, y + 68);
-  pdf.setFont('helvetica', 'bold'); pdf.setFontSize(9); pdf.setTextColor(13, 45, 94);
-  pdf.text(doc.signed_by_name || '', cx, y + 80);
-  pdf.setFont('helvetica', 'normal'); pdf.setFontSize(8); pdf.setTextColor(80, 80, 80);
-  pdf.text('Date: ' + new Date(doc.signed_at).toLocaleDateString(), cx, y + 92);
-  pdf.text('IP: ' + (doc.signed_ip || 'not captured'), cx, y + 102);
-  y += 150;
+  // Customer side
+  const cx = margin+14+colW+14;
+  sigPdf.setFont('helvetica','bold'); sigPdf.setFontSize(7.5); sigPdf.setTextColor(120,132,160);
+  sigPdf.text('CUSTOMER SIGNATURE', cx, y+30);
+  try { sigPdf.addImage(customerSigDataUrl,'PNG',cx,y+34,140,30); } catch(e){}
+  sigPdf.setDrawColor(13,45,94); sigPdf.line(cx, y+66, cx+colW, y+66);
+  sigPdf.setFont('helvetica','bold'); sigPdf.setFontSize(9); sigPdf.setTextColor(13,45,94);
+  sigPdf.text(doc.signed_by_name||'', cx, y+78);
+  sigPdf.setFont('helvetica','normal'); sigPdf.setFontSize(8); sigPdf.setTextColor(80,80,80);
+  sigPdf.text('Date: '+new Date(doc.signed_at).toLocaleDateString(), cx, y+89);
+  sigPdf.text('IP: '+(doc.signed_ip||'not captured'), cx, y+99);
+  y+=158;
 
-  // Legal notice
-  pdf.setFont('helvetica', 'italic'); pdf.setFontSize(8); pdf.setTextColor(120, 132, 160);
-  const notice = 'This document was electronically signed in accordance with the Electronic Signatures in Global and National Commerce (ESIGN) Act. The electronic signature above constitutes a legal signature and is binding upon the parties.';
-  pdf.splitTextToSize(notice, pageW - margin * 2).forEach(line => { pdf.text(line, margin, y); y += 10; });
+  // ESIGN notice
+  sigPdf.setFont('helvetica','italic'); sigPdf.setFontSize(7.5); sigPdf.setTextColor(120,132,160);
+  const notice = 'This document was electronically signed under the Electronic Signatures in Global and National Commerce (ESIGN) Act. The signatures above constitute legally binding signatures of the parties.';
+  sigPdf.splitTextToSize(notice, pageW-margin*2).forEach(line => { sigPdf.text(line,margin,y); y+=10; });
 
   // Footer
-  pdf.setFontSize(7); pdf.setTextColor(120, 132, 160);
-  pdf.text('JG Restoration · JJ Greil Enterprises LLC · 1720 N Silverspring Dr, Appleton WI 54913 · 920-428-4200', pageW / 2, pageH - 24, { align: 'center' });
+  sigPdf.setFontSize(7); sigPdf.text('JG Restoration · JJ Greil Enterprises LLC · 920-428-4200 · info@jg-restoration.com', pageW/2, pageH-22, {align:'center'});
 
-  return pdf.output('blob');
+  // Convert sig page to bytes
+  const sigPageBytes = sigPdf.output('arraybuffer');
+
+  // ── Step 3: merge original + signature page ───────────────────
+  const finalDoc = await PDFDocument.create();
+
+  if (origPdfDoc) {
+    const origPages = await finalDoc.copyPages(origPdfDoc, origPdfDoc.getPageIndices());
+    origPages.forEach(pg => finalDoc.addPage(pg));
+  }
+
+  // Load sig page PDF and copy it in
+  const sigDoc = await PDFDocument.load(sigPageBytes);
+  const [sigPage] = await finalDoc.copyPages(sigDoc, [0]);
+  finalDoc.addPage(sigPage);
+
+  // Metadata
+  finalDoc.setTitle(title + ' — Signed');
+  finalDoc.setAuthor('JG Restoration');
+  finalDoc.setCreationDate(new Date(doc.signed_at));
+
+  const finalBytes = await finalDoc.save();
+  return new Blob([finalBytes], { type: 'application/pdf' });
 }
 
 async function uploadSignedPdf(doc, pdfBlob) {
