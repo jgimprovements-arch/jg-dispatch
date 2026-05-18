@@ -5086,6 +5086,21 @@
   .doc-menu-item:hover { background: var(--bg); }
   .doc-menu-item.doc-menu-danger { color: var(--red); }
   .doc-menu-item.doc-menu-danger:hover { background: rgba(214,69,69,.08); }
+  .sig-badge {
+    position: absolute;
+    top: 6px;
+    left: 6px;
+    font-size: 10px;
+    font-weight: 700;
+    padding: 2px 8px;
+    border-radius: 999px;
+    letter-spacing: .3px;
+    pointer-events: none;
+    z-index: 2;
+  }
+  .sig-badge.signed { background: #1f8b4c; color: #fff; }
+  .sig-badge.pending { background: var(--orange); color: #fff; }
+  .sig-badge.none { display: none; }
   .doc-menu-icon {
     width: 16px;
     text-align: center;
@@ -8323,12 +8338,18 @@ function renderDocRow(d) {
         <button class="doc-menu-trigger doc-card-menu-btn" data-id="${d.id}" title="More actions" aria-label="More actions">⋮</button>
         <div class="doc-menu" data-doc-menu="${d.id}" hidden>
           ${isPhoto ? `<button class="doc-menu-item doc-photo-edit" data-id="${d.id}"><span class="doc-menu-icon">✎</span> Edit photo info</button>` : ''}
+          <button class="doc-menu-item doc-send-sig" data-id="${d.id}"><span class="doc-menu-icon">✍</span> Send for Signature</button>
+          ${d.signature_status === 'signed'
+            ? `<button class="doc-menu-item doc-mark-unsigned" data-id="${d.id}"><span class="doc-menu-icon">↩</span> Mark as Unsigned</button>`
+            : `<button class="doc-menu-item doc-mark-signed" data-id="${d.id}"><span class="doc-menu-icon">✓</span> Mark as Signed</button>`}
+          ${d.signature_status === 'signed' && d.signed_pdf_url ? `<a class="doc-menu-item" href="${d.signed_pdf_url}" target="_blank"><span class="doc-menu-icon">📄</span> View Signed Copy</a>` : ''}
           <button class="doc-menu-item doc-toggle-vis" data-id="${d.id}"><span class="doc-menu-icon">${d.customer_visible ? '🔒' : '👁️'}</span> ${d.customer_visible ? 'Hide from customer' : 'Show customer'}</button>
           <button class="doc-menu-item doc-rename" data-id="${d.id}"><span class="doc-menu-icon">✏️</span> Rename</button>
           <button class="doc-menu-item doc-dl" data-id="${d.id}"><span class="doc-menu-icon">📥</span> Download</button>
           ${d.push_status !== 'sent' ? `<button class="doc-menu-item doc-retry" data-id="${d.id}"><span class="doc-menu-icon">↻</span> Retry Albi push</button>` : ''}
           <button class="doc-menu-item doc-menu-danger doc-del" data-id="${d.id}"><span class="doc-menu-icon">✕</span> Delete</button>
         </div>
+        ${d.signature_status === 'signed' ? '<span class="sig-badge signed">✓ Signed</span>' : d.signature_status === 'pending' ? '<span class="sig-badge pending">Signature Needed</span>' : ''}
         <span class="doc-card-albi">${albiBadge}</span>
         ${d.customer_visible ? '<span class="doc-card-cust-badge" title="Visible to customer">👁️</span>' : ''}
       </div>
@@ -10937,6 +10958,95 @@ function renderTabContent() {
       const idx = all.findIndex(x => x._kind === 'doc' && x.url === state.documents.find(d => d.id === id)?.file_url);
       JG.openLightbox(all, idx >= 0 ? idx : 0);
     }));
+    // Send for Signature
+    $$('.doc-send-sig').forEach(btn => btn.addEventListener('click', async e => {
+      e.stopPropagation();
+      const d = state.documents.find(x => x.id === btn.dataset.id);
+      if (!d) return;
+      const p = state.activeProject || {};
+      // Get recipient
+      const recipientName = prompt('Recipient name:', p.customer_name || '');
+      if (!recipientName) return;
+      const recipientEmail = prompt('Recipient email:', p.customer_email || '');
+      if (!recipientEmail || !recipientEmail.includes('@')) { toast('Invalid email'); return; }
+      btn.closest('.doc-menu').hidden = true;
+      toast('Sending signature request…');
+      try {
+        const token = crypto.randomUUID();
+        const { error: tokErr } = await sb.from('rebuild_documents').update({
+          signature_status: 'pending',
+          signature_token: token,
+          signature_sent_at: new Date().toISOString(),
+          signature_sent_to_email: recipientEmail,
+          signature_sent_to_name: recipientName,
+        }).eq('id', d.id);
+        if (tokErr) throw tokErr;
+        const signUrl = 'https://jgimprovements-arch.github.io/jg-dispatch/sign.html?t=' + token;
+        const MESSAGE_HOOK = 'https://hooks.zapier.com/hooks/catch/12653197/uvugxag/';
+        await fetch(MESSAGE_HOOK, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            channel: 'email',
+            to_email: recipientEmail,
+            from_email: 'info@jg-restoration.com',
+            from_name: p.albi_pm_name || 'JG Restoration',
+            recipient_name: recipientName,
+            recipient_type: 'customer',
+            subject: 'Signature Required: ' + d.filename.replace(/^\d{8,}[_-]+/, '') + ' — JG Restoration',
+            body: buildBrandedEmail({
+              preheader: 'A document requires your signature',
+              headline: 'Document Signature Required',
+              intro: 'Hi ' + recipientName.split(' ')[0] + ',',
+              bodyHtml: '<p>JG Restoration has sent you a document that requires your signature:</p><p><strong>' + d.filename.replace(/^\d{8,}[_-]+/, '') + '</strong></p><p>Please review and sign at your earliest convenience.</p>',
+              ctaLabel: 'Review & Sign Document',
+              ctaUrl: signUrl,
+              signoffName: p.albi_pm_name || 'JG Restoration',
+            }),
+            attachment_count: 0,
+            attachment_urls: '',
+          }),
+          mode: 'no-cors',
+        });
+        toast('\u2713 Signature request sent to ' + recipientEmail);
+        await loadDocuments();
+        renderDetail();
+      } catch (err) {
+        toast('Failed: ' + err.message);
+      }
+    }));
+
+    // Mark as Signed (manual)
+    $$('.doc-mark-signed').forEach(btn => btn.addEventListener('click', async e => {
+      e.stopPropagation();
+      if (!confirm('Mark this document as signed?')) return;
+      const { error } = await sb.from('rebuild_documents').update({
+        signature_status: 'signed',
+        signed_at: new Date().toISOString(),
+        signed_by_name: 'Manual — marked by ' + (state.pmEmail || state.userEmail || 'PM'),
+      }).eq('id', btn.dataset.id);
+      if (error) { toast('Failed: ' + error.message); return; }
+      toast('\u2713 Marked as signed');
+      await loadDocuments();
+      renderDetail();
+    }));
+
+    // Mark as Unsigned
+    $$('.doc-mark-unsigned').forEach(btn => btn.addEventListener('click', async e => {
+      e.stopPropagation();
+      if (!confirm('Remove signed status from this document?')) return;
+      const { error } = await sb.from('rebuild_documents').update({
+        signature_status: 'none',
+        signed_at: null,
+        signed_by_name: null,
+        signed_pdf_url: null,
+      }).eq('id', btn.dataset.id);
+      if (error) { toast('Failed: ' + error.message); return; }
+      toast('Signature status cleared');
+      await loadDocuments();
+      renderDetail();
+    }));
+
     $$('.doc-retry').forEach(btn => btn.addEventListener('click', async e => {
       e.stopPropagation();
       const d = state.documents.find(x => x.id === btn.dataset.id);
