@@ -8309,6 +8309,7 @@ function renderDocumentsTab() {
     <div class="section-head">
       <h3>Project Documents</h3>
       <div style="display:flex;gap:8px;align-items:center;">
+        <button class="btn-pill-orange" id="btnRegenDocs" title="Delete and regenerate standard docs (Work Auth, Insurance Recovery, COS)">↺ Regen Docs</button>
         <button class="btn-pill-orange" id="btnBuildReport">📑 Build PDF Report</button>
       </div>
     </div>
@@ -10978,10 +10979,12 @@ function renderTabContent() {
     }
     $$('.doc-del').forEach(btn => btn.addEventListener('click', e => {
       e.stopPropagation();
+      document.querySelectorAll('.doc-menu:not([hidden])').forEach(m => m.hidden = true);
       deleteDocument(btn.dataset.id);
     }));
     $$('.doc-dl').forEach(btn => btn.addEventListener('click', e => {
       e.stopPropagation();
+      document.querySelectorAll('.doc-menu:not([hidden])').forEach(m => m.hidden = true);
       const d = state.documents.find(x => x.id === btn.dataset.id);
       if (d) JG.downloadFile(d.file_url, d.filename);
     }));
@@ -11013,6 +11016,40 @@ function renderTabContent() {
       await loadDocuments();
       renderDetail();
     }));
+    // Regenerate standard docs
+    const regenBtn = $('#btnRegenDocs');
+    if (regenBtn) {
+      regenBtn.addEventListener('click', async () => {
+        if (!confirm('Delete and regenerate all standard documents (Work Auth, Insurance Recovery, COS) for this project?\n\nAny unsigned copies will be replaced. Signed docs are preserved.')) return;
+        regenBtn.disabled = true;
+        regenBtn.textContent = 'Regenerating…';
+        try {
+          // Delete existing system-generated standard docs (unsigned only)
+          const toDelete = state.documents.filter(d =>
+            d.uploaded_by_email === 'system@jg-restoration.com' &&
+            d.signature_status !== 'signed' &&
+            STANDARD_DOCS.some(sd => d.filename.startsWith(sd.key + '_'))
+          );
+          for (const d of toDelete) {
+            if (d.file_url) {
+              const storagePath = d.file_url.split('/rebuild-documents/')[1];
+              if (storagePath) await sb.storage.from('rebuild-documents').remove([storagePath]);
+            }
+            await sb.from('rebuild_documents').delete().eq('id', d.id);
+          }
+          // Force regeneration
+          await ensureStandardDocs(state.activeProjectId);
+          await loadDocuments();
+          renderDetail();
+          toast('\u2713 Standard docs regenerated');
+        } catch (e) {
+          toast('Regen failed: ' + e.message);
+          regenBtn.disabled = false;
+          regenBtn.textContent = '\u21ba Regen Docs';
+        }
+      });
+    }
+
     // Print blank COS
     const printCosBtn = $('#btnPrintCos');
     if (printCosBtn) {
