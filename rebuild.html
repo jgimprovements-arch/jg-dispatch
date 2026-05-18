@@ -7291,9 +7291,23 @@ async function ensureStandardDocs(projectId) {
   const { data: existing } = await sb.from('rebuild_documents')
     .select('filename').eq('project_id', projectId).eq('category', 'Customer Documents');
   const existingKeys = (existing || []).map(function(d) { return d.filename; });
+  // A standard doc "exists" if either the original generated file
+  // (work_auth_*, ins_recovery_*, cos_*) OR its signed/renamed variant
+  // ("Signed Work Authorization - ...", etc.) is already present.
+  // Without the signed-name check, signing renames the file and this
+  // check no longer matches, causing a fresh blank duplicate to be
+  // regenerated on every load.
+  const SIGNED_NAME_BY_KEY = {
+    work_auth:    /^signed work authorization\b/i,
+    ins_recovery: /^signed insurance recovery agreement\b/i,
+    cos:          /^signed certificate of satisfaction\b/i,
+  };
   for (var di = 0; di < STANDARD_DOCS.length; di++) {
     var docDef = STANDARD_DOCS[di];
-    if (existingKeys.some(function(f) { return f.startsWith(docDef.key + '_'); })) continue;
+    var signedRe = SIGNED_NAME_BY_KEY[docDef.key];
+    if (existingKeys.some(function(f) {
+          return f.startsWith(docDef.key + '_') || (signedRe && signedRe.test(f));
+        })) continue;
     try {
       var pdfBlob = null;
       if (docDef.key === 'work_auth') pdfBlob = generateWorkAuthPdf(p);
@@ -8493,35 +8507,82 @@ function showReportError(msg) {
   setTimeout(() => { if (card.parentNode) card.remove(); }, 10000);
 }
 
+// Backup pdf.js worker if the primary CDN fails to load the worker.
+const PDFJS_WORKER_PRIMARY = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+const PDFJS_WORKER_BACKUP  = 'https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
+
 async function renderPdfThumbnail(el) {
-  if (!window.pdfjsLib || el.dataset.thumbRendered === '1') return;
+  if (el.dataset.thumbRendered === '1') return;
   const url = el.dataset.pdfThumb;
   if (!url) return;
+
+  if (!window.pdfjsLib) {
+    el.dataset.thumbRendered = '0';
+    el.title = 'PDF preview unavailable (pdf.js not loaded)';
+    console.warn('PDF thumb skipped: pdfjsLib not loaded', url);
+    return;
+  }
   el.dataset.thumbRendered = '1';
+
+  // Step 1: fetch the bytes ourselves so CORS / 403 / 404 are explicit and
+  // separable from pdf.js parse failures. This also avoids pdf.js range
+  // requests entirely (some storage CORS configs reject Range headers).
+  let bytes;
   try {
+    const resp = await fetch(url, { mode: 'cors', credentials: 'omit', cache: 'force-cache' });
+    if (!resp.ok) {
+      el.dataset.thumbRendered = '0';
+      el.title = `PDF preview failed: HTTP ${resp.status}`;
+      console.warn('PDF thumb fetch HTTP error', resp.status, url);
+      return;
+    }
+    bytes = await resp.arrayBuffer();
+  } catch (fetchErr) {
+    el.dataset.thumbRendered = '0';
+    el.title = 'PDF preview failed: network/CORS blocked';
+    console.warn('PDF thumb fetch blocked (CORS/network)', url, fetchErr);
+    return;
+  }
+
+  // Step 2: parse + render with pdf.js, retrying once with a backup worker
+  // if the primary worker died (global CDN failure).
+  async function tryRender() {
     const pdf = await window.pdfjsLib.getDocument({
-      url,
-      withCredentials: false,
+      data: bytes.slice(0),
       disableRange: true,
       disableStream: true,
     }).promise;
     const page = await pdf.getPage(1);
-    const viewport = page.getViewport({ scale: 1 });
     const targetW = 120;
-    const scale = targetW / viewport.width;
+    const scale = targetW / page.getViewport({ scale: 1 }).width;
     const scaled = page.getViewport({ scale });
     const canvas = document.createElement('canvas');
     canvas.width = scaled.width;
     canvas.height = scaled.height;
-    const ctx = canvas.getContext('2d');
-    await page.render({ canvasContext: ctx, viewport: scaled }).promise;
-    const dataUrl = canvas.toDataURL('image/jpeg', 0.7);
+    await page.render({ canvasContext: canvas.getContext('2d'), viewport: scaled }).promise;
+    return canvas.toDataURL('image/jpeg', 0.7);
+  }
+
+  try {
+    let dataUrl;
+    try {
+      dataUrl = await tryRender();
+    } catch (firstErr) {
+      // Swap to the backup worker once per session and retry.
+      if (!window._pdfjsBackupTried) {
+        window._pdfjsBackupTried = true;
+        window.pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS_WORKER_BACKUP;
+        console.warn('pdf.js primary worker failed, retrying with backup CDN', firstErr);
+      }
+      dataUrl = await tryRender();
+    }
     el.innerHTML = `<img src="${dataUrl}" alt="PDF preview">`;
+    el.title = '';
     el.classList.add('doc-thumb-pdf-rendered', 'doc-recent-pdf', 'rendered');
   } catch (e) {
-    // Keep PDF fallback label on error
     el.dataset.thumbRendered = '0';
-    console.warn('PDF thumb render failed', url, e);
+    el.title = 'PDF preview failed: could not render';
+    console.warn('PDF thumb render failed (post-fetch)', url, e);
   }
 }
 
