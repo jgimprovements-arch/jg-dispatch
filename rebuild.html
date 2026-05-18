@@ -11144,30 +11144,50 @@ function renderTabContent() {
         }).eq('id', d.id);
         if (tokErr) throw tokErr;
         const signUrl = 'https://jgimprovements-arch.github.io/jg-dispatch/sign.html?t=' + token;
-        const MESSAGE_HOOK = 'https://hooks.zapier.com/hooks/catch/12653197/uvugxag/';
         const custFirst = recipientName.split(' ')[0];
         const fname = (d.filename || '').replace(/^\d{8,}[_-]+/, '');
+        const fromEmail = 'info@jg-restoration.com';
+        const fromName = p.albi_pm_name || 'JG Restoration';
+        const subject = 'Signature Required: ' + fname + ' · JG Restoration';
+        const emailBody = buildBrandedEmail({
+          preheader: 'A document requires your signature',
+          headline: 'Document Signature Required',
+          intro: 'Hi ' + custFirst + ',',
+          bodyHtml: '<p>JG Restoration has sent you a document that requires your signature:</p><p><strong>' + fname + '</strong></p><p>Please click the button below to review and sign at your earliest convenience.</p>',
+          ctaLabel: 'Review & Sign Document',
+          ctaUrl: signUrl,
+          signoffName: fromName,
+        });
+        // Log to rebuild_messages
+        await sb.from('rebuild_messages').insert({
+          project_id: p.id,
+          direction: 'outbound',
+          channel: 'email',
+          status: 'sent',
+          subject,
+          body: emailBody,
+          recipient_type: 'customer',
+          recipient_name: recipientName,
+          recipient_email: recipientEmail,
+          sent_by_name: fromName,
+          sent_by_email: fromEmail,
+        });
+        // Fire Zapier to actually send
         await fetch(MESSAGE_HOOK, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
+            project_id: p.id,
             channel: 'email',
-            to_email: recipientEmail,
-            from_email: 'info@jg-restoration.com',
-            from_name: p.albi_pm_name || 'JG Restoration',
-            recipient_name: recipientName,
+            direction: 'outbound',
             recipient_type: 'customer',
-            subject: 'Signature Required: ' + fname + ' · JG Restoration',
-            body: buildBrandedEmail({
-              preheader: 'A document requires your signature',
-              headline: 'Document Signature Required',
-              intro: 'Hi ' + custFirst + ',',
-              bodyHtml: '<p>JG Restoration has sent you a document that requires your signature:</p><p><strong>' + fname + '</strong></p><p>Please review and sign at your earliest convenience.</p>',
-              ctaLabel: 'Review & Sign Document',
-              ctaUrl: signUrl,
-              signoffName: p.albi_pm_name || 'JG Restoration',
-            }),
-            attachment_count: 0, attachment_urls: '',
+            recipient_name: recipientName,
+            recipient_email: recipientEmail,
+            to_email: recipientEmail,
+            from_email: fromEmail,
+            from_name: fromName,
+            subject,
+            body: emailBody,
           }),
           mode: 'no-cors',
         });
