@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Capture JG Signature</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, sans-serif; background: #f4f6fb; display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+.card { background: #fff; border-radius: 16px; padding: 32px; max-width: 600px; width: 100%; box-shadow: 0 8px 32px rgba(13,45,94,.15); }
+h1 { color: #0d2d5e; font-size: 20px; margin-bottom: 6px; }
+p { color: #7884a0; font-size: 13px; margin-bottom: 20px; }
+.pad-wrap { border: 2px dashed #e3e7f0; border-radius: 10px; background: #fafbfd; position: relative; margin-bottom: 16px; }
+canvas { display: block; width: 100%; height: 200px; cursor: crosshair; touch-action: none; border-radius: 10px; }
+.hint { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #b0baca; font-size: 16px; pointer-events: none; }
+.hint.gone { display: none; }
+.btns { display: flex; gap: 10px; }
+button { padding: 11px 24px; border-radius: 999px; font-size: 14px; font-weight: 700; cursor: pointer; border: none; font-family: inherit; }
+.btn-clear { background: #f4f6fb; color: #0d2d5e; border: 1px solid #e3e7f0; }
+.btn-save { background: #e85d04; color: #fff; flex: 1; }
+.btn-save:disabled { opacity: .4; }
+.output { margin-top: 20px; padding: 14px; background: #f0f8f0; border: 1px solid #2d9c5f; border-radius: 8px; display: none; }
+.output h3 { color: #2d9c5f; font-size: 13px; margin-bottom: 8px; }
+.output textarea { width: 100%; height: 80px; font-size: 11px; font-family: monospace; border: 1px solid #e3e7f0; border-radius: 6px; padding: 8px; resize: none; }
+.output .copy-btn { margin-top: 8px; padding: 8px 16px; background: #2d9c5f; color: #fff; border: none; border-radius: 6px; font-weight: 700; cursor: pointer; font-size: 12px; }
+.preview { margin-top: 12px; }
+.preview img { border: 1px solid #e3e7f0; border-radius: 6px; max-width: 100%; }
+.step { background: #fff8f0; border: 1px solid rgba(232,93,4,.3); border-radius: 8px; padding: 12px 14px; margin-bottom: 16px; font-size: 13px; color: #0d2d5e; line-height: 1.6; }
+.step b { color: #e85d04; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>Capture Your Real Signature</h1>
+  <div class="step">
+    <b>Instructions:</b><br>
+    1. Sign your name below using your mouse or finger<br>
+    2. Click <b>Save Signature</b><br>
+    3. Copy the base64 output and send it to the developer to embed in all docs
+  </div>
+  <p>Sign exactly as you would on a contract. Take your time — this will be on every document.</p>
+
+  <div class="pad-wrap" id="padWrap">
+    <canvas id="sigCanvas"></canvas>
+    <div class="hint" id="hint">✍ Sign here</div>
+  </div>
+
+  <div class="btns">
+    <button class="btn-clear" id="btnClear">Clear</button>
+    <button class="btn-save" id="btnSave" disabled>Save Signature</button>
+  </div>
+
+  <div class="output" id="output">
+    <h3>✅ Signature captured! Copy the text below and send to your developer:</h3>
+    <div class="preview"><img id="preview" alt="Your signature"></div>
+    <textarea id="b64out" readonly></textarea>
+    <button class="copy-btn" id="copyBtn">📋 Copy to Clipboard</button>
+  </div>
+</div>
+
+<script>
+const canvas = document.getElementById('sigCanvas');
+const ctx = canvas.getContext('2d');
+const hint = document.getElementById('hint');
+let drawing = false, hasSig = false;
+
+ctx.strokeStyle = '#0d2d5e';
+ctx.lineWidth = 2.5;
+ctx.lineCap = 'round';
+ctx.lineJoin = 'round';
+
+function resize() {
+  const r = canvas.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = r.width * dpr;
+  canvas.height = r.height * dpr;
+  ctx.scale(dpr, dpr);
+  ctx.strokeStyle = '#0d2d5e';
+  ctx.lineWidth = 2.5;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+}
+resize();
+window.addEventListener('resize', resize);
+
+function getXY(e) {
+  const r = canvas.getBoundingClientRect();
+  const src = e.touches ? e.touches[0] : e;
+  return { x: src.clientX - r.left, y: src.clientY - r.top };
+}
+
+canvas.addEventListener('mousedown', e => { drawing = true; const p = getXY(e); ctx.beginPath(); ctx.moveTo(p.x, p.y); });
+canvas.addEventListener('mousemove', e => { if (!drawing) return; const p = getXY(e); ctx.lineTo(p.x, p.y); ctx.stroke(); hasSig = true; hint.classList.add('gone'); document.getElementById('btnSave').disabled = false; });
+canvas.addEventListener('mouseup', () => drawing = false);
+canvas.addEventListener('mouseleave', () => drawing = false);
+canvas.addEventListener('touchstart', e => { e.preventDefault(); drawing = true; const p = getXY(e); ctx.beginPath(); ctx.moveTo(p.x, p.y); }, { passive: false });
+canvas.addEventListener('touchmove', e => { e.preventDefault(); if (!drawing) return; const p = getXY(e); ctx.lineTo(p.x, p.y); ctx.stroke(); hasSig = true; hint.classList.add('gone'); document.getElementById('btnSave').disabled = false; }, { passive: false });
+canvas.addEventListener('touchend', () => drawing = false);
+
+document.getElementById('btnClear').addEventListener('click', () => {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  hasSig = false; hint.classList.remove('gone');
+  document.getElementById('btnSave').disabled = true;
+  document.getElementById('output').style.display = 'none';
+});
+
+document.getElementById('btnSave').addEventListener('click', () => {
+  if (!hasSig) return;
+  // Export at 3x resolution for crisp embedding
+  const offscreen = document.createElement('canvas');
+  const r = canvas.getBoundingClientRect();
+  offscreen.width = r.width * 3;
+  offscreen.height = r.height * 3;
+  const octx = offscreen.getContext('2d');
+  octx.fillStyle = '#ffffff';
+  octx.fillRect(0, 0, offscreen.width, offscreen.height);
+  octx.drawImage(canvas, 0, 0, offscreen.width, offscreen.height);
+  const b64 = offscreen.toDataURL('image/jpeg', 0.95);
+  document.getElementById('b64out').value = b64;
+  document.getElementById('preview').src = b64;
+  document.getElementById('output').style.display = 'block';
+  document.getElementById('output').scrollIntoView({ behavior: 'smooth' });
+});
+
+document.getElementById('copyBtn').addEventListener('click', () => {
+  const ta = document.getElementById('b64out');
+  ta.select();
+  document.execCommand('copy');
+  document.getElementById('copyBtn').textContent = '✅ Copied!';
+  setTimeout(() => document.getElementById('copyBtn').textContent = '📋 Copy to Clipboard', 2000);
+});
+</script>
+</body>
+</html>
