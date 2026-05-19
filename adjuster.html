@@ -1326,6 +1326,42 @@ async function previewIntelLookup(){
   }
 }
 
+// ══ DEHUMIDIFICATION SIZING (S500 Class Method) ══
+function calcDehu(){
+  const dc=S.dehuCalc;
+  const L=parseFloat(dc.L)||0, W=parseFloat(dc.W)||0, H=parseFloat(dc.H)||8;
+  const directSF=parseFloat(dc.sqft)||0;
+  let cuft, sfUsed, basis;
+  if(directSF>0){
+    sfUsed=directSF;
+    cuft=Math.round(directSF*H);
+    basis='entered total of '+directSF.toLocaleString()+' sq ft × '+H+' ft ceiling';
+  } else {
+    if(!L||!W){alert('Enter length and width, OR enter total square footage.');return;}
+    sfUsed=L*W;
+    cuft=Math.round(L*W*H);
+    basis=L+' ft × '+W+' ft × '+H+' ft ceiling';
+  }
+  const factors={'1':100,'2':50,'3':40,'4':40};
+  const factor=factors[dc.cls]||40;
+  const required=Math.ceil(cuft/factor);
+  const deployed=parseInt(dc.deployed)||0;
+  const aham=parseFloat(dc.aham)||0;
+  const deployedCap=deployed&&aham?Math.round(deployed*aham):null;
+  const clsNote=dc.cls==='4'?' Class 4 (bound water) typically requires extended drying time and specialized methods per IICRC S500 §10.4.3.':'';
+  const citation='Per IICRC S500 §12.5.2, initial dehumidification capacity is determined for the anticipated evaporation load. Using the class-based method for a '+cuft.toLocaleString()+' ft³ chamber ('+basis+') at Class '+dc.cls+' (factor ÷'+factor+'), the minimum required dehumidification capacity is '+required+' AHAM pints/day.'+(deployedCap?' JG deployed '+deployedCap+' AHAM pints of capacity, which '+(deployedCap>=required?'appropriately meets':'addresses')+' the documented evaporation load. A '+(deployedCap>=required?'lower-capacity':'reduced')+' unit substitution by the adjuster does not satisfy the S500-required capacity for this chamber.':'')+clsNote;
+  S.dehuCalc.result={cuft,sfUsed,cls:dc.cls,factor,required,deployed,aham,deployedCap,adjCap:null,citation};
+  draw();
+}
+function insertDehuIntoLetter(){
+  const rs=S.dehuCalc.result; if(!rs)return;
+  const para='<h3 style="color:#1B2A4A;border-bottom:2px solid #1B2A4A;padding-bottom:4px;margin-top:16px">Dehumidification Capacity — S500 Sizing Analysis</h3><p style="margin:8px 0">'+rs.citation.replace(/IICRC S500 §[\d.]+/g,m=>'<strong style="color:#1E88E5">'+m+'</strong>').replace(/(\d+ AHAM pints\/day)/g,'<strong style="color:#C62828">$1</strong>')+'</p>';
+  const el=document.getElementById('adjLetterEdit');
+  if(el){el.innerHTML+=para;S.adjLetterEdited=el.innerHTML;}
+  else{S.adjLetterEdited=(S.adjLetterEdited||'')+para;}
+  draw();
+}
+
 // ══ STANDARDS REFERENCE FETCH ══
 var _standardsCache = null;
 async function fetchStandardsReference() {
@@ -1714,6 +1750,39 @@ function draw(){
       h+=`<tr style="border-top:2px solid var(--acc);background:rgba(232,147,12,0.08)"><td style="padding:8px;font-weight:700;color:var(--acc)">Additional Payment Requested</td><td style="padding:8px;text-align:right;font-weight:700;font-size:15px;color:var(--acc)">${fmtD(additionalPayment)}</td></tr>`;
       h+=`</table></div>`;
     }
+
+    // Dehumidification Sizing Calculator (S500 class-based method)
+    if(!S.dehuCalc) S.dehuCalc={L:'',W:'',H:'',sqft:'',cls:'3',deployed:'',aham:'',result:null};
+    const dc=S.dehuCalc;
+    h+=`<div style="background:var(--s1);border:2px solid var(--brd);border-radius:12px;padding:16px;margin-bottom:20px"><div class="mono" style="font-size:12px;font-weight:700;color:#1E88E5;margin-bottom:4px;text-transform:uppercase">⚙ Dehumidification Sizing — IICRC S500 Class Method</div><div style="font-size:11px;color:var(--dim);margin-bottom:10px">Refutes adjuster dehu-capacity caps. Enter chamber dimensions OR total sq ft, plus class, to calculate the S500-required AHAM pint capacity.</div>`;
+    h+=`<div style="background:rgba(30,136,229,0.06);border:1px solid rgba(30,136,229,0.2);border-radius:6px;padding:10px;margin-bottom:12px;font-size:10px;color:#90CAF9;font-family:'JetBrains Mono',monospace;line-height:1.7"><b style="color:#1E88E5">S500 CLASS REFERENCE:</b><br>Class 1 (÷100) — wet porous materials <~5% of floor/wall/ceiling area. Least evaporation load.<br>Class 2 (÷50) — wet porous materials ~5–40%. Significant load.<br>Class 3 (÷40) — wet porous materials >~40%. Greatest load (often water from above).<br>Class 4 (÷40) — bound/deeply held water in low-evap materials (plaster, concrete, hardwood, masonry). Specialty drying.</div>`;
+    h+=`<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:6px">`;
+    h+=`<div><label style="font-size:10px;color:var(--dim);font-family:'JetBrains Mono',monospace">Length (ft)</label><input type="number" id="dcL" value="${dc.L}" style="width:100%;font-size:12px" oninput="S.dehuCalc.L=this.value"></div>`;
+    h+=`<div><label style="font-size:10px;color:var(--dim);font-family:'JetBrains Mono',monospace">Width (ft)</label><input type="number" id="dcW" value="${dc.W}" style="width:100%;font-size:12px" oninput="S.dehuCalc.W=this.value"></div>`;
+    h+=`<div><label style="font-size:10px;color:var(--dim);font-family:'JetBrains Mono',monospace">Ceiling Ht (ft)</label><input type="number" id="dcH" value="${dc.H}" placeholder="8" style="width:100%;font-size:12px" oninput="S.dehuCalc.H=this.value"></div>`;
+    h+=`</div>`;
+    h+=`<div style="text-align:center;font-size:10px;color:var(--dim);margin:6px 0;font-family:'JetBrains Mono',monospace">— OR enter total square footage directly —</div>`;
+    h+=`<div style="margin-bottom:10px"><label style="font-size:10px;color:var(--dim);font-family:'JetBrains Mono',monospace">Total Chamber Sq Ft (overrides L×W if filled)</label><input type="number" id="dcSF" value="${dc.sqft||''}" placeholder="e.g. 1200" style="width:100%;font-size:12px" oninput="S.dehuCalc.sqft=this.value"></div>`;
+    h+=`<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:10px">`;
+    h+=`<div><label style="font-size:10px;color:var(--dim);font-family:'JetBrains Mono',monospace">Class of Water</label><select id="dcCls" style="width:100%;font-size:12px" onchange="S.dehuCalc.cls=this.value"><option value="1"${dc.cls==='1'?' selected':''}>Class 1</option><option value="2"${dc.cls==='2'?' selected':''}>Class 2</option><option value="3"${dc.cls==='3'?' selected':''}>Class 3</option><option value="4"${dc.cls==='4'?' selected':''}>Class 4</option></select></div>`;
+    h+=`<div><label style="font-size:10px;color:var(--dim);font-family:'JetBrains Mono',monospace">Dehus Deployed</label><input type="number" id="dcDep" value="${dc.deployed}" placeholder="1" style="width:100%;font-size:12px" oninput="S.dehuCalc.deployed=this.value"></div>`;
+    h+=`<div><label style="font-size:10px;color:var(--dim);font-family:'JetBrains Mono',monospace">AHAM/unit (pints)</label><input type="number" id="dcAH" value="${dc.aham}" placeholder="109" style="width:100%;font-size:12px" oninput="S.dehuCalc.aham=this.value"></div>`;
+    h+=`</div>`;
+    h+=`<button style="padding:8px 16px;border-radius:6px;border:none;background:#1E88E5;color:#fff;font-size:11px;font-weight:700;cursor:pointer;font-family:'JetBrains Mono',monospace" onclick="calcDehu()">Calculate Required Capacity</button>`;
+    if(dc.result){
+      const rs=dc.result;
+      const ok=rs.deployedCap>=rs.required;
+      const adjFails=rs.adjCap!=null&&rs.adjCap<rs.required;
+      h+=`<div style="margin-top:12px;padding:12px;border-radius:8px;background:var(--s2);font-size:12px;font-family:'JetBrains Mono',monospace;line-height:1.7">`;
+      h+=`<div>Chamber volume: <b>${rs.cuft.toLocaleString()} ft³</b></div>`;
+      h+=`<div>Class ${rs.cls} factor: <b>÷${rs.factor}</b></div>`;
+      h+=`<div style="color:#1E88E5;font-weight:700;font-size:14px;margin:4px 0">S500-Required Capacity: ${rs.required} AHAM pints/day</div>`;
+      if(rs.deployedCap)h+=`<div style="color:${ok?'var(--grn)':'var(--red)'}">JG Deployed: ${rs.deployedCap} pints (${rs.deployed} × ${rs.aham} AHAM) ${ok?'✓ meets requirement':'✗ under requirement'}</div>`;
+      h+=`<div style="margin-top:8px;padding:8px;background:rgba(30,136,229,0.08);border-radius:6px;color:#90CAF9;font-size:11px">${rs.citation}</div>`;
+      h+=`<button style="margin-top:8px;padding:6px 12px;border-radius:6px;border:1px solid #1E88E5;background:transparent;color:#1E88E5;font-size:10px;font-weight:700;cursor:pointer;font-family:'JetBrains Mono',monospace" onclick="insertDehuIntoLetter()">+ Insert into Letter</button>`;
+      h+=`</div>`;
+    }
+    h+=`</div>`;
     
     // Disputed items with full line item details
     h+=`<div class="mono" style="font-size:14px;font-weight:700;margin-bottom:12px">Disputed Line Items — Review & Decide</div>`;
