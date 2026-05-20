@@ -15122,6 +15122,14 @@ async function loadChangeOrders() {
 // BEGIN SOV MODULE — added 2026-05-20 (Schedule of Values tab)
 // ════════════════════════════════════════════════════════════════════════════
 
+// ─── Local money formatter (delegates to existing usdCompact) ───────────────
+// SOV module uses usd() everywhere; rebuild.html only defines usdCompact.
+// Two cents of precision matters for partial payments, so use a real formatter.
+function usd(n) {
+  const v = Number(n) || 0;
+  return '$' + v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 // SOV (Schedule of Values) Module — customer-facing draw schedule
 // Tables: rebuild_sov, rebuild_sov_draws, rebuild_sov_history
@@ -15178,10 +15186,14 @@ async function loadSov() {
   const { data: sovRows, error } = await sb.from('rebuild_sov')
     .select('*')
     .eq('project_id', state.activeProjectId)
-    .not('status', 'in', '(superseded,cancelled)')
+    .in('status', ['draft', 'sent', 'customer_signed', 'active', 'complete'])
     .order('created_at', { ascending: false })
     .limit(1);
-  if (error) { console.error('[sov] load failed', error); state.sov = null; state.sovDraws = []; state.sovHistory = []; state.sovLoading = false; return; }
+  if (error) {
+    console.error('[sov] load failed', error.message, error.code, error.details, error.hint);
+    state.sov = null; state.sovDraws = []; state.sovHistory = []; state.sovLoading = false;
+    return;
+  }
   state.sov = (sovRows && sovRows[0]) || null;
   if (!state.sov) { state.sovDraws = []; state.sovHistory = []; state.sovLoading = false; return; }
   const { data: draws } = await sb.from('rebuild_sov_draws')
