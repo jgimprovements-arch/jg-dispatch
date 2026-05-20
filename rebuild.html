@@ -15130,6 +15130,20 @@ function usd(n) {
   return '$' + v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
+// ─── Compute Xact total from woBudget for SOV contract auto-fill ────────────
+// rebuild.html doesn't store a single grand_total field on the upload row.
+// We sum the line item totals across materials + labor + equipment (matches
+// the pattern used in computeAutoTargetBudgets at line ~13780).
+function computeXactTotalForSov() {
+  const b = state.woBudget;
+  if (!b) return 0;
+  const sumField = (arr, field) => (arr || []).reduce((s, r) => s + (Number(r?.[field]) || 0), 0);
+  // Prefer items if present (line-item totals from estimate), fall back to material/labor/equipment buckets
+  const itemsTotal = sumField(b.items, 'total') || sumField(b.items, 'line_total') || sumField(b.items, 'amount');
+  if (itemsTotal > 0) return itemsTotal;
+  return sumField(b.materials, 'total') + sumField(b.labor, 'total') + sumField(b.equipment, 'total');
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 // SOV (Schedule of Values) Module — customer-facing draw schedule
 // Tables: rebuild_sov, rebuild_sov_draws, rebuild_sov_history
@@ -15240,7 +15254,7 @@ function renderSovTab() {
 // ─── Empty state ────────────────────────────────────────────────────────────
 function renderSovEmpty() {
   const p = state.activeProject || {};
-  const xactTotal = state.woBudget?.upload?.grand_total || 0;
+  const xactTotal = computeXactTotalForSov();
   const xactHint = xactTotal > 0
     ? `<div style="margin-top:6px;font-size:12px;color:var(--muted);">Xactimate budget on file: <b>${usd(xactTotal)}</b> — use as contract starting point</div>`
     : '';
@@ -15436,8 +15450,8 @@ function wireSovTab() {
 // ─── Create SOV modal ───────────────────────────────────────────────────────
 function openCreateSovModal() {
   const p = state.activeProject || {};
-  // Default contract total = xact budget if present, else 0
-  const xactTotal = state.woBudget?.upload?.grand_total || 0;
+  // Default contract total = sum of Xact items (materials + labor + equipment) if present
+  const xactTotal = computeXactTotalForSov();
   const html = `
     <div class="modal-back on" id="sov_create_overlay">
       <div class="modal" style="max-width:560px;">
