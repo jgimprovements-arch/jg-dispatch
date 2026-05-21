@@ -164,8 +164,9 @@ function renderSovTab() {
 if (state.sovLoading) {
   return `<div class="empty" style="padding:40px 20px;"><p>Loading SOV…</p></div>`;
 }
-if (!state.sov) return renderSovEmpty();
-return renderSovHeader() + renderSovDrawsTable() + renderSovHistory();
+const packetHtml = (typeof renderPacketSection === 'function') ? renderPacketSection() : '';
+if (!state.sov) return packetHtml + renderSovEmpty();
+return packetHtml + renderSovHeader() + renderSovDrawsTable() + renderSovHistory();
 }
 
 // ─── Empty state ────────────────────────────────────────────────────────────
@@ -1077,10 +1078,182 @@ XLSX.writeFile(wb, filename);
 }
 
 // ════════════════════════════════════════════════════════════════════════════
+// CONTRACT PACKET — read-only status display (Piece 1)
+// ════════════════════════════════════════════════════════════════════════════
+// Loads the most recent non-voided packet for the project. The packet is the
+// signed customer contract bundle (Xact + SOV + Contract doc), tracked in
+// rebuild_contract_packets. Lifecycle: draft → sent → (customer_signed |
+// declined | voided | expired).
+//
+// This first piece is read-only: card shows current state with no buttons.
+// Subsequent pieces will add Create / Send / Re-issue actions.
+// ────────────────────────────────────────────────────────────────────────────
+
+const PACKET_STATUS_META = {
+  draft:           { lbl: 'DRAFT',           color: 'var(--muted)',   bg: 'rgba(107,114,128,0.10)', icon: '📄' },
+  sent:            { lbl: 'SENT — AWAITING', color: 'var(--gold)',    bg: 'rgba(245,166,35,0.12)',  icon: '✉' },
+  customer_signed: { lbl: 'CUSTOMER SIGNED', color: 'var(--success)', bg: 'rgba(34,197,94,0.12)',   icon: '✓' },
+  declined:        { lbl: 'DECLINED',        color: 'var(--danger)',  bg: 'rgba(220,38,38,0.10)',   icon: '✗' },
+  voided:          { lbl: 'VOIDED',          color: 'var(--muted)',   bg: 'rgba(107,114,128,0.10)', icon: '⊘' },
+  expired:         { lbl: 'EXPIRED',         color: 'var(--muted)',   bg: 'rgba(107,114,128,0.10)', icon: '⏰' },
+};
+
+const PACKET_DECLINE_REASON_LABELS = {
+  price_too_high:                 'Price too high',
+  timing_concerns:                'Timing concerns',
+  scope_concerns:                 'Scope concerns',
+  going_with_another_contractor:  'Going with another contractor',
+  wants_to_wait:                  'Wants to wait',
+  other:                          'Other',
+};
+
+async function loadPacket() {
+  if (!sb || !state.activeProjectId) {
+    state.packet = null;
+    return;
+  }
+  // Most recent packet that is NOT voided. Voided ones are history;
+  // a project always has at most one "live" packet at a time.
+  const { data, error } = await sb.from('rebuild_contract_packets')
+    .select('*')
+    .eq('project_id', state.activeProjectId)
+    .not('status', 'eq', 'voided')
+    .order('created_at', { ascending: false })
+    .limit(1);
+  if (error) {
+    console.error('[packet] load failed', error.message, error.code, error.details);
+    state.packet = null;
+    return;
+  }
+  state.packet = (data && data[0]) || null;
+}
+
+function _packetTimeAgoCompact(dateStr) {
+  if (!dateStr) return '';
+  const d = new Date(dateStr);
+  if (isNaN(d.getTime())) return '';
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+    + ' at ' + d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+}
+
+function _packetDaysRemaining(expiresAt) {
+  if (!expiresAt) return null;
+  const ms = new Date(expiresAt).getTime() - Date.now();
+  if (isNaN(ms)) return null;
+  return Math.ceil(ms / (1000 * 60 * 60 * 24));
+}
+
+function _packetTimeToSignHours(sentAt, signedAt) {
+  if (!sentAt || !signedAt) return null;
+  const hrs = (new Date(signedAt).getTime() - new Date(sentAt).getTime()) / (1000 * 60 * 60);
+  if (isNaN(hrs) || hrs < 0) return null;
+  return hrs;
+}
+
+function renderPacketSection() {
+  const pkt = state.packet;
+  const containerStyle = 'background:#fff;border:1px solid var(--border);border-radius:10px;padding:14px 16px;margin-bottom:12px;';
+
+  function header(statusKey) {
+    const meta = PACKET_STATUS_META[statusKey] || PACKET_STATUS_META.draft;
+    const pillHtml = statusKey
+      ? `<span class="wobx-status-pill" style="background:${meta.bg};color:${meta.color};border:1px solid ${meta.color}40;font-size:11px;padding:2px 10px;border-radius:20px;font-weight:600;">${meta.icon} ${meta.lbl}</span>`
+      : '<span style="font-size:11px;color:var(--muted);font-style:italic;">— not started</span>';
+    return `
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;">
+        <div style="display:flex;align-items:center;gap:10px;">
+          <h3 style="margin:0;font-size:16px;color:var(--navy);">📋 Contract Packet</h3>
+        </div>
+        <div>${pillHtml}</div>
+      </div>
+    `;
+  }
+
+  if (!pkt) {
+    return `
+      <div class="packet-section" style="${containerStyle}">
+        ${header(null)}
+        <div style="border-top:1px solid var(--border);margin-top:10px;padding-top:10px;font-size:13px;color:var(--muted);">
+          No contract packet created yet. The contract packet bundles the Xactimate estimate, Schedule of Values, and contract document into one signable PDF for the customer.
+        </div>
+      </div>
+    `;
+  }
+
+  let bodyRows = '';
+
+  if (pkt.status === 'draft') {
+    bodyRows = `
+      <div style="font-size:13px;color:var(--muted);">
+        Packet created ${_packetTimeAgoCompact(pkt.created_at)}. Ready to send to customer.
+      </div>
+    `;
+  } else if (pkt.status === 'sent') {
+    const days = _packetDaysRemaining(pkt.token_expires_at);
+    const daysLine = days !== null
+      ? (days > 0
+          ? `<span style="color:var(--muted);">(${days} day${days === 1 ? '' : 's'} remaining)</span>`
+          : `<span style="color:var(--danger);font-weight:600;">EXPIRED — sweep pending</span>`)
+      : '';
+    bodyRows = `
+      <div style="display:grid;grid-template-columns:auto 1fr;gap:6px 14px;font-size:13px;">
+        <div style="color:var(--muted);">Sent on:</div><div>${_packetTimeAgoCompact(pkt.sent_at)}</div>
+        <div style="color:var(--muted);">Expires:</div><div>${_packetTimeAgoCompact(pkt.token_expires_at)} ${daysLine}</div>
+        ${pkt.viewed_at ? `<div style="color:var(--muted);">First viewed:</div><div>${_packetTimeAgoCompact(pkt.viewed_at)}</div>` : ''}
+      </div>
+    `;
+  } else if (pkt.status === 'customer_signed') {
+    const tts = _packetTimeToSignHours(pkt.sent_at, pkt.signed_at);
+    const ttsLine = tts !== null
+      ? (tts < 24 ? `${tts.toFixed(1)} hours` : `${(tts / 24).toFixed(1)} days`)
+      : '—';
+    bodyRows = `
+      <div style="display:grid;grid-template-columns:auto 1fr;gap:6px 14px;font-size:13px;">
+        <div style="color:var(--muted);">Signed by:</div><div style="font-weight:600;">${esc(pkt.signed_name || '—')}</div>
+        <div style="color:var(--muted);">Signed on:</div><div>${_packetTimeAgoCompact(pkt.signed_at)}</div>
+        <div style="color:var(--muted);">Time to sign:</div><div>${ttsLine}</div>
+        ${pkt.merged_pdf_url ? `<div style="color:var(--muted);">Packet PDF:</div><div><a href="${esc(pkt.merged_pdf_url)}" target="_blank" style="color:var(--navy);">📑 View signed packet</a></div>` : ''}
+      </div>
+    `;
+  } else if (pkt.status === 'declined') {
+    const reasonLbl = PACKET_DECLINE_REASON_LABELS[pkt.decline_reason] || pkt.decline_reason || '—';
+    bodyRows = `
+      <div style="display:grid;grid-template-columns:auto 1fr;gap:6px 14px;font-size:13px;">
+        <div style="color:var(--muted);">Declined on:</div><div>${_packetTimeAgoCompact(pkt.declined_at)}</div>
+        <div style="color:var(--muted);">Reason:</div><div style="font-weight:600;">${esc(reasonLbl)}</div>
+        ${pkt.decline_comment ? `<div style="color:var(--muted);">Comment:</div><div style="font-style:italic;">"${esc(pkt.decline_comment)}"</div>` : ''}
+      </div>
+    `;
+  } else if (pkt.status === 'expired') {
+    bodyRows = `
+      <div style="display:grid;grid-template-columns:auto 1fr;gap:6px 14px;font-size:13px;">
+        <div style="color:var(--muted);">Sent on:</div><div>${_packetTimeAgoCompact(pkt.sent_at)}</div>
+        <div style="color:var(--muted);">Expired on:</div><div>${_packetTimeAgoCompact(pkt.expired_at)}</div>
+      </div>
+    `;
+  } else {
+    bodyRows = `<div style="font-size:13px;color:var(--muted);">Status: ${esc(pkt.status)}</div>`;
+  }
+
+  return `
+    <div class="packet-section" style="${containerStyle}">
+      ${header(pkt.status)}
+      <div style="border-top:1px solid var(--border);margin-top:10px;padding-top:10px;">
+        ${bodyRows}
+      </div>
+    </div>
+  `;
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 // END SOV MODULE
 // ════════════════════════════════════════════════════════════════════════════
 // ─── Expose to window so HTML onclick= attributes and rebuild.html call sites work ───
 window.usd = usd;
+window.loadPacket = loadPacket;
+window.renderPacketSection = renderPacketSection;
+window.PACKET_STATUS_META = PACKET_STATUS_META;
+window.PACKET_DECLINE_REASON_LABELS = PACKET_DECLINE_REASON_LABELS;
 window.computeXactTotalForSov = computeXactTotalForSov;
 window.sovBadge = sovBadge;
 window.loadSov = loadSov;
