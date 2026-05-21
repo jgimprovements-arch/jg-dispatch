@@ -1,38 +1,22 @@
 /*  ══════════════════════════════════════════════════════════════════════
     JG PLATFORM — REBUILD SCHEDULER · SOV MODULE
     Extracted 2026-05-20 from rebuild.html.
+    Updated 2026-05-21 — Piece 2: Contract Packet action buttons.
 
     What this is:
-      Schedule of Values (customer-facing draw schedule) module.
-      Tables: rebuild_sov, rebuild_sov_draws, rebuild_sov_history.
+      Schedule of Values (customer-facing draw schedule) module +
+      Contract Packet module (signed customer contract bundle).
+      Tables: rebuild_sov, rebuild_sov_draws, rebuild_sov_history,
+              rebuild_contract_packets.
 
     Dependencies (defined in rebuild.html main <script>):
       - state.*   (activeProject, activeProjectId, pmEmail, sov, sovDraws,
-                   sovHistory, sovLoading, woBudget)
+                   sovHistory, sovLoading, woBudget, packet)
       - sb        (Supabase client)
       - $(), $$() (selector helpers)
       - esc(), toast(), logToAlbi(), renderDetail(), renderCoSection()
+      - buildBrandedEmail(), MESSAGE_HOOK
       - XLSX, jsPDF (CDN-loaded libraries)
-
-    Scope:
-      Top-level script (NOT wrapped in an IIFE). Function declarations
-      hoist into the shared window scope alongside rebuild.html's main
-      <script>. This is required so bare-identifier calls like loadSov()
-      from rebuild.html's selectProject() can resolve.
-      The window.* assignments at the bottom are redundant in this
-      configuration but kept as documentation of the module's public API.
-
-    External callsites in rebuild.html (verified working):
-      - loadSov()         — selectProject() parallel loader + realtime
-      - sovBadge()        — tab button HTML
-      - renderSovTab()    — tab content dispatcher
-      - wireSovTab()      — tab wiring
-      Plus onclick= attributes inside SOV's own template literals.
-
-    Load order:
-      rebuild.html main <script> defines all dependencies first.
-      Then <script src="rebuild-sov.js"> runs and declares loadSov etc.
-      at script-top scope.
     ════════════════════════════════════════════════════════════════════════ */
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -40,32 +24,20 @@
 // ════════════════════════════════════════════════════════════════════════════
 
 // ─── Local money formatter (delegates to existing usdCompact) ───────────────
-// SOV module uses usd() everywhere; rebuild.html only defines usdCompact.
-// Two cents of precision matters for partial payments, so use a real formatter.
 function usd(n) {
 const v = Number(n) || 0;
 return '$' + v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
 // ─── Compute Xact total from woBudget for SOV contract auto-fill ────────────
-// rebuild.html doesn't store a single grand_total field on the upload row.
-// We sum the line item totals across materials + labor + equipment (matches
-// the pattern used in computeAutoTargetBudgets at line ~13780).
 function computeXactTotalForSov() {
 const b = state.woBudget;
 if (!b) return 0;
 const sumField = (arr, field) => (arr || []).reduce((s, r) => s + (Number(r?.[field]) || 0), 0);
-// Prefer items if present (line-item totals from estimate), fall back to material/labor/equipment buckets
 const itemsTotal = sumField(b.items, 'total') || sumField(b.items, 'line_total') || sumField(b.items, 'amount');
 if (itemsTotal > 0) return itemsTotal;
 return sumField(b.materials, 'total') + sumField(b.labor, 'total') + sumField(b.equipment, 'total');
 }
-
-// ════════════════════════════════════════════════════════════════════════════
-// SOV (Schedule of Values) Module — customer-facing draw schedule
-// Tables: rebuild_sov, rebuild_sov_draws, rebuild_sov_history
-// Splice into rebuild.html BEFORE renderCoSection() (currently line 15110)
-// ════════════════════════════════════════════════════════════════════════════
 
 const SOV_STATUS_META = {
 draft:           { lbl: 'Draft',              color: 'var(--muted)',  bg: 'rgba(107,122,150,.12)' },
@@ -201,7 +173,6 @@ const signedLine = s.customer_signed_at
   ? `<span style="font-size:12px;color:var(--success);">✓ Signed ${new Date(s.customer_signed_at).toLocaleDateString()} by ${esc(s.customer_signed_name || 'customer')}</span>`
   : '';
 
-// Actions by status
 let actions = '';
 if (s.status === 'draft') {
   actions = `
@@ -363,12 +334,13 @@ document.querySelectorAll('[data-sov-draw-act]').forEach(btn => {
     else if (act === 'edit') openEditDrawModal(drawId);
   });
 });
+// Piece 2 — Wire packet action buttons (Create/Send/Re-issue/Void/Resend/Copy/Discard)
+if (typeof wirePacketActions === 'function') wirePacketActions();
 }
 
 // ─── Create SOV modal ───────────────────────────────────────────────────────
 function openCreateSovModal() {
 const p = state.activeProject || {};
-// Default contract total = sum of Xact items (materials + labor + equipment) if present
 const xactTotal = computeXactTotalForSov();
 const html = `
   <div class="modal-back on" id="sov_create_overlay">
@@ -428,7 +400,6 @@ function renderPreview() {
         <div id="sov_custom_total" style="margin-top:6px;font-weight:700;"></div>
       </div>
     `;
-    // Wire custom inputs
     preview.querySelectorAll('[data-custom-pct], [data-custom-trigger]').forEach(input => {
       input.addEventListener('input', updateCustom);
     });
@@ -547,11 +518,9 @@ const p = state.activeProject || {};
 if (!p.customer_email) { toast('No customer email on project'); return; }
 if (!confirm(`Send SOV to ${p.customer_email} for signature?`)) return;
 
-// Generate signed PDF blob first, store, then send link
 const pdfBlob = await buildSovPdfBlob({ forSignature: true });
 if (!pdfBlob) { toast('Failed to generate PDF'); return; }
 
-// Upload to rebuild_documents bucket (assumes same storage pattern as other docs)
 const filename = `SOV_${(p.albi_job_number || state.activeProjectId).replace(/[^a-zA-Z0-9._-]/g, '_')}_${Date.now()}.pdf`;
 const { data: upload, error: upErr } = await sb.storage
   .from('rebuild-documents')
@@ -560,7 +529,6 @@ if (upErr) { toast('Upload failed: ' + upErr.message); return; }
 const { data: urlData } = sb.storage.from('rebuild-documents').getPublicUrl(`signatures/${filename}`);
 const fileUrl = urlData.publicUrl;
 
-// Insert rebuild_documents row tracking the signature request
 const { data: docRow, error: docErr } = await sb.from('rebuild_documents').insert({
   project_id: state.activeProjectId,
   category: 'contract',
@@ -579,7 +547,6 @@ const { data: docRow, error: docErr } = await sb.from('rebuild_documents').inser
 }).select().single();
 if (docErr) { toast('Doc create failed: ' + docErr.message); return; }
 
-// Update SOV status to sent
 await sb.from('rebuild_sov').update({ status: 'sent' }).eq('id', state.sov.id);
 await logSovEvent('sov_sent', {
   new_values: { sent_to: p.customer_email, doc_id: docRow.id },
@@ -771,14 +738,12 @@ document.getElementById('sov_pay_submit').addEventListener('click', async () => 
     paid_method: method,
     paid_check_num: ref || null,
   }).eq('id', drawId);
-  // If all draws are paid and SOV isn't yet complete, flip status to complete
   const { data: allDraws } = await sb.from('rebuild_sov_draws').select('status').eq('sov_id', state.sov.id);
   const allPaid = (allDraws || []).every(d => d.status === 'paid' || d.status === 'waived');
   if (allPaid && allDraws.length) {
     await sb.from('rebuild_sov').update({ status: 'complete' }).eq('id', state.sov.id);
     await logSovEvent('sov_complete', { notes: 'All draws paid — SOV marked complete' });
   } else if (state.sov.status === 'customer_signed') {
-    // First payment received — flip from customer_signed to active
     await sb.from('rebuild_sov').update({ status: 'active' }).eq('id', state.sov.id);
   }
   await logSovEvent(isFullPay ? 'draw_paid' : 'draw_partial', {
@@ -808,7 +773,6 @@ await sb.from('rebuild_sov_draws').update({
   paid_method: null,
   paid_check_num: null,
 }).eq('id', drawId);
-// If SOV was complete, demote to active
 if (state.sov.status === 'complete') {
   await sb.from('rebuild_sov').update({ status: 'active' }).eq('id', state.sov.id);
 }
@@ -873,7 +837,6 @@ const pageW = doc.internal.pageSize.getWidth();
 const margin = 48;
 let y = margin;
 
-// Header
 doc.setFont('helvetica', 'bold'); doc.setFontSize(18); doc.setTextColor(13, 45, 94);
 doc.text('SCHEDULE OF VALUES', margin, y); y += 22;
 doc.setFontSize(11); doc.setTextColor(60, 60, 60);
@@ -882,12 +845,10 @@ if (p.property_address) { doc.text(p.property_address, margin, y); y += 14; }
 doc.setTextColor(120, 120, 120); doc.setFontSize(9);
 doc.text('JG Restoration | (920) 428-4200 | Contractor License DC-011000010', margin, y); y += 20;
 
-// Status line
 doc.setFontSize(10); doc.setTextColor(60, 60, 60);
 const statusMeta = SOV_STATUS_META[s.status] || SOV_STATUS_META.draft;
 doc.text(`Status: ${statusMeta.lbl}    Contract Total: ${usd(s.contract_total)}    ${draws.length} Draw${draws.length === 1 ? '' : 's'}`, margin, y); y += 20;
 
-// Draws table
 doc.setFont('helvetica', 'bold'); doc.setFontSize(11); doc.setTextColor(13, 45, 94);
 doc.text('DRAW SCHEDULE', margin, y); y += 14;
 doc.setDrawColor(200, 200, 200); doc.line(margin, y, pageW - margin, y); y += 4;
@@ -918,7 +879,6 @@ doc.setFont('helvetica', 'bold'); doc.setFontSize(11);
 doc.text('TOTAL', margin, y);
 doc.text(usd(s.contract_total), pageW - margin - 80, y); y += 24;
 
-// Terms
 if (y > 600) { doc.addPage(); y = margin; }
 doc.setFont('helvetica', 'bold'); doc.setFontSize(10); doc.setTextColor(13, 45, 94);
 doc.text('TERMS', margin, y); y += 12;
@@ -937,7 +897,6 @@ terms.forEach(t => {
 });
 y += 16;
 
-// Acceptance block
 if (y > 600) { doc.addPage(); y = margin; }
 doc.setFont('helvetica', 'bold'); doc.setFontSize(11); doc.setTextColor(13, 45, 94);
 doc.text('ACCEPTANCE', margin, y); y += 14;
@@ -948,7 +907,6 @@ const accText = doc.splitTextToSize(
 );
 doc.text(accText, margin, y); y += accText.length * 11 + 14;
 
-// Customer signature line
 doc.setFontSize(10); doc.setTextColor(13, 45, 94); doc.setFont('helvetica', 'bold');
 doc.text('HOMEOWNER', margin, y); y += 14;
 doc.setTextColor(100, 100, 100); doc.setFont('helvetica', 'normal'); doc.setFontSize(9);
@@ -961,7 +919,6 @@ if (s.customer_signed_at) {
   doc.text('Date: ____________________________________', margin, y); y += 20;
 }
 
-// JG signature line
 doc.setTextColor(13, 45, 94); doc.setFont('helvetica', 'bold'); doc.setFontSize(10);
 doc.text('JG RESTORATION', margin, y); y += 14;
 doc.setTextColor(100, 100, 100); doc.setFont('helvetica', 'normal'); doc.setFontSize(9);
@@ -996,7 +953,6 @@ const s = state.sov;
 const draws = state.sovDraws || [];
 const wb = XLSX.utils.book_new();
 
-// Sheet 1: Draw Schedule (summary, since we don't have phase line items per SOV)
 const draw1Data = [
   ['SCHEDULE OF VALUES'],
   [`Project: ${p.customer_name || ''}`],
@@ -1020,7 +976,6 @@ const ws1 = XLSX.utils.aoa_to_sheet(draw1Data);
 ws1['!cols'] = [{ wch: 6 }, { wch: 60 }, { wch: 10 }, { wch: 14 }, { wch: 16 }];
 XLSX.utils.book_append_sheet(wb, ws1, 'Draw Schedule');
 
-// Sheet 2: Payment Schedule (mirrors Volkert layout)
 let cum = 0;
 const sheet2 = [
   ['DRAW PAYMENT SCHEDULE'],
@@ -1051,7 +1006,6 @@ const ws2 = XLSX.utils.aoa_to_sheet(sheet2);
 ws2['!cols'] = [{ wch: 8 }, { wch: 60 }, { wch: 14 }, { wch: 14 }, { wch: 14 }, { wch: 16 }];
 XLSX.utils.book_append_sheet(wb, ws2, 'Payment Schedule');
 
-// Sheet 3: Acceptance
 const sheet3 = [
   ['SCHEDULE OF VALUES — ACCEPTANCE'],
   [],
@@ -1078,15 +1032,14 @@ XLSX.writeFile(wb, filename);
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// CONTRACT PACKET — read-only status display (Piece 1)
+// CONTRACT PACKET MODULE
 // ════════════════════════════════════════════════════════════════════════════
-// Loads the most recent non-voided packet for the project. The packet is the
-// signed customer contract bundle (Xact + SOV + Contract doc), tracked in
-// rebuild_contract_packets. Lifecycle: draft → sent → (customer_signed |
-// declined | voided | expired).
+// Tracks the customer contract bundle (Xact + SOV + Contract doc) in
+// rebuild_contract_packets. Lifecycle:
+//   draft → sent → (customer_signed | declined | voided | expired)
 //
-// This first piece is read-only: card shows current state with no buttons.
-// Subsequent pieces will add Create / Send / Re-issue actions.
+// Piece 1 (read-only): status card on SOV tab. Deployed 2026-05-21.
+// Piece 2 (actions):   Create / Send / Re-issue / Void / Resend / Discard.
 // ────────────────────────────────────────────────────────────────────────────
 
 const PACKET_STATUS_META = {
@@ -1107,13 +1060,18 @@ const PACKET_DECLINE_REASON_LABELS = {
   other:                          'Other',
 };
 
+// Customer-facing packet portal base URL
+const PACKET_PORTAL_BASE = 'https://jgimprovements-arch.github.io/jg-dispatch/packet.html';
+
+// Vercel merge endpoint
+const PACKET_MERGE_ENDPOINT = 'https://jg-proxy-v2.vercel.app/api/packet-merge';
+
+// ─── Loader ─────────────────────────────────────────────────────────────────
 async function loadPacket() {
   if (!sb || !state.activeProjectId) {
     state.packet = null;
     return;
   }
-  // Most recent packet that is NOT voided. Voided ones are history;
-  // a project always has at most one "live" packet at a time.
   const { data, error } = await sb.from('rebuild_contract_packets')
     .select('*')
     .eq('project_id', state.activeProjectId)
@@ -1128,6 +1086,7 @@ async function loadPacket() {
   state.packet = (data && data[0]) || null;
 }
 
+// ─── Time helpers ───────────────────────────────────────────────────────────
 function _packetTimeAgoCompact(dateStr) {
   if (!dateStr) return '';
   const d = new Date(dateStr);
@@ -1150,9 +1109,61 @@ function _packetTimeToSignHours(sentAt, signedAt) {
   return hrs;
 }
 
+// ─── Find the most recent Xactimate PDF document for the project ────────────
+async function _findXactDoc() {
+  if (!sb || !state.activeProjectId) return null;
+  const { data } = await sb.from('rebuild_documents')
+    .select('id, file_url, filename, category, uploaded_at')
+    .eq('project_id', state.activeProjectId)
+    .or('category.ilike.%xact%,category.ilike.%estimate%')
+    .order('uploaded_at', { ascending: false })
+    .limit(1);
+  return (data && data[0]) || null;
+}
+
+// ─── Gate check ─────────────────────────────────────────────────────────────
+async function _packetGateCheck() {
+  const p = state.activeProject;
+  if (!p) return { ok: false, reason: 'No active project loaded.' };
+  if (!p.customer_email) return { ok: false, reason: 'No customer email on file. Add one before creating a packet.' };
+  if (!state.sov) return { ok: false, reason: 'No Schedule of Values yet. Create the SOV first.' };
+  if (state.sov.status !== 'draft') return { ok: false, reason: `SOV is in status "${state.sov.status}". It must be in draft to bundle into a new packet.` };
+  const xactDoc = await _findXactDoc();
+  if (!xactDoc) return { ok: false, reason: 'No Xactimate estimate uploaded. Upload it to the Documents tab first.' };
+  const pkt = state.packet;
+  if (pkt && ['draft','sent'].includes(pkt.status)) {
+    return { ok: false, reason: `An active packet already exists (status: ${pkt.status}). Discard or void it first.` };
+  }
+  return { ok: true, xactDoc };
+}
+
+// ─── renderPacketSection — STATUS CARD WITH BUTTONS ─────────────────────────
 function renderPacketSection() {
   const pkt = state.packet;
   const containerStyle = 'background:#fff;border:1px solid var(--border);border-radius:10px;padding:14px 16px;margin-bottom:12px;';
+
+  function actions(statusKey) {
+    if (!statusKey) {
+      return `<button class="btn primary" id="packet_create_btn" style="font-size:12px;padding:5px 14px;">+ Create Packet</button>`;
+    }
+    if (statusKey === 'draft') {
+      return `
+        <button class="btn primary" id="packet_send_btn" style="font-size:12px;padding:5px 14px;">✉ Send to Customer</button>
+        <button class="btn ghost" id="packet_discard_btn" style="font-size:12px;padding:5px 14px;color:var(--danger);border-color:var(--danger);">🗑 Discard</button>
+      `;
+    }
+    if (statusKey === 'sent') {
+      return `
+        <button class="btn ghost" id="packet_copy_link_btn" style="font-size:12px;padding:5px 14px;">🔗 Copy Link</button>
+        <button class="btn ghost" id="packet_resend_btn" style="font-size:12px;padding:5px 14px;">✉ Resend Email</button>
+        <button class="btn ghost" id="packet_void_btn" style="font-size:12px;padding:5px 14px;color:var(--danger);border-color:var(--danger);">🚫 Void</button>
+      `;
+    }
+    if (statusKey === 'declined' || statusKey === 'expired') {
+      return `<button class="btn primary" id="packet_reissue_btn" style="font-size:12px;padding:5px 14px;">↩ Re-issue Packet</button>`;
+    }
+    return '';
+  }
 
   function header(statusKey) {
     const meta = PACKET_STATUS_META[statusKey] || PACKET_STATUS_META.draft;
@@ -1163,8 +1174,9 @@ function renderPacketSection() {
       <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;">
         <div style="display:flex;align-items:center;gap:10px;">
           <h3 style="margin:0;font-size:16px;color:var(--navy);">📋 Contract Packet</h3>
+          ${pillHtml}
         </div>
-        <div>${pillHtml}</div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;">${actions(statusKey)}</div>
       </div>
     `;
   }
@@ -1186,6 +1198,7 @@ function renderPacketSection() {
     bodyRows = `
       <div style="font-size:13px;color:var(--muted);">
         Packet created ${_packetTimeAgoCompact(pkt.created_at)}. Ready to send to customer.
+        ${pkt.merged_pdf_url ? `<div style="margin-top:6px;"><a href="${esc(pkt.merged_pdf_url)}" target="_blank" style="color:var(--navy);">📑 Preview merged PDF</a></div>` : ''}
       </div>
     `;
   } else if (pkt.status === 'sent') {
@@ -1200,6 +1213,7 @@ function renderPacketSection() {
         <div style="color:var(--muted);">Sent on:</div><div>${_packetTimeAgoCompact(pkt.sent_at)}</div>
         <div style="color:var(--muted);">Expires:</div><div>${_packetTimeAgoCompact(pkt.token_expires_at)} ${daysLine}</div>
         ${pkt.viewed_at ? `<div style="color:var(--muted);">First viewed:</div><div>${_packetTimeAgoCompact(pkt.viewed_at)}</div>` : ''}
+        ${pkt.merged_pdf_url ? `<div style="color:var(--muted);">Packet PDF:</div><div><a href="${esc(pkt.merged_pdf_url)}" target="_blank" style="color:var(--navy);">📑 View</a></div>` : ''}
       </div>
     `;
   } else if (pkt.status === 'customer_signed') {
@@ -1245,6 +1259,333 @@ function renderPacketSection() {
   `;
 }
 
+// ─── ACTION: Create Packet ──────────────────────────────────────────────────
+async function createPacket() {
+  const gate = await _packetGateCheck();
+  if (!gate.ok) { toast(gate.reason); return; }
+  const { xactDoc } = gate;
+  const p = state.activeProject;
+  const sov = state.sov;
+
+  const html = `
+    <div class="modal-back on" id="packet_create_overlay">
+      <div class="modal" style="max-width:520px;">
+        <h3>Create Contract Packet <button class="close" data-close>×</button></h3>
+        <div class="modal-body">
+          <div style="background:rgba(245,166,35,0.08);border:1px solid rgba(245,166,35,0.3);border-radius:6px;padding:10px 12px;margin-bottom:12px;font-size:12px;color:var(--navy);">
+            <strong>Heads up:</strong> Once sent, the SOV and all draw amounts become locked.
+            They can only be edited if the customer declines or the link expires.
+          </div>
+          <div style="display:grid;grid-template-columns:auto 1fr;gap:6px 14px;font-size:12px;margin-bottom:14px;padding:10px;background:var(--bg);border-radius:6px;">
+            <div style="color:var(--muted);">Customer:</div><div style="font-weight:600;">${esc(p.customer_name || '—')}</div>
+            <div style="color:var(--muted);">Email:</div><div>${esc(p.customer_email)}</div>
+            <div style="color:var(--muted);">Xactimate:</div><div>${esc(xactDoc.filename)}</div>
+            <div style="color:var(--muted);">SOV Total:</div><div style="font-weight:600;">${usd(sov.contract_total || 0)}</div>
+          </div>
+          <div style="margin-bottom:12px;">
+            <label style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:.05em;">Contract Document (PDF)</label>
+            <input type="file" id="packet_contract_file" accept="application/pdf" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;font-size:13px;margin-top:4px;">
+            <div style="font-size:11px;color:var(--muted);margin-top:4px;">The legal contract terms. PDF only.</div>
+          </div>
+          <div id="packet_create_status" style="font-size:12px;color:var(--muted);min-height:18px;margin-bottom:10px;"></div>
+          <div style="display:flex;gap:8px;justify-content:flex-end;">
+            <button class="btn ghost" data-close>Cancel</button>
+            <button class="btn primary" id="packet_create_submit">Create Packet</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+  document.body.insertAdjacentHTML('beforeend', html);
+  const overlay = document.getElementById('packet_create_overlay');
+  overlay.querySelectorAll('[data-close]').forEach(b => b.addEventListener('click', () => overlay.remove()));
+
+  document.getElementById('packet_create_submit').addEventListener('click', async () => {
+    const fileInput = document.getElementById('packet_contract_file');
+    const statusEl = document.getElementById('packet_create_status');
+    const submitBtn = document.getElementById('packet_create_submit');
+    const file = fileInput.files && fileInput.files[0];
+    if (!file) { statusEl.textContent = 'Please select a contract PDF.'; statusEl.style.color = 'var(--danger)'; return; }
+    if (file.type !== 'application/pdf') { statusEl.textContent = 'File must be a PDF.'; statusEl.style.color = 'var(--danger)'; return; }
+
+    submitBtn.disabled = true;
+    statusEl.style.color = 'var(--muted)';
+
+    try {
+      // 1) Upload contract PDF to storage
+      statusEl.textContent = 'Uploading contract document…';
+      const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+      const contractPath = `projects/${state.activeProjectId}/packets/contract-${Date.now()}-${safeName}`;
+      const upRes = await sb.storage.from('rebuild-documents').upload(contractPath, file, {
+        contentType: 'application/pdf',
+        upsert: false,
+      });
+      if (upRes.error) throw new Error('Contract upload failed: ' + upRes.error.message);
+      const { data: contractUrlData } = sb.storage.from('rebuild-documents').getPublicUrl(contractPath);
+      const contractPdfUrl = contractUrlData.publicUrl;
+
+      // 2) Log contract PDF in rebuild_documents (visibility in Documents tab)
+      await sb.from('rebuild_documents').insert({
+        project_id: state.activeProjectId,
+        category: 'Contract',
+        filename: file.name,
+        file_url: contractPdfUrl,
+        file_size_bytes: file.size,
+        mime_type: 'application/pdf',
+        uploaded_by_email: state.pmEmail || null,
+        push_status: 'skipped',
+      });
+
+      // 3) Generate + upload SOV PDF
+      statusEl.textContent = 'Generating SOV PDF…';
+      const sovBlob = await buildSovPdfBlob({ forSignature: true });
+      if (!sovBlob) throw new Error('SOV PDF generator returned null');
+      const sovPath = `projects/${state.activeProjectId}/packets/sov-${Date.now()}.pdf`;
+      const sovUp = await sb.storage.from('rebuild-documents').upload(sovPath, sovBlob, { contentType: 'application/pdf', upsert: false });
+      if (sovUp.error) throw new Error('SOV PDF upload failed: ' + sovUp.error.message);
+      const { data: sovUrlData } = sb.storage.from('rebuild-documents').getPublicUrl(sovPath);
+      const sovPdfUrl = sovUrlData.publicUrl;
+
+      // 4) Insert packet row (draft, URLs set, merged_pdf_url not yet set)
+      statusEl.textContent = 'Creating packet record…';
+      const packetInsertRow = {
+        project_id: state.activeProjectId,
+        sov_id: state.sov.id,
+        xact_pdf_url: xactDoc.file_url,
+        contract_pdf_url: contractPdfUrl,
+        status: 'draft',
+        created_by: state.pmEmail || null,
+      };
+      if (state._packetReissueFrom) {
+        packetInsertRow.voids_packet_id = state._packetReissueFrom;
+      }
+      const { data: pktRows, error: pktErr } = await sb.from('rebuild_contract_packets').insert(packetInsertRow).select();
+      if (pktErr) throw new Error('Packet insert failed: ' + pktErr.message);
+      const packetRow = pktRows[0];
+
+      // 5) Call Vercel merge endpoint
+      statusEl.textContent = 'Merging Xactimate + SOV + Contract into one PDF…';
+      const mergeRes = await fetch(PACKET_MERGE_ENDPOINT, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          packet_id: packetRow.id,
+          project_id: state.activeProjectId,
+          xact_pdf_url: xactDoc.file_url,
+          sov_pdf_url: sovPdfUrl,
+          contract_pdf_url: contractPdfUrl,
+          albi_job_number: p.albi_job_number || '',
+        }),
+      });
+      if (!mergeRes.ok) {
+        const errTxt = await mergeRes.text();
+        throw new Error(`Merge failed (${mergeRes.status}): ${errTxt}`);
+      }
+      const mergeData = await mergeRes.json();
+      if (!mergeData.ok) throw new Error('Merge failed: ' + (mergeData.error || 'unknown'));
+
+      // 6) Update packet row with merged_pdf_url
+      const { error: updErr } = await sb.from('rebuild_contract_packets').update({
+        merged_pdf_url: mergeData.merged_pdf_url,
+      }).eq('id', packetRow.id);
+      if (updErr) throw new Error('Packet update failed: ' + updErr.message);
+
+      overlay.remove();
+      toast('✓ Packet created as draft. Review and send when ready.');
+      await loadPacket();
+      if (typeof loadDocuments === 'function') await loadDocuments();
+      renderDetail();
+
+    } catch (err) {
+      console.error('[packet] create failed:', err);
+      statusEl.textContent = 'Failed: ' + err.message;
+      statusEl.style.color = 'var(--danger)';
+      submitBtn.disabled = false;
+    }
+  });
+}
+
+// ─── ACTION: Send Packet ────────────────────────────────────────────────────
+async function sendPacket(isResend) {
+  const pkt = state.packet;
+  const p = state.activeProject;
+  if (!pkt) { toast('No packet to send'); return; }
+  if (!isResend && pkt.status !== 'draft') { toast(`Cannot send a packet in status "${pkt.status}"`); return; }
+  if (isResend && pkt.status !== 'sent') { toast('Resend only works on sent packets'); return; }
+  if (!p.customer_email) { toast('No customer email on file'); return; }
+
+  if (!isResend) {
+    const ok = confirm(`Send contract packet to ${p.customer_email}?\n\nOnce sent, the SOV and draws will be locked. The customer has 90 days to sign.`);
+    if (!ok) return;
+  }
+
+  toast(isResend ? 'Re-sending packet…' : 'Sending packet…');
+
+  try {
+    let activePkt = pkt;
+
+    if (!isResend) {
+      const { data, error } = await sb.rpc('send_contract_packet', { p_packet_id: pkt.id });
+      if (error) throw new Error('RPC send failed: ' + error.message);
+      activePkt = Array.isArray(data) ? data[0] : data;
+    }
+
+    const signUrl = `${PACKET_PORTAL_BASE}?t=${activePkt.customer_token}`;
+    const custFirst = (p.customer_name || '').split(' ')[0] || 'there';
+    const fromEmail = 'info@jg-restoration.com';
+    const fromName = p.albi_pm_name || 'JG Restoration';
+    const subject = `${isResend ? 'Reminder: ' : ''}Contract Ready for Signature · ${p.albi_job_number || 'JG Restoration'}`;
+    const emailBody = buildBrandedEmail({
+      preheader: isResend ? 'Reminder: your JG Restoration contract is awaiting signature' : 'Your JG Restoration contract is ready for signature',
+      headline: isResend ? 'Reminder: Contract Awaiting Signature' : 'Contract Ready for Signature',
+      intro: 'Hi ' + custFirst + ',',
+      bodyHtml: `<p>${isResend ? 'This is a friendly reminder that your' : 'Your'} JG Restoration contract packet is ready for your review and signature. The packet includes:</p>
+        <ul style="margin:8px 0 14px 18px;padding:0;line-height:1.7;">
+          <li>The signed contract terms</li>
+          <li>The Schedule of Values (draw schedule)</li>
+          <li>The Xactimate estimate detail</li>
+        </ul>
+        <p>Please click the button below to review and sign at your earliest convenience.</p>`,
+      ctaLabel: 'Review & Sign Packet',
+      ctaUrl: signUrl,
+      signoffName: fromName,
+    });
+
+    await sb.from('rebuild_messages').insert({
+      project_id: p.id,
+      direction: 'outbound',
+      channel: 'email',
+      status: 'sent',
+      subject,
+      body: emailBody,
+      recipient_type: 'customer',
+      recipient_name: p.customer_name || null,
+      recipient_email: p.customer_email,
+      sent_by_name: fromName,
+      sent_by_email: fromEmail,
+    });
+
+    await fetch(MESSAGE_HOOK, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        project_id: p.id,
+        channel: 'email',
+        direction: 'outbound',
+        recipient_type: 'customer',
+        recipient_name: p.customer_name || '',
+        recipient_email: p.customer_email,
+        to_email: p.customer_email,
+        from_email: fromEmail,
+        from_name: fromName,
+        subject,
+        body: emailBody,
+      }),
+      mode: 'no-cors',
+    });
+
+    toast(isResend ? '✓ Reminder email sent' : '✓ Packet sent to ' + p.customer_email);
+    await loadPacket();
+    await loadSov();
+    renderDetail();
+  } catch (err) {
+    console.error('[packet] send failed:', err);
+    toast('Send failed: ' + err.message);
+  }
+}
+
+// ─── ACTION: Copy Customer Link ─────────────────────────────────────────────
+function copyPacketLink() {
+  const pkt = state.packet;
+  if (!pkt || pkt.status !== 'sent' || !pkt.customer_token) { toast('No active packet link'); return; }
+  const url = `${PACKET_PORTAL_BASE}?t=${pkt.customer_token}`;
+  navigator.clipboard.writeText(url).then(
+    () => toast('✓ Customer link copied'),
+    () => toast('Copy failed — link: ' + url)
+  );
+}
+
+// ─── ACTION: Void Packet ────────────────────────────────────────────────────
+async function voidPacket() {
+  const pkt = state.packet;
+  if (!pkt) return;
+  if (pkt.status !== 'sent') { toast(`Cannot void a packet in status "${pkt.status}"`); return; }
+  const ok = confirm('Void this contract packet?\n\nThe customer link will stop working immediately. The SOV will unlock so you can re-issue a new packet.');
+  if (!ok) return;
+
+  toast('Voiding packet…');
+  try {
+    const { error } = await sb.rpc('void_contract_packet', { p_packet_id: pkt.id });
+    if (error) throw new Error(error.message);
+    toast('✓ Packet voided');
+    await loadPacket();
+    await loadSov();
+    renderDetail();
+  } catch (err) {
+    console.error('[packet] void failed:', err);
+    toast('Void failed: ' + err.message);
+  }
+}
+
+// ─── ACTION: Discard Draft ──────────────────────────────────────────────────
+async function discardDraftPacket() {
+  const pkt = state.packet;
+  if (!pkt || pkt.status !== 'draft') { toast('Only draft packets can be discarded'); return; }
+  const ok = confirm('Discard this draft packet?\n\nThe merged PDF and packet record will be deleted. You can create a fresh one afterward.');
+  if (!ok) return;
+
+  try {
+    const { error } = await sb.from('rebuild_contract_packets').delete().eq('id', pkt.id);
+    if (error) throw new Error(error.message);
+    toast('✓ Draft discarded');
+    await loadPacket();
+    renderDetail();
+  } catch (err) {
+    console.error('[packet] discard failed:', err);
+    toast('Discard failed: ' + err.message);
+  }
+}
+
+// ─── ACTION: Re-issue Packet ────────────────────────────────────────────────
+async function reissuePacket() {
+  const pkt = state.packet;
+  if (!pkt) return;
+  if (!['declined','expired','voided'].includes(pkt.status)) {
+    toast(`Cannot re-issue from status "${pkt.status}"`); return;
+  }
+  state._packetReissueFrom = pkt.id;
+  try {
+    await createPacket();
+  } finally {
+    state._packetReissueFrom = null;
+  }
+}
+
+// ─── Wire packet button events ──────────────────────────────────────────────
+function wirePacketActions() {
+  const createBtn = document.getElementById('packet_create_btn');
+  if (createBtn) createBtn.addEventListener('click', createPacket);
+
+  const sendBtn = document.getElementById('packet_send_btn');
+  if (sendBtn) sendBtn.addEventListener('click', () => sendPacket(false));
+
+  const resendBtn = document.getElementById('packet_resend_btn');
+  if (resendBtn) resendBtn.addEventListener('click', () => sendPacket(true));
+
+  const copyBtn = document.getElementById('packet_copy_link_btn');
+  if (copyBtn) copyBtn.addEventListener('click', copyPacketLink);
+
+  const voidBtn = document.getElementById('packet_void_btn');
+  if (voidBtn) voidBtn.addEventListener('click', voidPacket);
+
+  const discardBtn = document.getElementById('packet_discard_btn');
+  if (discardBtn) discardBtn.addEventListener('click', discardDraftPacket);
+
+  const reissueBtn = document.getElementById('packet_reissue_btn');
+  if (reissueBtn) reissueBtn.addEventListener('click', reissuePacket);
+}
+
+
 // ════════════════════════════════════════════════════════════════════════════
 // END SOV MODULE
 // ════════════════════════════════════════════════════════════════════════════
@@ -1252,6 +1593,13 @@ function renderPacketSection() {
 window.usd = usd;
 window.loadPacket = loadPacket;
 window.renderPacketSection = renderPacketSection;
+window.wirePacketActions = wirePacketActions;
+window.createPacket = createPacket;
+window.sendPacket = sendPacket;
+window.copyPacketLink = copyPacketLink;
+window.voidPacket = voidPacket;
+window.discardDraftPacket = discardDraftPacket;
+window.reissuePacket = reissuePacket;
 window.PACKET_STATUS_META = PACKET_STATUS_META;
 window.PACKET_DECLINE_REASON_LABELS = PACKET_DECLINE_REASON_LABELS;
 window.computeXactTotalForSov = computeXactTotalForSov;
