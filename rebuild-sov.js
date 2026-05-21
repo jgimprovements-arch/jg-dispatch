@@ -1267,26 +1267,71 @@ async function createPacket() {
   const p = state.activeProject;
   const sov = state.sov;
 
+  // Pull frozen financial snapshot from the parsed Xact upload
+  const up = state.woBudget && state.woBudget.upload ? state.woBudget.upload : {};
+  const fin = {
+    line_item_total: Number(up.line_item_total) || 0,
+    material_tax:    Number(up.material_sales_tax) || 0,
+    service_tax:     Number(up.service_sales_tax) || 0,
+    subtotal:        Number(up.subtotal) || 0,
+    overhead:        Number(up.overhead) || 0,
+    profit:          Number(up.profit) || 0,
+    rcv:             Number(up.replacement_cost_value) || 0,
+  };
+  const totalTax = fin.material_tax + fin.service_tax;
+
   const html = `
     <div class="modal-back on" id="packet_create_overlay">
-      <div class="modal" style="max-width:520px;">
+      <div class="modal" style="max-width:560px;">
         <h3>Create Contract Packet <button class="close" data-close>×</button></h3>
         <div class="modal-body">
           <div style="background:rgba(245,166,35,0.08);border:1px solid rgba(245,166,35,0.3);border-radius:6px;padding:10px 12px;margin-bottom:12px;font-size:12px;color:var(--navy);">
             <strong>Heads up:</strong> Once sent, the SOV and all draw amounts become locked.
             They can only be edited if the customer declines or the link expires.
+            The financial breakdown below will be <strong>frozen into this packet</strong> — re-uploading the Xactimate later won't change the signed amount.
           </div>
-          <div style="display:grid;grid-template-columns:auto 1fr;gap:6px 14px;font-size:12px;margin-bottom:14px;padding:10px;background:var(--bg);border-radius:6px;">
+
+          <div style="display:grid;grid-template-columns:auto 1fr;gap:6px 14px;font-size:12px;margin-bottom:12px;padding:10px;background:var(--bg);border-radius:6px;">
             <div style="color:var(--muted);">Customer:</div><div style="font-weight:600;">${esc(p.customer_name || '—')}</div>
             <div style="color:var(--muted);">Email:</div><div>${esc(p.customer_email)}</div>
             <div style="color:var(--muted);">Xactimate:</div><div>${esc(xactDoc.filename)}</div>
-            <div style="color:var(--muted);">SOV Total:</div><div style="font-weight:600;">${usd(sov.contract_total || 0)}</div>
           </div>
+
+          <div style="border:1px solid var(--border);border-radius:6px;padding:10px 12px;margin-bottom:14px;background:#fff;">
+            <div style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px;">Contract Financial Terms (from Xactimate)</div>
+            <div style="display:grid;grid-template-columns:1fr auto;gap:4px 14px;font-size:13px;">
+              <div style="color:var(--muted);">Line items subtotal</div><div style="text-align:right;">${usd(fin.line_item_total)}</div>
+              <div style="color:var(--muted);">Sales tax (material + service)</div><div style="text-align:right;">${usd(totalTax)}</div>
+              <div style="color:var(--muted);border-top:1px solid var(--border);padding-top:4px;">Subtotal</div><div style="text-align:right;border-top:1px solid var(--border);padding-top:4px;">${usd(fin.subtotal)}</div>
+              <div style="color:var(--muted);">Overhead</div><div style="text-align:right;">${usd(fin.overhead)}</div>
+              <div style="color:var(--muted);">Profit</div><div style="text-align:right;">${usd(fin.profit)}</div>
+              <div style="font-weight:700;color:var(--navy);border-top:2px solid var(--navy);padding-top:6px;font-size:14px;">Contract Price (RCV)</div><div style="font-weight:700;color:var(--navy);text-align:right;border-top:2px solid var(--navy);padding-top:6px;font-size:14px;">${usd(fin.rcv)}</div>
+            </div>
+          </div>
+
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px;">
+            <div>
+              <label style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:.05em;">Commencement Date *</label>
+              <input type="date" id="packet_start_date" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;font-size:13px;margin-top:4px;" required>
+            </div>
+            <div>
+              <label style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:.05em;">Substantial Completion *</label>
+              <input type="date" id="packet_completion_date" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;font-size:13px;margin-top:4px;" required>
+            </div>
+          </div>
+
           <div style="margin-bottom:12px;">
-            <label style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:.05em;">Contract Document (PDF)</label>
+            <label style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:.05em;">Exclusions (optional)</label>
+            <textarea id="packet_exclusions" rows="3" placeholder="e.g. Personal property, landscaping, items not listed in scope…" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;font-size:13px;margin-top:4px;resize:vertical;font-family:inherit;"></textarea>
+            <div style="font-size:11px;color:var(--muted);margin-top:4px;">Items explicitly NOT covered by this contract. Surfaced to the customer in the signed packet.</div>
+          </div>
+
+          <div style="margin-bottom:12px;">
+            <label style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:.05em;">Contract Document (PDF) *</label>
             <input type="file" id="packet_contract_file" accept="application/pdf" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;font-size:13px;margin-top:4px;">
             <div style="font-size:11px;color:var(--muted);margin-top:4px;">The legal contract terms. PDF only.</div>
           </div>
+
           <div id="packet_create_status" style="font-size:12px;color:var(--muted);min-height:18px;margin-bottom:10px;"></div>
           <div style="display:flex;gap:8px;justify-content:flex-end;">
             <button class="btn ghost" data-close>Cancel</button>
@@ -1304,7 +1349,19 @@ async function createPacket() {
     const fileInput = document.getElementById('packet_contract_file');
     const statusEl = document.getElementById('packet_create_status');
     const submitBtn = document.getElementById('packet_create_submit');
+    const startInput = document.getElementById('packet_start_date');
+    const completionInput = document.getElementById('packet_completion_date');
+    const exclusionsInput = document.getElementById('packet_exclusions');
     const file = fileInput.files && fileInput.files[0];
+
+    // ─── Validation ──────────────────────────────────────────────────
+    if (!startInput.value) { statusEl.textContent = 'Commencement Date is required.'; statusEl.style.color = 'var(--danger)'; return; }
+    if (!completionInput.value) { statusEl.textContent = 'Substantial Completion Date is required.'; statusEl.style.color = 'var(--danger)'; return; }
+    if (new Date(completionInput.value) <= new Date(startInput.value)) {
+      statusEl.textContent = 'Substantial Completion must be after Commencement.';
+      statusEl.style.color = 'var(--danger)';
+      return;
+    }
     if (!file) { statusEl.textContent = 'Please select a contract PDF.'; statusEl.style.color = 'var(--danger)'; return; }
     if (file.type !== 'application/pdf') { statusEl.textContent = 'File must be a PDF.'; statusEl.style.color = 'var(--danger)'; return; }
 
@@ -1355,6 +1412,18 @@ async function createPacket() {
         contract_pdf_url: contractPdfUrl,
         status: 'draft',
         created_by: state.pmEmail || null,
+        // ── Contractual terms captured at packet creation ──
+        commencement_date: startInput.value,
+        substantial_completion_date: completionInput.value,
+        exclusions: (exclusionsInput.value || '').trim() || null,
+        // ── Frozen financial snapshot from Xact upload (immutable) ──
+        contract_line_item_total: fin.line_item_total,
+        contract_material_tax:    fin.material_tax,
+        contract_service_tax:     fin.service_tax,
+        contract_subtotal:        fin.subtotal,
+        contract_overhead:        fin.overhead,
+        contract_profit:          fin.profit,
+        contract_rcv:             fin.rcv,
       };
       if (state._packetReissueFrom) {
         packetInsertRow.voids_packet_id = state._packetReissueFrom;
