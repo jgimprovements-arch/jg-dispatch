@@ -5188,7 +5188,10 @@ function renderDetail() {
 function renderTabContent() {
   const c = $('#tabContent');
   if (state.tab === 'packet') {
-    c.innerHTML = (typeof renderPacketSection === 'function') ? renderPacketSection() : '<div style="padding:20px;color:var(--muted);">Packet module not loaded</div>';
+    // Show Xact upload section if not yet parsed, then packet creation section below
+    const uploadHtml = renderPacketXactUpload();
+    const packetHtml = (typeof renderPacketSection === 'function') ? renderPacketSection() : '<div style="padding:20px;color:var(--muted);">Packet module not loaded</div>';
+    c.innerHTML = uploadHtml + packetHtml;
     if (typeof wirePacketActions === 'function') wirePacketActions();
   }
   else if (state.tab === 'relationships') c.innerHTML = renderRelationshipsTab();
@@ -9187,6 +9190,102 @@ async function upsertWoBuilderRow(tradeCategory, fields) {
   }
 }
 
+
+// ═══════════════ PACKET XACT UPLOAD (Packet tab entry point) ═══════════════
+// Extracted from WO Builder to make Xact upload the first step of the
+// contract-first workflow. Only shown in Packet tab when gated (not signed).
+function renderPacketXactUpload() {
+  const budget = state.woBudget;
+  
+  // Parsing in progress
+  if (state.woBudgetParsing) {
+    const { stage, pct } = state.woBudgetProgress || { stage: '', pct: 0 };
+    return `
+      <div class="wobx-card">
+        <div class="wobx-head">
+          <h3>📄 Parsing Xactimate…</h3>
+        </div>
+        <div class="wobx-body">
+          <div class="wobx-progress-bar"><div class="wobx-progress-fill" style="width:${pct}%;"></div></div>
+          <div class="wobx-progress-label">${esc(stage)} (${pct}%)</div>
+        </div>
+      </div>
+    `;
+  }
+
+  // No upload yet
+  if (!budget || !budget.upload) {
+    return `
+      <div class="wobx-card wobx-empty">
+        <div class="wobx-head">
+          <h3>Step 1: Upload Xactimate Estimate</h3>
+        </div>
+        <div class="wobx-body">
+          <p style="color:var(--muted);font-size:13px;margin:0 0 14px;">
+            Upload the <b>Estimate PDF</b> and <b>Components PDF</b> from Xactimate.
+            The platform will parse them, generate the Schedule of Values (50/50 split),
+            and prepare the contract document for the customer to sign.
+          </p>
+          <div class="wobx-dropzone" id="wobx_dropzone">
+            <input type="file" id="wobx_files" accept="application/pdf" multiple style="display:none;">
+            <div class="wobx-dz-empty">
+              <div class="wobx-dz-icon">📥</div>
+              <div class="wobx-dz-title">Drop both PDFs here</div>
+              <div class="wobx-dz-sub">or <span class="wobx-dz-link">click to browse</span> · need both Estimate + Components</div>
+            </div>
+            <div class="wobx-dz-files" id="wobx_dz_files"></div>
+          </div>
+          <div class="wobx-action-row">
+            <button class="wobx-go-btn" id="wobx_generate" disabled>Parse & Generate SOV</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  // Parse failed
+  if (budget.upload.parse_status === 'error') {
+    return `
+      <div class="wobx-card wobx-error">
+        <div class="wobx-head">
+          <h3>⚠️ Parse Failed</h3>
+          <button class="wobx-action-btn" id="wobx_retry">Try Again</button>
+        </div>
+        <div class="wobx-body">
+          <p style="color:var(--red);font-size:13px;margin:0;">
+            <b>Error:</b> ${esc(budget.upload.parse_error || 'Unknown error')}
+          </p>
+        </div>
+      </div>
+    `;
+  }
+
+  // Parsed successfully — show summary + next steps
+  if (budget.upload.parse_status === 'parsed') {
+    return `
+      <div class="wobx-card wobx-success">
+        <div class="wobx-head">
+          <h3>✓ Xactimate Parsed Successfully</h3>
+        </div>
+        <div class="wobx-body">
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px;font-size:13px;">
+            <div><span style="color:var(--muted);">File:</span> ${esc(budget.upload.filename)}</div>
+            <div><span style="color:var(--muted);">Estimate Date:</span> ${budget.upload.date_estimated ? new Date(budget.upload.date_estimated).toLocaleDateString() : '—'}</div>
+            <div><span style="color:var(--muted);">Line Items:</span> ${usdCompact(budget.upload.line_item_total || 0)}</div>
+            <div><span style="color:var(--muted);">Contract Price (RCV):</span> <strong>${usdCompact(budget.upload.replacement_cost_value || 0)}</strong></div>
+          </div>
+          <p style="color:var(--muted);font-size:12px;margin:0;">
+            The Schedule of Values has been auto-generated (50/50 split). Proceed to enter contract dates and exclusions below.
+          </p>
+        </div>
+      </div>
+    `;
+  }
+
+  return '';
+}
+
+
 // ═══════════════ WO BUILDER (Xact PDF → Budget + Work Orders) ═══════════════
 function renderWoBuilderSection(budget) {
   // Parsing in progress — show the progress card
@@ -9205,30 +9304,19 @@ function renderWoBuilderSection(budget) {
     `;
   }
 
-  // No upload yet — show the upload card
+  // No upload yet — redirect to Packet tab
   if (!budget || !budget.upload) {
     return `
       <div class="wobx-card wobx-empty">
         <div class="wobx-head">
-          <h3>📄 WO Builder — Budget from Xactimate</h3>
+          <h3>🔒 Work Orders Locked</h3>
         </div>
         <div class="wobx-body">
-          <p style="color:var(--muted);font-size:13px;margin:0 0 14px;">
-            Upload an <b>Estimate PDF</b> and the matching <b>Components PDF</b> from Xactimate.
-            Claude AI will parse them and auto-generate work orders by trade, with real-time margin calculation against your 50% goal.
+          <p style="color:var(--muted);font-size:13px;margin:0 0 12px;">
+            To unlock the Work Order Builder, first upload the Xactimate estimate in the <strong>Contract Packet</strong> tab.
+            This starts the contract-first workflow.
           </p>
-          <div class="wobx-dropzone" id="wobx_dropzone">
-            <input type="file" id="wobx_files" accept="application/pdf" multiple style="display:none;">
-            <div class="wobx-dz-empty">
-              <div class="wobx-dz-icon">📥</div>
-              <div class="wobx-dz-title">Drop both PDFs here</div>
-              <div class="wobx-dz-sub">or <span class="wobx-dz-link">click to browse</span> · need both Estimate + Components</div>
-            </div>
-            <div class="wobx-dz-files" id="wobx_dz_files"></div>
-          </div>
-          <div class="wobx-action-row">
-            <button class="wobx-go-btn" id="wobx_generate" disabled>Generate Budget</button>
-          </div>
+          <button class="btn primary" onclick="state.tab='packet'; renderDetail();" style="width:100%;">Go to Contract Packet</button>
         </div>
       </div>
     `;
