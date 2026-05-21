@@ -262,6 +262,28 @@ function isProjectGated(p) {
   return true;
 }
 
+// ─── Contract-first workflow: is this project gated? ────────────────────
+// Returns true if the WO Builder and other operations tabs should be locked.
+// Projects are gated unless: (1) contract is signed, OR (2) override is active
+// and not yet expired.
+function isProjectGated(p) {
+  if (!p) return true; // safety: null project is gated
+  
+  // If contract is already signed, project is NOT gated
+  if (p.contract_signed_at) return false;
+  
+  // Check if there's an active override
+  if (p.contract_override_at && p.contract_override_expires_at) {
+    const now = new Date();
+    const expiresAt = new Date(p.contract_override_expires_at);
+    // Override is active if it hasn't expired yet
+    if (expiresAt > now) return false; // override active, NOT gated
+  }
+  
+  // No signed contract, no active override → gated
+  return true;
+}
+
 // ─── Global lightbox + download helpers ───
 const JG = window.JG = window.JG || {};
 
@@ -5104,13 +5126,14 @@ function renderDetail() {
     </div>
 
     <div class="tabs" id="tabs">
+      <button class="${state.tab==='packet'?'on':''}" data-tab="packet">📋 Contract Packet</button>
       <button class="${state.tab==='relationships'?'on':''}" data-tab="relationships">Relationships ${(state.relationships||[]).length ? `<span class="badge">${state.relationships.length}</span>` : ''}</button>
-      <button class="${state.tab==='phases'?'on':''}" data-tab="phases">Schedule <span class="badge">${state.phases.length}</span></button>
+      <button class="${state.tab==='phases'?'on':''}" data-tab="phases" ${isProjectGated(p) ? 'disabled title="Locked until customer signs contract"' : ''}>Schedule <span class="badge">${state.phases.length}</span></button>
       <button class="${state.tab==='sov'?'on':''}" data-tab="sov">SOV ${sovBadge()}</button>
-      <button class="${state.tab==='workorders'?'on':''}" data-tab="workorders">Work Orders ${(overdueSelections + (state.workOrders||[]).filter(w => w.status === 'sent').length) ? `<span class="badge">${overdueSelections + (state.workOrders||[]).filter(w => w.status === 'sent').length}</span>` : ''}</button>
+      <button class="${state.tab==='workorders'?'on':''}" data-tab="workorders" ${isProjectGated(p) ? 'disabled title="Locked until customer signs contract"' : ''}>Work Orders ${(overdueSelections + (state.workOrders||[]).filter(w => w.status === 'sent').length) ? `<span class="badge">${overdueSelections + (state.workOrders||[]).filter(w => w.status === 'sent').length}</span>` : ''}</button>
       <button class="${state.tab==='financials'?'on':''}" data-tab="financials">Financials ${state.qbActuals?.invoice_balance > 0 ? `<span class="badge">AR</span>` : ''}</button>
-      <button class="${state.tab==='messages'?'on':''}" data-tab="messages">Messages ${(state.journalEntries||[]).filter(e => !e.deleted_at).length ? `<span class="badge">${state.journalEntries.filter(e=>!e.deleted_at).length}</span>` : ''}</button>
-      <button class="${state.tab==='todos'?'on':''}" data-tab="todos">To-Dos ${(state.todos||[]).filter(t => t.status === 'open' || t.status === 'in_progress').length ? `<span class="badge">${state.todos.filter(t => t.status === 'open' || t.status === 'in_progress').length}</span>` : ''}</button>
+      <button class="${state.tab==='messages'?'on':''}" data-tab="messages" ${isProjectGated(p) ? 'disabled title="Locked until customer signs contract"' : ''}>Messages ${(state.journalEntries||[]).filter(e => !e.deleted_at).length ? `<span class="badge">${state.journalEntries.filter(e=>!e.deleted_at).length}</span>` : ''}</button>
+      <button class="${state.tab==='todos'?'on':''}" data-tab="todos" ${isProjectGated(p) ? 'disabled title="Locked until customer signs contract"' : ''}>To-Dos ${(state.todos||[]).filter(t => t.status === 'open' || t.status === 'in_progress').length ? `<span class="badge">${state.todos.filter(t => t.status === 'open' || t.status === 'in_progress').length}</span>` : ''}</button>
       <button class="${state.tab==='documents'?'on':''}" data-tab="documents">Documents</button>
       <button class="${state.tab==='audit'?'on':''}" data-tab="audit">Audit Trail</button>
     </div>
@@ -5164,7 +5187,11 @@ function renderDetail() {
 
 function renderTabContent() {
   const c = $('#tabContent');
-  if (state.tab === 'relationships') c.innerHTML = renderRelationshipsTab();
+  if (state.tab === 'packet') {
+    c.innerHTML = (typeof renderPacketSection === 'function') ? renderPacketSection() : '<div style="padding:20px;color:var(--muted);">Packet module not loaded</div>';
+    if (typeof wirePacketActions === 'function') wirePacketActions();
+  }
+  else if (state.tab === 'relationships') c.innerHTML = renderRelationshipsTab();
   else if (state.tab === 'phases')      c.innerHTML = renderPhasesTab();
   else if (state.tab === 'selections') { state.tab = 'workorders'; if (typeof updateUrlHash === 'function') updateUrlHash(); c.innerHTML = renderWorkOrdersTab(); }
   else if (state.tab === 'messages') c.innerHTML = renderMessagesTab();
@@ -6311,6 +6338,14 @@ async function openSelectionEditor(selectionId) {
       .sel-cost-tile.sel-cost-tile-total { background: rgba(45,156,95,.08); border-color: rgba(45,156,95,.30); }
       .sel-cost-tile.sel-cost-tile-total label { color: var(--green); }
       .sel-cost-tile.sel-cost-tile-total input { color: var(--green); }
+          /* ─── Gated tabs: disabled button styling ─── */
+      button[disabled] {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+      button[disabled]:hover {
+        background: none;
+      }
     </style>
 
     <div class="sel-editor">
