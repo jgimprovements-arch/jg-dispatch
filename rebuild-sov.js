@@ -1192,6 +1192,9 @@ const PACKET_PORTAL_BASE = 'https://jgimprovements-arch.github.io/jg-dispatch/pa
 // Vercel merge endpoint
 const PACKET_MERGE_ENDPOINT = 'https://jg-proxy-v2.vercel.app/api/packet-merge';
 
+// Vercel contract-generation endpoint (renders contract.html template → PDF)
+const PACKET_CONTRACT_GEN_ENDPOINT = 'https://jg-proxy-v2.vercel.app/api/contract-generate';
+
 // ─── Loader ─────────────────────────────────────────────────────────────────
 async function loadPacket() {
   if (!sb || !state.activeProjectId) {
@@ -1453,10 +1456,11 @@ async function createPacket() {
             <div style="font-size:11px;color:var(--muted);margin-top:4px;">Items explicitly NOT covered by this contract. Surfaced to the customer in the signed packet.</div>
           </div>
 
-          <div style="margin-bottom:12px;">
-            <label style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:.05em;">Contract Document (PDF) *</label>
-            <input type="file" id="packet_contract_file" accept="application/pdf" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;font-size:13px;margin-top:4px;">
-            <div style="font-size:11px;color:var(--muted);margin-top:4px;">The legal contract terms. PDF only.</div>
+          <div style="margin-bottom:12px;padding:10px 12px;background:rgba(34,197,94,0.05);border:1px solid rgba(34,197,94,0.25);border-radius:6px;">
+            <div style="font-size:11px;font-weight:700;color:var(--success);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">📄 Contract Auto-Generated</div>
+            <div style="font-size:12px;color:var(--navy);line-height:1.5;">
+              The legal contract will be generated automatically from JG Restoration's attorney-reviewed template, with Exhibits A-G included. It auto-fills customer info, property address, financial terms, dates, and exclusions from above.
+            </div>
           </div>
 
           <div id="packet_create_status" style="font-size:12px;color:var(--muted);min-height:18px;margin-bottom:10px;"></div>
@@ -1473,13 +1477,11 @@ async function createPacket() {
   overlay.querySelectorAll('[data-close]').forEach(b => b.addEventListener('click', () => overlay.remove()));
 
   document.getElementById('packet_create_submit').addEventListener('click', async () => {
-    const fileInput = document.getElementById('packet_contract_file');
     const statusEl = document.getElementById('packet_create_status');
     const submitBtn = document.getElementById('packet_create_submit');
     const startInput = document.getElementById('packet_start_date');
     const completionInput = document.getElementById('packet_completion_date');
     const exclusionsInput = document.getElementById('packet_exclusions');
-    const file = fileInput.files && fileInput.files[0];
 
     // ─── Validation ──────────────────────────────────────────────────
     if (!startInput.value) { statusEl.textContent = 'Commencement Date is required.'; statusEl.style.color = 'var(--danger)'; return; }
@@ -1489,35 +1491,70 @@ async function createPacket() {
       statusEl.style.color = 'var(--danger)';
       return;
     }
-    if (!file) { statusEl.textContent = 'Please select a contract PDF.'; statusEl.style.color = 'var(--danger)'; return; }
-    if (file.type !== 'application/pdf') { statusEl.textContent = 'File must be a PDF.'; statusEl.style.color = 'var(--danger)'; return; }
 
     submitBtn.disabled = true;
     statusEl.style.color = 'var(--muted)';
 
     try {
-      // 1) Upload contract PDF to storage
-      statusEl.textContent = 'Uploading contract document…';
-      const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
-      const contractPath = `projects/${state.activeProjectId}/packets/contract-${Date.now()}-${safeName}`;
-      const upRes = await sb.storage.from('rebuild-documents').upload(contractPath, file, {
-        contentType: 'application/pdf',
-        upsert: false,
-      });
-      if (upRes.error) throw new Error('Contract upload failed: ' + upRes.error.message);
-      const { data: contractUrlData } = sb.storage.from('rebuild-documents').getPublicUrl(contractPath);
-      const contractPdfUrl = contractUrlData.publicUrl;
+      // 1) Generate contract PDF from platform template (Step 7 endpoint)
+      statusEl.textContent = 'Generating contract from template…';
+      const draws = state.sovDraws || [];
+      const contractGenPayload = {
+        project_id: state.activeProjectId,
+        albi_job_number: p.albi_job_number || '',
+        customer: {
+          name: p.customer_name || '',
+          email: p.customer_email || '',
+          phone: p.customer_phone || '',
+          property_address: p.property_address || '',
+        },
+        pm: {
+          name: p.albi_pm_name || '',
+          email: state.pmEmail || '',
+        },
+        financials: fin, // frozen Xact snapshot (line_item_total, taxes, subtotal, overhead, profit, rcv)
+        dates: {
+          commencement_date: startInput.value,
+          substantial_completion_date: completionInput.value,
+        },
+        exclusions: (exclusionsInput.value || '').trim() || null,
+        sov: {
+          id: state.sov.id,
+          contract_total: state.sov.contract_total,
+          draws: draws.map(d => ({
+            draw_num: d.draw_num,
+            trigger_event: d.trigger_event,
+            percent: Number(d.percent),
+            amount: Number(d.total_amount || d.base_amount),
+          })),
+        },
+      };
 
-      // 2) Log contract PDF in rebuild_documents (visibility in Documents tab)
+      const contractRes = await fetch(PACKET_CONTRACT_GEN_ENDPOINT, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(contractGenPayload),
+      });
+      if (!contractRes.ok) {
+        const errTxt = await contractRes.text();
+        throw new Error(`Contract generation failed (${contractRes.status}): ${errTxt}`);
+      }
+      const contractData = await contractRes.json();
+      if (!contractData.ok) throw new Error('Contract gen failed: ' + (contractData.error || 'unknown'));
+      const contractPdfUrl = contractData.contract_pdf_url;
+      const contractTemplateVersion = contractData.template_version || null;
+
+      // 2) Log generated contract PDF in rebuild_documents (visibility in Documents tab)
       await sb.from('rebuild_documents').insert({
         project_id: state.activeProjectId,
         category: 'Contract',
-        filename: file.name,
+        filename: `Contract_${p.albi_job_number || state.activeProjectId}_v${contractTemplateVersion || '1'}.pdf`,
         file_url: contractPdfUrl,
-        file_size_bytes: file.size,
+        file_size_bytes: contractData.file_size_bytes || 0,
         mime_type: 'application/pdf',
         uploaded_by_email: state.pmEmail || null,
         push_status: 'skipped',
+        notes: `Auto-generated from template${contractTemplateVersion ? ' v' + contractTemplateVersion : ''}`,
       });
 
       // 3) Generate + upload SOV PDF
@@ -1551,6 +1588,8 @@ async function createPacket() {
         contract_overhead:        fin.overhead,
         contract_profit:          fin.profit,
         contract_rcv:             fin.rcv,
+        // ── Contract template version (for diligence: which template signed) ──
+        contract_template_version: contractTemplateVersion,
       };
       if (state._packetReissueFrom) {
         packetInsertRow.voids_packet_id = state._packetReissueFrom;
