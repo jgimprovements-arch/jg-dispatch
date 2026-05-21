@@ -175,8 +175,13 @@ const signedLine = s.customer_signed_at
 
 let actions = '';
 if (s.status === 'draft') {
+  // Confirm button: only show if not yet confirmed for packet
+  const confirmBtn = !s.confirmed_for_packet_at
+    ? `<button class="btn primary" id="sov_confirm_packet_btn" style="background:var(--success);border-color:var(--success);">✓ Confirm SOV for Packet</button>`
+    : `<span class="wobx-status-pill" style="background:rgba(34,197,94,0.12);color:var(--success);border:1px solid #22c55e40;font-size:11px;padding:2px 10px;border-radius:20px;font-weight:600;">✓ CONFIRMED FOR PACKET</span>`;
   actions = `
-    <button class="btn primary" id="sov_send_btn">✉ Send to Customer</button>
+    ${confirmBtn}
+    <button class="btn ghost" id="sov_send_btn">✉ Send to Customer (legacy)</button>
     <button class="btn ghost" id="sov_mark_signed_btn">✓ Mark Signed Manually</button>
     <button class="btn ghost" id="sov_export_pdf_btn">📄 PDF</button>
     <button class="btn ghost" id="sov_export_xlsx_btn">📊 Excel</button>
@@ -223,6 +228,17 @@ return `
       <div><div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;">Requested</div><div style="font-size:18px;font-weight:700;color:var(--gold);">${usd(requested)}</div></div>
       <div><div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;">Pending</div><div style="font-size:18px;font-weight:700;color:var(--muted);">${usd(pending)}</div></div>
     </div>
+    ${s.status === 'draft' && !s.confirmed_for_packet_at ? `
+      <div style="margin-top:12px;padding:10px 12px;background:rgba(245,166,35,0.08);border:1px solid rgba(245,166,35,0.3);border-radius:6px;font-size:12px;color:var(--navy);">
+        <strong>Review the draws above.</strong> Default is 50/50 — edit individual draws if you want a different split (30/30/40, custom).
+        When the SOV is ready for the customer, click <strong>✓ Confirm SOV for Packet</strong> above. Confirmation locks the draws and unlocks packet creation.
+      </div>
+    ` : ''}
+    ${s.status === 'draft' && s.confirmed_for_packet_at ? `
+      <div style="margin-top:12px;padding:10px 12px;background:rgba(34,197,94,0.08);border:1px solid rgba(34,197,94,0.3);border-radius:6px;font-size:12px;color:var(--navy);">
+        <strong>✓ SOV confirmed for packet</strong> on ${new Date(s.confirmed_for_packet_at).toLocaleDateString()} by ${esc(s.confirmed_for_packet_by || 'PM')}. Go to <strong>Contract Packet</strong> tab to send to customer.
+      </div>
+    ` : ''}
   </div>
 `;
 }
@@ -308,6 +324,8 @@ return `
 function wireSovTab() {
 const createBtn = document.getElementById('sov_create_btn');
 if (createBtn) createBtn.addEventListener('click', openCreateSovModal);
+const confirmBtn = document.getElementById('sov_confirm_packet_btn');
+if (confirmBtn) confirmBtn.addEventListener('click', confirmSovForPacket);
 const sendBtn = document.getElementById('sov_send_btn');
 if (sendBtn) sendBtn.addEventListener('click', sendSovForSignature);
 const resendBtn = document.getElementById('sov_resend_btn');
@@ -479,7 +497,115 @@ document.getElementById('sov_form_submit').addEventListener('click', async () =>
 });
 }
 
+// ─── Confirm SOV for Packet (PM explicit approval) ─────────────────────────
+async function confirmSovForPacket() {
+  if (!state.sov || state.sov.status !== 'draft') {
+    toast('Only draft SOVs can be confirmed for packet');
+    return;
+  }
+  if (state.sov.confirmed_for_packet_at) {
+    toast('SOV already confirmed');
+    return;
+  }
+  const draws = state.sovDraws || [];
+  if (!draws.length) {
+    toast('SOV has no draws — add draws before confirming');
+    return;
+  }
+  // Verify draws sum to 100%
+  const sumPct = draws.reduce((s, d) => s + Number(d.percent || 0), 0);
+  if (Math.abs(sumPct - 1) > 0.001) {
+    toast(`Draws must total 100% (currently ${(sumPct * 100).toFixed(1)}%)`);
+    return;
+  }
+  if (!confirm(`Confirm SOV for packet?\n\n${draws.length} draw(s) totaling ${usd(state.sov.contract_total)}.\n\nOnce confirmed, draws are locked. The packet can then be created and sent to the customer.`)) return;
+
+  const now = new Date().toISOString();
+  const { error } = await sb.from('rebuild_sov').update({
+    confirmed_for_packet_at: now,
+    confirmed_for_packet_by: state.pmEmail || null,
+  }).eq('id', state.sov.id);
+  if (error) { toast('Confirm failed: ' + error.message); return; }
+  await logSovEvent('sov_confirmed_for_packet', {
+    new_values: { draws: draws.length, contract_total: state.sov.contract_total },
+    notes: `SOV confirmed for packet with ${draws.length} draws totaling ${usd(state.sov.contract_total)}`,
+  });
+  if (typeof logToAlbi === 'function') logToAlbi('sov_confirmed', `SOV confirmed for packet by ${state.pmEmail || 'PM'}`);
+  await loadSov();
+  renderDetail();
+  toast('✓ SOV confirmed — go to Contract Packet tab to send');
+}
+
+// ─── Auto-create default 50/50 SOV after successful Xact parse ─────────────
+// Called by the WO Builder parse completion handler in rebuild.html.
+// Only creates if no SOV exists for the project; otherwise no-op.
+async function autoCreateDefault5050Sov() {
+  if (!sb || !state.activeProjectId) return { ok: false, reason: 'No active project' };
+  
+  // Idempotency: only create if no SOV exists
+  if (state.sov) {
+    return { ok: false, reason: 'SOV already exists', existing: state.sov };
+  }
+  
+  // Get contract total — prefer RCV from Xact upload, fall back to computeXactTotalForSov
+  const upload = state.woBudget?.upload;
+  let contractTotal = 0;
+  if (upload && Number(upload.replacement_cost_value) > 0) {
+    contractTotal = Number(upload.replacement_cost_value);
+  } else {
+    contractTotal = computeXactTotalForSov();
+  }
+  
+  if (contractTotal <= 0) {
+    return { ok: false, reason: 'Xact total is zero — cannot auto-create SOV' };
+  }
+  
+  // Build default 50/50 draws
+  const draws = SOV_PRESET_SPLITS['50/50'];
+  
+  // Insert SOV row
+  const { data: sovRow, error } = await sb.from('rebuild_sov').insert({
+    project_id: state.activeProjectId,
+    contract_total: contractTotal,
+    draw_count: draws.length,
+    status: 'draft',
+    created_by: state.pmEmail || 'system:auto-50-50',
+  }).select().single();
+  if (error || !sovRow) {
+    console.error('[sov] auto-create failed', error);
+    return { ok: false, reason: 'DB insert failed: ' + (error?.message || 'unknown') };
+  }
+  
+  // Insert draws
+  const drawRows = draws.map((d, i) => ({
+    sov_id: sovRow.id,
+    draw_num: i + 1,
+    trigger_event: d.trigger,
+    percent: d.pct,
+    base_amount: +(contractTotal * d.pct).toFixed(2),
+    status: 'pending',
+  }));
+  const { error: drawErr } = await sb.from('rebuild_sov_draws').insert(drawRows);
+  if (drawErr) {
+    console.error('[sov] auto-create draws failed', drawErr);
+    return { ok: false, reason: 'Draws insert failed: ' + drawErr.message };
+  }
+  
+  // Log event
+  state.sov = sovRow;
+  await logSovEvent('sov_auto_created', {
+    new_values: { contract_total: contractTotal, draw_count: draws.length, source: 'xact_parse' },
+    notes: `Auto-created 50/50 SOV from Xact parse (${usd(contractTotal)})`,
+  });
+  if (typeof logToAlbi === 'function') logToAlbi('sov_auto_created', `Default 50/50 SOV created (${usd(contractTotal)}) — pending PM confirmation`);
+  
+  await loadSov();
+  return { ok: true, sov: sovRow };
+}
+
 // ─── Create SOV (DB write) ──────────────────────────────────────────────────
+
+
 async function createSov(total, draws) {
 if (!sb || !state.activeProjectId) return;
 const { data: sovRow, error } = await sb.from('rebuild_sov').insert({
@@ -1126,8 +1252,9 @@ async function _packetGateCheck() {
   const p = state.activeProject;
   if (!p) return { ok: false, reason: 'No active project loaded.' };
   if (!p.customer_email) return { ok: false, reason: 'No customer email on file. Add one before creating a packet.' };
-  if (!state.sov) return { ok: false, reason: 'No Schedule of Values yet. Create the SOV first.' };
+  if (!state.sov) return { ok: false, reason: 'No Schedule of Values yet. Upload Xactimate to auto-create the SOV.' };
   if (state.sov.status !== 'draft') return { ok: false, reason: `SOV is in status "${state.sov.status}". It must be in draft to bundle into a new packet.` };
+  if (!state.sov.confirmed_for_packet_at) return { ok: false, reason: 'SOV is not confirmed for packet. Review the draws in the SOV tab and click "Confirm SOV for Packet" before sending.' };
   const xactDoc = await _findXactDoc();
   if (!xactDoc) return { ok: false, reason: 'No Xactimate estimate uploaded. Upload it to the Documents tab first.' };
   const pkt = state.packet;
@@ -1698,3 +1825,5 @@ window.exportSovExcel = exportSovExcel;
 window.SOV_STATUS_META = SOV_STATUS_META;
 window.DRAW_STATUS_META = DRAW_STATUS_META;
 window.SOV_PRESET_SPLITS = SOV_PRESET_SPLITS;
+window.confirmSovForPacket = confirmSovForPacket;
+window.autoCreateDefault5050Sov = autoCreateDefault5050Sov;
