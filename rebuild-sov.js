@@ -1193,7 +1193,10 @@ const PACKET_PORTAL_BASE = 'https://jgimprovements-arch.github.io/jg-dispatch/pa
 const PACKET_MERGE_ENDPOINT = 'https://jg-proxy-v2.vercel.app/api/packet-merge';
 
 // Vercel contract-generation endpoint (renders contract.html template → PDF)
-const PACKET_CONTRACT_GEN_ENDPOINT = 'https://jg-proxy-v2.vercel.app/api/contract-generate';
+const PACKET_CONTRACT_GEN_ENDPOINT = 'https://jg-proxy-v2.vercel.app/api/render-contract';
+
+// Contract template version (bumped when JG_Contract_Template.html is revised)
+const CONTRACT_TEMPLATE_VERSION = '1.0';
 
 // ─── Loader ─────────────────────────────────────────────────────────────────
 async function loadPacket() {
@@ -1496,68 +1499,25 @@ async function createPacket() {
     statusEl.style.color = 'var(--muted)';
 
     try {
-      // 1) Generate contract PDF from platform template (Step 7 endpoint)
-      statusEl.textContent = 'Generating contract from template…';
-      const draws = state.sovDraws || [];
-      const contractGenPayload = {
-        project_id: state.activeProjectId,
-        albi_job_number: p.albi_job_number || '',
-        customer: {
-          name: p.customer_name || '',
-          email: p.customer_email || '',
-          phone: p.customer_phone || '',
-          property_address: p.property_address || '',
-        },
-        pm: {
-          name: p.albi_pm_name || '',
-          email: state.pmEmail || '',
-        },
-        financials: fin, // frozen Xact snapshot (line_item_total, taxes, subtotal, overhead, profit, rcv)
-        dates: {
-          commencement_date: startInput.value,
-          substantial_completion_date: completionInput.value,
-        },
-        exclusions: (exclusionsInput.value || '').trim() || null,
-        sov: {
-          id: state.sov.id,
-          contract_total: state.sov.contract_total,
-          draws: draws.map(d => ({
-            draw_num: d.draw_num,
-            trigger_event: d.trigger_event,
-            percent: Number(d.percent),
-            amount: Number(d.total_amount || d.base_amount),
-          })),
-        },
+      // ── Money formatter for contract template (e.g., 103874.51 → "103,874.51") ──
+      const fmtMoney = n => Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      // ── Date formatter for contract template (e.g., "Jun 1, 2026") ──
+      const fmtDate = (iso) => {
+        if (!iso) return '';
+        const d = new Date(iso + (iso.length === 10 ? 'T12:00:00' : ''));
+        return d.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
       };
 
-      const contractRes = await fetch(PACKET_CONTRACT_GEN_ENDPOINT, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(contractGenPayload),
-      });
-      if (!contractRes.ok) {
-        const errTxt = await contractRes.text();
-        throw new Error(`Contract generation failed (${contractRes.status}): ${errTxt}`);
-      }
-      const contractData = await contractRes.json();
-      if (!contractData.ok) throw new Error('Contract gen failed: ' + (contractData.error || 'unknown'));
-      const contractPdfUrl = contractData.contract_pdf_url;
-      const contractTemplateVersion = contractData.template_version || null;
+      const draws = state.sovDraws || [];
+      const totalTax = (fin.material_tax || 0) + (fin.service_tax || 0);
+      const todayIso = new Date().toISOString().slice(0, 10);
 
-      // 2) Log generated contract PDF in rebuild_documents (visibility in Documents tab)
-      await sb.from('rebuild_documents').insert({
-        project_id: state.activeProjectId,
-        category: 'Contract',
-        filename: `Contract_${p.albi_job_number || state.activeProjectId}_v${contractTemplateVersion || '1'}.pdf`,
-        file_url: contractPdfUrl,
-        file_size_bytes: contractData.file_size_bytes || 0,
-        mime_type: 'application/pdf',
-        uploaded_by_email: state.pmEmail || null,
-        push_status: 'skipped',
-        notes: `Auto-generated from template${contractTemplateVersion ? ' v' + contractTemplateVersion : ''}`,
-      });
+      // Split property address into two lines for the contract template
+      const addrParts = (p.property_address || '').split(',').map(s => s.trim());
+      const projectSiteAddr1 = addrParts[0] || '';
+      const projectSiteAddr2 = addrParts.slice(1).join(', ') || '';
 
-      // 3) Generate + upload SOV PDF
+      // 1) Generate + upload SOV PDF (needed first so packet row can reference it)
       statusEl.textContent = 'Generating SOV PDF…';
       const sovBlob = await buildSovPdfBlob({ forSignature: true });
       if (!sovBlob) throw new Error('SOV PDF generator returned null');
@@ -1567,13 +1527,13 @@ async function createPacket() {
       const { data: sovUrlData } = sb.storage.from('rebuild-documents').getPublicUrl(sovPath);
       const sovPdfUrl = sovUrlData.publicUrl;
 
-      // 4) Insert packet row (draft, URLs set, merged_pdf_url not yet set)
+      // 2) Insert packet row first (need packet_id for contract storage path)
+      //    contract_pdf_url + merged_pdf_url are filled in after Vercel calls complete.
       statusEl.textContent = 'Creating packet record…';
       const packetInsertRow = {
         project_id: state.activeProjectId,
         sov_id: state.sov.id,
         xact_pdf_url: xactDoc.file_url,
-        contract_pdf_url: contractPdfUrl,
         status: 'draft',
         created_by: state.pmEmail || null,
         // ── Contractual terms captured at packet creation ──
@@ -1589,7 +1549,7 @@ async function createPacket() {
         contract_profit:          fin.profit,
         contract_rcv:             fin.rcv,
         // ── Contract template version (for diligence: which template signed) ──
-        contract_template_version: contractTemplateVersion,
+        contract_template_version: CONTRACT_TEMPLATE_VERSION,
       };
       if (state._packetReissueFrom) {
         packetInsertRow.voids_packet_id = state._packetReissueFrom;
@@ -1598,7 +1558,90 @@ async function createPacket() {
       if (pktErr) throw new Error('Packet insert failed: ' + pktErr.message);
       const packetRow = pktRows[0];
 
-      // 5) Call Vercel merge endpoint
+      // 3) Call /api/render-contract — fetches JG_Contract_Template.html, injects field values, renders PDF
+      statusEl.textContent = 'Generating contract from template…';
+      const renderPayload = {
+        packet_id: packetRow.id,
+        project_id: state.activeProjectId,
+        fields: {
+          // Cover page
+          cover_owner_name:        p.customer_name || '',
+          cover_project_site:      p.property_address || '',
+          cover_contract_date:     fmtDate(todayIso),
+          cover_project_ref:       p.albi_job_number || '',
+          // Owner / Customer details
+          owner_name:              p.customer_name || '',
+          owner_address:           p.property_address || '',
+          owner_phone:             p.customer_phone || '',
+          owner_email:             p.customer_email || '',
+          // Contract details
+          contract_price:          fmtMoney(fin.rcv),
+          sales_rep_name:          p.albi_pm_name || state.pmName || 'JG Restoration',
+          project_site_addr_1:     projectSiteAddr1,
+          project_site_addr_2:     projectSiteAddr2,
+          commencement_date:       fmtDate(startInput.value),
+          completion_date:         fmtDate(completionInput.value),
+          // Cancellation page
+          cancellation_contract_date: fmtDate(todayIso),
+          // Guaranty page
+          guaranty_contract_date:  fmtDate(todayIso),
+          guaranty_project_site:   p.property_address || '',
+          // Other
+          other_incorporated_docs: 'Xactimate Estimate; Schedule of Values',
+          // SOV exhibit
+          sov_project_ref:         p.albi_job_number || '',
+          sov_contract_price:      fmtMoney(fin.rcv),
+          sov_source_estimate:     xactDoc.filename || '',
+          sov_version_date:        fmtDate(todayIso),
+          sov_subtotal:            fmtMoney(fin.subtotal),
+          sov_tax:                 fmtMoney(totalTax),
+          sov_overhead:            fmtMoney(fin.overhead),
+          sov_profit:              fmtMoney(fin.profit),
+          sov_exclusions:          (exclusionsInput.value || '').trim() || 'None',
+        },
+        draws: draws.map(d => ({
+          num:     d.draw_num,
+          pct:     Number(d.percent) > 0 ? `${(Number(d.percent) * 100).toFixed(0)}%` : '—',
+          amount:  fmtMoney(d.total_amount || d.base_amount),
+          trigger: d.trigger_event || '',
+        })),
+      };
+
+      const contractRes = await fetch(PACKET_CONTRACT_GEN_ENDPOINT, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(renderPayload),
+      });
+      if (!contractRes.ok) {
+        const errTxt = await contractRes.text();
+        throw new Error(`Contract generation failed (${contractRes.status}): ${errTxt}`);
+      }
+      const contractData = await contractRes.json();
+      if (!contractData.ok) throw new Error('Contract gen failed: ' + (contractData.error || 'unknown'));
+      const contractPdfUrl = contractData.contract_pdf_url;
+      const contractByteSize = contractData.byte_size || 0;
+
+      // 4) Update packet row with generated contract URL
+      const { error: contractUpdErr } = await sb.from('rebuild_contract_packets')
+        .update({ contract_pdf_url: contractPdfUrl })
+        .eq('id', packetRow.id);
+      if (contractUpdErr) throw new Error('Packet contract URL update failed: ' + contractUpdErr.message);
+      packetRow.contract_pdf_url = contractPdfUrl;
+
+      // 5) Log generated contract in rebuild_documents (visibility in Documents tab)
+      await sb.from('rebuild_documents').insert({
+        project_id: state.activeProjectId,
+        category: 'Contract',
+        filename: `Contract_${p.albi_job_number || state.activeProjectId}_v${CONTRACT_TEMPLATE_VERSION}.pdf`,
+        file_url: contractPdfUrl,
+        file_size_bytes: contractByteSize,
+        mime_type: 'application/pdf',
+        uploaded_by_email: state.pmEmail || null,
+        push_status: 'skipped',
+        notes: `Auto-generated from template v${CONTRACT_TEMPLATE_VERSION}`,
+      });
+
+      // 6) Call /api/packet-merge — merges Contract + Xact + SOV PDFs into one
       statusEl.textContent = 'Merging Xactimate + SOV + Contract into one PDF…';
       const mergeRes = await fetch(PACKET_MERGE_ENDPOINT, {
         method: 'POST',
@@ -1619,7 +1662,7 @@ async function createPacket() {
       const mergeData = await mergeRes.json();
       if (!mergeData.ok) throw new Error('Merge failed: ' + (mergeData.error || 'unknown'));
 
-      // 6) Update packet row with merged_pdf_url
+      // 7) Update packet row with merged_pdf_url
       const { error: updErr } = await sb.from('rebuild_contract_packets').update({
         merged_pdf_url: mergeData.merged_pdf_url,
       }).eq('id', packetRow.id);
