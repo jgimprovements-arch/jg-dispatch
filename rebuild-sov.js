@@ -177,8 +177,8 @@ let actions = '';
 if (s.status === 'draft') {
   // Confirm button: only show if not yet confirmed for packet
   const confirmBtn = !s.confirmed_for_packet_at
-    ? `<button class="btn primary" id="sov_confirm_packet_btn" style="background:var(--success);border-color:var(--success);">✓ Confirm SOV for Packet</button>`
-    : `<span class="wobx-status-pill" style="background:rgba(34,197,94,0.12);color:var(--success);border:1px solid #22c55e40;font-size:11px;padding:2px 10px;border-radius:20px;font-weight:600;">✓ CONFIRMED FOR PACKET</span>`;
+    ? `<button class="btn primary" id="sov_confirm_packet_btn" style="background:#22c55e;border-color:#22c55e;color:#fff;">✓ Confirm SOV for Packet</button>`
+    : `<span class="wobx-status-pill" style="background:rgba(34,197,94,0.12);color:#22c55e;border:1px solid #22c55e40;font-size:11px;padding:2px 10px;border-radius:20px;font-weight:600;">✓ CONFIRMED FOR PACKET</span>`;
   actions = `
     ${confirmBtn}
     <button class="btn ghost" id="sov_send_btn">✉ Send to Customer (legacy)</button>
