@@ -41,8 +41,10 @@ const PACKET_DECLINE_REASON_LABELS = {
   other:                          'Other',
 };
 
-// Customer-facing packet portal base URL
-const PACKET_PORTAL_BASE = 'https://jgimprovements-arch.github.io/jg-dispatch/packet.html';
+// Customer-facing signing portal. Packets are signed via the same sign.html
+// flow that handles every other doc type (SOV, CO, work auth, etc.). The token
+// is the signature_token on the merged packet's rebuild_documents row.
+const PACKET_PORTAL_BASE = 'https://jgimprovements-arch.github.io/jg-dispatch/sign.html';
 
 // Vercel merge endpoint
 // Cloudflare Worker — replaces broken Vercel jg-proxy-v2/api/packet-merge.
@@ -526,9 +528,34 @@ async function createPacket() {
       const mergeData = await mergeRes.json();
       if (!mergeData.ok) throw new Error('Merge failed: ' + (mergeData.error || 'unknown'));
 
-      // 7) Update packet row with merged_pdf_url
+      // 7) Insert the MERGED packet PDF into rebuild_documents as a signable doc.
+      //    sign.html keys off rebuild_documents.signature_token to load the doc,
+      //    so the packet needs a row there with a token. The `kind` field flags
+      //    it as a packet so sign.html applies packet-specific UI (decline w/ reason).
+      const signatureToken = (typeof crypto !== 'undefined' && crypto.randomUUID)
+        ? crypto.randomUUID()
+        : ('pkt_' + Date.now() + '_' + Math.random().toString(36).slice(2, 10));
+
+      const { data: signDocRows, error: signDocErr } = await sb.from('rebuild_documents').insert({
+        project_id: state.activeProjectId,
+        category: 'Contract',
+        kind: 'contract_packet',
+        filename: `Packet_${p.albi_job_number || state.activeProjectId}_v${CONTRACT_TEMPLATE_VERSION}.pdf`,
+        file_url: mergeData.merged_pdf_url,
+        mime_type: 'application/pdf',
+        uploaded_by_email: state.pmEmail || null,
+        signature_status: 'pending',
+        signature_token: signatureToken,
+        push_status: 'skipped',
+        notes: `Merged packet: Contract v${CONTRACT_TEMPLATE_VERSION} + Xactimate. Signable.`,
+      }).select();
+      if (signDocErr) throw new Error('Sign doc insert failed: ' + signDocErr.message);
+      const signDocId = signDocRows && signDocRows[0] ? signDocRows[0].id : null;
+
+      // 8) Update packet row with merged_pdf_url + link to the signable doc
       const { error: updErr } = await sb.from('rebuild_contract_packets').update({
         merged_pdf_url: mergeData.merged_pdf_url,
+        signed_document_id: signDocId,
       }).eq('id', packetRow.id);
       if (updErr) throw new Error('Packet update failed: ' + updErr.message);
 
@@ -577,7 +604,21 @@ async function sendPacket(isResend) {
       activePkt = Array.isArray(data) ? data[0] : data;
     }
 
-    const signUrl = `${PACKET_PORTAL_BASE}?t=${activePkt.customer_token}`;
+    // Build sign URL from the linked rebuild_documents row's signature_token.
+    // sign.html is keyed off rebuild_documents.signature_token (same flow used
+    // for SOV, CO, work_auth, etc.). The packet's customer_token is kept as an
+    // internal correlation ID but isn't what sign.html reads.
+    let signToken = null;
+    if (activePkt.signed_document_id) {
+      const { data: signDoc, error: signDocErr } = await sb.from('rebuild_documents')
+        .select('signature_token')
+        .eq('id', activePkt.signed_document_id)
+        .maybeSingle();
+      if (signDocErr) throw new Error('Sign doc lookup failed: ' + signDocErr.message);
+      signToken = signDoc && signDoc.signature_token;
+    }
+    if (!signToken) throw new Error('Packet is missing a signable document. Recreate the packet to fix.');
+    const signUrl = `${PACKET_PORTAL_BASE}?t=${signToken}`;
     const custFirst = (p.customer_name || '').split(' ')[0] || 'there';
     // Sender: logged-in PM. Falls back to a known admin if pmEmail not set
     // (shouldn't happen — sendPacket is only available to authorized users).
@@ -657,10 +698,19 @@ async function sendPacket(isResend) {
 }
 
 // ─── ACTION: Copy Customer Link ─────────────────────────────────────────────
-function copyPacketLink() {
+async function copyPacketLink() {
   const pkt = state.packet;
-  if (!pkt || pkt.status !== 'sent' || !pkt.customer_token) { toast('No active packet link'); return; }
-  const url = `${PACKET_PORTAL_BASE}?t=${pkt.customer_token}`;
+  if (!pkt || pkt.status !== 'sent') { toast('No active packet link'); return; }
+  if (!pkt.signed_document_id) { toast('Packet has no linked signable doc'); return; }
+  const { data: signDoc, error } = await sb.from('rebuild_documents')
+    .select('signature_token')
+    .eq('id', pkt.signed_document_id)
+    .maybeSingle();
+  if (error || !signDoc || !signDoc.signature_token) {
+    toast('Sign link not found (doc may already be signed)');
+    return;
+  }
+  const url = `${PACKET_PORTAL_BASE}?t=${signDoc.signature_token}`;
   navigator.clipboard.writeText(url).then(
     () => toast('✓ Customer link copied'),
     () => toast('Copy failed — link: ' + url)

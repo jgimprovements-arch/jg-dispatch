@@ -30,6 +30,12 @@ header img{width:38px;height:38px;object-fit:contain;background:#fff;padding:3px
 .btn-open-sign{background:var(--orange);color:#fff;border:none;padding:12px 32px;border-radius:999px;font-size:15px;font-weight:700;cursor:pointer;font-family:inherit;transition:background .15s,transform .1s}
 .btn-open-sign:hover{background:#d05303;transform:translateY(-1px)}
 .btn-open-sign:disabled{opacity:.4;cursor:not-allowed;transform:none}
+.btn-decline{background:transparent;color:var(--muted);border:1px solid var(--line);padding:12px 22px;border-radius:999px;font-size:14px;font-weight:600;cursor:pointer;font-family:inherit;transition:background .15s,color .15s,border-color .15s}
+.btn-decline:hover{background:#fef2f2;color:var(--danger);border-color:var(--danger)}
+.btn-decline-submit{width:100%;background:var(--danger);color:#fff;border:none;padding:14px;border-radius:10px;font-size:15px;font-weight:700;cursor:pointer;font-family:inherit;margin-top:8px;transition:background .15s}
+.btn-decline-submit:hover:not(:disabled){background:#b91c1c}
+.btn-decline-submit:disabled{opacity:.4;cursor:not-allowed}
+.decline-select{width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:8px;font-family:inherit;font-size:14px;background:#fff;box-sizing:border-box}
 
 /* Modal */
 .overlay{position:fixed;inset:0;background:rgba(13,45,94,.6);backdrop-filter:blur(4px);z-index:999;display:flex;align-items:center;justify-content:center;padding:16px}
@@ -108,7 +114,46 @@ body.full-page-mode{overflow:auto;height:auto}
     <b id="actionTitle"></b>
     JG Restoration has pre-signed this document. Your signature is required.
   </div>
+  <button class="btn-decline" id="btnOpenDecline" style="display:none">Decline</button>
   <button class="btn-open-sign" id="btnOpenSign">✍ Sign Document</button>
+</div>
+
+<!-- Decline Modal (only shown for contract packets) -->
+<div class="overlay hidden" id="declineOverlay">
+  <div class="modal">
+    <div class="modal-head">
+      <h2>Decline Contract Packet</h2>
+      <button class="modal-close" id="declineModalClose">×</button>
+    </div>
+    <div class="modal-body">
+      <p style="font-size:13px;color:var(--muted);line-height:1.5;margin:0 0 16px">
+        Tell us why you're declining. Your feedback helps us serve you better and won't be shared publicly.
+      </p>
+
+      <div class="field">
+        <label>Reason for declining</label>
+        <select id="declineReason" class="decline-select">
+          <option value="">— Select a reason —</option>
+          <option value="price_too_high">Price is too high</option>
+          <option value="timing_concerns">Timing concerns</option>
+          <option value="scope_concerns">Concerns about the scope</option>
+          <option value="going_with_another_contractor">Going with another contractor</option>
+          <option value="wants_to_wait">Want to wait</option>
+          <option value="other">Other</option>
+        </select>
+      </div>
+
+      <div class="field">
+        <label>Additional comments <span style="font-weight:400;text-transform:none;letter-spacing:0;font-size:11px;color:var(--muted)">(optional)</span></label>
+        <textarea id="declineComment" rows="3" placeholder="Anything else you'd like us to know?" style="width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:8px;font-family:inherit;font-size:14px;resize:vertical;box-sizing:border-box"></textarea>
+      </div>
+
+      <button class="btn-decline-submit" id="btnDeclineSubmit" disabled>Submit Decline</button>
+      <div style="font-size:11px;color:var(--muted);text-align:center;margin-top:10px;line-height:1.5">
+        Questions? Call <a href="tel:9204284200" style="color:var(--navy);font-weight:600">(920) 428-4200</a>
+      </div>
+    </div>
+  </div>
 </div>
 
 <!-- Sign Modal -->
@@ -198,6 +243,7 @@ const fmt   = d => d ? new Date(d).toLocaleString('en-US',{month:'short',day:'nu
 
 function friendlyTitle(fn) {
   const c = clean(fn||'').replace(/\.pdf$/i,'');
+  if (/^packet/i.test(c))       return 'Contract Packet';
   if (/^work_auth/i.test(c))    return 'Authorization to Perform Services & Direction of Payment';
   if (/^ins_recovery/i.test(c)) return 'Insurance Recovery Agreement';
   if (/^cos(_|$)/i.test(c))     return 'Certificate of Satisfaction';
@@ -214,6 +260,10 @@ async function init() {
 
   if (error || !doc) { showMsg('error','Not found','This link may have expired or already been used.'); return; }
   if (doc.signature_status === 'signed') { showSigned(doc); return; }
+  if (doc.signature_status === 'declined') {
+    showMsg('info', 'Already Declined', 'This contract packet has already been declined. A member of our team may reach out to discuss alternatives.');
+    return;
+  }
   showDoc(doc);
 }
 
@@ -221,6 +271,7 @@ function showDoc(doc) {
   const p = doc.project || {};
   const title = friendlyTitle(doc.filename);
   const isPdf = /\.pdf$/i.test(doc.filename);
+  const isPacket = doc.kind === 'contract_packet';
 
   $('heroBar').style.display = '';
   $('heroTitle').textContent = title;
@@ -234,11 +285,24 @@ function showDoc(doc) {
   $('actionBar').style.display = '';
   $('actionTitle').textContent = title;
 
+  // Packet-specific: show Decline button and update messaging
+  if (isPacket) {
+    $('btnOpenDecline').style.display = '';
+    const infoDiv = document.querySelector('.action-bar-info');
+    if (infoDiv) {
+      // Replace the static "JG has pre-signed..." text with packet-specific copy
+      const titleEl = infoDiv.querySelector('#actionTitle');
+      const titleHtml = titleEl ? titleEl.outerHTML : '';
+      infoDiv.innerHTML = titleHtml + 'Review the contract, Xactimate estimate, and Schedule of Values bundled in this packet. Sign to accept, or decline with a reason.';
+    }
+  }
+
   // JG signature now rendered as Alex Brush text (see .jg-sig-text)
   // Pre-fill name
   $('sigName').value = p.customer_name || '';
 
   wireModal(doc);
+  if (isPacket) wireDeclineModal(doc);
 }
 
 function wireModal(doc) {
@@ -323,6 +387,26 @@ function wireModal(doc) {
         signature_status: 'signed', signed_at: now, signed_by_name: name, signed_ip: ip, signature_token: null,
       }).eq('signature_token', token);
 
+      // If this is a contract packet, ALSO update rebuild_contract_packets so
+      // the packet workflow status flips. Two-table update is intentional —
+      // see the migration notes. We do this BEFORE buildSignedPdf so even if
+      // PDF generation fails, the packet status is correct.
+      if (doc.kind === 'contract_packet') {
+        const { error: pktErr } = await sb.from('rebuild_contract_packets')
+          .update({
+            status: 'customer_signed',
+            signed_at: now,
+            signed_name: name,
+            signed_by_ip: ip,
+          })
+          .eq('signed_document_id', doc.id);
+        if (pktErr) {
+          console.error('[sign] packet status update failed:', pktErr);
+          // Don't throw — the doc is signed, the packet just didn't sync.
+          // Logged for cleanup. PM can manually fix from platform side.
+        }
+      }
+
       doc.signed_at = now; doc.signed_by_name = name; doc.signed_ip = ip;
 
       submitBtn.textContent = 'Building PDF…';
@@ -334,6 +418,15 @@ function wireModal(doc) {
         if (signedUrl) {
           await sb.from('rebuild_documents').update({ signed_pdf_url: signedUrl }).eq('id', doc.id);
           doc.signed_pdf_url = signedUrl;
+          // For packets: also point the packet's merged_pdf_url at the signed
+          // version so the platform UI's "View signed packet" link shows the
+          // fully-executed PDF (with signature page appended), not the
+          // pre-signed merged version.
+          if (doc.kind === 'contract_packet') {
+            await sb.from('rebuild_contract_packets')
+              .update({ merged_pdf_url: signedUrl })
+              .eq('signed_document_id', doc.id);
+          }
           await emailCopy(doc, signedUrl, name);
         }
       }
@@ -346,6 +439,113 @@ function wireModal(doc) {
       alert('Error: ' + err.message);
     }
   });
+}
+
+// ─── Decline flow (packets only) ─────────────────────────────────────────────
+// Wires the decline modal: reason dropdown, comment field, submit handler.
+// On submit:
+//   1) Update rebuild_documents: signature_status='declined', clear token
+//   2) Update rebuild_contract_packets: status='declined' + reason + comment + timestamp
+// The platform side reverts the packet to allow re-issue (see rebuild-packet.js
+// reissuePacket() — chains via voids_packet_id for immutable audit).
+function wireDeclineModal(doc) {
+  const overlay   = $('declineOverlay');
+  const reasonSel = $('declineReason');
+  const commentEl = $('declineComment');
+  const submitBtn = $('btnDeclineSubmit');
+
+  function refresh() {
+    submitBtn.disabled = !reasonSel.value;
+  }
+
+  $('btnOpenDecline').addEventListener('click', () => {
+    overlay.classList.remove('hidden');
+    reasonSel.focus();
+  });
+
+  $('declineModalClose').addEventListener('click', () => overlay.classList.add('hidden'));
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.classList.add('hidden'); });
+  reasonSel.addEventListener('change', refresh);
+  refresh();
+
+  submitBtn.addEventListener('click', async () => {
+    const reason = reasonSel.value;
+    if (!reason) return;
+    const comment = (commentEl.value || '').trim() || null;
+
+    if (!confirm('Are you sure you want to decline this contract packet? You can be contacted by JG Restoration to discuss alternatives.')) return;
+
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Submitting…';
+
+    try {
+      const now = new Date().toISOString();
+      let ip = 'not captured';
+      try { const r = await fetch('https://api.ipify.org?format=json'); ip = (await r.json()).ip || ip; } catch {}
+
+      // 1) Mark the document as declined and clear the token so the link
+      //    can't be re-used. (Same pattern as sign: signature_token=null.)
+      const { error: docErr } = await sb.from('rebuild_documents').update({
+        signature_status: 'declined',
+        signed_at: now,
+        signed_ip: ip,
+        signature_token: null,
+      }).eq('signature_token', token);
+      if (docErr) throw new Error('Doc update failed: ' + docErr.message);
+
+      // 2) Update the packet row with decline reason + comment.
+      const { error: pktErr } = await sb.from('rebuild_contract_packets').update({
+        status: 'declined',
+        declined_at: now,
+        declined_reason: reason,
+        declined_comment: comment,
+      }).eq('signed_document_id', doc.id);
+      if (pktErr) {
+        console.error('[decline] packet update failed:', pktErr);
+        // Don't block — the doc is declined. PM will see the issue.
+      }
+
+      overlay.classList.add('hidden');
+      showDeclined(doc, reason, comment);
+    } catch (err) {
+      console.error(err);
+      submitBtn.disabled = false;
+      submitBtn.textContent = 'Submit Decline';
+      alert('Error: ' + err.message);
+    }
+  });
+}
+
+// Show a confirmation screen after a successful decline.
+function showDeclined(doc, reason, comment) {
+  document.body.classList.add('full-page-mode');
+  $('heroBar').style.display = 'none';
+  $('docArea').style.display = 'none';
+  $('actionBar').style.display = 'none';
+  const fp = $('fullPageArea');
+  fp.style.display = 'flex';
+  fp.style.alignItems = 'center';
+  const reasonLabels = {
+    price_too_high: 'Price is too high',
+    timing_concerns: 'Timing concerns',
+    scope_concerns: 'Concerns about the scope',
+    going_with_another_contractor: 'Going with another contractor',
+    wants_to_wait: 'Want to wait',
+    other: 'Other',
+  };
+  fp.innerHTML = `<div class="result-card">
+    <div class="icon">✗</div>
+    <h2>Decline Recorded</h2>
+    <p style="color:var(--muted);line-height:1.5">
+      Thank you for letting us know. Your reason has been recorded:<br>
+      <strong style="color:var(--navy)">${esc(reasonLabels[reason] || reason)}</strong>
+    </p>
+    ${comment ? `<p style="color:var(--muted);font-size:13px;font-style:italic;margin-top:12px">"${esc(comment)}"</p>` : ''}
+    <p style="color:var(--muted);font-size:13px;margin-top:20px">
+      A member of our team may reach out to discuss alternatives.<br>
+      Questions? Call <a href="tel:9204284200" style="color:var(--navy);font-weight:600">(920) 428-4200</a>
+    </p>
+  </div>`;
 }
 
 function showSigned(doc) {
@@ -518,6 +718,7 @@ async function savePdf(doc, blob) {
   const jobNum = p.albi_job_number || doc.project_id;
   const docLabel = (() => {
     const c = clean(doc.filename||'').replace(/\.pdf$/i,'');
+    if (/^packet/i.test(c))       return 'Signed Contract Packet';
     if (/^work_auth/i.test(c))    return 'Signed Work Authorization';
     if (/^ins_recovery/i.test(c)) return 'Signed Insurance Recovery Agreement';
     if (/^cos(_|$)/i.test(c))     return 'Signed Certificate of Satisfaction';
