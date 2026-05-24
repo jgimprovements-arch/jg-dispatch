@@ -1190,10 +1190,14 @@ const PACKET_DECLINE_REASON_LABELS = {
 const PACKET_PORTAL_BASE = 'https://jgimprovements-arch.github.io/jg-dispatch/packet.html';
 
 // Vercel merge endpoint
-const PACKET_MERGE_ENDPOINT = 'https://jg-proxy-v2.vercel.app/api/packet-merge';
+// Cloudflare Worker — replaces broken Vercel jg-proxy-v2/api/packet-merge.
+// Source: github.com/jgimprovements-arch/jg-workers/packet-merge
+const PACKET_MERGE_ENDPOINT = 'https://jg-packet-merge.josh-70f.workers.dev';
 
 // Vercel contract-generation endpoint (renders contract.html template → PDF)
-const PACKET_CONTRACT_GEN_ENDPOINT = 'https://jg-proxy-v2.vercel.app/api/render-contract';
+// Cloudflare Worker — replaces broken Vercel jg-proxy-v2/api/render-contract.
+// Source: github.com/jgimprovements-arch/jg-workers/render-contract
+const PACKET_CONTRACT_GEN_ENDPOINT = 'https://jg-render-contract.josh-70f.workers.dev';
 
 // Contract template version (bumped when JG_Contract_Template.html is revised)
 const CONTRACT_TEMPLATE_VERSION = '1.0';

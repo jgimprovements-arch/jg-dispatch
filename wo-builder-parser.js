@@ -18,12 +18,74 @@ const MODEL = 'claude-opus-4-5'; // best for structured document extraction
 const MAX_TOKENS = 16000;
 
 // ─── Public entrypoint ─────────────────────────────────────────────
+// opts:
+//   onProgress      - (stage, pct) => void  progress callback
+//   uploadedByEmail - string                 user attribution
+//   uploadedByName  - string                 user attribution
+//   dryRun          - boolean                if true, parse only — no DB writes.
+//                                            Returns { items, summary, dryRun: true }
+//                                            with no uploadId. Used by the
+//                                            change-order flow to diff against
+//                                            the original estimate before
+//                                            committing anything to storage.
 export async function parseAndStoreXactPDFs(sb, projectId, estimateFile, componentsFile, opts = {}) {
-  const { onProgress = () => {}, uploadedByEmail, uploadedByName } = opts;
+  const { onProgress = () => {}, uploadedByEmail, uploadedByName, dryRun = false } = opts;
   const apiKey = localStorage.getItem('jg_key');
   if (!apiKey) {
     throw new Error('No Anthropic API key found in browser storage (jg_key). Set one on adjuster.html first.');
   }
+
+  // ─── DRY-RUN FAST PATH ────────────────────────────────────────────
+  // Parse PDFs via Claude API only. No Supabase reads or writes, no
+  // upload rows, no document audit trail. Caller gets line items + summary
+  // for diffing/preview purposes and decides whether to commit.
+  if (dryRun) {
+    onProgress('Reading PDFs…', 10);
+    const [estimateB64, componentsB64] = await Promise.all([
+      fileToBase64(estimateFile),
+      fileToBase64(componentsFile),
+    ]);
+    onProgress('Sending to Claude for extraction…', 25);
+    const [estimateData, componentsData] = await Promise.all([
+      callClaude(apiKey, estimateB64, ESTIMATE_PROMPT, 'estimate'),
+      callClaude(apiKey, componentsB64, COMPONENTS_PROMPT, 'components'),
+    ]);
+    onProgress('Computing totals…', 80);
+    const materialsTotal = sum(componentsData.materials, 'total');
+    const equipmentTotal = sum(componentsData.equipment, 'total');
+    const laborSubtotal = sum(componentsData.labor, 'total');
+    const miscLabor = componentsData.misc_labor || 0;
+    const laborTotal = laborSubtotal + miscLabor;
+    const componentsGrandTotal = materialsTotal + equipmentTotal + laborTotal;
+    const rcv = estimateData.replacement_cost_value || 0;
+    const grossProfit = rcv - componentsGrandTotal;
+    const marginPct = rcv > 0 ? (grossProfit / rcv) * 100 : 0;
+    onProgress('Done!', 100);
+    return {
+      dryRun: true,
+      uploadId: null,
+      items: estimateData.items || [],       // ← what the change-order diff reads
+      lineItems: estimateData.items || [],   // alias for older callers
+      estimateData,
+      componentsData,
+      summary: {
+        rcv,
+        cost: round2(componentsGrandTotal),
+        materials: round2(materialsTotal),
+        labor: round2(laborTotal),
+        equipment: round2(equipmentTotal),
+        grossProfit: round2(grossProfit),
+        marginPct: round2(marginPct),
+        itemCount: (estimateData.items || []).length,
+        materialCount: (componentsData.materials || []).length,
+        laborCount: (componentsData.labor || []).length,
+        equipmentCount: (componentsData.equipment || []).length,
+      },
+      errors: [],
+    };
+  }
+
+  // ─── COMMIT PATH (writes to Supabase) ─────────────────────────────
 
   // ─── 1. Mark older uploads for this project as not-current ───
   onProgress('Preparing upload session…', 5);
@@ -204,6 +266,8 @@ export async function parseAndStoreXactPDFs(sb, projectId, estimateFile, compone
     onProgress('Done!', 100);
     return {
       uploadId,
+      items: estimateData.items || [],       // for parity with dryRun shape
+      lineItems: estimateData.items || [],   // alias
       summary: {
         rcv,
         cost: round2(componentsGrandTotal),

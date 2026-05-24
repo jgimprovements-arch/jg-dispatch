@@ -10506,16 +10506,13 @@ async function processCoUpload(estimateFile, componentsFile, coNum, title, budge
     });
     newItems = result?.items || result?.lineItems || [];
   } catch (parseErr) {
-    // Fallback: if parser doesn't support dryRun, use Vercel proxy directly
-    console.warn('Parser dryRun not supported, falling back to proxy:', parseErr.message);
-    statusEl.textContent = 'Parsing estimate PDF via proxy...';
-    const formData = new FormData();
-    formData.append('file', estimateFile);
-    formData.append('type', 'estimate');
-    const res = await fetch('https://jg-proxy-v2.vercel.app/api/parse-pdf', { method: 'POST', body: formData });
-    if (!res.ok) throw new Error('PDF parse failed: ' + res.status);
-    const parsed = await res.json();
-    newItems = parsed.lineItems || parsed.items || parsed.estimate_items || [];
+    // No fallback available. The legacy Vercel /api/parse-pdf endpoint was
+    // removed when jg-proxy-v2 was decommissioned in May 2026 — it had
+    // become dead code anyway (the primary parseAndStoreXactPDFs path
+    // always returns line items, so this catch was never hit in practice).
+    // If parsing fails here, surface the real error.
+    console.error('Xact PDF parse failed:', parseErr);
+    throw new Error('Estimate parsing failed: ' + (parseErr.message || parseErr));
   }
 
   if (!newItems.length) throw new Error('No line items found. Check the files are Xact PDFs.');
