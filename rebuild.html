@@ -1296,6 +1296,77 @@ $('#searchInput').addEventListener('input', e => {
 const ALBI_PROXY_URL = 'https://jg-albi-proxy.josh-70f.workers.dev';
 const ALBI_NOTE_HOOK = 'https://hooks.zapier.com/hooks/catch/12653197/uvugxag/';
 const MESSAGE_HOOK = 'https://hooks.zapier.com/hooks/catch/12653197/uvule41/';
+
+// ─── Platform Mailer (Cloudflare Worker) ────────────────────────────────────
+// Server-side mail sender that impersonates the logged-in PM via Gmail API
+// domain-wide delegation. Replaces Zapier MESSAGE_HOOK for transactional sends.
+//   Endpoint:  https://jg-platform-mailer.josh-70f.workers.dev/send
+//   Auth:      MAILER_API_KEY (from platform_settings) + Supabase active-employee check
+//   Scope:     Sender must be in worker's AUTHORIZED_SENDERS hardcoded list
+const MAILER_URL = 'https://jg-platform-mailer.josh-70f.workers.dev/send';
+let _mailerKeyCache = null;
+async function getMailerKey() {
+  if (_mailerKeyCache) return _mailerKeyCache;
+  if (!sb) return null;
+  const { data, error } = await sb.from('platform_settings').select('value').eq('key', 'mailer_api_key').single();
+  if (error || !data) {
+    console.error('[mailer] could not load API key:', error);
+    return null;
+  }
+  _mailerKeyCache = data.value;
+  return _mailerKeyCache;
+}
+
+// Send mail via the platform mailer Worker.
+// from defaults to the logged-in PM email.
+//   args: { to, subject, html, text, cc, bcc, reply_to, attachments, from }
+//   attachments: [{ filename, content_base64, mime_type }]
+// Returns: { ok, message_id, thread_id } on success, throws on failure.
+async function sendViaPlatformMailer(args) {
+  const key = await getMailerKey();
+  if (!key) throw new Error('Mailer API key not configured');
+  const from = (args.from || state.pmEmail || '').toLowerCase();
+  if (!from) throw new Error('No sender — not logged in');
+  const payload = {
+    from,
+    to: args.to,
+    subject: args.subject,
+    html: args.html,
+    text: args.text,
+    cc: args.cc,
+    bcc: args.bcc,
+    reply_to: args.reply_to || from,
+    attachments: args.attachments || undefined,
+  };
+  const resp = await fetch(MAILER_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Mailer-Key': key },
+    body: JSON.stringify(payload),
+  });
+  const data = await resp.json();
+  if (!resp.ok || !data.ok) {
+    throw new Error(data.error || `Mailer returned ${resp.status}`);
+  }
+  return data;
+}
+
+// Fetch a URL and return its content as base64 (for email attachments).
+async function fetchAsBase64(url) {
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error(`Fetch failed: ${resp.status}`);
+  const blob = await resp.blob();
+  return await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      const result = reader.result;
+      const idx = result.indexOf(',');
+      resolve(idx >= 0 ? result.slice(idx + 1) : result);
+    };
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(blob);
+  });
+}
+
 // Albi document push hook → Zapier → Albi v4.5.1 (uploads file to project)
 const ALBI_DOC_HOOK = 'https://hooks.zapier.com/hooks/catch/12653197/uves4j9/';
 const ALBI_DOC_BATCH_HOOK = 'https://hooks.zapier.com/hooks/catch/12653197/uv04fhh/';
