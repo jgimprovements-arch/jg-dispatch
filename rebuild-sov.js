@@ -1712,7 +1712,12 @@ async function sendPacket(isResend) {
     let activePkt = pkt;
 
     if (!isResend) {
-      const { data, error } = await sb.rpc('send_contract_packet', { p_packet_id: pkt.id });
+      const callerEmail = (state.pmEmail || '').toLowerCase();
+      if (!callerEmail) throw new Error('Not logged in — state.pmEmail is empty');
+      const { data, error } = await sb.rpc('send_contract_packet', {
+        p_packet_id: pkt.id,
+        p_caller_email: callerEmail,
+      });
       if (error) throw new Error('RPC send failed: ' + error.message);
       activePkt = Array.isArray(data) ? data[0] : data;
     }
