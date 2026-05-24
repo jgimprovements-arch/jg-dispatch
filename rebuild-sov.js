@@ -1719,8 +1719,10 @@ async function sendPacket(isResend) {
 
     const signUrl = `${PACKET_PORTAL_BASE}?t=${activePkt.customer_token}`;
     const custFirst = (p.customer_name || '').split(' ')[0] || 'there';
-    const fromEmail = 'info@jg-restoration.com';
-    const fromName = p.albi_pm_name || 'JG Restoration';
+    // Sender: logged-in PM. Falls back to a known admin if pmEmail not set
+    // (shouldn't happen — sendPacket is only available to authorized users).
+    const senderEmail = (state.pmEmail || 'josh@jg-restoration.com').toLowerCase();
+    const senderDisplayName = p.albi_pm_name || state.pmName || 'JG Restoration';
     const subject = `${isResend ? 'Reminder: ' : ''}Contract Ready for Signature · ${p.albi_job_number || 'JG Restoration'}`;
     const emailBody = buildBrandedEmail({
       preheader: isResend ? 'Reminder: your JG Restoration contract is awaiting signature' : 'Your JG Restoration contract is ready for signature',
@@ -1732,12 +1734,43 @@ async function sendPacket(isResend) {
           <li>The Schedule of Values (draw schedule)</li>
           <li>The Xactimate estimate detail</li>
         </ul>
-        <p>Please click the button below to review and sign at your earliest convenience.</p>`,
+        <p>The full packet PDF is attached to this email for your records. To review and sign, please click the button below.</p>`,
       ctaLabel: 'Review & Sign Packet',
       ctaUrl: signUrl,
-      signoffName: fromName,
+      signoffName: senderDisplayName,
     });
 
+    // Attempt to attach the merged contract packet PDF (best-effort).
+    // If the PDF fetch fails for any reason, we still send the email with link only.
+    let attachments;
+    if (activePkt.merged_pdf_url) {
+      try {
+        const pdfBase64 = await fetchAsBase64(activePkt.merged_pdf_url);
+        const filename = `Contract-Packet-${(p.albi_job_number || 'JG').replace(/[^a-zA-Z0-9._-]/g, '_')}.pdf`;
+        attachments = [{
+          filename,
+          content_base64: pdfBase64,
+          mime_type: 'application/pdf',
+        }];
+      } catch (attachErr) {
+        console.warn('[packet] PDF attach failed, sending link-only:', attachErr);
+      }
+    }
+
+    // Send via platform mailer (Cloudflare Worker → Gmail API).
+    // Sender impersonation is via Google Workspace domain-wide delegation.
+    const sendResult = await sendViaPlatformMailer({
+      from: senderEmail,
+      to: p.customer_email,
+      subject,
+      html: emailBody,
+      text: `${isResend ? 'Reminder: your' : 'Your'} JG Restoration contract packet is ready for signature.\n\nReview and sign here: ${signUrl}\n\n— ${senderDisplayName}`,
+      reply_to: senderEmail,
+      attachments,
+    });
+
+    // Audit log — record the send to rebuild_messages.
+    // Includes the Gmail message_id for downstream lookup/diligence.
     await sb.from('rebuild_messages').insert({
       project_id: p.id,
       direction: 'outbound',
@@ -1748,27 +1781,9 @@ async function sendPacket(isResend) {
       recipient_type: 'customer',
       recipient_name: p.customer_name || null,
       recipient_email: p.customer_email,
-      sent_by_name: fromName,
-      sent_by_email: fromEmail,
-    });
-
-    await fetch(MESSAGE_HOOK, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        project_id: p.id,
-        channel: 'email',
-        direction: 'outbound',
-        recipient_type: 'customer',
-        recipient_name: p.customer_name || '',
-        recipient_email: p.customer_email,
-        to_email: p.customer_email,
-        from_email: fromEmail,
-        from_name: fromName,
-        subject,
-        body: emailBody,
-      }),
-      mode: 'no-cors',
+      sent_by_name: senderDisplayName,
+      sent_by_email: senderEmail,
+      gmail_message_id: sendResult.message_id || null,
     });
 
     toast(isResend ? '✓ Reminder email sent' : '✓ Packet sent to ' + p.customer_email);
