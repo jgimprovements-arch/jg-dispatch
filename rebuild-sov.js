@@ -1609,6 +1609,17 @@ async function createPacket() {
           amount:  fmtMoney(d.total_amount || d.base_amount),
           trigger: d.trigger_event || '',
         })),
+        // Xact line items for the SOV exhibit table (Exhibit A — Schedule of
+        // Values & Scope of Work). Worker groups by trade_category and renders
+        // a phase row per trade plus one line per item. Sent as plain objects
+        // (worker doesn't query the DB).
+        xact_items: (state.woBudget?.items || []).map(it => ({
+          description:    it.description || '',
+          line_total:     Number(it.line_total || 0),
+          trade_category: it.trade_category || 'general',
+          room:           it.room || '',
+          section:        it.section || '',
+        })),
       };
 
       const contractRes = await fetch(PACKET_CONTRACT_GEN_ENDPOINT, {
@@ -1645,8 +1656,13 @@ async function createPacket() {
         notes: `Auto-generated from template v${CONTRACT_TEMPLATE_VERSION}`,
       });
 
-      // 6) Call /api/packet-merge — merges Contract + Xact + SOV PDFs into one
-      statusEl.textContent = 'Merging Xactimate + SOV + Contract into one PDF…';
+      // 6) Call /api/packet-merge — merges Contract + Xact into one PDF.
+      //    NOTE: sov_pdf_url is intentionally omitted. The contract template
+      //    already contains the SOV draw schedule inline (Section 9 + Exhibit A),
+      //    so appending the standalone SOV PDF would duplicate the same content
+      //    and confuse the customer. To re-enable, add `sov_pdf_url: sovPdfUrl`
+      //    back to the body — the merge worker accepts it as optional.
+      statusEl.textContent = 'Merging Xactimate + Contract into one PDF…';
       const mergeRes = await fetch(PACKET_MERGE_ENDPOINT, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1654,7 +1670,6 @@ async function createPacket() {
           packet_id: packetRow.id,
           project_id: state.activeProjectId,
           xact_pdf_url: xactDoc.file_url,
-          sov_pdf_url: sovPdfUrl,
           contract_pdf_url: contractPdfUrl,
           albi_job_number: p.albi_job_number || '',
         }),

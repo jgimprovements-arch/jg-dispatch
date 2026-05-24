@@ -1,4 +1,8 @@
-<!DOCTYPE html>
+// AUTO-GENERATED — do not edit by hand.
+// Source: jgimprovements-arch/jg-dispatch/main/JG_Contract_Template.html
+// Regenerated: 2026-05-24 — logo embedded as base64 data URI; exhibit-hero margin fix.
+
+export const CONTRACT_TEMPLATE_HTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -1489,3 +1493,4 @@ p { margin-bottom: 8pt; }
 
 </body>
 </html>
+`;
