@@ -1592,15 +1592,16 @@ async function createPacket() {
           guaranty_project_site:   p.property_address || '',
           // Other
           other_incorporated_docs: 'Xactimate Estimate; Schedule of Values',
-          // SOV exhibit
+          // SOV exhibit — phase table removed from template; Exhibit A now
+          // references the attached Xactimate. Only the contract-price total +
+          // tax + exclusions appear in Exhibit A's summary box.
           sov_project_ref:         p.albi_job_number || '',
           sov_contract_price:      fmtMoney(fin.rcv),
           sov_source_estimate:     xactDoc.filename || '',
+          sov_source_estimate_ref: xactDoc.filename || '',  // mirror for inline callout
           sov_version_date:        fmtDate(todayIso),
-          sov_subtotal:            fmtMoney(fin.subtotal),
+          sov_subtotal:            fmtMoney(fin.subtotal || fin.line_item_total || 0),
           sov_tax:                 fmtMoney(totalTax),
-          sov_overhead:            fmtMoney(fin.overhead),
-          sov_profit:              fmtMoney(fin.profit),
           sov_exclusions:          (exclusionsInput.value || '').trim() || 'None',
         },
         draws: draws.map(d => ({
@@ -1608,17 +1609,6 @@ async function createPacket() {
           pct:     Number(d.percent) > 0 ? `${(Number(d.percent) * 100).toFixed(0)}%` : '—',
           amount:  fmtMoney(d.total_amount || d.base_amount),
           trigger: d.trigger_event || '',
-        })),
-        // Xact line items for the SOV exhibit table (Exhibit A — Schedule of
-        // Values & Scope of Work). Worker groups by trade_category and renders
-        // a phase row per trade plus one line per item. Sent as plain objects
-        // (worker doesn't query the DB).
-        xact_items: (state.woBudget?.items || []).map(it => ({
-          description:    it.description || '',
-          line_total:     Number(it.line_total || 0),
-          trade_category: it.trade_category || 'general',
-          room:           it.room || '',
-          section:        it.section || '',
         })),
       };
 
