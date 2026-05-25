@@ -224,12 +224,12 @@ function renderPacketSection() {
       </div>
     `;
   } else if (pkt.status === 'declined') {
-    const reasonLbl = PACKET_DECLINE_REASON_LABELS[pkt.decline_reason] || pkt.decline_reason || '—';
+    const reasonLbl = PACKET_DECLINE_REASON_LABELS[pkt.declined_reason] || pkt.declined_reason || '—';
     bodyRows = `
       <div style="display:grid;grid-template-columns:auto 1fr;gap:6px 14px;font-size:13px;">
         <div style="color:var(--muted);">Declined on:</div><div>${_packetTimeAgoCompact(pkt.declined_at)}</div>
         <div style="color:var(--muted);">Reason:</div><div style="font-weight:600;">${esc(reasonLbl)}</div>
-        ${pkt.decline_comment ? `<div style="color:var(--muted);">Comment:</div><div style="font-style:italic;">"${esc(pkt.decline_comment)}"</div>` : ''}
+        ${pkt.declined_comment ? `<div style="color:var(--muted);">Comment:</div><div style="font-style:italic;">"${esc(pkt.declined_comment)}"</div>` : ''}
       </div>
     `;
   } else if (pkt.status === 'expired') {
@@ -546,7 +546,12 @@ async function createPacket() {
         uploaded_by_email: state.pmEmail || null,
         signature_status: 'pending',
         signature_token: signatureToken,
-        push_status: 'skipped',
+        // Customer email for the "signed copy" email sign.html sends after signing.
+        // Without this, emailCopy() bails silently and the customer never receives the PDF.
+        signature_sent_to_email: p.customer_email || null,
+        // push_status:'pending' enables Albi push after signing (same pipeline used
+        // for SOV/CO/work_auth). sign.html flips this to 'sent' on successful push.
+        push_status: 'pending',
         notes: `Merged packet: Contract v${CONTRACT_TEMPLATE_VERSION} + Xactimate. Signable.`,
       }).select();
       if (signDocErr) throw new Error('Sign doc insert failed: ' + signDocErr.message);

@@ -387,10 +387,19 @@ function wireModal(doc) {
         signature_status: 'signed', signed_at: now, signed_by_name: name, signed_ip: ip, signature_token: null,
       }).eq('signature_token', token);
 
-      // If this is a contract packet, ALSO update rebuild_contract_packets so
-      // the packet workflow status flips. Two-table update is intentional —
-      // see the migration notes. We do this BEFORE buildSignedPdf so even if
-      // PDF generation fails, the packet status is correct.
+      // If this is a contract packet, ALSO update three other tables so the
+      // full workflow flips together. Order matters less than completeness —
+      // each is fire-and-forget (logged on error, doesn't block the signing
+      // result). The doc is the source of truth; these are derived state.
+      //
+      //   1. rebuild_contract_packets — packet status → customer_signed
+      //   2. rebuild_projects — contract_signed_at → now (UNLOCKS THE PROJECT:
+      //      tabs become accessible, CO section appears, isProjectGated flips)
+      //   3. rebuild_sov — SOV status → customer_signed (the packet IS the
+      //      signed contract that contains the SOV, so they sign together)
+      //
+      // Doing this BEFORE buildSignedPdf ensures workflow state is correct
+      // even if PDF generation/upload fails downstream.
       if (doc.kind === 'contract_packet') {
         const { error: pktErr } = await sb.from('rebuild_contract_packets')
           .update({
@@ -402,8 +411,31 @@ function wireModal(doc) {
           .eq('signed_document_id', doc.id);
         if (pktErr) {
           console.error('[sign] packet status update failed:', pktErr);
-          // Don't throw — the doc is signed, the packet just didn't sync.
-          // Logged for cleanup. PM can manually fix from platform side.
+        }
+
+        // Unlock the project — this is the master gate the platform reads
+        // for tab visibility, CO section, etc.
+        const { error: projErr } = await sb.from('rebuild_projects')
+          .update({ contract_signed_at: now })
+          .eq('id', doc.project_id);
+        if (projErr) {
+          console.error('[sign] project contract_signed_at update failed:', projErr);
+        }
+
+        // Cascade SOV to customer_signed. There's only one active SOV per
+        // project; the .in('status', [...]) guard avoids accidentally
+        // overwriting a superseded or cancelled SOV from a prior packet
+        // re-issue cycle.
+        const { error: sovErr } = await sb.from('rebuild_sov')
+          .update({
+            status: 'customer_signed',
+            customer_signed_at: now,
+            customer_signed_name: name,
+          })
+          .eq('project_id', doc.project_id)
+          .in('status', ['draft', 'sent']);
+        if (sovErr) {
+          console.error('[sign] sov cascade failed:', sovErr);
         }
       }
 
