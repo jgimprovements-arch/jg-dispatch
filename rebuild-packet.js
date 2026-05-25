@@ -730,9 +730,18 @@ async function voidPacket() {
   const ok = confirm('Void this contract packet?\n\nThe customer link will stop working immediately. The SOV will unlock so you can re-issue a new packet.');
   if (!ok) return;
 
+  const callerEmail = (state.pmEmail || '').toLowerCase();
+  if (!callerEmail) { toast('Not logged in — refresh and try again'); return; }
+
   toast('Voiding packet…');
   try {
-    const { error } = await sb.rpc('void_contract_packet', { p_packet_id: pkt.id });
+    // RPC takes (p_packet_id, p_caller_email). The email is the trust anchor
+    // under the custom session model (no Supabase Auth). Same pattern as
+    // send_contract_packet — see 2026-05-20 RPC patch.
+    const { error } = await sb.rpc('void_contract_packet', {
+      p_packet_id:    pkt.id,
+      p_caller_email: callerEmail,
+    });
     if (error) throw new Error(error.message);
     toast('✓ Packet voided');
     await loadPacket();
