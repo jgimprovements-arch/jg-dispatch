@@ -271,7 +271,7 @@ async function sendCoToCustomer(co) {
       co_date:                   fmtDate(new Date()),
       co_original_contract_date: contractDate,
       co_owner_name:             p.customer_name || '___',
-      co_project_address:        [p.project_address, p.project_city, p.project_state, p.project_zip].filter(Boolean).join('  ') || '___',
+      co_project_address:        p.property_address || [p.project_address, p.project_city, p.project_state, p.project_zip].filter(Boolean).join('  ') || '___',
       co_original_total:         usd(originalTotal),
       co_delta_amount:           (coDelta >= 0 ? '+' : '') + usd(coDelta),
       co_delta_label:            `CO #${co.co_number}`,
