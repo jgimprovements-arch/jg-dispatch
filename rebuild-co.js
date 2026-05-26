@@ -247,10 +247,14 @@ async function sendCoToCustomer(co) {
 
   try {
     // ─── 1. Compute financial summary ───────────────────────────────────
-    // Original total = sum of existing SOV draws (before this CO).
+    // Original total = the SOV contract_total (the signed contract price).
+    // CO delta = amount_delta on the CO row (computed at upload time as
+    //   new estimate total - original estimate total for diff mode, or
+    //   sum of all items for standalone mode).
+    // New total = original + delta.
     const sov = state.sov;
     const draws = state.sovDraws || [];
-    const originalTotal = draws.reduce((s, d) => s + (Number(d.base_amount) || 0), 0);
+    const originalTotal = Number(sov?.contract_total) || draws.reduce((s, d) => s + (Number(d.base_amount) || 0), 0);
     const coDelta = Number(co.amount_delta) || 0;
     const newTotal = originalTotal + coDelta;
 
@@ -590,48 +594,40 @@ async function processCoUpload(estimateFile, componentsFile, coNum, title, budge
       totalDelta += amt;
     });
   } else {
-    // ─── Full re-estimate: diff against original ────────────────────────
-    statusEl.textContent = `Found ${newItems.length} items. Diffing against original...`;
+    // ─── Full re-estimate: the CO estimate REPLACES the original ────────
+    // Delta = new estimate total - original estimate total (simple subtraction).
+    // ALL items from the new estimate are shown (not just changed ones),
+    // with original amounts populated where descriptions match. Items that
+    // existed in the original but are absent from the CO are shown as removed.
+    statusEl.textContent = `Found ${newItems.length} items. Comparing against original...`;
 
-    // Build a lookup of original items by description (case-insensitive).
-    // To handle duplicate descriptions (e.g., same item in different rooms),
-    // we store an ARRAY of originals per key and consume them in order.
+    const origTotal = (budget.items || []).reduce((s, i) => s + (Number(i.line_total || i.total || i.amount || 0)), 0);
+    const newTotal = newItems.reduce((s, i) => s + (Number(i.line_total || i.total || i.amount || 0)), 0);
+    totalDelta = newTotal - origTotal;
+
+    // Build lookup of original items for matching (display purposes only —
+    // totalDelta is already computed from the gross totals above).
     const origLookup = {};
     (budget.items || []).forEach(item => {
       const key = (item.description || '').trim().toLowerCase();
       if (!origLookup[key]) origLookup[key] = [];
       origLookup[key].push(item);
     });
-
-    // Track which originals have been consumed so duplicates match 1:1
     const origConsumed = {};
 
+    // Items in the new estimate
     newItems.forEach(item => {
       const key = (item.description || '').trim().toLowerCase();
       const newAmt = Number(item.line_total || item.total || item.amount || 0);
-
-      // Find the next unconsumed original with this description
       const origList = origLookup[key] || [];
       const consumedCount = origConsumed[key] || 0;
       const orig = origList[consumedCount] || null;
 
-      if (!orig) {
-        // No matching original (or all consumed) → new item
-        coItems.push({
-          description: item.description || '',
-          qty: item.qty || null,
-          unit: item.unit || null,
-          original_amount: 0,
-          new_amount: newAmt,
-          trade_category: item.trade_category || item.category || 'general',
-          is_new: true,
-          is_unassigned: true,
-        });
-        totalDelta += newAmt;
-      } else {
+      if (orig) {
         origConsumed[key] = consumedCount + 1;
         const origAmt = Number(orig.line_total || orig.total || orig.amount || 0);
         const delta = newAmt - origAmt;
+        // Only show items that changed or are new — skip unchanged items
         if (Math.abs(delta) > 0.01) {
           coItems.push({
             description: item.description || '',
@@ -643,16 +639,57 @@ async function processCoUpload(estimateFile, componentsFile, coNum, title, budge
             is_new: false,
             is_unassigned: true,
           });
-          totalDelta += delta;
         }
-        // else: same amount → skip (no change)
+      } else {
+        coItems.push({
+          description: item.description || '',
+          qty: item.qty || null,
+          unit: item.unit || null,
+          original_amount: 0,
+          new_amount: newAmt,
+          trade_category: item.trade_category || item.category || 'general',
+          is_new: true,
+          is_unassigned: true,
+        });
+      }
+    });
+
+    // Items REMOVED from the original (in original but not in new estimate)
+    const newLookup = {};
+    newItems.forEach(item => {
+      const key = (item.description || '').trim().toLowerCase();
+      if (!newLookup[key]) newLookup[key] = 0;
+      newLookup[key]++;
+    });
+    (budget.items || []).forEach(item => {
+      const key = (item.description || '').trim().toLowerCase();
+      const newCount = newLookup[key] || 0;
+      const origCount = (origLookup[key] || []).length;
+      // If original has more instances than the new estimate, those are removed
+      if (newCount < origCount) {
+        const origAmt = Number(item.line_total || item.total || item.amount || 0);
+        // Only add once per excess (track with a counter)
+        if (!newLookup['__removed_' + key]) newLookup['__removed_' + key] = 0;
+        newLookup['__removed_' + key]++;
+        if (newLookup['__removed_' + key] <= (origCount - newCount)) {
+          coItems.push({
+            description: item.description || '',
+            qty: item.qty || null,
+            unit: item.unit || null,
+            original_amount: origAmt,
+            new_amount: 0,
+            trade_category: item.trade_category || item.category || 'general',
+            is_new: false,
+            is_unassigned: false,
+          });
+        }
       }
     });
   }
 
-  if (!coItems.length) throw new Error(estType === 'standalone'
+  if (!coItems.length && Math.abs(totalDelta) < 0.01) throw new Error(estType === 'standalone'
     ? 'No line items found in the estimate.'
-    : 'No new or changed items found. The new estimate appears identical to the original.');
+    : 'No differences found. The new estimate appears identical to the original.');
 
   statusEl.textContent = `${coItems.length} CO items (+${usdCompact(totalDelta)}). Saving...`;
 
