@@ -511,7 +511,7 @@ async function createPacket() {
       // 5) Log generated contract in rebuild_documents (visibility in Documents tab)
       await sb.from('rebuild_documents').insert({
         project_id: state.activeProjectId,
-        category: 'Contract',
+        category: 'Customer Documents',
         filename: `Contract_${p.albi_job_number || state.activeProjectId}_v${CONTRACT_TEMPLATE_VERSION}.pdf`,
         file_url: contractPdfUrl,
         file_size_bytes: contractByteSize,
@@ -556,7 +556,7 @@ async function createPacket() {
 
       const { data: signDocRows, error: signDocErr } = await sb.from('rebuild_documents').insert({
         project_id: state.activeProjectId,
-        category: 'Contract',
+        category: 'Customer Documents',
         kind: 'contract_packet',
         filename: `Packet_${p.albi_job_number || state.activeProjectId}_v${CONTRACT_TEMPLATE_VERSION}.pdf`,
         file_url: mergeData.merged_pdf_url,
@@ -564,6 +564,7 @@ async function createPacket() {
         uploaded_by_email: state.pmEmail || null,
         signature_status: 'pending',
         signature_token: signatureToken,
+        customer_visible: true,
         // Customer email for the "signed copy" email sign.html sends after signing.
         // Without this, emailCopy() bails silently and the customer never receives the PDF.
         signature_sent_to_email: p.customer_email || null,
