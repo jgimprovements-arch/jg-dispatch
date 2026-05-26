@@ -450,13 +450,9 @@ function openCoUploadModal() {
       <label style="font-size:12px;font-weight:600;color:var(--navy);">CO Title</label>
       <input id="co_title_input" style="width:100%;padding:8px;border:1px solid var(--line);border-radius:6px;font-size:13px;margin:4px 0 12px;box-sizing:border-box;" value="${defaultTitle}">
       <label style="font-size:12px;font-weight:600;color:var(--navy);">Estimate Type</label>
-      <div style="display:flex;gap:8px;margin:6px 0 14px;">
-        <label style="display:flex;align-items:center;gap:5px;cursor:pointer;font-size:12px;padding:6px 12px;border:2px solid var(--orange);border-radius:6px;background:rgba(232,116,60,.08);color:var(--navy);font-weight:600;">
-          <input type="radio" name="co_est_type" value="standalone" checked style="accent-color:var(--orange);"> Standalone CO estimate
-        </label>
-        <label style="display:flex;align-items:center;gap:5px;cursor:pointer;font-size:12px;padding:6px 12px;border:2px solid var(--line);border-radius:6px;color:var(--muted);">
-          <input type="radio" name="co_est_type" value="full_re_estimate" style="accent-color:var(--orange);"> Updated full estimate (diff against original)
-        </label>
+      <div style="display:flex;gap:8px;margin:6px 0 14px;" id="co_est_type_btns">
+        <button type="button" class="btn" id="co_type_standalone" style="font-size:11px;padding:6px 12px;border:2px solid var(--orange);background:rgba(232,116,60,.08);color:var(--navy);font-weight:600;">Standalone CO estimate</button>
+        <button type="button" class="btn" id="co_type_diff" style="font-size:11px;padding:6px 12px;border:2px solid var(--line);background:transparent;color:var(--muted);">Updated full estimate (diff)</button>
       </div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px;">
         <div>
@@ -481,8 +477,37 @@ function openCoUploadModal() {
   `;
   document.body.appendChild(back);
   let estFile = null, compFile = null;
+  let selectedEstType = 'standalone';
   const processBtn = back.querySelector('#co_process_btn');
   const statusEl = back.querySelector('#co_parse_status');
+
+  // Wire estimate type toggle
+  const standaloneBtn = back.querySelector('#co_type_standalone');
+  const diffBtn = back.querySelector('#co_type_diff');
+  function setEstType(type) {
+    selectedEstType = type;
+    if (type === 'standalone') {
+      standaloneBtn.style.borderColor = 'var(--orange)';
+      standaloneBtn.style.background = 'rgba(232,116,60,.08)';
+      standaloneBtn.style.color = 'var(--navy)';
+      standaloneBtn.style.fontWeight = '600';
+      diffBtn.style.borderColor = 'var(--line)';
+      diffBtn.style.background = 'transparent';
+      diffBtn.style.color = 'var(--muted)';
+      diffBtn.style.fontWeight = '400';
+    } else {
+      diffBtn.style.borderColor = 'var(--orange)';
+      diffBtn.style.background = 'rgba(232,116,60,.08)';
+      diffBtn.style.color = 'var(--navy)';
+      diffBtn.style.fontWeight = '600';
+      standaloneBtn.style.borderColor = 'var(--line)';
+      standaloneBtn.style.background = 'transparent';
+      standaloneBtn.style.color = 'var(--muted)';
+      standaloneBtn.style.fontWeight = '400';
+    }
+  }
+  standaloneBtn.addEventListener('click', () => setEstType('standalone'));
+  diffBtn.addEventListener('click', () => setEstType('full_re_estimate'));
 
   function wireSlot(dropId, inputId, onFile) {
     const drop = back.querySelector('#' + dropId);
@@ -509,8 +534,7 @@ function openCoUploadModal() {
     statusEl.style.color = 'var(--muted)';
     try {
       const title = back.querySelector('#co_title_input').value.trim() || defaultTitle;
-      const estType = back.querySelector('input[name="co_est_type"]:checked')?.value || 'standalone';
-      await processCoUpload(estFile, compFile, coNum, title, budget, statusEl, estType);
+      await processCoUpload(estFile, compFile, coNum, title, budget, statusEl, selectedEstType);
       back.remove();
       await loadChangeOrders();
       await loadWoBudget();
@@ -569,25 +593,30 @@ async function processCoUpload(estimateFile, componentsFile, coNum, title, budge
     // ─── Full re-estimate: diff against original ────────────────────────
     statusEl.textContent = `Found ${newItems.length} items. Diffing against original...`;
 
-    // Key by description + room + section to handle duplicate descriptions
-    // in different rooms (e.g., two "Remove & Replace Drywall" entries).
-    const makeKey = (item) => [
-      (item.description || '').trim().toLowerCase(),
-      (item.room || '').trim().toLowerCase(),
-      (item.section || '').trim().toLowerCase(),
-    ].join('||');
-
+    // Build a lookup of original items by description (case-insensitive).
+    // To handle duplicate descriptions (e.g., same item in different rooms),
+    // we store an ARRAY of originals per key and consume them in order.
     const origLookup = {};
     (budget.items || []).forEach(item => {
-      const key = makeKey(item);
-      origLookup[key] = item;
+      const key = (item.description || '').trim().toLowerCase();
+      if (!origLookup[key]) origLookup[key] = [];
+      origLookup[key].push(item);
     });
 
+    // Track which originals have been consumed so duplicates match 1:1
+    const origConsumed = {};
+
     newItems.forEach(item => {
-      const key = makeKey(item);
-      const orig = origLookup[key];
+      const key = (item.description || '').trim().toLowerCase();
       const newAmt = Number(item.line_total || item.total || item.amount || 0);
+
+      // Find the next unconsumed original with this description
+      const origList = origLookup[key] || [];
+      const consumedCount = origConsumed[key] || 0;
+      const orig = origList[consumedCount] || null;
+
       if (!orig) {
+        // No matching original (or all consumed) → new item
         coItems.push({
           description: item.description || '',
           qty: item.qty || null,
@@ -600,6 +629,7 @@ async function processCoUpload(estimateFile, componentsFile, coNum, title, budge
         });
         totalDelta += newAmt;
       } else {
+        origConsumed[key] = consumedCount + 1;
         const origAmt = Number(orig.line_total || orig.total || orig.amount || 0);
         const delta = newAmt - origAmt;
         if (Math.abs(delta) > 0.01) {
@@ -615,6 +645,7 @@ async function processCoUpload(estimateFile, componentsFile, coNum, title, budge
           });
           totalDelta += delta;
         }
+        // else: same amount → skip (no change)
       }
     });
   }
