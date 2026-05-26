@@ -2543,7 +2543,7 @@ function renderTabContent() {
     // Change Orders — amendments to the signed contract. Only relevant once contract is signed.
     // renderCoSection() returns empty string if no signed contract yet (handled inside the function).
     const coHtml = (typeof renderCoSection === 'function') ? renderCoSection() : '';
-    c.innerHTML = sovHtml + coHtml + packetHtml + uploadHtml;
+    c.innerHTML = sovHtml + packetHtml + coHtml + uploadHtml;
   }
   else if (state.tab === 'relationships') c.innerHTML = renderRelationshipsTab();
   else if (state.tab === 'phases')      c.innerHTML = renderPhasesTab();
@@ -6767,9 +6767,1121 @@ function renderWoBuilderSection(budget) {
 }
 
 // ──── CHANGE ORDERS ────
-// Extracted to rebuild-co.js (2026-05-26). Functions: loadChangeOrders,
-// renderCoSection, wireCoActions, openCoUploadModal, processCoUpload,
-// openCoPdfPreview, openCoEditModal, sendCoToCustomer.
+
+async function loadChangeOrders() {
+  if (!sb || !state.activeProjectId) { state.changeOrders = []; state.coLineItems = {}; return; }
+  // COs are not currently linked to a specific sub at the CO level; the sub
+  // relationship lives on rebuild_co_line_items via the trade_category fan-out.
+  // Plain select.
+  const { data: cos } = await sb.from('rebuild_change_orders')
+    .select('*')
+    .eq('project_id', state.activeProjectId)
+    .order('co_number');
+  state.changeOrders = cos || [];
+
+  // Load line items for all COs
+  state.coLineItems = {};
+  if (state.changeOrders.length) {
+    const coIds = state.changeOrders.map(c => c.id);
+    const { data: items } = await sb.from('rebuild_co_line_items')
+      .select('*')
+      .in('co_id', coIds)
+      .order('is_new', { ascending: false })
+      .order('delta_amount', { ascending: false });
+    (items || []).forEach(item => {
+      if (!state.coLineItems[item.co_id]) state.coLineItems[item.co_id] = [];
+      state.coLineItems[item.co_id].push(item);
+    });
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// SOV MODULE — extracted to rebuild-sov.js (2026-05-20)
+// Loaded via <script src="rebuild-sov.js"> at the bottom of the file.
+// See rebuild-sov.js for the full module + dependency notes.
+// ════════════════════════════════════════════════════════════════════════════
+
+
+function renderCoSection() {
+  const p = state.activeProject || {};
+  const contractSigned = !!p.contract_signed_at;
+  const cos = state.changeOrders || [];
+
+  if (!contractSigned) {
+    return `
+      <div class="wobx-co-section" style="margin-top:16px;border-top:2px solid var(--line);padding-top:16px;">
+        <div class="wobx-trades-title">
+          <span style="color:var(--muted);">🔒 Change Orders</span>
+          <button class="btn primary" id="markContractSignedBtn" style="font-size:12px;padding:5px 14px;">✓ Mark Contract Signed</button>
+        </div>
+        <div style="padding:14px 0;color:var(--muted);font-size:13px;">
+          Change Orders are locked until the customer contract is signed.
+        </div>
+      </div>
+    `;
+  }
+  const coStatusMeta = {
+    draft:             { lbl: 'Draft',              color: 'var(--muted)' },
+    sent_to_customer:  { lbl: 'Awaiting Customer',  color: 'var(--gold)' },
+    customer_signed:   { lbl: 'Customer Signed',    color: 'var(--orange)' },
+    sent_to_sub:       { lbl: 'Awaiting Sub',       color: 'var(--gold)' },
+    sub_signed:        { lbl: 'Sub Signed',         color: 'var(--orange)' },
+    complete:          { lbl: 'Complete',            color: 'var(--green)' },
+  };
+
+  const cosHtml = cos.map(co => {
+    const items = state.coLineItems[co.id] || [];
+    const meta = coStatusMeta[co.status] || { lbl: co.status, color: 'var(--muted)' };
+    const tradeGroups = {};
+    items.forEach(item => {
+      const trade = item.trade_category || 'general';
+      if (!tradeGroups[trade]) tradeGroups[trade] = [];
+      tradeGroups[trade].push(item);
+    });
+
+    const tradeRowsHtml = Object.entries(tradeGroups).map(([trade, its]) => {
+      const label = MERGED_TRADE_GROUPS[trade]?.label || trade;
+      const delta = its.reduce((s, i) => s + (Number(i.delta_amount) || 0), 0);
+      return `
+        <tr class="wobx-co-trade-row" data-co-id="${esc(co.id)}" data-trade="${esc(trade)}">
+          <td><b>${esc(label)}</b> <span class="wobx-co-badge">CO#${co.co_number}</span></td>
+          <td class="r">${its.length} item${its.length===1?'':'s'}</td>
+          <td class="r" style="color:var(--green);font-weight:700;">+${usdCompact(delta)}</td>
+          <td></td>
+          <td></td>
+          <td></td>
+          <td></td>
+        </tr>
+      `;
+    }).join('');
+
+    const canSendCustomer = co.status === 'draft';
+    const canSendSub = co.status === 'customer_signed';
+    const isUnlocked = ['customer_signed', 'sent_to_sub', 'sub_signed', 'complete'].includes(co.status);
+
+    return `
+      <div class="wobx-co-card" data-co-id="${esc(co.id)}">
+        <div class="wobx-co-card-head">
+          <div style="display:flex;align-items:center;gap:10px;">
+            <button class="wobx-co-toggle" data-co-id="${esc(co.id)}" title="Expand/collapse">▾</button>
+            <span class="wobx-co-title">CO #${co.co_number} — ${esc(co.title || 'Change Order')}</span>
+            <span class="wobx-status-pill" style="background:${meta.color}20;color:${meta.color};border:1px solid ${meta.color}40;font-size:11px;padding:2px 8px;border-radius:20px;">${meta.lbl}</span>
+            <span style="color:var(--green);font-weight:700;">+${usdCompact(co.total_delta)}</span>
+          </div>
+          <div style="display:flex;gap:6px;">
+            ${canSendCustomer ? `<button class="btn primary" data-co-act="send-customer" data-co-id="${esc(co.id)}">✉ Send to Customer</button>` : ''}
+            ${canSendSub ? `<button class="btn primary" data-co-act="send-sub" data-co-id="${esc(co.id)}">✉ Send to Sub</button>` : ''}
+            ${isUnlocked ? `<span style="font-size:12px;color:var(--green);">✓ Items unlocked in WO Builder</span>` : ''}
+            <button class="btn ghost" data-co-act="view-pdf" data-co-id="${esc(co.id)}">📄 View CO</button>
+            <button class="btn ghost" data-co-act="mark-customer-signed" data-co-id="${esc(co.id)}" ${co.status !== 'sent_to_customer' ? 'style="display:none"' : ''}>✓ Mark Customer Signed</button>
+            <button class="btn ghost" data-co-act="edit" data-co-id="${esc(co.id)}" ${co.status !== 'draft' ? 'style="display:none"' : ''}>✎ Edit</button>
+            <button class="btn ghost" data-co-act="delete" data-co-id="${esc(co.id)}" style="color:var(--red);border-color:var(--red);" ${co.status !== 'draft' ? 'style="display:none"' : ''}>🗑</button>
+          </div>
+        </div>
+        <div class="wobx-co-body" data-co-body="${esc(co.id)}">
+          ${items.length ? `
+            <table class="wobx-trade-table" style="margin-top:8px;">
+              <thead><tr>
+                <th>Trade</th><th class="r">Items</th><th class="r">Delta</th>
+                <th></th><th></th><th></th><th></th>
+              </tr></thead>
+              <tbody>${tradeRowsHtml}</tbody>
+            </table>
+          ` : `<div style="padding:16px;color:var(--muted);font-size:13px;">No line items yet. Upload a change order estimate to populate.</div>`}
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  const signedDate = new Date(p.contract_signed_at).toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' });
+  return `
+    <div class="wobx-co-section">
+      <div class="wobx-trades-title" style="margin-top:16px;border-top:2px solid var(--line);padding-top:16px;">
+        <span>Change Orders <span style="font-size:11px;color:var(--green);font-weight:600;margin-left:8px;">✓ Contract signed ${signedDate}</span></span>
+        <span style="display:flex;gap:8px;align-items:center;">
+          <button class="btn ghost" id="markContractUnsignedBtn" style="font-size:11px;padding:4px 10px;color:var(--muted);">↩ Unmark</button>
+          <button class="btn primary" id="wobx_new_co" style="font-size:12px;padding:5px 12px;">+ Upload Change Order</button>
+        </span>
+      </div>
+      ${cos.length ? cosHtml : `<div style="padding:16px 0;color:var(--muted);font-size:13px;">No change orders yet. Click "+ Upload Change Order" to add a supplement estimate.</div>`}
+    </div>
+  `;
+}
+
+// Roll up estimate items + components into per-trade WO data
+// Merged trade groups — multiple raw trades roll up into one "work order" trade.
+// This fixes the negative-margin problem where Xactimate's Components report puts
+// all finish work under CARP-FNC labor, but estimate line items get classified into
+// separate sub-trades like trim/cabinetry/doors.
+const MERGED_TRADE_GROUPS = {
+  finish_carpentry: {
+    label: 'Finish Carpentry',
+    categories: ['trim', 'cabinetry', 'doors', 'hardware', 'fasteners'],
+    sort: 50,
+  },
+  paint: { label: 'Paint', categories: ['paint'], sort: 35 },
+  drywall: { label: 'Drywall', categories: ['drywall'], sort: 30 },
+  flooring: { label: 'Flooring', categories: ['flooring'], sort: 40 },
+  insulation: { label: 'Insulation', categories: ['insulation'], sort: 25 },
+  framing: { label: 'Framing', categories: ['framing'], sort: 20 },
+  plumbing: { label: 'Plumbing', categories: ['plumbing'], sort: 85 },
+  electrical: { label: 'Electrical', categories: ['electrical'], sort: 80 },
+  appliances: { label: 'Appliances', categories: ['appliances'], sort: 90 },
+  demo: { label: 'Demolition', categories: ['demo'], sort: 10 },
+  containment: { label: 'Containment', categories: ['containment'], sort: 12 },
+  contents: { label: 'Contents Handling', categories: ['contents'], sort: 15 },
+  supervision: { label: 'Project Management', categories: ['supervision'], sort: 5 },
+  cleaning: { label: 'Final Cleaning', categories: ['cleaning'], sort: 95 },
+  internal: { label: 'Internal', categories: ['internal'], sort: 97 },
+  general: { label: 'General Labor', categories: ['general', 'misc'], sort: 99 },
+  __jg_materials__: { label: 'JG Purchased Materials', categories: ['__jg_materials__'], sort: 96 },
+};
+
+// Finish trades that auto-enable the Selections workflow when consolidated into a WO.
+// "All finish trades (broad)" per spec — covers flooring, finish carpentry (incl. cabinetry/trim/doors/hardware), paint, and drywall touch-up.
+const FINISH_TRADE_KEYS = new Set([
+  'flooring',
+  'finish_carpentry',
+  'paint',
+  'drywall',
+]);
+function isFinishTrade(tradeKey) { return FINISH_TRADE_KEYS.has(tradeKey); }
+function anyFinishTradeIn(tradeKeys) { return (tradeKeys || []).some(k => FINISH_TRADE_KEYS.has(k)); }
+
+// Reverse lookup: raw category → merged group key
+function mergedGroupFor(rawCategory) {
+  // Step 1: find the default merged group from MERGED_TRADE_GROUPS
+  let groupKey = 'general';
+  for (const [k, group] of Object.entries(MERGED_TRADE_GROUPS)) {
+    if (group.categories.includes(rawCategory)) { groupKey = k; break; }
+  }
+  // Step 2: follow any user-defined merge chain (with safety cap)
+  return resolveTradeMerge(groupKey);
+}
+
+// Walk the user-merge chain — if A→B→C, A resolves to C
+function resolveTradeMerge(tradeKey) {
+  const merges = state.tradeMerges || {};
+  let current = tradeKey;
+  let hops = 0;
+  while (merges[current] && hops < 10) {
+    current = merges[current];
+    hops++;
+  }
+  return current;
+}
+
+// Get a display label for a trade key — uses MERGED_TRADE_GROUPS if known
+function tradeLabelForKey(key) {
+  return MERGED_TRADE_GROUPS[key]?.label || tradeLabelFor(key);
+}
+
+function computeTradeRollup(budget) {
+  // Group everything by merged trade
+  const groups = {};
+
+  function keyFor(rawCategory) {
+    const groupKey = mergedGroupFor(rawCategory || 'general');
+    const group = MERGED_TRADE_GROUPS[groupKey];
+    if (!group) {
+      // Defensive: unknown group key — fall back to a synthetic entry so we don't crash.
+      // Real fix is to add the missing group to MERGED_TRADE_GROUPS or fix mergedGroupFor().
+      console.warn('[computeTradeRollup] unknown trade group:', groupKey, 'for rawCategory:', rawCategory);
+      return { key: groupKey || 'general', label: groupKey || 'General', sort: 9999 };
+    }
+    return { key: groupKey, label: group.label, sort: group.sort };
+  }
+  function getGroup(rawCategory) {
+    const k = keyFor(rawCategory);
+    if (!groups[k.key]) {
+      groups[k.key] = {
+        category: k.key, label: k.label, sort: k.sort,
+        items: [], materials: [], labor: [], equipment: [],
+      };
+    }
+    return groups[k.key];
+  }
+
+  (budget.items || []).forEach(it => { if (!it.is_unassigned) getGroup(it.trade_category).items.push(it); });
+  (budget.materials || []).forEach(m => { if (!m.is_unassigned) getGroup(m.trade_category).materials.push(m); });
+  (budget.labor || []).forEach(l => { if (!l.is_unassigned) getGroup(l.trade_category).labor.push(l); });
+  (budget.equipment || []).forEach(e => { if (!e.is_unassigned) getGroup(e.trade_category).equipment.push(e); });
+
+  // Ensure 'Internal' trade always appears even with 0 items
+  getGroup('internal');
+
+  // For each trade group, compute revenue + a single trade-level budget
+  // First pass — compute each trade row
+  let totalJgMaterialsCarvedOut = 0;       // total revenue $$ carved out across all JG-supplies trades
+  let totalJgXactMaterialsCost = 0;        // sum of Xact materials cost across affected trades
+
+  // Build reverse merge map: targetKey → [sourceLabel, ...]
+  const merges = state.tradeMerges || {};
+  const mergedSources = {};
+  for (const [srcKey, tgtKey] of Object.entries(merges)) {
+    const resolved = resolveTradeMerge(srcKey);
+    if (!mergedSources[resolved]) mergedSources[resolved] = new Set();
+    mergedSources[resolved].add(MERGED_TRADE_GROUPS[srcKey]?.label || srcKey);
+  }
+
+  const tradeRows = Object.values(groups).map(g => {
+    const grossRevenue = sumField(g.items, 'line_total');
+    const hours = sumField(g.labor, 'hours');
+    const xactMaterialsTotal = sumField(g.materials, 'total');
+
+    const wbWo = (budget.wos || []).find(w => w.trade_category === g.category);
+    const jgSupplies = wbWo?.materials_supplier === 'jg';
+
+    let revenue = grossRevenue;
+    let materialsCarveOut = 0;
+    if (jgSupplies) {
+      materialsCarveOut = Math.min(xactMaterialsTotal, grossRevenue);
+      revenue = grossRevenue - materialsCarveOut;
+      totalJgMaterialsCarvedOut += materialsCarveOut;
+      totalJgXactMaterialsCost += xactMaterialsTotal;
+    }
+
+    const tradeBudget = (wbWo?.trade_budget != null)
+      ? Number(wbWo.trade_budget)
+      : Number((revenue * 0.5).toFixed(2));
+
+    const profit = revenue - tradeBudget;
+
+    // Combined label showing all merged source trades
+    const sources = mergedSources[g.category];
+    const combinedLabel = sources && sources.size
+      ? g.label + ' / ' + [...sources].join(' / ')
+      : g.label;
+
+    return {
+      category: g.category,
+      label: combinedLabel,
+      sort: g.sort,
+      itemCount: g.items.length,
+      grossRevenue,           // original (before carve-out) — for reference in modal
+      revenue,                // labor-only when JG supplies, full otherwise
+      materialsCarveOut,      // how much was moved to JG bucket from this trade
+      xactMaterialsTotal,     // for display
+      budget: tradeBudget,
+      materialsBudget: 0,     // legacy field — no longer used per-trade; left for compatibility
+      totalCost: tradeBudget,
+      jgSupplies,
+      budgetIsOverride: wbWo?.trade_budget != null,
+      profit,
+      hours,
+      suggestedPhaseId: matchPhaseForTrade(g.category),
+    };
+  }).sort((a, b) => (a.sort || 100) - (b.sort || 100));
+
+  // Add the synthetic JG Purchased Materials row if any trade is JG-supplied.
+  // BUDGET MODEL: this row's "budget" represents the materials spend allowance
+  // that keeps the overall project at its target margin (default 50%).
+  // It is NOT a cost — actual material spend is tracked in Albi.
+  //
+  //   target_profit = total_project_revenue × target_margin
+  //   budget_allowance = (total_project_revenue − target_profit) − sum(other_trade_budgets)
+  //
+  // Profit on this row = revenue − budget_allowance (i.e. the cushion against the cap)
+  // The Xact materials total ($14,347 typically) is shown as a reference benchmark for
+  // negotiation: "if we negotiate vendors down to this allowance, we still hit margin."
+  if (totalJgMaterialsCarvedOut > 0) {
+    const jgWo = (budget.wos || []).find(w => w.trade_category === '__jg_materials__');
+
+    // Compute project-wide totals across all OTHER (non-JG-materials) trades
+    const otherRevenue = tradeRows.reduce((acc, r) => acc + (r.revenue || 0), 0);
+    const otherBudget = tradeRows.reduce((acc, r) => acc + (r.budget || 0), 0);
+    const projectRevenue = otherRevenue + totalJgMaterialsCarvedOut;
+
+    // Target margin — read from project settings or default to 50%
+    const targetMarginPct = (state.project?.target_margin_pct != null)
+      ? Number(state.project.target_margin_pct) / 100
+      : 0.5;
+
+    // Materials allowance = remaining budget capacity to hit target margin
+    const targetProfit = projectRevenue * targetMarginPct;
+    const totalBudgetCap = projectRevenue - targetProfit;
+    let computedAllowance = totalBudgetCap - otherBudget;
+    if (computedAllowance < 0) computedAllowance = 0;  // never negative
+
+    // If user manually overrode the materials budget, use their value;
+    // otherwise use the margin-target-based allowance.
+    const jgBudget = (jgWo?.trade_budget != null)
+      ? Number(jgWo.trade_budget)
+      : Number(computedAllowance.toFixed(2));
+
+    // Profit on this row = revenue (the materials portion of the contract) − the spend allowance
+    // If we stay under allowance → positive profit cushion
+    // If we exceed allowance → negative (we're eating into other trade margins)
+    const jgProfit = totalJgMaterialsCarvedOut - jgBudget;
+
+    tradeRows.push({
+      category: '__jg_materials__',
+      label: '📦 JG Purchased Materials',
+      sort: 999,
+      itemCount: 0,
+      grossRevenue: totalJgMaterialsCarvedOut,
+      revenue: totalJgMaterialsCarvedOut,
+      materialsCarveOut: 0,
+      xactMaterialsTotal: totalJgXactMaterialsCost,
+      budget: jgBudget,
+      materialsBudget: 0,
+      totalCost: jgBudget,
+      jgSupplies: false,
+      budgetIsOverride: jgWo?.trade_budget != null,
+      profit: jgProfit,
+      hours: 0,
+      suggestedPhaseId: null,
+      isSynthetic: true,
+      // Margin-allowance metadata for renderers
+      marginAllowance: Number(computedAllowance.toFixed(2)),
+      targetMarginPct: targetMarginPct,
+      xactBenchmark: Number(totalJgXactMaterialsCost.toFixed(2)),
+    });
+  }
+
+  return tradeRows;
+}
+
+const TRADE_LABEL_OVERRIDES = {
+  supervision: 'Project Management',
+  demo: 'Demolition',
+  containment: 'Containment',
+  framing: 'Framing',
+  drywall: 'Drywall',
+  paint: 'Paint',
+  flooring: 'Flooring',
+  trim: 'Finish Carpentry',
+  cabinetry: 'Cabinetry',
+  doors: 'Doors',
+  hardware: 'Door Hardware',
+  electrical: 'Electrical',
+  plumbing: 'Plumbing',
+  appliances: 'Appliances',
+  insulation: 'Insulation',
+  cleaning: 'Final Cleaning',
+  contents: 'Contents Handling',
+  fasteners: 'Misc Fasteners',
+  misc: 'Miscellaneous',
+  general: 'General Labor',
+};
+function tradeLabelFor(category) { return TRADE_LABEL_OVERRIDES[category] || category; }
+
+// Guess which rebuild_phase matches a trade by name
+function matchPhaseForTrade(category) {
+  const label = (tradeLabelFor(category) || '').toLowerCase();
+  if (!label || !state.phases.length) return null;
+  // exact match first
+  let found = state.phases.find(p => (p.phase_name || '').toLowerCase() === label);
+  if (found) return found.id;
+  // contains either way
+  found = state.phases.find(p => {
+    const pn = (p.phase_name || '').toLowerCase();
+    return pn.includes(label) || label.includes(pn);
+  });
+  return found ? found.id : null;
+}
+
+// usdCompact moved to rebuild-utils.js
+
+// ─── Wire the WO Builder upload + parse flow ───
+function wireWoBuilderControls() {
+  const dz = $('#wobx_dropzone');
+  const fileInput = $('#wobx_files');
+  const filesDisplay = $('#wobx_dz_files');
+  const goBtn = $('#wobx_generate');
+  const reupBtn = $('#wobx_reupload');
+  const retryBtn = $('#wobx_retry');
+
+  // Track selected files in state (persists across re-renders within this tab)
+  if (!state.wobxPicked) state.wobxPicked = { estimate: null, components: null };
+
+  function classifyByName(filename) {
+    const f = (filename || '').toUpperCase();
+    if (f.includes('COMPONENT')) return 'components';
+    if (f.includes('ESTIMATE') || f.includes('ABBREVIATED')) return 'estimate';
+    return null; // unknown — user has to clarify via second slot
+  }
+
+  function addFile(file) {
+    if (!file || file.type !== 'application/pdf') {
+      toast('Only PDF files supported', true);
+      return;
+    }
+    const guess = classifyByName(file.name);
+    if (guess === 'components' && !state.wobxPicked.components) {
+      state.wobxPicked.components = file;
+    } else if (guess === 'estimate' && !state.wobxPicked.estimate) {
+      state.wobxPicked.estimate = file;
+    } else if (!state.wobxPicked.estimate) {
+      state.wobxPicked.estimate = file;
+    } else if (!state.wobxPicked.components) {
+      state.wobxPicked.components = file;
+    } else {
+      // both slots full — replace estimate by default
+      state.wobxPicked.estimate = file;
+      toast('Replaced Estimate file');
+    }
+    renderPicked();
+  }
+
+  function removeFile(slot) {
+    state.wobxPicked[slot] = null;
+    renderPicked();
+  }
+
+  function swapFiles() {
+    const e = state.wobxPicked.estimate;
+    state.wobxPicked.estimate = state.wobxPicked.components;
+    state.wobxPicked.components = e;
+    renderPicked();
+  }
+
+  function renderPicked() {
+    const { estimate, components } = state.wobxPicked;
+    const hasAny = estimate || components;
+    if (!hasAny) {
+      filesDisplay.innerHTML = '';
+      filesDisplay.classList.remove('on');
+      dz.querySelector('.wobx-dz-empty').style.display = '';
+    } else {
+      dz.querySelector('.wobx-dz-empty').style.display = 'none';
+      filesDisplay.classList.add('on');
+      filesDisplay.innerHTML = `
+        ${slotHtml('estimate', 'Estimate PDF', estimate)}
+        ${slotHtml('components', 'Components PDF', components)}
+        ${(estimate && components) ? `
+          <button class="wobx-swap" id="wobx_swap" title="Swap if labels are wrong">↔ Swap</button>
+        ` : ''}
+      `;
+      const sw = $('#wobx_swap');
+      if (sw) sw.addEventListener('click', swapFiles);
+      filesDisplay.querySelectorAll('[data-remove]').forEach(b => {
+        b.addEventListener('click', (e) => {
+          e.stopPropagation();
+          removeFile(b.dataset.remove);
+        });
+      });
+    }
+    goBtn.disabled = !(estimate && components);
+  }
+
+  function slotHtml(slot, label, file) {
+    if (file) {
+      const sizeKb = Math.round(file.size / 1024);
+      return `
+        <div class="wobx-slot wobx-slot-filled">
+          <div class="wobx-slot-icon">📄</div>
+          <div class="wobx-slot-info">
+            <div class="wobx-slot-label">${label}</div>
+            <div class="wobx-slot-name">${esc(file.name)} · ${sizeKb} KB</div>
+          </div>
+          <button class="wobx-slot-x" data-remove="${slot}" title="Remove">×</button>
+        </div>
+      `;
+    }
+    return `
+      <div class="wobx-slot wobx-slot-empty">
+        <div class="wobx-slot-icon">⊕</div>
+        <div class="wobx-slot-info">
+          <div class="wobx-slot-label">${label}</div>
+          <div class="wobx-slot-name">Drop a PDF here or click to add</div>
+        </div>
+      </div>
+    `;
+  }
+
+  // ─── Drag and drop wiring ───
+  if (dz) {
+    // Click anywhere on the dropzone to open file picker
+    dz.addEventListener('click', (e) => {
+      if (e.target.closest('button')) return; // don't trigger when clicking × or swap
+      fileInput.click();
+    });
+
+    // File input → add files
+    fileInput.addEventListener('change', (e) => {
+      [...(e.target.files || [])].forEach(addFile);
+      fileInput.value = ''; // reset so picking same file twice fires change
+    });
+
+    // Drag-over visuals
+    let dragDepth = 0;
+    dz.addEventListener('dragenter', (e) => {
+      e.preventDefault();
+      dragDepth++;
+      dz.classList.add('wobx-dz-hover');
+    });
+    dz.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'copy';
+    });
+    dz.addEventListener('dragleave', (e) => {
+      dragDepth--;
+      if (dragDepth <= 0) {
+        dragDepth = 0;
+        dz.classList.remove('wobx-dz-hover');
+      }
+    });
+    dz.addEventListener('drop', (e) => {
+      e.preventDefault();
+      dragDepth = 0;
+      dz.classList.remove('wobx-dz-hover');
+      const files = [...(e.dataTransfer?.files || [])].filter(f => f.type === 'application/pdf');
+      if (!files.length) {
+        toast('Drop PDF files only', true);
+        return;
+      }
+      files.slice(0, 2).forEach(addFile);
+    });
+
+    // Initial render in case state.wobxPicked has stale data from previous session
+    renderPicked();
+  }
+
+  // Generate button
+  if (goBtn) {
+    goBtn.addEventListener('click', async () => {
+      const { estimate, components } = state.wobxPicked;
+      if (!estimate || !components) return;
+      await runWoBuilderParse(estimate, components);
+      // Clear after successful run (state.wobxPicked reset for next time)
+      state.wobxPicked = { estimate: null, components: null };
+    });
+  }
+
+  // Re-upload (after a parsed budget exists)
+  if (reupBtn) {
+    reupBtn.addEventListener('click', () => {
+      if (!state.woBudget?.upload?.id) return;
+      if (!confirm('Replace the current budget data with a new pair of PDFs?')) return;
+      sb.from('wo_builder_uploads').update({ deleted_at: new Date().toISOString() }).eq('id', state.woBudget.upload.id).then(() => {
+        state.woBudget = null;
+        state.wobxPicked = { estimate: null, components: null };
+        renderTabContent();
+      });
+    });
+  }
+
+  // Retry (after a parse error)
+  if (retryBtn) {
+    retryBtn.addEventListener('click', async () => {
+      if (!state.woBudget?.upload?.id) return;
+      await sb.from('wo_builder_uploads').update({ deleted_at: new Date().toISOString() }).eq('id', state.woBudget.upload.id);
+      state.woBudget = null;
+      state.wobxPicked = { estimate: null, components: null };
+      renderTabContent();
+    });
+  }
+
+  // Trade-table budget inputs — save to wo_builder_work_orders.trade_budget
+  document.querySelectorAll('.wobx-trade-budget-input').forEach(inp => {
+    let originalValue = inp.value;
+    const save = async () => {
+      if (inp.value === originalValue) return;
+      const trade = inp.dataset.trade;
+      const newVal = parseFloat(inp.value);
+      if (isNaN(newVal) || newVal < 0) { inp.value = originalValue; return; }
+      inp.disabled = true;
+      const result = await upsertWoBuilderRow(trade, { trade_budget: newVal });
+      if (!result.ok) {
+        toast('Save failed: ' + result.error, true);
+        inp.value = originalValue;
+        inp.disabled = false;
+        return;
+      }
+      inp.disabled = false;
+      originalValue = inp.value;
+      inp.classList.add('wobx-budget-override');
+      // Update local state
+      const wbWo = (state.woBudget?.wos || []).find(w => w.trade_category === trade);
+      if (wbWo) wbWo.trade_budget = newVal;
+      // Re-render the whole table so profit/margin update
+      renderTabContent();
+      refreshBudgetSummary();
+    };
+    inp.addEventListener('blur', save);
+    inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); inp.blur(); } });
+    // Stop click from opening the row's detail modal when editing
+    inp.addEventListener('click', e => e.stopPropagation());
+  });
+
+  // Phase dropdowns — when user picks a phase, save it
+  document.querySelectorAll('.wobx-phase-select').forEach(sel => {
+    let lastValue = sel.value;
+    sel.addEventListener('change', async (e) => {
+      const trade = sel.dataset.trade;
+      let phaseId = sel.value || null;
+      if (phaseId === '__create__') {
+        sel.value = lastValue;  // revert visual selection until create completes
+        const newId = await createNewPhasePrompt();
+        if (!newId) return;  // user cancelled
+        phaseId = newId;
+        // Re-render so all dropdowns get the new option
+        renderTabContent();
+      }
+      const phaseResult = await upsertWoBuilderRow(trade, { phase_id: phaseId, phase_id_user_set: true });
+      if (!phaseResult.ok) {
+        toast('Phase save failed: ' + phaseResult.error, true);
+        return;
+      }
+      lastValue = phaseId || '';
+      toast('Phase mapping saved');
+    });
+  });
+
+  // Click trade row → open detail popup (skip if click was on a select/button or row was just dragged)
+  document.querySelectorAll('.wobx-trade-row').forEach(row => {
+    row.addEventListener('click', (e) => {
+      if (e.target.closest('select, button, input')) return;
+      if (row.dataset.justDragged === '1') {
+        row.dataset.justDragged = '0';
+        return;
+      }
+      // Synthetic JG Purchased Materials row → its own modal
+      if (row.classList.contains('wobx-synthetic-row')) {
+        openJgMaterialsModal();
+        return;
+      }
+      openWoDetailModal(row.dataset.trade, row.dataset.tradeLabel);
+    });
+
+    // Drag handlers
+    row.addEventListener('dragstart', (e) => {
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', JSON.stringify({
+        trade: row.dataset.trade,
+        label: row.dataset.tradeLabel,
+      }));
+      row.classList.add('wobx-dragging');
+      row.dataset.justDragged = '1';
+    });
+    row.addEventListener('dragend', () => {
+      row.classList.remove('wobx-dragging');
+      document.querySelectorAll('.wobx-trade-row').forEach(r => r.classList.remove('wobx-drop-target'));
+    });
+    row.addEventListener('dragover', (e) => {
+      const dragging = document.querySelector('.wobx-trade-row.wobx-dragging');
+      if (!dragging || dragging === row) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      row.classList.add('wobx-drop-target');
+    });
+    row.addEventListener('dragleave', () => {
+      row.classList.remove('wobx-drop-target');
+    });
+    row.addEventListener('drop', async (e) => {
+      e.preventDefault();
+      row.classList.remove('wobx-drop-target');
+      let payload;
+      try { payload = JSON.parse(e.dataTransfer.getData('text/plain') || '{}'); } catch { return; }
+      const sourceKey = payload.trade;
+      const sourceLabel = payload.label;
+      const targetKey = row.dataset.trade;
+      const targetLabel = row.dataset.tradeLabel;
+      if (!sourceKey || sourceKey === targetKey) return;
+
+      // Block if target trade is locked
+      if (row.dataset.locked === '1') {
+        toast(`Can't merge into "${targetLabel}" — it's already locked to a Work Order. Reset merges or create a new WO instead.`, true);
+        return;
+      }
+
+      // Confirm
+      const ok = confirm(`Merge "${sourceLabel}" into "${targetLabel}"?\n\nAll items, materials, labor, and equipment from "${sourceLabel}" will roll up under "${targetLabel}". You can undo with "Reset Merges".`);
+      if (!ok) return;
+      await applyTradeMerge(sourceKey, targetKey, sourceLabel, targetLabel);
+    });
+  });
+
+  // Click unassigned bucket
+  const unassignedRow = $('#wobx_unassigned');
+  if (unassignedRow) {
+    unassignedRow.addEventListener('click', () => {
+      openWoDetailModal('__unassigned__', 'Unassigned');
+    });
+  }
+
+  // Reset all trade merges for this project
+  const resetBtn = $('#wobx_reset_merges');
+  if (resetBtn) {
+    resetBtn.addEventListener('click', async () => {
+      const count = Object.keys(state.tradeMerges || {}).length;
+      if (!count) return;
+      if (!confirm(`Reset ${count} trade merge${count === 1 ? '' : 's'} back to default groups?`)) return;
+      const { error } = await sb.from('wo_builder_trade_merges')
+        .delete()
+        .eq('project_id', state.activeProjectId);
+      if (error) { toast('Reset failed: ' + error.message, true); return; }
+      state.tradeMerges = {};
+      toast('Trade merges reset');
+      refreshBudgetSummary();
+      renderTabContent();
+    });
+  }
+
+  // Wire Change Order buttons
+  const newCoBtn = $('#wobx_new_co');
+  if (newCoBtn) {
+    newCoBtn.addEventListener('click', () => openCoUploadModal());
+  }
+
+  // Mark Contract Signed
+  const markSignedBtn = $('#markContractSignedBtn');
+  if (markSignedBtn) {
+    markSignedBtn.addEventListener('click', async () => {
+      if (!state.activeProjectId) return;
+      const now = new Date().toISOString();
+      const { error } = await sb.from('rebuild_projects')
+        .update({ contract_signed_at: now })
+        .eq('id', state.activeProjectId);
+      if (error) { toast('Failed to mark contract signed: ' + error.message); return; }
+      if (state.activeProject) state.activeProject.contract_signed_at = now;
+      toast('✓ Contract marked as signed');
+      renderDetail();
+    });
+  }
+
+  // Unmark Contract Signed
+  const unmarkSignedBtn = $('#markContractUnsignedBtn');
+  if (unmarkSignedBtn) {
+    unmarkSignedBtn.addEventListener('click', async () => {
+      if (!state.activeProjectId) return;
+      if (!confirm('Remove the contract signed date? Change Orders will be hidden again.')) return;
+      const { error } = await sb.from('rebuild_projects')
+        .update({ contract_signed_at: null })
+        .eq('id', state.activeProjectId);
+      if (error) { toast('Failed: ' + error.message); return; }
+      if (state.activeProject) state.activeProject.contract_signed_at = null;
+      toast('Contract signed date removed');
+      renderDetail();
+    });
+  }
+
+  // CO toggle collapse
+  document.querySelectorAll('.wobx-co-toggle').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      const coId = btn.dataset.coId;
+      const body = document.querySelector(`[data-co-body="${coId}"]`);
+      if (body) {
+        body.classList.toggle('hidden');
+        btn.classList.toggle('collapsed');
+      }
+    });
+  });
+
+  // CO action buttons
+  document.querySelectorAll('[data-co-act]').forEach(btn => {
+    btn.addEventListener('click', async e => {
+      e.stopPropagation();
+      const act = btn.dataset.coAct;
+      const coId = btn.dataset.coId;
+      const co = (state.changeOrders || []).find(c => c.id === coId);
+      if (!co) return;
+
+      if (act === 'delete') {
+        if (!confirm(`Delete CO #${co.co_number}? This cannot be undone.`)) return;
+        await sb.from('rebuild_change_orders').delete().eq('id', coId);
+        await loadChangeOrders();
+        toast('Change Order deleted');
+        renderTabContent();
+
+      } else if (act === 'send-customer') {
+        // Email customer the CO for DocuSign
+        const p = state.activeProject;
+        if (!p.customer_email) { toast('No customer email on file'); return; }
+        const { error } = await sb.from('rebuild_change_orders')
+          .update({ status: 'sent_to_customer' })
+          .eq('id', coId);
+        if (error) { toast('Failed: ' + error.message); return; }
+        // Log to Albi
+        logToAlbi('co_sent_to_customer', `CO #${co.co_number} sent to customer for signature`);
+        toast(`CO #${co.co_number} marked as sent to customer`);
+        await loadChangeOrders();
+        renderTabContent();
+
+      } else if (act === 'mark-customer-signed') {
+        const name = prompt('Customer name (for record):') || 'Customer';
+        const { error } = await sb.from('rebuild_change_orders')
+          .update({ status: 'customer_signed', customer_signed_at: new Date().toISOString(), customer_signed_name: name })
+          .eq('id', coId);
+        if (error) { toast('Failed: ' + error.message); return; }
+        // Unlock CO items in WO Builder by clearing is_unassigned
+        await sb.from('rebuild_co_line_items')
+          .update({ is_unassigned: false })
+          .eq('co_id', coId);
+        await loadChangeOrders();
+        await loadWoBudget();
+        toast(`CO #${co.co_number} customer signature recorded — items now available in WO Builder`);
+        renderTabContent();
+
+      } else if (act === 'send-sub') {
+        const { error } = await sb.from('rebuild_change_orders')
+          .update({ status: 'sent_to_sub' })
+          .eq('id', coId);
+        if (error) { toast('Failed: ' + error.message); return; }
+        logToAlbi('co_sent_to_sub', `CO #${co.co_number} sent to sub for signature`);
+        toast(`CO #${co.co_number} marked as sent to sub`);
+        await loadChangeOrders();
+        renderTabContent();
+
+      } else if (act === 'view-pdf') {
+        openCoPdfPreview(co);
+
+      } else if (act === 'edit') {
+        openCoEditModal(co);
+      }
+    });
+  });
+}
+
+
+// ──── CHANGE ORDER UPLOAD + DIFF ────
+
+function openCoUploadModal() {
+  const budget = state.woBudget;
+  if (!budget) { toast('Upload a base estimate first before creating a Change Order'); return; }
+  const coNum = (state.changeOrders || []).length + 1;
+  document.querySelectorAll('.co-upload-modal-back').forEach(m => m.remove());
+  const back = document.createElement('div');
+  back.className = 'co-upload-modal-back';
+  back.style.cssText = 'position:fixed;inset:0;background:rgba(13,45,94,.6);z-index:9998;display:flex;align-items:center;justify-content:center;';
+  const defaultTitle = `CO #${coNum} — ${new Date().toLocaleDateString('en-US',{month:'short',year:'numeric'})}`;
+  back.innerHTML = `
+    <div style="background:#fff;border-radius:12px;padding:24px;max-width:560px;width:92%;box-shadow:0 20px 60px rgba(0,0,0,.3);">
+      <div style="font-weight:700;font-size:16px;color:var(--navy);margin-bottom:4px;">Upload Change Order #${coNum}</div>
+      <div style="font-size:13px;color:var(--muted);margin-bottom:16px;">Upload both the new Estimate PDF and Components PDF from Xactimate. New or changed line items become the CO additions.</div>
+      <label style="font-size:12px;font-weight:600;color:var(--navy);">CO Title</label>
+      <input id="co_title_input" style="width:100%;padding:8px;border:1px solid var(--line);border-radius:6px;font-size:13px;margin:4px 0 12px;box-sizing:border-box;" value="${defaultTitle}">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px;">
+        <div>
+          <label style="font-size:12px;font-weight:600;color:var(--navy);">Estimate PDF</label>
+          <div id="co_est_drop" style="border:2px dashed var(--line);border-radius:8px;padding:16px;text-align:center;cursor:pointer;color:var(--muted);font-size:12px;margin-top:4px;min-height:60px;display:flex;align-items:center;justify-content:center;">
+            Drop or click<input type="file" id="co_est_input" accept=".pdf" style="display:none">
+          </div>
+        </div>
+        <div>
+          <label style="font-size:12px;font-weight:600;color:var(--navy);">Components PDF</label>
+          <div id="co_comp_drop" style="border:2px dashed var(--line);border-radius:8px;padding:16px;text-align:center;cursor:pointer;color:var(--muted);font-size:12px;margin-top:4px;min-height:60px;display:flex;align-items:center;justify-content:center;">
+            Drop or click<input type="file" id="co_comp_input" accept=".pdf" style="display:none">
+          </div>
+        </div>
+      </div>
+      <div id="co_parse_status" style="font-size:12px;color:var(--muted);margin-bottom:12px;min-height:18px;"></div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;">
+        <button class="btn" id="co_cancel_btn">Cancel</button>
+        <button class="btn primary" id="co_process_btn" disabled>Process & Diff</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(back);
+  let estFile = null, compFile = null;
+  const processBtn = back.querySelector('#co_process_btn');
+  const statusEl = back.querySelector('#co_parse_status');
+
+  function wireSlot(dropId, inputId, onFile) {
+    const drop = back.querySelector('#' + dropId);
+    const input = back.querySelector('#' + inputId);
+    drop.addEventListener('click', () => input.click());
+    drop.addEventListener('dragover', e => { e.preventDefault(); drop.style.borderColor = 'var(--orange)'; });
+    drop.addEventListener('dragleave', () => { drop.style.borderColor = 'var(--line)'; });
+    drop.addEventListener('drop', e => { e.preventDefault(); drop.style.borderColor = 'var(--line)'; if (e.dataTransfer.files[0]) onFile(e.dataTransfer.files[0], drop); });
+    input.addEventListener('change', () => { if (input.files[0]) onFile(input.files[0], drop); });
+  }
+  function markFile(file, drop) {
+    drop.innerHTML = `<span style="color:var(--navy);font-size:11px;">✓ ${file.name}</span>`;
+  }
+  wireSlot('co_est_drop', 'co_est_input', (f, drop) => { estFile = f; markFile(f, drop); checkReady(); });
+  wireSlot('co_comp_drop', 'co_comp_input', (f, drop) => { compFile = f; markFile(f, drop); checkReady(); });
+  function checkReady() { processBtn.disabled = !(estFile && compFile); }
+
+  back.querySelector('#co_cancel_btn').addEventListener('click', () => back.remove());
+  back.addEventListener('click', e => { if (e.target === back) back.remove(); });
+  processBtn.addEventListener('click', async () => {
+    if (!estFile || !compFile) return;
+    processBtn.disabled = true;
+    processBtn.textContent = 'Processing...';
+    statusEl.style.color = 'var(--muted)';
+    try {
+      const title = back.querySelector('#co_title_input').value.trim() || defaultTitle;
+      await processCoUpload(estFile, compFile, coNum, title, budget, statusEl);
+      back.remove();
+      await loadChangeOrders();
+      await loadWoBudget();
+      renderTabContent();
+      toast(`CO #${coNum} created — review the change items below`);
+    } catch (err) {
+      statusEl.style.color = 'var(--red)';
+      statusEl.textContent = 'Error: ' + err.message;
+      processBtn.disabled = false;
+      processBtn.textContent = 'Process & Diff';
+    }
+  });
+}
+
+
+async function processCoUpload(estimateFile, componentsFile, coNum, title, budget, statusEl) {
+  // Use the same parser module as the original estimate upload
+  statusEl.textContent = 'Parsing estimate + components PDFs...';
+  let newItems = [];
+  try {
+    const mod = await import('./wo-builder-parser.js');
+    // Parse the new estimate to get line items for diffing
+    const result = await mod.parseAndStoreXactPDFs(sb, state.activeProjectId, estimateFile, componentsFile, {
+      onProgress: (stage, pct) => { statusEl.textContent = `${stage} (${pct}%)`; },
+      uploadedByEmail: state.pmEmail,
+      uploadedByName: state.pmName,
+      dryRun: true, // parse only — don't store to DB yet, we need to diff first
+    });
+    newItems = result?.items || result?.lineItems || [];
+  } catch (parseErr) {
+    // No fallback available. The legacy Vercel /api/parse-pdf endpoint was
+    // removed when jg-proxy-v2 was decommissioned in May 2026 — it had
+    // become dead code anyway (the primary parseAndStoreXactPDFs path
+    // always returns line items, so this catch was never hit in practice).
+    // If parsing fails here, surface the real error.
+    console.error('Xact PDF parse failed:', parseErr);
+    throw new Error('Estimate parsing failed: ' + (parseErr.message || parseErr));
+  }
+
+  if (!newItems.length) throw new Error('No line items found. Check the files are Xact PDFs.');
+
+  statusEl.textContent = `Found ${newItems.length} items. Diffing against original...`;
+
+  // Build lookup of original items by description (case-insensitive)
+  const origLookup = {};
+  (budget.items || []).forEach(item => {
+    const key = (item.description || '').trim().toLowerCase();
+    origLookup[key] = item;
+  });
+
+  // Diff
+  const coItems = [];
+  let totalDelta = 0;
+  newItems.forEach(item => {
+    const key = (item.description || '').trim().toLowerCase();
+    const orig = origLookup[key];
+    const newAmt = Number(item.line_total || item.total || item.amount || 0);
+    if (!orig) {
+      coItems.push({ description: item.description || key, qty: item.qty || null, unit: item.unit || null, original_amount: 0, new_amount: newAmt, trade_category: item.trade_category || item.category || 'general', is_new: true, is_unassigned: true });
+      totalDelta += newAmt;
+    } else {
+      const origAmt = Number(orig.line_total || orig.total || orig.amount || 0);
+      const delta = newAmt - origAmt;
+      if (Math.abs(delta) > 0.01) {
+        coItems.push({ description: item.description || key, qty: item.qty || null, unit: item.unit || null, original_amount: origAmt, new_amount: newAmt, trade_category: item.trade_category || item.category || orig.trade_category || 'general', is_new: false, is_unassigned: true });
+        totalDelta += delta;
+      }
+    }
+  });
+
+  if (!coItems.length) throw new Error('No new or changed items found. The new estimate appears identical to the original.');
+
+  statusEl.textContent = `${coItems.length} CO items (+${usdCompact(totalDelta)}). Saving...`;
+
+  const { data: coData, error: coErr } = await sb.from('rebuild_change_orders').insert({
+    project_id: state.activeProjectId,
+    co_number: coNum,
+    title,
+    status: 'draft',
+    base_upload_id: budget.upload?.id || null,
+    total_delta: totalDelta,
+    created_by: state.pmEmail,
+  }).select().single();
+  if (coErr) throw new Error('Failed to create CO: ' + coErr.message);
+
+  const { error: itemErr } = await sb.from('rebuild_co_line_items').insert(coItems.map(i => ({ ...i, co_id: coData.id })));
+  if (itemErr) throw new Error('Failed to save CO items: ' + itemErr.message);
+
+  statusEl.textContent = 'Done!';
+}
+
+
+function openCoPdfPreview(co) {
+  const items = state.coLineItems[co.id] || [];
+  const p = state.activeProject;
+  const rowsHtml = items.map(item => {
+    const origFmt = item.original_amount > 0 ? '$' + Number(item.original_amount).toLocaleString(undefined,{minimumFractionDigits:2}) : '—';
+    const newFmt = '$' + Number(item.new_amount).toLocaleString(undefined,{minimumFractionDigits:2});
+    const delta = Number(item.delta_amount || (item.new_amount - item.original_amount));
+    const deltaFmt = (delta >= 0 ? '+' : '') + '$' + Math.abs(delta).toLocaleString(undefined,{minimumFractionDigits:2});
+    return `<tr>
+      <td style="padding:6px 8px;border-bottom:1px solid #e5e7eb;font-size:13px;">${esc(item.description)}</td>
+      <td style="padding:6px 8px;border-bottom:1px solid #e5e7eb;text-align:right;color:#7884a0;">${origFmt}</td>
+      <td style="padding:6px 8px;border-bottom:1px solid #e5e7eb;text-align:right;">${newFmt}</td>
+      <td style="padding:6px 8px;border-bottom:1px solid #e5e7eb;text-align:right;color:${delta >= 0 ? '#16a34a' : '#dc2626'};font-weight:700;">${deltaFmt}</td>
+    </tr>`;
+  }).join('');
+
+  const back = document.createElement('div');
+  back.style.cssText = 'position:fixed;inset:0;background:rgba(13,45,94,.6);z-index:9998;display:flex;align-items:center;justify-content:center;overflow:auto;padding:20px;';
+  back.innerHTML = `
+    <div style="background:#fff;border-radius:12px;padding:28px;max-width:720px;width:100%;max-height:90vh;overflow:auto;box-shadow:0 20px 60px rgba(0,0,0,.3);">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:20px;">
+        <div>
+          <img src="https://jgimprovements-arch.github.io/jg-dispatch/logo.png" height="40" style="margin-bottom:8px;display:block;">
+          <div style="font-size:20px;font-weight:700;color:#0d2d5e;">CHANGE ORDER #${co.co_number}</div>
+          <div style="font-size:13px;color:#7884a0;">${esc(co.title || '')}</div>
+        </div>
+        <button id="co_pdf_close" style="background:none;border:none;font-size:24px;cursor:pointer;color:#7884a0;line-height:1;">×</button>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:20px;font-size:13px;padding:12px;background:#f7f9fc;border-radius:8px;">
+        <div><span style="color:#7884a0;font-size:11px;text-transform:uppercase;letter-spacing:.5px;">Project</span><br><b>${esc(p.albi_job_number || '—')}</b></div>
+        <div><span style="color:#7884a0;font-size:11px;text-transform:uppercase;letter-spacing:.5px;">Customer</span><br><b>${esc(p.customer_name || '—')}</b></div>
+        <div><span style="color:#7884a0;font-size:11px;text-transform:uppercase;letter-spacing:.5px;">Property</span><br><b>${esc(p.address || '—')}</b></div>
+        <div><span style="color:#7884a0;font-size:11px;text-transform:uppercase;letter-spacing:.5px;">Date</span><br><b>${new Date().toLocaleDateString()}</b></div>
+      </div>
+      <table style="width:100%;border-collapse:collapse;margin-bottom:16px;">
+        <thead>
+          <tr style="background:#f7f9fc;">
+            <th style="padding:8px;text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#7884a0;border-bottom:2px solid #e5e7eb;">Description</th>
+            <th style="padding:8px;text-align:right;font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#7884a0;border-bottom:2px solid #e5e7eb;">Original</th>
+            <th style="padding:8px;text-align:right;font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#7884a0;border-bottom:2px solid #e5e7eb;">New</th>
+            <th style="padding:8px;text-align:right;font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#7884a0;border-bottom:2px solid #e5e7eb;">Delta</th>
+          </tr>
+        </thead>
+        <tbody>${rowsHtml}</tbody>
+        <tfoot>
+          <tr style="background:#f0fdf4;">
+            <td colspan="3" style="padding:12px 8px;font-weight:700;font-size:15px;color:#0d2d5e;">Total Change Order</td>
+            <td style="padding:12px 8px;text-align:right;font-weight:700;font-size:15px;color:#16a34a;">+$${Number(co.total_delta).toLocaleString(undefined,{minimumFractionDigits:2})}</td>
+          </tr>
+        </tfoot>
+      </table>
+      <div style="margin-top:28px;border-top:1px solid #e5e7eb;padding-top:20px;">
+        <p style="font-size:12px;color:#7884a0;margin-bottom:20px;">By signing below, all parties agree to the change in scope and price described above. All other terms of the original Restoration Services Agreement remain in effect.</p>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:32px;">
+          <div>
+            <div style="font-weight:700;font-size:13px;margin-bottom:12px;color:#0d2d5e;">Contractor — JG Restoration</div>
+            <div style="border-bottom:1.5px solid #0d2d5e;margin-bottom:6px;height:36px;"></div>
+            <div style="font-size:12px;color:#7884a0;">Signature &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Date: ___________</div>
+          </div>
+          <div>
+            <div style="font-weight:700;font-size:13px;margin-bottom:12px;color:#0d2d5e;">Customer — ${esc(p.customer_name || '')}</div>
+            <div style="border-bottom:1.5px solid #0d2d5e;margin-bottom:6px;height:36px;"></div>
+            <div style="font-size:12px;color:#7884a0;">Signature &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Date: ___________</div>
+          </div>
+        </div>
+      </div>
+      <div style="text-align:center;margin-top:24px;">
+        <button class="btn primary" onclick="window.print()">🖨 Print / Save as PDF</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(back);
+  back.querySelector('#co_pdf_close').addEventListener('click', () => back.remove());
+  back.addEventListener('click', e => { if (e.target === back) back.remove(); });
+}
+
+function openCoEditModal(co) {
+  const title = prompt('Edit CO title:', co.title || '');
+  if (title === null) return;
+  sb.from('rebuild_change_orders').update({ title }).eq('id', co.id).then(async () => {
+    await loadChangeOrders();
+    renderTabContent();
+    toast('CO title updated');
+  });
+}
 
 async function applyTradeMerge(sourceKey, targetKey, sourceLabel, targetLabel) {
   // Prevent merge cycles (target merges back into source via chain)
@@ -9678,7 +10790,6 @@ function setupRealtime() {
 <script src="rebuild-pdf.js?v=2026.05.24-r1"></script>
 <script src="rebuild-sov.js?v=2026.05.26-r1"></script>
 <script src="rebuild-packet.js?v=2026.05.26-r1"></script>
-<script src="rebuild-co.js?v=2026.05.26-r1"></script>
 <script src="rebuild-messages.js?v=2026.05.24-r1"></script>
 <script src="rebuild-documents.js?v=2026.05.24-r1"></script>
 <script src="rebuild-relationships.js?v=2026.05.20-r3"></script>
