@@ -439,9 +439,36 @@ function wireModal(doc) {
         }
       }
 
-      doc.signed_at = now; doc.signed_by_name = name; doc.signed_ip = ip;
+      // ── Change Order status cascade ──────────────────────────────────────
+      // When a customer signs a CO, cascade:
+      //   1. rebuild_change_orders — status → customer_signed
+      //   2. rebuild_sov_draws — lock the CO draw
+      if (doc.kind === 'change_order') {
+        const { error: coErr } = await sb.from('rebuild_change_orders')
+          .update({
+            status: 'customer_signed',
+            signed_at: now,
+            signed_name: name,
+          })
+          .eq('signed_document_id', doc.id);
+        if (coErr) {
+          console.error('[sign] CO status update failed:', coErr);
+        }
 
-      // For contract packets: first call the render-contract worker to get a
+        // Lock the CO's SOV draw
+        const { data: coRows } = await sb.from('rebuild_change_orders')
+          .select('id')
+          .eq('signed_document_id', doc.id)
+          .limit(1);
+        if (coRows && coRows.length) {
+          const { error: drawErr } = await sb.from('rebuild_sov_draws')
+            .update({ status: 'locked' })
+            .eq('co_id', coRows[0].id);
+          if (drawErr) {
+            console.error('[sign] CO SOV draw lock failed:', drawErr);
+          }
+        }
+      }
       // signed PDF with sigs embedded directly on the contract's signature
       // lines. Then feed that PDF into buildSignedPdf as the source — the
       // existing execution/attestation page still gets appended on top, so
@@ -457,6 +484,14 @@ function wireModal(doc) {
         } catch (workerErr) {
           console.error('[sign] worker render+merge failed, will append exec page to unsigned source:', workerErr);
           sourceForBuildSigned = null; // signal to use doc.file_url default
+        }
+      } else if (doc.kind === 'change_order') {
+        try {
+          submitBtn.textContent = 'Rendering signed CO amendment…';
+          sourceForBuildSigned = await fetchSignedCoFromWorker(doc, sigDataUrl);
+        } catch (workerErr) {
+          console.error('[sign] CO worker render failed, will append exec page to unsigned source:', workerErr);
+          sourceForBuildSigned = null;
         }
       }
 
@@ -476,6 +511,11 @@ function wireModal(doc) {
           if (doc.kind === 'contract_packet') {
             await sb.from('rebuild_contract_packets')
               .update({ merged_pdf_url: signedUrl })
+              .eq('signed_document_id', doc.id);
+          }
+          if (doc.kind === 'change_order') {
+            await sb.from('rebuild_change_orders')
+              .update({ co_pdf_url: signedUrl })
               .eq('signed_document_id', doc.id);
           }
           await emailCopy(doc, signedUrl, name);
@@ -755,6 +795,52 @@ async function fetchSignedMergedPacketFromWorkers(doc, custSigDataUrl) {
     return signedContractUrl;
   }
   return mergeData.merged_pdf_url;
+}
+
+// ─── Re-render CO amendment with signatures via worker ──────────────────────
+// Similar to fetchSignedMergedPacketFromWorkers but simpler:
+//   1) Look up render_payload from rebuild_change_orders
+//   2) Call render-contract worker with type='change_order' + signatures
+//   3) Return the signed CO PDF URL (no Xact merge needed for COs)
+async function fetchSignedCoFromWorker(doc, custSigDataUrl) {
+  // 1) Look up CO row for the frozen render_payload
+  const { data: coRows, error: coErr } = await sb.from('rebuild_change_orders')
+    .select('id, render_payload')
+    .eq('signed_document_id', doc.id)
+    .limit(1);
+  if (coErr) throw new Error('CO lookup failed: ' + coErr.message);
+  if (!coRows || !coRows.length) throw new Error('No CO found for signed_document_id ' + doc.id);
+  const co = coRows[0];
+  if (!co.render_payload || typeof co.render_payload !== 'object') {
+    throw new Error('CO has no render_payload — falling back to exec-page-only');
+  }
+
+  // 2) Re-render with signatures
+  const signedAt = new Date(doc.signed_at).toLocaleDateString('en-US', {
+    year: 'numeric', month: 'long', day: 'numeric',
+  });
+  const renderPayload = {
+    ...co.render_payload,
+    signatures: {
+      customer_name:         doc.signed_by_name || '',
+      customer_sig_data_url: custSigDataUrl,
+      signed_at:             signedAt,
+    },
+  };
+
+  const renderRes = await fetch(PACKET_CONTRACT_GEN_ENDPOINT, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(renderPayload),
+  });
+  if (!renderRes.ok) {
+    const errTxt = await renderRes.text();
+    throw new Error('CO render worker failed (' + renderRes.status + '): ' + errTxt);
+  }
+  const renderData = await renderRes.json();
+  if (!renderData.ok) throw new Error('CO render worker rejected: ' + (renderData.error || 'unknown'));
+
+  return renderData.contract_pdf_url;
 }
 
 async function buildSignedPdf(doc, custSigDataUrl, sourcePdfUrl) {
