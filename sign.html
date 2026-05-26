@@ -441,25 +441,73 @@ function wireModal(doc) {
 
       doc.signed_at = now; doc.signed_by_name = name; doc.signed_ip = ip;
 
-      submitBtn.textContent = 'Building PDF…';
-      const pdfBlob = await buildSignedPdf(doc, sigDataUrl);
+      // ─── Signed PDF generation: two paths ─────────────────────────────────
+      // Contract packets: re-call the render-contract Worker with signatures
+      //   appended. Produces a fully-executed PDF where JG + customer sigs are
+      //   embedded as page content (not a tacked-on signature page). Worker
+      //   handles its own upload — we just receive the URL.
+      // Everything else (regular SOVs, change orders, work auths, etc.):
+      //   the legacy buildSignedPdf + savePdf path appends a jsPDF execution
+      //   page to the original PDF. Untouched by this change.
       let signedUrl = null;
-      if (pdfBlob) {
-        submitBtn.textContent = 'Uploading…';
-        signedUrl = await savePdf(doc, pdfBlob);
-        if (signedUrl) {
-          await sb.from('rebuild_documents').update({ signed_pdf_url: signedUrl }).eq('id', doc.id);
-          doc.signed_pdf_url = signedUrl;
-          // For packets: also point the packet's merged_pdf_url at the signed
-          // version so the platform UI's "View signed packet" link shows the
-          // fully-executed PDF (with signature page appended), not the
-          // pre-signed merged version.
-          if (doc.kind === 'contract_packet') {
+      if (doc.kind === 'contract_packet') {
+        try {
+          submitBtn.textContent = 'Generating signed contract…';
+          signedUrl = await finalizePacketWithCustomerSigs(doc, sigDataUrl);
+          if (signedUrl) {
+            // Point the document record at the worker-produced signed PDF.
+            // file_url is also updated so the Documents tab in the platform
+            // surfaces the signed copy, not the unsigned one. push_status is
+            // marked pending so the existing Albi push (in savePdf) can be
+            // mirrored here on a future pass — for now packet docs don't
+            // currently auto-push to Albi anyway, so leaving push_status
+            // alone preserves whatever the platform set at send time.
+            await sb.from('rebuild_documents').update({
+              file_url: signedUrl,
+              signed_pdf_url: signedUrl,
+            }).eq('id', doc.id);
+            doc.signed_pdf_url = signedUrl;
+            // Point the packet's merged_pdf_url at the signed contract so the
+            // platform UI's "View signed packet" link shows the executed PDF.
             await sb.from('rebuild_contract_packets')
               .update({ merged_pdf_url: signedUrl })
               .eq('signed_document_id', doc.id);
+            await emailCopy(doc, signedUrl, name);
           }
-          await emailCopy(doc, signedUrl, name);
+        } catch(workerErr) {
+          // Worker failed (no render_payload on legacy packets, network blip,
+          // worker 500, etc). Fall through to the local jsPDF append path so
+          // the customer still gets a signed PDF — degraded but functional.
+          // This preserves the prior behavior for any in-flight packets that
+          // were created before render_payload persistence shipped.
+          console.error('[sign] worker signed-render failed, falling back to jsPDF append:', workerErr);
+          submitBtn.textContent = 'Building PDF (fallback)…';
+          const pdfBlob = await buildSignedPdf(doc, sigDataUrl);
+          if (pdfBlob) {
+            submitBtn.textContent = 'Uploading…';
+            signedUrl = await savePdf(doc, pdfBlob);
+            if (signedUrl) {
+              await sb.from('rebuild_documents').update({ signed_pdf_url: signedUrl }).eq('id', doc.id);
+              doc.signed_pdf_url = signedUrl;
+              await sb.from('rebuild_contract_packets')
+                .update({ merged_pdf_url: signedUrl })
+                .eq('signed_document_id', doc.id);
+              await emailCopy(doc, signedUrl, name);
+            }
+          }
+        }
+      } else {
+        // Non-packet docs: legacy jsPDF append path, unchanged.
+        submitBtn.textContent = 'Building PDF…';
+        const pdfBlob = await buildSignedPdf(doc, sigDataUrl);
+        if (pdfBlob) {
+          submitBtn.textContent = 'Uploading…';
+          signedUrl = await savePdf(doc, pdfBlob);
+          if (signedUrl) {
+            await sb.from('rebuild_documents').update({ signed_pdf_url: signedUrl }).eq('id', doc.id);
+            doc.signed_pdf_url = signedUrl;
+            await emailCopy(doc, signedUrl, name);
+          }
         }
       }
       overlay.classList.add('hidden');
@@ -637,6 +685,73 @@ async function emailCopy(doc, signedUrl, signerName) {
       }),
     });
   } catch(e) { console.warn('Email failed:', e); }
+}
+
+// ─── Packet finalization (Phase 3 — worker re-render) ────────────────────────
+// For contract_packet kind, the platform-side createPacket already called the
+// render-contract Cloudflare Worker once (unsigned render) and stashed the
+// exact payload it sent in rebuild_contract_packets.render_payload. Here we
+// pull that payload back, append a `signatures` object, and call the worker
+// again to produce the fully-executed PDF — pixel-identical to the unsigned
+// version except with JG + customer signature images embedded as page content.
+//
+// Why this is the right approach (and not jsPDF append-page like other docs):
+//   1. Diligence — the signed PDF reads as a single coherent contract instead
+//      of "unsigned contract + tacked-on execution page".
+//   2. The worker already handles the contractor (JG) sig from a baked-in PNG,
+//      so we don't need to re-render JG's sig client-side.
+//   3. Worker handles upload itself; sign.html doesn't need to know storage
+//      paths or call savePdf for packets.
+//
+// Returns the signed contract URL on success, throws on failure.
+const PACKET_CONTRACT_GEN_ENDPOINT = 'https://jg-render-contract.josh-70f.workers.dev';
+
+async function finalizePacketWithCustomerSigs(doc, custSigDataUrl) {
+  // 1) Find the packet row + its frozen render payload
+  const { data: pkts, error: pktErr } = await sb.from('rebuild_contract_packets')
+    .select('id, render_payload')
+    .eq('signed_document_id', doc.id)
+    .limit(1);
+  if (pktErr) throw new Error('Packet lookup failed: ' + pktErr.message);
+  if (!pkts || !pkts.length) throw new Error('No packet found for signed_document_id ' + doc.id);
+  const packet = pkts[0];
+  if (!packet.render_payload || typeof packet.render_payload !== 'object') {
+    throw new Error('Packet has no render_payload — cannot regenerate signed contract. ' +
+      'This packet may have been created before render_payload persistence shipped; ' +
+      'fall back to client-side append path.');
+  }
+
+  // 2) Build the signatures block. customer_sig_data_url is required by the
+  //    worker; joint/guarantor are optional and stay absent unless captured.
+  //    signed_at is a human-readable date string for the printed name area,
+  //    NOT the ISO timestamp (which we keep in doc.signed_at for DB rows).
+  const signedAt = new Date(doc.signed_at).toLocaleDateString('en-US', {
+    year: 'numeric', month: 'long', day: 'numeric',
+  });
+  const signatures = {
+    customer_name:         doc.signed_by_name || '',
+    customer_sig_data_url: custSigDataUrl,
+    signed_at:             signedAt,
+  };
+
+  // 3) Splice signatures onto the original payload and POST to the worker.
+  //    Spread order matters: render_payload first, then signatures override
+  //    (in case anything ever ends up overlapping by field name).
+  const finalPayload = { ...packet.render_payload, signatures };
+
+  const res = await fetch(PACKET_CONTRACT_GEN_ENDPOINT, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(finalPayload),
+  });
+  if (!res.ok) {
+    const errTxt = await res.text();
+    throw new Error('Signed contract generation failed (' + res.status + '): ' + errTxt);
+  }
+  const data = await res.json();
+  if (!data.ok) throw new Error('Worker rejected: ' + (data.error || 'unknown'));
+  if (!data.signed) console.warn('[finalize] worker returned signed=false — sig payload may have been ignored');
+  return data.contract_pdf_url;
 }
 
 async function buildSignedPdf(doc, custSigDataUrl) {

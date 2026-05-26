@@ -483,12 +483,19 @@ async function createPacket() {
       const contractPdfUrl = contractData.contract_pdf_url;
       const contractByteSize = contractData.byte_size || 0;
 
-      // 4) Update packet row with generated contract URL
+      // 4) Update packet row with generated contract URL + frozen render payload.
+      //    render_payload is the EXACT JSON sent to the render-contract worker.
+      //    Stored so that sign.html can re-call the worker at signing time with
+      //    `signatures` appended, producing a fully-executed PDF that's
+      //    pixel-identical to the unsigned version except for the embedded
+      //    signature images. Without this, sign-time would have to reconstruct
+      //    the payload from primary data — fragile and drift-prone.
       const { error: contractUpdErr } = await sb.from('rebuild_contract_packets')
-        .update({ contract_pdf_url: contractPdfUrl })
+        .update({ contract_pdf_url: contractPdfUrl, render_payload: renderPayload })
         .eq('id', packetRow.id);
       if (contractUpdErr) throw new Error('Packet contract URL update failed: ' + contractUpdErr.message);
       packetRow.contract_pdf_url = contractPdfUrl;
+      packetRow.render_payload = renderPayload;
 
       // 5) Log generated contract in rebuild_documents (visibility in Documents tab)
       await sb.from('rebuild_documents').insert({
