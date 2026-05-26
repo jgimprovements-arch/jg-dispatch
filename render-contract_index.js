@@ -80,6 +80,28 @@ const FIELD_IDS = [
   'sov_subtotal', 'sov_tax', 'sov_overhead', 'sov_profit', 'sov_exclusions',
 ];
 
+// ─── JG (Contractor) signature ──────────────────────────────────────────
+// Pre-baked PNG data URL of Josh Greil's signature, rendered once from
+// sign.html's jgDrawSignature() (Alex Brush font, baseline-aligned) and
+// captured via canvas.toDataURL('image/png').
+//
+// Pre-baking the contractor sig as a PNG (instead of injecting Alex Brush
+// font + text into the Worker's headless Chrome) gives us pixel-identical
+// output across every contract — no font-rendering variance between
+// environments. For M&A diligence: every signed contract you've ever
+// generated has the same JG signature pixels. Defensible.
+//
+// To regenerate (e.g., new authorized signer): open sign.html in any
+// browser, run in the console:
+//   const c = document.createElement('canvas'); c.width=400; c.height=120;
+//   const ctx = c.getContext('2d'); ctx.fillStyle='#000';
+//   const { jsPDF } = window.jspdf; const tmp = new jsPDF();
+//   jgDrawSignature(tmp, 0, 0, 48);   // jsPDF path — see sign.html
+//   // OR direct canvas: ctx.font = "48px 'Alex Brush'"; ctx.fillText('Josh Greil', 10, 80);
+//   console.log(c.toDataURL('image/png'));
+// Paste the data:image/png;base64,... output below.
+const JG_SIG_DATA_URL = '';  // TODO: paste pre-baked PNG here before deploy
+
 export default {
   async fetch(request, env, ctx) {
     const pre = preflight(request);
@@ -96,7 +118,7 @@ export default {
       return jsonResponse(request, { ok: false, error: 'Invalid JSON body' }, 400);
     }
 
-    const { packet_id, project_id, fields, draws, xact_items } = body || {};
+    const { packet_id, project_id, fields, draws, xact_items, signatures } = body || {};
     if (!packet_id || !project_id) {
       return jsonResponse(request, { ok: false, error: 'packet_id and project_id required' }, 400);
     }
@@ -109,6 +131,35 @@ export default {
     // xact_items is optional — if absent or empty, the SOV phase table is
     // hidden rather than rendered with empty rows.
     const xactItems = Array.isArray(xact_items) ? xact_items : [];
+
+    // signatures is optional. If absent → pre-sign render (unsigned contract,
+    // sent to customer). If present → post-sign render (fully executed
+    // contract, JG + customer sigs embedded as page content).
+    //
+    // Shape: {
+    //   customer_name:        string,    // printed name to stamp under sig
+    //   customer_sig_data_url: string,    // 'data:image/png;base64,...'
+    //   customer_joint_name:  string?,   // optional joint signer printed name
+    //   customer_joint_sig_data_url: string?,  // optional joint sig PNG
+    //   guarantor_name:       string?,   // optional Exhibit G guarantor name
+    //   guarantor_sig_data_url: string?, // optional Exhibit G guarantor sig PNG
+    //   signed_at:            string,    // ISO timestamp, stamped under sig
+    // }
+    //
+    // Roles handled by the DOM walker:
+    //   contractor       → JG_SIG_DATA_URL (always stamped, baked into Worker)
+    //   customer         → signatures.customer_sig_data_url
+    //   customer-joint   → signatures.customer_joint_sig_data_url (skipped if absent)
+    //   customer-guarantor → signatures.guarantor_sig_data_url (skipped if absent)
+    //   leave-blank      → never stamped (cancellation/optional forms)
+    const sigs = (signatures && typeof signatures === 'object') ? signatures : null;
+    if (sigs && !sigs.customer_sig_data_url) {
+      return jsonResponse(request, { ok: false, error: 'signatures.customer_sig_data_url required when signatures provided' }, 400);
+    }
+    if (sigs && !JG_SIG_DATA_URL) {
+      // Fail fast — won't deploy if the contractor sig wasn't baked in.
+      return jsonResponse(request, { ok: false, error: 'JG_SIG_DATA_URL not configured in Worker' }, 500);
+    }
     if (!env.BROWSER) {
       return jsonResponse(request, { ok: false, error: 'BROWSER binding not configured' }, 500);
     }
@@ -126,7 +177,7 @@ export default {
       await page.setContent(CONTRACT_TEMPLATE_HTML, { waitUntil: 'load' });
 
       // Inject fields + draws table + Xact line items in page context.
-      await page.evaluate(({ fields, draws, fieldIds, xactItems }) => {
+      await page.evaluate(({ fields, draws, fieldIds, xactItems, sigs, jgSig }) => {
         // 1) Field text injection.
         for (const id of fieldIds) {
           const el = document.getElementById(id);
@@ -226,7 +277,90 @@ export default {
             }
           }
         }
-      }, { fields, draws, fieldIds: FIELD_IDS, xactItems });
+
+        // 4) Signature stamping (DOM-injected for pixel-identical output
+        //    across renders). When sigs is null this block is a no-op — the
+        //    unsigned pre-send render leaves every sig-field-line blank.
+        //
+        //    Strategy: replace each tagged sig-field's internal markup with
+        //    an <img> of the sig PNG sitting just above the existing
+        //    underline+label. Image is sized to span the underline width
+        //    (~180px target, scales down for narrow fields). Below the image
+        //    we add the printed name + signed date for legal completeness.
+        //
+        //    For 'leave-blank' role: skip entirely (cancellation forms).
+        //    For 'customer-joint'/'customer-guarantor': skip if no data URL.
+        if (sigs) {
+          const stampSig = (el, sigDataUrl, printedName, signedAt) => {
+            // Find the underline div and label inside the tagged sig-field.
+            const line = el.querySelector('.sig-field-line');
+            const label = el.querySelector('.sig-field-label');
+            if (!line || !label) return;
+
+            // Insert <img> above the underline. Inline styles only — avoids
+            // depending on additional CSS in the template.
+            const img = document.createElement('img');
+            img.src = sigDataUrl;
+            img.style.display = 'block';
+            img.style.maxHeight = '36pt';
+            img.style.maxWidth = '100%';
+            img.style.objectFit = 'contain';
+            img.style.objectPosition = 'left bottom';
+            img.style.marginBottom = '-4pt';  // overlap the line slightly so sig sits "on" it
+            line.parentNode.insertBefore(img, line);
+
+            // Replace the label with printed name + date (smaller, on two lines).
+            // This gives diligence reviewers the printed name without needing
+            // to inspect canvas pixels.
+            if (printedName || signedAt) {
+              label.innerHTML = '';
+              if (printedName) {
+                const nameSpan = document.createElement('span');
+                nameSpan.textContent = printedName;
+                nameSpan.style.fontWeight = '600';
+                label.appendChild(nameSpan);
+              }
+              if (signedAt) {
+                if (printedName) label.appendChild(document.createElement('br'));
+                const dateSpan = document.createElement('span');
+                dateSpan.textContent = `Signed ${signedAt}`;
+                dateSpan.style.fontSize = '7pt';
+                dateSpan.style.opacity = '0.7';
+                label.appendChild(dateSpan);
+              }
+            }
+          };
+
+          const anchors = document.querySelectorAll('[data-sig-role]');
+          for (const el of anchors) {
+            const role = el.getAttribute('data-sig-role');
+            switch (role) {
+              case 'contractor':
+                stampSig(el, jgSig, 'Joshua J. Greil', sigs.signed_at);
+                break;
+              case 'customer':
+                stampSig(el, sigs.customer_sig_data_url, sigs.customer_name, sigs.signed_at);
+                break;
+              case 'customer-joint':
+                if (sigs.customer_joint_sig_data_url) {
+                  stampSig(el, sigs.customer_joint_sig_data_url, sigs.customer_joint_name, sigs.signed_at);
+                }
+                break;
+              case 'customer-guarantor':
+                if (sigs.guarantor_sig_data_url) {
+                  stampSig(el, sigs.guarantor_sig_data_url, sigs.guarantor_name, sigs.signed_at);
+                }
+                break;
+              case 'leave-blank':
+                // Intentional no-op. Cancellation/optional forms stay blank.
+                break;
+              default:
+                // Unknown role — log for diligence, do nothing.
+                console.warn('Unknown data-sig-role:', role);
+            }
+          }
+        }
+      }, { fields, draws, fieldIds: FIELD_IDS, xactItems, sigs, jgSig: JG_SIG_DATA_URL });
 
       const pdfBuffer = await page.pdf({
         format: 'Letter',
@@ -234,14 +368,21 @@ export default {
         preferCSSPageSize: true,  // honor template's @page rules
       });
 
-      // Deterministic storage path — re-issues use new packet_id → new path,
-      // never overwrites a sent/locked packet's contract.
-      const storagePath = `projects/${project_id}/contracts/contract-${packet_id}.pdf`;
+      // Deterministic storage path. Pre-sign and post-sign renders go to
+      // distinct paths so we preserve both for diligence:
+      //   contract-{packet_id}.pdf         — unsigned, what we sent
+      //   contract-{packet_id}-signed.pdf  — fully executed (JG + customer)
+      // Re-issues use new packet_id → new path, never overwrites a sent/
+      // locked packet's contract. x-upsert: false in uploadPdfToStorage()
+      // would 409 on collision; the suffix prevents that case entirely.
+      const suffix = sigs ? '-signed' : '';
+      const storagePath = `projects/${project_id}/contracts/contract-${packet_id}${suffix}.pdf`;
       const contract_pdf_url = await uploadPdfToStorage(env, storagePath, pdfBuffer);
 
       return jsonResponse(request, {
         ok: true,
         contract_pdf_url,
+        signed: !!sigs,
         byte_size: pdfBuffer.byteLength,
       });
     } catch (err) {
