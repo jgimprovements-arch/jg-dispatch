@@ -102,9 +102,9 @@ function renderCoSection() {
         <div class="wobx-co-card-head">
           <div style="display:flex;align-items:center;gap:10px;">
             <button class="wobx-co-toggle" data-co-id="${esc(co.id)}" title="Expand/collapse">▾</button>
-            <span class="wobx-co-title">CO #${co.co_number} — ${esc(co.title || 'Change Order')}</span>
+            <span class="wobx-co-title">CO #${co.co_number} — ${esc(co.description || 'Change Order')}</span>
             <span class="wobx-status-pill" style="background:${meta.color}20;color:${meta.color};border:1px solid ${meta.color}40;font-size:11px;padding:2px 8px;border-radius:20px;">${meta.lbl}</span>
-            <span style="color:var(--green);font-weight:700;">+${usdCompact(co.total_delta)}</span>
+            <span style="color:var(--green);font-weight:700;">+${usdCompact(co.amount_delta)}</span>
           </div>
           <div style="display:flex;gap:6px;">
             ${canSendCustomer ? `<button class="btn primary" data-co-act="send-customer" data-co-id="${esc(co.id)}">✉ Send to Customer</button>` : ''}
@@ -237,7 +237,7 @@ async function sendCoToCustomer(co) {
 
   const ok = confirm(
     `Send CO #${co.co_number} to ${p.customer_email} for signature?\n\n` +
-    `Amount: +${usdCompact(co.total_delta)}\n` +
+    `Amount: +${usdCompact(co.amount_delta)}\n` +
     `Items: ${items.length}\n\n` +
     `A new SOV draw will be created for this CO amount.`
   );
@@ -251,7 +251,7 @@ async function sendCoToCustomer(co) {
     const sov = state.sov;
     const draws = state.sovDraws || [];
     const originalTotal = draws.reduce((s, d) => s + (Number(d.base_amount) || 0), 0);
-    const coDelta = Number(co.total_delta) || 0;
+    const coDelta = Number(co.amount_delta) || 0;
     const newTotal = originalTotal + coDelta;
 
     const usd = (n) => Number(n).toLocaleString('en-US', { style: 'currency', currency: 'USD' });
@@ -262,7 +262,7 @@ async function sendCoToCustomer(co) {
 
     // ─── 2. Build worker payload ────────────────────────────────────────
     const coFields = {
-      co_title:                  `Change Order #${co.co_number} — ${co.title || 'Amendment'}`,
+      co_title:                  `Change Order #${co.co_number} — ${co.description || 'Amendment'}`,
       co_project_ref:            p.albi_job_number || state.activeProjectId,
       co_date:                   fmtDate(new Date()),
       co_original_contract_date: contractDate,
@@ -341,7 +341,7 @@ async function sendCoToCustomer(co) {
       const { error: drawErr } = await sb.from('rebuild_sov_draws').insert({
         sov_id: sov.id,
         draw_num: existingDraws + 1,
-        trigger_event: `CO #${co.co_number}: ${co.title || 'Change Order'}`,
+        trigger_event: `CO #${co.co_number}: ${co.description || 'Change Order'}`,
         percent: 0, // CO draws are flat amounts, not percentages
         base_amount: coDelta,
         status: 'pending',
@@ -628,15 +628,18 @@ async function processCoUpload(estimateFile, componentsFile, coNum, title, budge
   const { data: coData, error: coErr } = await sb.from('rebuild_change_orders').insert({
     project_id: state.activeProjectId,
     co_number: coNum,
-    title,
+    description: title,
     status: 'draft',
-    base_upload_id: budget.upload?.id || null,
-    total_delta: totalDelta,
+    amount_delta: totalDelta,
     created_by: state.pmEmail,
   }).select().single();
   if (coErr) throw new Error('Failed to create CO: ' + coErr.message);
 
-  const { error: itemErr } = await sb.from('rebuild_co_line_items').insert(coItems.map(i => ({ ...i, co_id: coData.id })));
+  const { error: itemErr } = await sb.from('rebuild_co_line_items').insert(coItems.map(i => ({
+    ...i,
+    co_id: coData.id,
+    delta_amount: (Number(i.new_amount) || 0) - (Number(i.original_amount) || 0),
+  })));
   if (itemErr) throw new Error('Failed to save CO items: ' + itemErr.message);
 
   statusEl.textContent = 'Done!';
@@ -665,8 +668,8 @@ function openCoPdfPreview(co) {
     </tr>`;
   }).join('');
   win.document.write(`<html><head><title>CO #${co.co_number}</title><style>body{font-family:sans-serif;padding:20px}table{width:100%;border-collapse:collapse}th,td{padding:6px 10px;border-bottom:1px solid #ddd;font-size:13px}th{text-align:left;background:#f5f5f5}</style></head><body>
-    <h2>CO #${co.co_number} — ${co.title || 'Change Order'}</h2>
-    <p>${p.albi_job_number || ''} · Delta: <b>+$${(Number(co.total_delta)||0).toLocaleString()}</b></p>
+    <h2>CO #${co.co_number} — ${co.description || 'Change Order'}</h2>
+    <p>${p.albi_job_number || ''} · Delta: <b>+$${(Number(co.amount_delta)||0).toLocaleString()}</b></p>
     <table><thead><tr><th>Description</th><th style="text-align:right">Original</th><th style="text-align:right">New</th><th style="text-align:right">Delta</th></tr></thead><tbody>${rows}</tbody></table>
   </body></html>`);
   win.document.close();
@@ -674,7 +677,7 @@ function openCoPdfPreview(co) {
 
 // ─── CO Edit Modal ──────────────────────────────────────────────────────────
 function openCoEditModal(co) {
-  const newTitle = prompt('Edit CO title:', co.title || '');
+  const newTitle = prompt('Edit CO title:', co.description || '');
   if (newTitle === null) return;
   sb.from('rebuild_change_orders').update({ title: newTitle.trim() }).eq('id', co.id).then(async () => {
     await loadChangeOrders();
