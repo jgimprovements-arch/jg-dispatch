@@ -179,13 +179,19 @@ if (s.status === 'draft') {
   const confirmBtn = !s.confirmed_for_packet_at
     ? `<button class="btn primary" id="sov_confirm_packet_btn" style="background:#22c55e;border-color:#22c55e;color:#fff;">✓ Confirm SOV for Packet</button>`
     : `<span class="wobx-status-pill" style="background:rgba(34,197,94,0.12);color:#22c55e;border:1px solid #22c55e40;font-size:11px;padding:2px 10px;border-radius:20px;font-weight:600;">✓ CONFIRMED FOR PACKET</span>`;
-  actions = `
-    ${confirmBtn}
+  // Legacy buttons (Send to Customer, Mark Signed, Cancel) are hidden once
+  // the SOV is confirmed for packet — the packet flow handles customer
+  // delivery and electronic signing. Only PDF/Excel export remain.
+  const legacyBtns = s.confirmed_for_packet_at ? '' : `
     <button class="btn ghost" id="sov_send_btn">✉ Send to Customer (legacy)</button>
     <button class="btn ghost" id="sov_mark_signed_btn">✓ Mark Signed Manually</button>
+    <button class="btn ghost" id="sov_cancel_btn" style="color:var(--danger);border-color:var(--danger);">Cancel</button>
+  `;
+  actions = `
+    ${confirmBtn}
+    ${legacyBtns}
     <button class="btn ghost" id="sov_export_pdf_btn">📄 PDF</button>
     <button class="btn ghost" id="sov_export_xlsx_btn">📊 Excel</button>
-    <button class="btn ghost" id="sov_cancel_btn" style="color:var(--danger);border-color:var(--danger);">Cancel</button>
   `;
 } else if (s.status === 'sent') {
   actions = `
