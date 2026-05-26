@@ -449,6 +449,15 @@ function openCoUploadModal() {
       <div style="font-size:13px;color:var(--muted);margin-bottom:16px;">Upload both the new Estimate PDF and Components PDF from Xactimate. New or changed line items become the CO additions.</div>
       <label style="font-size:12px;font-weight:600;color:var(--navy);">CO Title</label>
       <input id="co_title_input" style="width:100%;padding:8px;border:1px solid var(--line);border-radius:6px;font-size:13px;margin:4px 0 12px;box-sizing:border-box;" value="${defaultTitle}">
+      <label style="font-size:12px;font-weight:600;color:var(--navy);">Estimate Type</label>
+      <div style="display:flex;gap:8px;margin:6px 0 14px;">
+        <label style="display:flex;align-items:center;gap:5px;cursor:pointer;font-size:12px;padding:6px 12px;border:2px solid var(--orange);border-radius:6px;background:rgba(232,116,60,.08);color:var(--navy);font-weight:600;">
+          <input type="radio" name="co_est_type" value="standalone" checked style="accent-color:var(--orange);"> Standalone CO estimate
+        </label>
+        <label style="display:flex;align-items:center;gap:5px;cursor:pointer;font-size:12px;padding:6px 12px;border:2px solid var(--line);border-radius:6px;color:var(--muted);">
+          <input type="radio" name="co_est_type" value="full_re_estimate" style="accent-color:var(--orange);"> Updated full estimate (diff against original)
+        </label>
+      </div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px;">
         <div>
           <label style="font-size:12px;font-weight:600;color:var(--navy);">Estimate PDF</label>
@@ -500,7 +509,8 @@ function openCoUploadModal() {
     statusEl.style.color = 'var(--muted)';
     try {
       const title = back.querySelector('#co_title_input').value.trim() || defaultTitle;
-      await processCoUpload(estFile, compFile, coNum, title, budget, statusEl);
+      const estType = back.querySelector('input[name="co_est_type"]:checked')?.value || 'standalone';
+      await processCoUpload(estFile, compFile, coNum, title, budget, statusEl, estType);
       back.remove();
       await loadChangeOrders();
       await loadWoBudget();
@@ -516,7 +526,7 @@ function openCoUploadModal() {
 }
 
 // ─── Process CO Upload (parse + diff) ───────────────────────────────────────
-async function processCoUpload(estimateFile, componentsFile, coNum, title, budget, statusEl) {
+async function processCoUpload(estimateFile, componentsFile, coNum, title, budget, statusEl, estType) {
   statusEl.textContent = 'Parsing estimate + components PDFs...';
   let newItems = [];
   try {
@@ -535,34 +545,83 @@ async function processCoUpload(estimateFile, componentsFile, coNum, title, budge
 
   if (!newItems.length) throw new Error('No line items found. Check the files are Xact PDFs.');
 
-  statusEl.textContent = `Found ${newItems.length} items. Diffing against original...`;
-
-  const origLookup = {};
-  (budget.items || []).forEach(item => {
-    const key = (item.description || '').trim().toLowerCase();
-    origLookup[key] = item;
-  });
-
-  const coItems = [];
+  let coItems = [];
   let totalDelta = 0;
-  newItems.forEach(item => {
-    const key = (item.description || '').trim().toLowerCase();
-    const orig = origLookup[key];
-    const newAmt = Number(item.line_total || item.total || item.amount || 0);
-    if (!orig) {
-      coItems.push({ description: item.description || key, qty: item.qty || null, unit: item.unit || null, original_amount: 0, new_amount: newAmt, trade_category: item.trade_category || item.category || 'general', is_new: true, is_unassigned: true });
-      totalDelta += newAmt;
-    } else {
-      const origAmt = Number(orig.line_total || orig.total || orig.amount || 0);
-      const delta = newAmt - origAmt;
-      if (Math.abs(delta) > 0.01) {
-        coItems.push({ description: item.description || key, qty: item.qty || null, unit: item.unit || null, original_amount: origAmt, new_amount: newAmt, trade_category: item.trade_category || item.category || orig.trade_category || 'general', is_new: false, is_unassigned: true });
-        totalDelta += delta;
-      }
-    }
-  });
 
-  if (!coItems.length) throw new Error('No new or changed items found. The new estimate appears identical to the original.');
+  if (estType === 'standalone') {
+    // ─── Standalone CO estimate: every item IS the CO scope ─────────────
+    statusEl.textContent = `Found ${newItems.length} items. Processing as standalone CO...`;
+    newItems.forEach(item => {
+      const amt = Number(item.line_total || item.total || item.amount || 0);
+      coItems.push({
+        description: item.description || '',
+        qty: item.qty || null,
+        unit: item.unit || null,
+        original_amount: 0,
+        new_amount: amt,
+        trade_category: item.trade_category || item.category || 'general',
+        is_new: true,
+        is_unassigned: true,
+      });
+      totalDelta += amt;
+    });
+  } else {
+    // ─── Full re-estimate: diff against original ────────────────────────
+    statusEl.textContent = `Found ${newItems.length} items. Diffing against original...`;
+
+    // Key by description + room + section to handle duplicate descriptions
+    // in different rooms (e.g., two "Remove & Replace Drywall" entries).
+    const makeKey = (item) => [
+      (item.description || '').trim().toLowerCase(),
+      (item.room || '').trim().toLowerCase(),
+      (item.section || '').trim().toLowerCase(),
+    ].join('||');
+
+    const origLookup = {};
+    (budget.items || []).forEach(item => {
+      const key = makeKey(item);
+      origLookup[key] = item;
+    });
+
+    newItems.forEach(item => {
+      const key = makeKey(item);
+      const orig = origLookup[key];
+      const newAmt = Number(item.line_total || item.total || item.amount || 0);
+      if (!orig) {
+        coItems.push({
+          description: item.description || '',
+          qty: item.qty || null,
+          unit: item.unit || null,
+          original_amount: 0,
+          new_amount: newAmt,
+          trade_category: item.trade_category || item.category || 'general',
+          is_new: true,
+          is_unassigned: true,
+        });
+        totalDelta += newAmt;
+      } else {
+        const origAmt = Number(orig.line_total || orig.total || orig.amount || 0);
+        const delta = newAmt - origAmt;
+        if (Math.abs(delta) > 0.01) {
+          coItems.push({
+            description: item.description || '',
+            qty: item.qty || null,
+            unit: item.unit || null,
+            original_amount: origAmt,
+            new_amount: newAmt,
+            trade_category: item.trade_category || item.category || orig.trade_category || 'general',
+            is_new: false,
+            is_unassigned: true,
+          });
+          totalDelta += delta;
+        }
+      }
+    });
+  }
+
+  if (!coItems.length) throw new Error(estType === 'standalone'
+    ? 'No line items found in the estimate.'
+    : 'No new or changed items found. The new estimate appears identical to the original.');
 
   statusEl.textContent = `${coItems.length} CO items (+${usdCompact(totalDelta)}). Saving...`;
 
