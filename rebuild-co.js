@@ -643,7 +643,6 @@ async function processCoUpload(estimateFile, componentsFile, coNum, title, budge
     unit: i.unit || null,
     original_amount: Number(i.original_amount) || 0,
     new_amount: Number(i.new_amount) || 0,
-    delta_amount: (Number(i.new_amount) || 0) - (Number(i.original_amount) || 0),
     trade_category: i.trade_category || 'general',
     is_new: !!i.is_new,
     is_unassigned: true,
