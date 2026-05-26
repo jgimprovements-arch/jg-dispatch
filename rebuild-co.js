@@ -653,38 +653,6 @@ async function processCoUpload(estimateFile, componentsFile, coNum, title, budge
         });
       }
     });
-
-    // Items REMOVED from the original (in original but not in new estimate)
-    const newLookup = {};
-    newItems.forEach(item => {
-      const key = (item.description || '').trim().toLowerCase();
-      if (!newLookup[key]) newLookup[key] = 0;
-      newLookup[key]++;
-    });
-    (budget.items || []).forEach(item => {
-      const key = (item.description || '').trim().toLowerCase();
-      const newCount = newLookup[key] || 0;
-      const origCount = (origLookup[key] || []).length;
-      // If original has more instances than the new estimate, those are removed
-      if (newCount < origCount) {
-        const origAmt = Number(item.line_total || item.total || item.amount || 0);
-        // Only add once per excess (track with a counter)
-        if (!newLookup['__removed_' + key]) newLookup['__removed_' + key] = 0;
-        newLookup['__removed_' + key]++;
-        if (newLookup['__removed_' + key] <= (origCount - newCount)) {
-          coItems.push({
-            description: item.description || '',
-            qty: item.qty || null,
-            unit: item.unit || null,
-            original_amount: origAmt,
-            new_amount: 0,
-            trade_category: item.trade_category || item.category || 'general',
-            is_new: false,
-            is_unassigned: false,
-          });
-        }
-      }
-    });
   }
 
   if (!coItems.length && Math.abs(totalDelta) < 0.01) throw new Error(estType === 'standalone'
