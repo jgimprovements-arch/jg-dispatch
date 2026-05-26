@@ -636,9 +636,17 @@ async function processCoUpload(estimateFile, componentsFile, coNum, title, budge
   if (coErr) throw new Error('Failed to create CO: ' + coErr.message);
 
   const { error: itemErr } = await sb.from('rebuild_co_line_items').insert(coItems.map(i => ({
-    ...i,
     co_id: coData.id,
+    description: i.description || '',
+    category: i.trade_category || 'general',
+    qty: i.qty || null,
+    unit: i.unit || null,
+    original_amount: Number(i.original_amount) || 0,
+    new_amount: Number(i.new_amount) || 0,
     delta_amount: (Number(i.new_amount) || 0) - (Number(i.original_amount) || 0),
+    trade_category: i.trade_category || 'general',
+    is_new: !!i.is_new,
+    is_unassigned: true,
   })));
   if (itemErr) throw new Error('Failed to save CO items: ' + itemErr.message);
 
