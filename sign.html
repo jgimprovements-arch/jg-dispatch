@@ -452,10 +452,10 @@ function wireModal(doc) {
       let sourceForBuildSigned = null;
       if (doc.kind === 'contract_packet') {
         try {
-          submitBtn.textContent = 'Rendering signed contract…';
-          sourceForBuildSigned = await fetchSignedContractFromWorker(doc, sigDataUrl);
+          submitBtn.textContent = 'Rendering signed packet…';
+          sourceForBuildSigned = await fetchSignedMergedPacketFromWorkers(doc, sigDataUrl);
         } catch (workerErr) {
-          console.error('[sign] worker render failed, will append exec page to unsigned source:', workerErr);
+          console.error('[sign] worker render+merge failed, will append exec page to unsigned source:', workerErr);
           sourceForBuildSigned = null; // signal to use doc.file_url default
         }
       }
@@ -659,21 +659,23 @@ async function emailCopy(doc, signedUrl, signerName) {
 }
 
 // ─── Packet finalization (Phase 3 — worker re-render with sigs embedded) ─────
-// For contract_packet kind: re-call the render-contract Cloudflare Worker
-// with the original render_payload + a new `signatures` block. Worker stamps
-// JG + customer sigs onto the [data-sig-role] anchors in the template and
-// returns a URL to the signed PDF (sigs visible on actual contract pages).
-//
-// We then feed THAT signed PDF into buildSignedPdf (instead of the unsigned
+// For contract_packet kind: re-call BOTH Cloudflare Workers in sequence:
+//   1. render-contract — re-renders the contract template with JG + customer
+//      sigs stamped onto [data-sig-role] anchors. Returns signed contract PDF.
+//   2. packet-merge — merges the signed contract with the original Xactimate
+//      PDF into one document. Returns the fully merged signed packet PDF.
+// We then feed that merged PDF into buildSignedPdf (instead of the unsigned
 // original) so the execution/attestation page still gets appended for ESIGN
-// audit completeness. Result: sigs on contract pages AND attestation page
-// with IP, date, etc — best of both worlds, matches what diligence expects.
+// audit completeness. Result: contract with sigs + Xact appended + execution
+// page on top — matches the pre-Phase-3 packet structure plus sigs on lines.
 //
-// Returns the signed contract URL on success, throws on failure (caller
-// catches and falls back to the legacy in-place append path).
+// Returns the merged signed packet URL on success, throws on failure (caller
+// catches and falls back to the legacy in-place append on unsigned source).
 const PACKET_CONTRACT_GEN_ENDPOINT = 'https://jg-render-contract.josh-70f.workers.dev';
+const PACKET_MERGE_ENDPOINT        = 'https://jg-packet-merge.josh-70f.workers.dev';
 
-async function fetchSignedContractFromWorker(doc, custSigDataUrl) {
+async function fetchSignedMergedPacketFromWorkers(doc, custSigDataUrl) {
+  // 1) Look up packet row for the frozen render_payload + packet_id
   const { data: pkts, error: pktErr } = await sb.from('rebuild_contract_packets')
     .select('id, render_payload')
     .eq('signed_document_id', doc.id)
@@ -685,10 +687,24 @@ async function fetchSignedContractFromWorker(doc, custSigDataUrl) {
     throw new Error('Packet has no render_payload (created before persistence shipped) — falling back');
   }
 
+  // 2) Look up the Xactimate doc for this project (same query packet-merge
+  //    used at create time — by category ilike 'xact' or 'estimate'). If
+  //    no Xact found, we still proceed with contract-only signed PDF, but
+  //    log a warning since this is unusual for a contract packet.
+  const { data: xactRows } = await sb.from('rebuild_documents')
+    .select('file_url, filename')
+    .eq('project_id', doc.project_id)
+    .or('category.ilike.%xact%,category.ilike.%estimate%')
+    .order('uploaded_at', { ascending: false })
+    .limit(1);
+  const xactPdfUrl = (xactRows && xactRows[0]) ? xactRows[0].file_url : null;
+  if (!xactPdfUrl) console.warn('[sign] no Xactimate found for project — signed packet will be contract-only');
+
+  // 3) Re-render the signed contract via render-contract worker
   const signedAt = new Date(doc.signed_at).toLocaleDateString('en-US', {
     year: 'numeric', month: 'long', day: 'numeric',
   });
-  const finalPayload = {
+  const renderPayload = {
     ...packet.render_payload,
     signatures: {
       customer_name:         doc.signed_by_name || '',
@@ -697,18 +713,48 @@ async function fetchSignedContractFromWorker(doc, custSigDataUrl) {
     },
   };
 
-  const res = await fetch(PACKET_CONTRACT_GEN_ENDPOINT, {
+  const renderRes = await fetch(PACKET_CONTRACT_GEN_ENDPOINT, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(finalPayload),
+    body: JSON.stringify(renderPayload),
   });
-  if (!res.ok) {
-    const errTxt = await res.text();
-    throw new Error('Worker render failed (' + res.status + '): ' + errTxt);
+  if (!renderRes.ok) {
+    const errTxt = await renderRes.text();
+    throw new Error('Render worker failed (' + renderRes.status + '): ' + errTxt);
   }
-  const data = await res.json();
-  if (!data.ok) throw new Error('Worker rejected: ' + (data.error || 'unknown'));
-  return data.contract_pdf_url;
+  const renderData = await renderRes.json();
+  if (!renderData.ok) throw new Error('Render worker rejected: ' + (renderData.error || 'unknown'));
+  const signedContractUrl = renderData.contract_pdf_url;
+
+  // 4) If we have an Xactimate, merge it with the signed contract via
+  //    packet-merge worker. If not, return the contract-only URL.
+  if (!xactPdfUrl) return signedContractUrl;
+
+  const p = doc.project || {};
+  const mergeRes = await fetch(PACKET_MERGE_ENDPOINT, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      packet_id:        packet.id,
+      project_id:       doc.project_id,
+      xact_pdf_url:     xactPdfUrl,
+      contract_pdf_url: signedContractUrl,
+      albi_job_number:  p.albi_job_number || '',
+    }),
+  });
+  if (!mergeRes.ok) {
+    const errTxt = await mergeRes.text();
+    // If merge fails after render succeeded, fall back to contract-only —
+    // signatures are still preserved on the contract, just without Xact.
+    console.error('[sign] packet-merge failed after render succeeded, using contract-only:', errTxt);
+    return signedContractUrl;
+  }
+  const mergeData = await mergeRes.json();
+  if (!mergeData.ok) {
+    console.error('[sign] packet-merge rejected after render succeeded, using contract-only:', mergeData.error);
+    return signedContractUrl;
+  }
+  return mergeData.merged_pdf_url;
 }
 
 async function buildSignedPdf(doc, custSigDataUrl, sourcePdfUrl) {
