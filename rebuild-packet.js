@@ -156,6 +156,17 @@ function renderPacketSection() {
     if (statusKey === 'declined' || statusKey === 'expired') {
       return `<button class="btn primary" id="packet_reissue_btn" style="font-size:12px;padding:5px 14px;">↩ Re-issue Packet</button>`;
     }
+    if (statusKey === 'customer_signed') {
+      // Admin-only — undoing a customer signature is a high-trust action.
+      // Reverses the entire signing event: packet → voided with reason,
+      // project re-locks, SOV rolls back to draft, draws unlocked. The
+      // signed PDF stays in storage for audit. PM then creates a fresh
+      // packet from scratch.
+      if (typeof getUserRole === 'function' && getUserRole() === 'admin') {
+        return `<button class="btn ghost" id="packet_undo_sign_btn" style="font-size:12px;padding:5px 14px;color:var(--danger);border-color:var(--danger);">↺ Undo Sign (admin)</button>`;
+      }
+      return '';
+    }
     return '';
   }
 
@@ -794,6 +805,67 @@ async function reissuePacket() {
   }
 }
 
+// ─── ACTION: Undo Sign (admin-only reversal of customer_signed) ─────────────
+// Calls the undo_packet_sign RPC which: marks packet voided with audit reason,
+// re-locks the project, rolls SOV back to draft, unlocks draws. Signed PDF
+// stays in storage for audit. After this runs, the PM can edit the SOV and
+// create a fresh packet from scratch.
+async function undoPacketSign() {
+  const pkt = state.packet;
+  if (!pkt) return;
+  if (pkt.status !== 'customer_signed') {
+    toast(`Cannot undo sign from status "${pkt.status}"`); return;
+  }
+  if (typeof getUserRole !== 'function' || getUserRole() !== 'admin') {
+    toast('Admin only'); return;
+  }
+  const callerEmail = (state.pmEmail || '').toLowerCase();
+  if (!callerEmail) { toast('Not logged in — refresh and try again'); return; }
+
+  // Two-step confirm — first asks for a reason, second confirms the action.
+  // The reason becomes part of the void audit trail (void_reason column on
+  // rebuild_contract_packets), so diligence reviewers can see WHY a signed
+  // contract was reversed.
+  const reason = prompt(
+    'UNDO SIGNATURE — admin action\n\n' +
+    'This will reverse the customer signature on this contract:\n' +
+    '  • Packet → voided (signed PDF preserved in storage for audit)\n' +
+    '  • Project → re-locked (tabs hide again)\n' +
+    '  • SOV → draft (draws editable)\n\n' +
+    'Enter a reason for the reversal (becomes part of the audit trail):'
+  );
+  if (!reason || !reason.trim()) {
+    if (reason !== null) toast('A reason is required to undo a signature');
+    return;
+  }
+
+  const ok = confirm(
+    `Reverse signature on this contract?\n\n` +
+    `Reason: ${reason.trim()}\n\n` +
+    `This action is logged and cannot be hidden from the audit trail. ` +
+    `Proceed?`
+  );
+  if (!ok) return;
+
+  toast('Reversing signature…');
+  try {
+    const { error } = await sb.rpc('undo_packet_sign', {
+      p_packet_id:    pkt.id,
+      p_caller_email: callerEmail,
+      p_reason:       reason.trim(),
+    });
+    if (error) throw new Error(error.message);
+    toast('✓ Signature reversed — SOV and project unlocked');
+    await loadPacket();
+    await loadSov();
+    if (typeof loadProject === 'function') await loadProject();
+    renderDetail();
+  } catch (err) {
+    console.error('[packet] undo sign failed:', err);
+    toast('Undo sign failed: ' + err.message);
+  }
+}
+
 // ─── Wire packet button events ──────────────────────────────────────────────
 function wirePacketActions() {
   const createBtn = document.getElementById('packet_create_btn');
@@ -816,6 +888,9 @@ function wirePacketActions() {
 
   const reissueBtn = document.getElementById('packet_reissue_btn');
   if (reissueBtn) reissueBtn.addEventListener('click', reissuePacket);
+
+  const undoSignBtn = document.getElementById('packet_undo_sign_btn');
+  if (undoSignBtn) undoSignBtn.addEventListener('click', undoPacketSign);
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -926,6 +1001,7 @@ window.copyPacketLink = copyPacketLink;
 window.voidPacket = voidPacket;
 window.discardDraftPacket = discardDraftPacket;
 window.reissuePacket = reissuePacket;
+window.undoPacketSign = undoPacketSign;
 window.renderPacketXactUpload = renderPacketXactUpload;
 window.PACKET_STATUS_META = PACKET_STATUS_META;
 window.PACKET_DECLINE_REASON_LABELS = PACKET_DECLINE_REASON_LABELS;
