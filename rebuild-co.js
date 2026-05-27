@@ -729,6 +729,75 @@ function openCoEditModal(co) {
   });
 }
 
+// ─── CO → WO Integration helpers ────────────────────────────────────────────
+// Returns CO line items grouped by trade_category, filtered to COs that have
+// been customer-signed or later. Only items with is_unassigned=false are
+// included (unsigned CO items stay locked until sign.html cascades the flip).
+//
+// Shape: { tradeKey: [ { ...item, co_number, co_id, co_status, co_description }, ... ] }
+//
+// IMPORTANT: trade_category on a CO line item uses the RAW category (e.g.
+// "drywall"), not the merged group key. Callers that need to match against
+// the trade rollup must pass each item's trade_category through mergedGroupFor().
+function getActiveCoItemsByTrade() {
+  const out = {};
+  const cos = state.changeOrders || [];
+  const ACTIVE_STATUSES = new Set(['customer_signed', 'sent_to_sub', 'sub_signed', 'complete']);
+
+  cos.forEach(co => {
+    if (!ACTIVE_STATUSES.has(co.status)) return;
+    const items = state.coLineItems[co.id] || [];
+    items.forEach(item => {
+      // Once is_unassigned flips false, the item is "active" in the WO Builder.
+      // Items where is_unassigned=true mean the CO is signed but the cascade
+      // hasn't run yet — defensive skip.
+      if (item.is_unassigned) return;
+      const trade = item.trade_category || 'general';
+      if (!out[trade]) out[trade] = [];
+      out[trade].push({
+        ...item,
+        co_number: co.co_number,
+        co_id: co.id,
+        co_status: co.status,
+        co_description: co.description || co.title || '',
+      });
+    });
+  });
+
+  return out;
+}
+
+// Returns the dollar delta for a given merged trade key from all active COs.
+// Uses delta_amount (the generated column on rebuild_co_line_items).
+function getCoDeltaForMergedTrade(mergedTradeKey) {
+  const byTrade = getActiveCoItemsByTrade();
+  let total = 0;
+  for (const [rawCat, items] of Object.entries(byTrade)) {
+    const mergedKey = (typeof mergedGroupFor === 'function')
+      ? mergedGroupFor(rawCat || 'general')
+      : rawCat;
+    if (mergedKey !== mergedTradeKey) continue;
+    items.forEach(i => { total += Number(i.delta_amount) || 0; });
+  }
+  return total;
+}
+
+// Returns all active CO items for a given merged trade key (for the WO Detail modal).
+function getCoItemsForMergedTrade(mergedTradeKey) {
+  const byTrade = getActiveCoItemsByTrade();
+  const out = [];
+  for (const [rawCat, items] of Object.entries(byTrade)) {
+    const mergedKey = (typeof mergedGroupFor === 'function')
+      ? mergedGroupFor(rawCat || 'general')
+      : rawCat;
+    if (mergedKey !== mergedTradeKey) continue;
+    out.push(...items);
+  }
+  // Sort by CO# then by description
+  out.sort((a, b) => (a.co_number - b.co_number) || (a.description || '').localeCompare(b.description || ''));
+  return out;
+}
+
 // ─── Window exports ─────────────────────────────────────────────────────────
 window.loadChangeOrders = loadChangeOrders;
 window.renderCoSection = renderCoSection;
@@ -738,3 +807,6 @@ window.processCoUpload = processCoUpload;
 window.openCoPdfPreview = openCoPdfPreview;
 window.openCoEditModal = openCoEditModal;
 window.sendCoToCustomer = sendCoToCustomer;
+window.getActiveCoItemsByTrade = getActiveCoItemsByTrade;
+window.getCoDeltaForMergedTrade = getCoDeltaForMergedTrade;
+window.getCoItemsForMergedTrade = getCoItemsForMergedTrade;

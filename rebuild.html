@@ -13,6 +13,124 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="rebuild.css?v=2026.05.20-r1">
+<style>
+  /* ─── CO → WO Integration badges (added 2026-05-27) ─── */
+  .wobx-co-row-badge {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 1px 7px;
+    font-size: 10px;
+    font-weight: 800;
+    line-height: 1.4;
+    border-radius: 10px;
+    background: #FFF4E5;
+    color: #C2410C;
+    border: 1px solid #FED7AA;
+    letter-spacing: .3px;
+    vertical-align: middle;
+  }
+  .wobx-co-only-pill {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 1px 7px;
+    font-size: 10px;
+    font-weight: 800;
+    line-height: 1.4;
+    border-radius: 10px;
+    background: #E85D04;
+    color: #fff;
+    letter-spacing: .3px;
+    vertical-align: middle;
+  }
+  .wobx-trade-row.wobx-has-co > td:first-child {
+    border-left: 3px solid #E85D04;
+  }
+  .wobx-trade-row.wobx-co-only > td:first-child {
+    border-left: 3px dashed #E85D04;
+  }
+  /* CO Scope section inside WO Detail modal */
+  .wobx-co-scope-section {
+    margin-top: 16px;
+    padding: 12px 14px;
+    border-radius: 10px;
+    background: #FFF8F0;
+    border: 1px solid #FED7AA;
+  }
+  .wobx-co-scope-title {
+    font-size: 11px;
+    font-weight: 800;
+    color: #C2410C;
+    text-transform: uppercase;
+    letter-spacing: .5px;
+    margin: 0 0 10px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    justify-content: space-between;
+  }
+  .wobx-co-scope-title .wobx-co-scope-total {
+    color: #16A34A;
+    font-size: 13px;
+    text-transform: none;
+    letter-spacing: 0;
+  }
+  .wobx-co-scope-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+  }
+  .wobx-co-scope-table th {
+    text-align: left;
+    color: #92400E;
+    font-weight: 700;
+    padding: 4px 8px;
+    border-bottom: 1px solid #FED7AA;
+  }
+  .wobx-co-scope-table td {
+    padding: 6px 8px;
+    border-bottom: 1px solid #FFEDD5;
+  }
+  .wobx-co-scope-table tr:last-child td { border-bottom: none; }
+  .wobx-co-scope-table .co-item-new {
+    background: #FED7AA;
+    color: #7C2D12;
+    font-size: 9px;
+    font-weight: 800;
+    padding: 1px 5px;
+    border-radius: 8px;
+    margin-left: 4px;
+    vertical-align: middle;
+  }
+  .wobx-co-scope-table .co-num-badge {
+    background: #FFEDD5;
+    color: #C2410C;
+    font-size: 10px;
+    font-weight: 800;
+    padding: 1px 6px;
+    border-radius: 8px;
+    margin-right: 6px;
+  }
+  .wobx-co-amend-banner {
+    margin: 10px 0;
+    padding: 10px 12px;
+    border-radius: 8px;
+    background: #FFF4E5;
+    border-left: 4px solid #E85D04;
+    font-size: 13px;
+    color: #7C2D12;
+  }
+  .wobx-co-amend-banner b { color: #C2410C; }
+  .wobx-co-scope-group {
+    margin-bottom: 10px;
+  }
+  .wobx-co-scope-group:last-child { margin-bottom: 0; }
+  .wobx-co-scope-group-head {
+    font-size: 11px;
+    font-weight: 800;
+    color: #C2410C;
+    margin-bottom: 4px;
+  }
+</style>
 </head>
 <body>
 
@@ -5365,6 +5483,7 @@ function renderWoDetailModal(tradeKey, tradeLabel, budget) {
               .map(t => t.category);
             return renderDetailSection('Estimate Line Items (Revenue)', 'item', items, isUnassigned, 'revenue', wo?.phase_id || null, existingTradeKeys);
           })()}
+          ${renderCoScopeForTrade(tradeKey, wo)}
           ${wo?.materials_supplier === 'jg' ? `
             <div class="wobx-jg-supplies-note">
               📦 Materials moved to <b>JG Purchased Materials</b> bucket. Click that row in the main table to view the materials list.
@@ -5381,6 +5500,15 @@ function renderWoDetailModal(tradeKey, tradeLabel, budget) {
             <button class="wobx-modal-convert" id="wobx_modal_convert">Convert to Work Order →</button>
           ` : ''}
           ${wo?.is_locked ? `
+            ${(() => {
+              // Show "Amend with CO" button if there are unprocessed CO items for this trade
+              const unprocessedCo = (typeof getCoItemsForMergedTrade === 'function')
+                ? getCoItemsForMergedTrade(tradeKey).filter(i => !i.converted_to_wo_id)
+                : [];
+              if (!unprocessedCo.length) return '';
+              const delta = unprocessedCo.reduce((s, i) => s + (Number(i.delta_amount) || 0), 0);
+              return `<button class="wobx-modal-convert" id="wobx_modal_amend_co" style="background:#E85D04;" title="Amend the existing WO with ${unprocessedCo.length} CO line item${unprocessedCo.length===1?'':'s'}">⊕ Amend WO with CO Scope (+${usdCompact(delta)})</button>`;
+            })()}
             <button class="wobx-modal-unlock" id="wobx_modal_unlock">🔓 Unlock & Edit</button>
             <button class="wobx-modal-delete-wo" id="wobx_modal_delete_wo">🗑 Delete WO</button>
           ` : ''}
@@ -5656,6 +5784,49 @@ function wireWoDetailModal(tradeKey) {
     if (!woId) return;
     closeWoDetailModal();
     openWoEditModal(woId);
+  });
+
+  // ─── Amend WO with CO Scope (version bump + append CO items) ───
+  $('#wobx_modal_amend_co')?.addEventListener('click', async () => {
+    const btn = $('#wobx_modal_amend_co');
+    const tradeLabel = MERGED_TRADE_GROUPS[tradeKey]?.label || tradeKey;
+    const unprocessed = (typeof getCoItemsForMergedTrade === 'function')
+      ? getCoItemsForMergedTrade(tradeKey).filter(i => !i.converted_to_wo_id)
+      : [];
+    if (!unprocessed.length) { toast('No unprocessed CO items', true); return; }
+    const delta = unprocessed.reduce((s, i) => s + (Number(i.delta_amount) || 0), 0);
+    const coNums = [...new Set(unprocessed.map(i => i.co_number))].sort((a, b) => a - b).map(n => '#' + n).join(', ');
+
+    if (!confirm(
+      `Amend "${tradeLabel}" Work Order with CO scope?\n\n` +
+      `• Current WO will be marked SUPERSEDED\n` +
+      `• New draft version will be created with ${unprocessed.length} CO line item${unprocessed.length===1?'':'s'} appended (CO ${coNums})\n` +
+      `• Total amount will increase by ${usdCompact(delta)}\n` +
+      `• You'll then need to review and re-send the WO PDF to the sub\n\n` +
+      `Proceed?`
+    )) return;
+
+    btn.disabled = true;
+    btn.textContent = 'Amending…';
+    const result = await amendWoWithCo(tradeKey);
+    if (!result.ok) {
+      toast('Amend failed: ' + result.error, true);
+      btn.disabled = false;
+      btn.textContent = '⊕ Amend WO with CO Scope';
+      return;
+    }
+    toast(`✓ "${result.tradeLabel}" amended → v${result.newVersion} (+${usdCompact(result.coDelta)}). Review and re-send.`);
+    await loadWoBudget();
+    await loadWorkOrders();
+    await loadChangeOrders(); // refresh CO state (converted_to_wo_id changes)
+    await refreshBudgetSummary();
+    closeWoDetailModal();
+    // Open the new WO version for review
+    if (result.woId && typeof openWoEditModal === 'function') {
+      openWoEditModal(result.woId);
+    } else {
+      renderTabContent();
+    }
   });
 
   // Unlock & Edit (keeps the WO, just clears the lock)
@@ -6151,7 +6322,7 @@ async function createNewPhasePrompt() {
 }
 
 // Build scope text for a converted WO from the trade's items + materials + labor
-function buildConvertedWoScope(tradeKey, tradeLabel, items, materials, labor, equipment, wo) {
+function buildConvertedWoScope(tradeKey, tradeLabel, items, materials, labor, equipment, wo, coItems) {
   const jgSupplies = wo?.materials_supplier === 'jg';
   const lines = [];
   lines.push(`Trade: ${tradeLabel}`);
@@ -6189,6 +6360,31 @@ function buildConvertedWoScope(tradeKey, tradeLabel, items, materials, labor, eq
     lines.push('EQUIPMENT:');
     equipment.forEach(e => {
       lines.push(`  • ${e.code || ''} — ${e.description || ''} (${e.quantity || ''} ${e.unit || ''})`);
+    });
+    lines.push('');
+  }
+  // ─── CO Scope (when present) — appended after estimate scope ───
+  // coItems is passed in by convertTradeToWo when there are signed CO items
+  // for this trade. We group by CO# and render each as its own block so the
+  // sub can clearly see what was added/changed by which Change Order.
+  if (Array.isArray(coItems) && coItems.length) {
+    const byCo = {};
+    coItems.forEach(i => {
+      if (!byCo[i.co_number]) byCo[i.co_number] = { co_number: i.co_number, co_description: i.co_description, items: [] };
+      byCo[i.co_number].items.push(i);
+    });
+    Object.values(byCo).sort((a, b) => a.co_number - b.co_number).forEach(g => {
+      lines.push(`═══════════════════════════════════════════════`);
+      lines.push(`CHANGE ORDER #${g.co_number}${g.co_description ? ' — ' + g.co_description : ''}`);
+      lines.push(`═══════════════════════════════════════════════`);
+      g.items.forEach(i => {
+        const qty = i.qty != null ? `${i.qty} ${i.unit || ''}` : '';
+        const newTag = i.is_new ? ' [NEW]' : ' [REVISED]';
+        const delta = Number(i.delta_amount) || 0;
+        const deltaTxt = (delta >= 0 ? '+$' : '−$') + Math.abs(delta).toLocaleString(undefined, { minimumFractionDigits: 2 });
+        lines.push(`  • ${i.description || ''}${newTag} — ${qty} (${deltaTxt})`);
+      });
+      lines.push('');
     });
   }
   return lines.join('\n').trim();
@@ -6376,7 +6572,13 @@ async function convertTradeToWo(tradeKey) {
   const equipment = (budget.equipment || []).filter(x => !x.is_unassigned && inGroup(x.trade_category));
 
   if (!items.length && !materials.length && !labor.length && !equipment.length) {
-    return { ok: false, error: 'No items to convert' };
+    // Allow conversion if there are CO items only (CO-only trade case)
+    const coItemsCheck = (typeof getCoItemsForMergedTrade === 'function')
+      ? getCoItemsForMergedTrade(tradeKey).filter(i => !i.converted_to_wo_id)
+      : [];
+    if (!coItemsCheck.length) {
+      return { ok: false, error: 'No items to convert' };
+    }
   }
 
   // Find this trade's wo_builder_work_orders row (assignee info lives there)
@@ -6391,15 +6593,29 @@ async function convertTradeToWo(tradeKey) {
     return { ok: false, error: 'No assignee set — open the trade detail and pick a sub or carpenter first' };
   }
 
-  // Compute totals using budget overrides where set, auto-target where not
-  const revenue = sumField(items, 'line_total');
+  // ─── Pull active CO items for this trade (from customer-signed COs) ───
+  // These get folded into the initial WO so the sub sees CO scope alongside
+  // estimate scope from day one. Items are tagged converted_to_wo_id below
+  // so amendWoWithCo() doesn't try to re-add them.
+  const coItems = (typeof getCoItemsForMergedTrade === 'function')
+    ? getCoItemsForMergedTrade(tradeKey).filter(i => !i.converted_to_wo_id)
+    : [];
+  const coDelta = coItems.reduce((s, i) => s + (Number(i.delta_amount) || 0), 0);
+
+  // Compute totals using budget overrides where set, auto-target where not.
+  // CO revenue (coDelta) is added to the WO total at the same margin assumption
+  // as the original — PM can override after the fact via Unlock & Edit.
+  const revenue = sumField(items, 'line_total') + coDelta;
   // WO total = trade_budget (what we pay the assignee). Materials budget (when JG supplies) goes to a vendor, not this WO.
-  const totalCost = (wbWo.trade_budget != null)
+  // When there are CO items, we add coDelta directly to the budget (1:1 pass-through) so the sub gets paid for the CO scope.
+  // PM can adjust via Unlock & Edit before sending.
+  const baseTotalCost = (wbWo.trade_budget != null)
     ? Number(wbWo.trade_budget)
-    : Number((revenue * 0.5).toFixed(2));
+    : Number((sumField(items, 'line_total') * 0.5).toFixed(2));
+  const totalCost = baseTotalCost + coDelta;
 
   const tradeLabel = MERGED_TRADE_GROUPS[tradeKey]?.label || tradeKey;
-  const scopeText = buildConvertedWoScope(tradeKey, tradeLabel, items, materials, labor, equipment, wbWo);
+  const scopeText = buildConvertedWoScope(tradeKey, tradeLabel, items, materials, labor, equipment, wbWo, coItems);
 
   // Get assignee details for contact info on the WO
   let assigneeName = '';
@@ -6465,11 +6681,30 @@ async function convertTradeToWo(tradeKey) {
       work_order_id: woRow.id,
       action: 'created',
       actor: state.pmEmail,
-      details: `Auto-generated from WO Builder · trade=${tradeLabel} · ${items.length} items · assignee=${assigneeName}`,
+      details: `Auto-generated from WO Builder · trade=${tradeLabel} · ${items.length} items${coItems.length ? ` + ${coItems.length} CO items (+${coDelta.toFixed(2)})` : ''} · assignee=${assigneeName}`,
     });
   } catch (e) { console.warn('WO history log skipped:', e?.message); }
 
-  return { ok: true, woId: woRow.id, tradeLabel, totalCost: round2(totalCost) };
+  // ─── CO Integration: link CO items to this WO + stamp source_co_id on the WO ───
+  if (coItems.length) {
+    try {
+      const itemIds = coItems.map(i => i.id);
+      await sb.from('rebuild_co_line_items')
+        .update({ converted_to_wo_id: woRow.id })
+        .in('id', itemIds);
+
+      // Stamp source_co_id with the most recent CO# affecting this trade
+      // (single-FK by design; full list captured in WO history above)
+      const latestCoId = coItems.sort((a, b) => b.co_number - a.co_number)[0].co_id;
+      await sb.from('rebuild_work_orders')
+        .update({ source_co_id: latestCoId })
+        .eq('id', woRow.id);
+    } catch (e) {
+      console.warn('CO item link skipped:', e?.message);
+    }
+  }
+
+  return { ok: true, woId: woRow.id, tradeLabel, totalCost: round2(totalCost), coCount: coItems.length, coDelta };
 }
 
 // Convert All — loops through every trade with an assignee, returns counts
@@ -6657,7 +6892,7 @@ function renderWoBuilderSection(budget) {
         ${(() => {
           const signedCos = (state.changeOrders || []).filter(c => ['customer_signed','sent_to_sub','sub_signed','complete'].includes(c.status));
           if (!signedCos.length) return '';
-          const coDelta = signedCos.reduce((s, c) => s + Number(c.total_delta || 0), 0);
+          const coDelta = signedCos.reduce((s, c) => s + Number(c.amount_delta || 0), 0);
           return `
             <div class="wobx-kpi" style="border-left:2px solid var(--orange);padding-left:10px;">
               <div class="wobx-kpi-label">CO Delta</div>
@@ -6705,13 +6940,13 @@ function renderWoBuilderSection(budget) {
               const isLocked = !!wbWo?.is_locked;
               const isSynthetic = !!t.isSynthetic;
               return `
-                <tr class="wobx-trade-row ${isLocked ? 'wobx-locked' : ''} ${isSynthetic ? 'wobx-synthetic-row' : ''}" ${(isLocked || isSynthetic) ? '' : 'draggable="true"'} data-trade="${esc(t.category)}" data-trade-label="${esc(t.label)}" data-locked="${isLocked ? '1' : '0'}">
+                <tr class="wobx-trade-row ${isLocked ? 'wobx-locked' : ''} ${isSynthetic ? 'wobx-synthetic-row' : ''} ${t.hasCoAdditions ? 'wobx-has-co' : ''} ${t.isCoOnly ? 'wobx-co-only' : ''}" ${(isLocked || isSynthetic) ? '' : 'draggable="true"'} data-trade="${esc(t.category)}" data-trade-label="${esc(t.label)}" data-locked="${isLocked ? '1' : '0'}">
                   <td>
-                    <b>${esc(t.label)}</b>${isLocked ? ' <span class="wobx-lock-pill">🔒 Locked</span>' : ''}${isSynthetic ? ' <span class="wobx-synthetic-pill">AUTO</span>' : ''}
-                    <div class="wobx-row-hint">${isSynthetic ? 'Click to view materials list · paid to vendors' : `${t.itemCount} items · click for detail${isLocked ? ' · WO created' : ' · drag to merge'}`}</div>
+                    <b>${esc(t.label)}</b>${isLocked ? ' <span class="wobx-lock-pill">🔒 Locked</span>' : ''}${isSynthetic ? ' <span class="wobx-synthetic-pill">AUTO</span>' : ''}${t.hasCoAdditions ? (t.coNumbers || []).map(n => `<span class="wobx-co-row-badge" title="Change Order #${n} affects this trade">CO#${n}</span>`).join('') : ''}${t.isCoOnly ? ' <span class="wobx-co-only-pill" title="This trade exists only because of a Change Order">CO ADDITION</span>' : ''}
+                    <div class="wobx-row-hint">${isSynthetic ? 'Click to view materials list · paid to vendors' : `${t.itemCount} items${t.coItems?.length ? ` + ${t.coItems.length} CO item${t.coItems.length===1?'':'s'}` : ''} · click for detail${isLocked ? ' · WO created — re-open to amend with CO scope' : ' · drag to merge'}`}</div>
                   </td>
                   <td class="r">${(t.hours && !isSynthetic) ? t.hours.toFixed(1) : '—'}</td>
-                  <td class="r">${usdCompact(t.revenue)}${isSynthetic ? '<div class="wobx-row-hint" style="margin-top:2px;">materials portion of contract</div>' : ''}</td>
+                  <td class="r">${usdCompact(t.revenue)}${t.coDelta ? `<div class="wobx-row-hint" style="margin-top:2px;color:var(--orange);font-weight:600;">incl. +${usdCompact(t.coDelta)} CO</div>` : ''}${isSynthetic ? '<div class="wobx-row-hint" style="margin-top:2px;">materials portion of contract</div>' : ''}</td>
                   <td class="r" onclick="event.stopPropagation();">
                     <input type="number" class="wobx-trade-budget-input ${t.budgetIsOverride ? 'wobx-budget-override' : ''}"
                            data-trade="${esc(t.category)}"
@@ -6865,7 +7100,7 @@ function renderCoSection() {
             <button class="wobx-co-toggle" data-co-id="${esc(co.id)}" title="Expand/collapse">▾</button>
             <span class="wobx-co-title">CO #${co.co_number} — ${esc(co.title || 'Change Order')}</span>
             <span class="wobx-status-pill" style="background:${meta.color}20;color:${meta.color};border:1px solid ${meta.color}40;font-size:11px;padding:2px 8px;border-radius:20px;">${meta.lbl}</span>
-            <span style="color:var(--green);font-weight:700;">+${usdCompact(co.total_delta)}</span>
+            <span style="color:var(--green);font-weight:700;">+${usdCompact(co.amount_delta)}</span>
           </div>
           <div style="display:flex;gap:6px;">
             ${canSendCustomer ? `<button class="btn primary" data-co-act="send-customer" data-co-id="${esc(co.id)}">✉ Send to Customer</button>` : ''}
@@ -6973,6 +7208,218 @@ function resolveTradeMerge(tradeKey) {
 // Get a display label for a trade key — uses MERGED_TRADE_GROUPS if known
 function tradeLabelForKey(key) {
   return MERGED_TRADE_GROUPS[key]?.label || tradeLabelFor(key);
+}
+
+// ─── CO Scope renderer for the WO Detail modal ────────────────────────────
+// Lists CO line items for a given merged trade, grouped by CO#.
+// Shows total delta, "NEW" badge for is_new items, and a state hint:
+//   • If WO not yet created → "These items will be folded into the new WO on Convert"
+//   • If WO locked + items already in WO (converted_to_wo_id set) → "Already in WO vN"
+//   • If WO locked + items pending (converted_to_wo_id null) → "Click Amend WO to add"
+function renderCoScopeForTrade(tradeKey, wo) {
+  if (typeof getCoItemsForMergedTrade !== 'function') return '';
+  const coItems = getCoItemsForMergedTrade(tradeKey);
+  if (!coItems.length) return '';
+
+  // Group by co_number
+  const byCo = {};
+  coItems.forEach(i => {
+    const k = i.co_number;
+    if (!byCo[k]) byCo[k] = { co_number: k, co_description: i.co_description, items: [] };
+    byCo[k].items.push(i);
+  });
+
+  const totalDelta = coItems.reduce((s, i) => s + (Number(i.delta_amount) || 0), 0);
+
+  // State hint
+  const isLocked = !!wo?.is_locked;
+  const unprocessedCount = coItems.filter(i => !i.converted_to_wo_id).length;
+  let hint = '';
+  if (!isLocked) {
+    hint = `<div class="wobx-co-amend-banner">These ${coItems.length} CO line item${coItems.length===1?'':'s'} will be <b>folded into the new Work Order</b> when you click Convert. The WO scope will list them as a separate "Change Order Additions" section.</div>`;
+  } else if (unprocessedCount > 0) {
+    hint = `<div class="wobx-co-amend-banner">⚠ <b>${unprocessedCount} CO item${unprocessedCount===1?'':'s'} not yet in the WO.</b> Click <b>Amend WO with CO Scope</b> below to bump the WO to v${(wo?.version || 1) + 1} and append the CO scope. The sub will see a "REVISED" banner on re-send.</div>`;
+  } else {
+    hint = `<div class="wobx-co-amend-banner" style="background:#F0FDF4;border-left-color:#16A34A;color:#14532D;">✓ All CO items above already folded into this WO (v${wo?.version || 1}). Re-send the WO PDF if the sub doesn't have the latest version.</div>`;
+  }
+
+  const groupsHtml = Object.values(byCo).sort((a, b) => a.co_number - b.co_number).map(g => {
+    const groupDelta = g.items.reduce((s, i) => s + (Number(i.delta_amount) || 0), 0);
+    const rows = g.items.map(i => {
+      const inWo = !!i.converted_to_wo_id;
+      const newBadge = i.is_new ? '<span class="co-item-new">NEW</span>' : '';
+      const inWoBadge = inWo ? '<span class="co-item-new" style="background:#DCFCE7;color:#14532D;">IN WO</span>' : '';
+      const qty = i.qty != null ? `${i.qty} ${i.unit || ''}` : '—';
+      const delta = Number(i.delta_amount) || 0;
+      return `
+        <tr>
+          <td>${esc(i.description || '')}${newBadge}${inWoBadge}</td>
+          <td style="text-align:right;color:var(--muted);">${esc(qty)}</td>
+          <td style="text-align:right;color:var(--muted);font-size:11px;">${i.original_amount > 0 ? '$' + Number(i.original_amount).toLocaleString(undefined,{minimumFractionDigits:2}) : '—'}</td>
+          <td style="text-align:right;">$${Number(i.new_amount || 0).toLocaleString(undefined,{minimumFractionDigits:2})}</td>
+          <td style="text-align:right;color:${delta >= 0 ? '#16A34A' : '#DC2626'};font-weight:700;">${delta >= 0 ? '+' : '−'}$${Math.abs(delta).toLocaleString(undefined,{minimumFractionDigits:2})}</td>
+        </tr>
+      `;
+    }).join('');
+    return `
+      <div class="wobx-co-scope-group">
+        <div class="wobx-co-scope-group-head">
+          <span class="co-num-badge">CO#${g.co_number}</span>${esc(g.co_description || 'Change Order')} · <span style="color:#16A34A;">+${usdCompact(groupDelta)}</span>
+        </div>
+        <table class="wobx-co-scope-table">
+          <thead>
+            <tr>
+              <th>Description</th>
+              <th style="text-align:right;">Qty</th>
+              <th style="text-align:right;">Original</th>
+              <th style="text-align:right;">New</th>
+              <th style="text-align:right;">Delta</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    `;
+  }).join('');
+
+  return `
+    <div class="wobx-co-scope-section">
+      <div class="wobx-co-scope-title">
+        <span>⊕ Change Order Scope (${coItems.length} item${coItems.length===1?'':'s'})</span>
+        <span class="wobx-co-scope-total">+${usdCompact(totalDelta)}</span>
+      </div>
+      ${hint}
+      ${groupsHtml}
+    </div>
+  `;
+}
+
+// ─── Amend an already-converted WO with new CO scope ──────────────────────
+// Uses the existing version-bump pattern (new-version action): marks the
+// current WO version as superseded, creates a new draft row at version+1
+// with the CO scope appended, links it to the source CO, and flips
+// rebuild_co_line_items.converted_to_wo_id to the new WO row.
+//
+// The new WO row inherits assignee, payment terms, and dates from the
+// previous version. The PM can edit it before sending.
+async function amendWoWithCo(tradeKey) {
+  if (!state.woBudget) return { ok: false, error: 'No budget loaded' };
+  const wbWo = (state.woBudget.wos || []).find(w => w.trade_category === tradeKey);
+  if (!wbWo || !wbWo.is_locked || !wbWo.converted_work_order_id) {
+    return { ok: false, error: 'No converted WO to amend' };
+  }
+  const coItems = (typeof getCoItemsForMergedTrade === 'function')
+    ? getCoItemsForMergedTrade(tradeKey).filter(i => !i.converted_to_wo_id)
+    : [];
+  if (!coItems.length) return { ok: false, error: 'No unprocessed CO items for this trade' };
+
+  // Load the current WO row
+  const { data: currentWo, error: woFetchErr } = await sb.from('rebuild_work_orders')
+    .select('*')
+    .eq('id', wbWo.converted_work_order_id)
+    .single();
+  if (woFetchErr || !currentWo) return { ok: false, error: 'Current WO fetch failed' };
+
+  // Group CO items by CO# for the appended scope block
+  const tradeLabel = MERGED_TRADE_GROUPS[tradeKey]?.label || tradeKey;
+  const byCo = {};
+  coItems.forEach(i => {
+    if (!byCo[i.co_number]) byCo[i.co_number] = { co_number: i.co_number, co_id: i.co_id, co_description: i.co_description, items: [] };
+    byCo[i.co_number].items.push(i);
+  });
+
+  // Build appended scope text
+  const today = new Date().toISOString().slice(0, 10);
+  const appendLines = ['', '', `═══════════════════════════════════════════════`, `CHANGE ORDER AMENDMENT (added ${today})`, `═══════════════════════════════════════════════`, ''];
+  Object.values(byCo).sort((a, b) => a.co_number - b.co_number).forEach(g => {
+    appendLines.push(`CO #${g.co_number}${g.co_description ? ' — ' + g.co_description : ''}`);
+    g.items.forEach(i => {
+      const qty = i.qty != null ? `${i.qty} ${i.unit || ''}` : '';
+      const newTag = i.is_new ? ' [NEW]' : ' [REVISED]';
+      const delta = Number(i.delta_amount) || 0;
+      const deltaTxt = (delta >= 0 ? '+$' : '−$') + Math.abs(delta).toLocaleString(undefined, { minimumFractionDigits: 2 });
+      appendLines.push(`  • ${i.description || ''}${newTag} — ${qty} (${deltaTxt})`);
+    });
+    appendLines.push('');
+  });
+  const newScopeText = (currentWo.scope_text || '') + '\n' + appendLines.join('\n').trim();
+
+  // Compute new total: previous total + sum of CO deltas
+  const coDelta = coItems.reduce((s, i) => s + (Number(i.delta_amount) || 0), 0);
+  const newTotal = Number((Number(currentWo.total_amount || 0) + coDelta).toFixed(2));
+
+  // 1. Mark current WO superseded
+  const { error: supErr } = await sb.from('rebuild_work_orders')
+    .update({ status: 'superseded' })
+    .eq('id', currentWo.id);
+  if (supErr) return { ok: false, error: 'Supersede failed: ' + supErr.message };
+
+  await sb.from('rebuild_work_order_history').insert({
+    work_order_id: currentWo.id,
+    action: 'superseded',
+    actor: state.pmEmail,
+    details: `Superseded by v${currentWo.version + 1} via CO amendment (CO#${[...new Set(coItems.map(i => i.co_number))].join(', CO#')})`,
+  });
+
+  // 2. Create new draft v+1 with appended scope, linked to source CO(s)
+  // If there are multiple source COs, link to the most recent one (highest co_number).
+  // source_co_id is single-FK by design; the history record above captures the full list.
+  const sourceCoId = Object.values(byCo).sort((a, b) => b.co_number - a.co_number)[0].co_id;
+
+  const { data: newWoRow, error: newErr } = await sb.from('rebuild_work_orders').insert({
+    project_id: currentWo.project_id,
+    sub_id: currentWo.sub_id,
+    employee_id: currentWo.employee_id,
+    assignee_type: currentWo.assignee_type,
+    version: currentWo.version + 1,
+    status: 'draft',
+    scope_text: newScopeText,
+    total_amount: newTotal,
+    amount_source: 'wo_builder_co_amend',
+    payment_terms: currentWo.payment_terms,
+    start_date: currentWo.start_date,
+    end_date: currentWo.end_date,
+    created_by_email: state.pmEmail,
+    created_by_name: state.pmName,
+    sent_to_email: currentWo.sent_to_email,
+    sent_to_phone: currentWo.sent_to_phone,
+    source_co_id: sourceCoId,
+  }).select().single();
+  if (newErr) {
+    // Best-effort rollback of supersede flag
+    await sb.from('rebuild_work_orders').update({ status: currentWo.status }).eq('id', currentWo.id);
+    return { ok: false, error: 'New version create failed: ' + newErr.message };
+  }
+
+  // 3. Update wo_builder_work_orders to point at the new WO
+  await sb.from('wo_builder_work_orders').update({
+    converted_work_order_id: newWoRow.id,
+    // keep is_locked=true, status remains 'approved'
+  }).eq('id', wbWo.id);
+
+  // 4. Flip converted_to_wo_id on the CO line items
+  const itemIds = coItems.map(i => i.id);
+  await sb.from('rebuild_co_line_items')
+    .update({ converted_to_wo_id: newWoRow.id })
+    .in('id', itemIds);
+
+  // 5. History log on the new version
+  await sb.from('rebuild_work_order_history').insert({
+    work_order_id: newWoRow.id,
+    action: 'created',
+    actor: state.pmEmail,
+    details: `Created v${newWoRow.version} from CO amendment · ${coItems.length} CO items · +${coDelta.toFixed(2)}`,
+  });
+
+  return {
+    ok: true,
+    woId: newWoRow.id,
+    newVersion: newWoRow.version,
+    tradeLabel,
+    coCount: coItems.length,
+    coDelta,
+    newTotal,
+  };
 }
 
 function computeTradeRollup(budget) {
@@ -7136,6 +7583,79 @@ function computeTradeRollup(budget) {
       targetMarginPct: targetMarginPct,
       xactBenchmark: Number(totalJgXactMaterialsCost.toFixed(2)),
     });
+  }
+
+  // ─── CO Integration: fold signed CO line items into trade rows ───
+  // CO items live in state.coLineItems (loaded by loadChangeOrders).
+  // Only items from customer_signed+ COs with is_unassigned=false are included.
+  // We add the CO delta to the trade row's revenue, append CO items to a new
+  // coItems array on the row, and create new rows for trades that exist only
+  // in COs (i.e. a CO introduced a trade that wasn't in the original estimate).
+  if (typeof getActiveCoItemsByTrade === 'function') {
+    const coByTrade = getActiveCoItemsByTrade();
+    // Build per-merged-trade aggregation of CO items
+    const coByMerged = {};
+    for (const [rawCat, items] of Object.entries(coByTrade)) {
+      const mergedKey = mergedGroupFor(rawCat || 'general');
+      if (!coByMerged[mergedKey]) coByMerged[mergedKey] = [];
+      coByMerged[mergedKey].push(...items);
+    }
+
+    // 1. For each existing trade row, fold matching CO items in
+    tradeRows.forEach(row => {
+      if (row.isSynthetic) return; // skip JG Purchased Materials synthetic row
+      const coItems = coByMerged[row.category] || [];
+      if (!coItems.length) return;
+      const coDelta = coItems.reduce((s, i) => s + (Number(i.delta_amount) || 0), 0);
+      row.coItems = coItems;
+      row.coDelta = coDelta;
+      // Set of CO numbers affecting this trade (for badge rendering)
+      row.coNumbers = [...new Set(coItems.map(i => i.co_number))].sort((a, b) => a - b);
+      // CO revenue is added to revenue (margin recomputes downstream)
+      row.revenue = (row.revenue || 0) + coDelta;
+      row.grossRevenue = (row.grossRevenue || 0) + coDelta;
+      // Profit recomputes — budget is unchanged at this stage (PM has to adjust it
+      // manually or convert/amend the WO to set a new budget for the CO scope).
+      row.profit = row.revenue - row.budget;
+      // Mark that this row has CO additions so renderers can show a badge
+      row.hasCoAdditions = true;
+    });
+
+    // 2. For trades that ONLY appear in COs (no original-estimate items),
+    //    create new synthetic trade rows so they show up in the WO Builder.
+    const existingMergedKeys = new Set(tradeRows.map(r => r.category));
+    for (const [mergedKey, items] of Object.entries(coByMerged)) {
+      if (existingMergedKeys.has(mergedKey)) continue;
+      const group = MERGED_TRADE_GROUPS[mergedKey];
+      const coDelta = items.reduce((s, i) => s + (Number(i.delta_amount) || 0), 0);
+      const tradeBudget = Number((coDelta * 0.5).toFixed(2)); // default 50% margin
+      tradeRows.push({
+        category: mergedKey,
+        label: group?.label || mergedKey,
+        sort: group?.sort || 500,
+        itemCount: 0,
+        grossRevenue: coDelta,
+        revenue: coDelta,
+        materialsCarveOut: 0,
+        xactMaterialsTotal: 0,
+        budget: tradeBudget,
+        materialsBudget: 0,
+        totalCost: tradeBudget,
+        jgSupplies: false,
+        budgetIsOverride: false,
+        profit: coDelta - tradeBudget,
+        hours: 0,
+        suggestedPhaseId: matchPhaseForTrade(mergedKey),
+        // CO metadata
+        coItems: items,
+        coDelta: coDelta,
+        coNumbers: [...new Set(items.map(i => i.co_number))].sort((a, b) => a - b),
+        hasCoAdditions: true,
+        isCoOnly: true, // no original-estimate items, this trade only exists because of COs
+      });
+    }
+    // Re-sort after possibly adding new rows
+    tradeRows.sort((a, b) => (a.sort || 100) - (b.sort || 100));
   }
 
   return tradeRows;
@@ -7788,7 +8308,7 @@ async function processCoUpload(estimateFile, componentsFile, coNum, title, budge
     title,
     status: 'draft',
     base_upload_id: budget.upload?.id || null,
-    total_delta: totalDelta,
+    amount_delta: totalDelta,
     created_by: state.pmEmail,
   }).select().single();
   if (coErr) throw new Error('Failed to create CO: ' + coErr.message);
@@ -7847,7 +8367,7 @@ function openCoPdfPreview(co) {
         <tfoot>
           <tr style="background:#f0fdf4;">
             <td colspan="3" style="padding:12px 8px;font-weight:700;font-size:15px;color:#0d2d5e;">Total Change Order</td>
-            <td style="padding:12px 8px;text-align:right;font-weight:700;font-size:15px;color:#16a34a;">+$${Number(co.total_delta).toLocaleString(undefined,{minimumFractionDigits:2})}</td>
+            <td style="padding:12px 8px;text-align:right;font-weight:700;font-size:15px;color:#16a34a;">+$${Number(co.amount_delta).toLocaleString(undefined,{minimumFractionDigits:2})}</td>
           </tr>
         </tfoot>
       </table>
@@ -8908,12 +9428,24 @@ async function sendWorkOrderToSub(wo, woUrl) {
   const toEmail = wo.sent_to_email || sub?.email;
   if (!toEmail) { toast('No email on file — add one in the WO before sending'); return; }
   const p = state.activeProject;
+  // ─── CO Amendment flagging ───
+  // When wo.version > 1 AND wo.source_co_id is set, this WO is a CO-driven
+  // revision. We adjust the email subject + headline + intro so the sub
+  // immediately knows this supersedes a previous version.
+  const isRevision = (wo.version || 1) > 1;
+  const isCoAmendment = isRevision && !!wo.source_co_id;
+  const revisionTag = isCoAmendment ? ' [REVISED — CO Amendment]' : (isRevision ? ' [REVISED]' : '');
+  const introExtra = isCoAmendment
+    ? ` <b style="color:#C2410C;">This is a REVISED Work Order (v${wo.version})</b> — it supersedes the prior version due to a signed Change Order. Please review the appended Change Order scope section at the bottom.`
+    : isRevision
+      ? ` <b style="color:#C2410C;">This is a REVISED Work Order (v${wo.version})</b> — it supersedes the prior version.`
+      : '';
   const body = buildBrandedEmail({
-    preheader: `Work Order for ${p.albi_job_number || 'project'} — please review and sign`,
-    headline: `New Work Order — ${p.albi_job_number || 'Project'}`,
-    intro: `Hi ${sub?.primary_contact || sub?.company_name || 'there'}, please review the work order below and accept to confirm scope, pricing, and terms before starting work.`,
-    bodyHtml: `<p style="margin:0 0 12px;font-size:14px;color:#1a2540;line-height:1.5;"><b>Customer:</b> ${esc(p.customer_name || '')}<br><b>Address:</b> ${esc(p.property_address || '')}<br><b>Agreed amount:</b> ${wo.total_amount ? '$' + Number(wo.total_amount).toLocaleString() : 'TBD'}</p>`,
-    ctaLabel: 'Review & Sign Work Order',
+    preheader: `Work Order${revisionTag} for ${p.albi_job_number || 'project'} — please review and sign`,
+    headline: `${isRevision ? 'Revised Work Order' : 'New Work Order'} — ${p.albi_job_number || 'Project'}`,
+    intro: `Hi ${sub?.primary_contact || sub?.company_name || 'there'}, please review the work order below and accept to confirm scope, pricing, and terms before starting work.${introExtra}`,
+    bodyHtml: `<p style="margin:0 0 12px;font-size:14px;color:#1a2540;line-height:1.5;"><b>Customer:</b> ${esc(p.customer_name || '')}<br><b>Address:</b> ${esc(p.property_address || '')}<br><b>Agreed amount:</b> ${wo.total_amount ? '$' + Number(wo.total_amount).toLocaleString() : 'TBD'}${isRevision ? `<br><b>Version:</b> v${wo.version}${isCoAmendment ? ' (CO amendment)' : ''}` : ''}</p>`,
+    ctaLabel: isRevision ? 'Review & Sign Revised Work Order' : 'Review & Sign Work Order',
     ctaUrl: woUrl,
     signoffName: state.pmName || 'JG Restoration',
     signoffPhone: p.albi_pm_phone || '(920) 428-4200',
@@ -8929,7 +9461,7 @@ async function sendWorkOrderToSub(wo, woUrl) {
         from_name: 'JG Restoration',
         recipient_name: sub?.primary_contact || sub?.company_name || toEmail,
         recipient_type: 'sub',
-        subject: `Work Order — ${p.albi_job_number || 'Project'} (please sign)`,
+        subject: `Work Order${revisionTag} — ${p.albi_job_number || 'Project'} (please sign)`,
         body,
         attachment_count: 0, attachment_urls: '',
       }),
@@ -10793,7 +11325,7 @@ function setupRealtime() {
 <script src="rebuild-pdf.js?v=2026.05.24-r1"></script>
 <script src="rebuild-sov.js?v=2026.05.26-r1"></script>
 <script src="rebuild-packet.js?v=2026.05.26-r1"></script>
-<script src="rebuild-co.js?v=2026.05.26-r6"></script>
+<script src="rebuild-co.js?v=2026.05.27-co-wo-r1"></script>
 <script src="rebuild-messages.js?v=2026.05.24-r1"></script>
 <script src="rebuild-documents.js?v=2026.05.24-r1"></script>
 <script src="rebuild-relationships.js?v=2026.05.20-r3"></script>
