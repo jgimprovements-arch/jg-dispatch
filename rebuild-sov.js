@@ -977,8 +977,9 @@ submitBtn.addEventListener('click', async () => {
     try {
       // no-cors mode skips the preflight that Zapier's hook doesn't allow.
       // Response is opaque (can't read status), so this is fire-and-forget.
-      // If the email fails downstream, PM can resend from the same modal —
-      // status is already flipped, draw is already requested in the DB.
+      // Field names: send body + message + body_html — the existing uvule41
+      // Zap's Gmail step maps "body" (not body_html). Send all three so the
+      // Zap works regardless of how its field mapping is wired today.
       await fetch('https://hooks.zapier.com/hooks/catch/12653197/uvule41/', {
         method: 'POST',
         mode: 'no-cors',
@@ -986,13 +987,19 @@ submitBtn.addEventListener('click', async () => {
         body: JSON.stringify({
           channel: 'email',
           to_email: customerEmail,
+          to: customerEmail,
           from_email: fromEmail,
+          from: fromEmail,
           subject: subject,
+          body: emailBody,
           body_html: emailBody,
+          message: emailBody,
+          body_type: 'html',
           attachments: [
             { url: requestPdfUrl, filename: `Draw_${draw.draw_num}_Request.pdf` },
             { url: invoiceUrl, filename: `JG_Invoice_Draw_${draw.draw_num}.pdf` },
           ],
+          file: [requestPdfUrl, invoiceUrl],
           project_id: p.id,
           albi_job_number: p.albi_job_number || '',
         }),
