@@ -935,6 +935,41 @@ submitBtn.addEventListener('click', async () => {
     }
     const requestPdfUrl = workerJson.draw_pdf_url;
 
+    // 3) File both PDFs into the project's Documents folder (Invoices
+    // category, customer-visible). This makes them discoverable in the
+    // Documents tab on rebuild.html and on customer.html. Insert is
+    // non-blocking — if it fails, the draw flow still completes.
+    submitBtn.textContent = 'Filing documents…';
+    try {
+      const drawLabel = `Draw_${draw.draw_num}`;
+      await sb.from('rebuild_documents').insert([
+        {
+          project_id: p.id,
+          category: 'Invoices',
+          filename: `${drawLabel}_JG_Invoice.pdf`,
+          file_url: invoiceUrl,
+          file_size_bytes: pickedFile.size,
+          mime_type: 'application/pdf',
+          uploaded_by_email: state.pmEmail || null,
+          uploaded_by_name: state.pmName || null,
+          customer_visible: true,
+        },
+        {
+          project_id: p.id,
+          category: 'Invoices',
+          filename: `${drawLabel}_Progress_Draw_Request.pdf`,
+          file_url: requestPdfUrl,
+          file_size_bytes: workerJson.byte_size || null,
+          mime_type: 'application/pdf',
+          uploaded_by_email: state.pmEmail || null,
+          uploaded_by_name: state.pmName || null,
+          customer_visible: true,
+        },
+      ]);
+    } catch (docErr) {
+      console.warn('[sov] document folder insert failed (non-blocking):', docErr);
+    }
+
     // 4) Flip draw status + persist URLs
     submitBtn.textContent = 'Updating draw…';
     const { error: drawErr } = await sb.from('rebuild_sov_draws').update({
@@ -974,6 +1009,32 @@ submitBtn.addEventListener('click', async () => {
     }) : `<p>Draw #${draw.draw_num} (${usd(draw.total_amount)}) request — open ${customerLink} to view and upload the signed form back.</p>`;
 
     const fromEmail = p.albi_pm_email || 'office@jg-restoration.com';
+    const fromName = p.albi_pm_name || 'JG Restoration';
+
+    // 5a) Log outbound email to rebuild_messages BEFORE firing Zapier so it
+    // appears in the Messages tab immediately. Status flips to sent/failed
+    // based on the Zapier POST result (no-cors makes the fetch opaque, so
+    // we infer success from absence of thrown errors).
+    let msgRowId = null;
+    try {
+      const { data: msgRows } = await sb.from('rebuild_messages').insert({
+        project_id: p.id,
+        direction: 'outbound',
+        channel: 'email',
+        status: 'queued',
+        subject: subject,
+        body: emailBody,
+        recipient_type: 'customer',
+        recipient_name: p.customer_name || '',
+        recipient_email: customerEmail,
+        sent_by_name: fromName,
+        sent_by_email: fromEmail,
+      }).select();
+      msgRowId = msgRows?.[0]?.id || null;
+    } catch (logErr) {
+      console.warn('[sov] message log insert failed (non-blocking):', logErr);
+    }
+
     try {
       // no-cors mode skips the preflight that Zapier's hook doesn't allow.
       // Response is opaque (can't read status), so this is fire-and-forget.
@@ -985,7 +1046,12 @@ submitBtn.addEventListener('click', async () => {
         mode: 'no-cors',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          message_id: msgRowId,
           channel: 'email',
+          direction: 'outbound',
+          recipient_type: 'customer',
+          recipient_name: p.customer_name || '',
+          recipient_email: customerEmail,
           to_email: customerEmail,
           to: customerEmail,
           from_email: fromEmail,
@@ -1004,8 +1070,19 @@ submitBtn.addEventListener('click', async () => {
           albi_job_number: p.albi_job_number || '',
         }),
       });
+      // Mark sent — no-cors prevents reading actual HTTP status, but the
+      // POST completed without throwing, so Zapier received it.
+      if (msgRowId) {
+        await sb.from('rebuild_messages').update({ status: 'sent' }).eq('id', msgRowId);
+      }
     } catch (emailErr) {
       console.error('[sov] draw request email send failed:', emailErr);
+      if (msgRowId) {
+        await sb.from('rebuild_messages').update({
+          status: 'failed',
+          error_message: String(emailErr).slice(0, 500),
+        }).eq('id', msgRowId);
+      }
       // Don't fail the whole flow — status is flipped, PM can resend
     }
 

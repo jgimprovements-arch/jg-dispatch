@@ -1948,20 +1948,66 @@ async function handleDrawUpload(e, project) {
     }).eq('id', drawId).eq('request_token', token);
     if (dbErr) throw dbErr;
 
-    // Optional: ping PM via Zapier so they get an email/Slack right away.
-    // Realtime sub on rebuild.html also fires renderDetail() automatically.
+    const notifyTo = project.albi_pm_email || 'office@jg-restoration.com';
+    const notifySubject = `Customer uploaded signed draw form — ${project.customer_name || ''} ${project.albi_job_number || ''}`;
+    const notifyBody = `<p>${escHtml(project.customer_name || 'Customer')} uploaded a signed draw form for their project at ${escHtml(project.property_address || '')}.</p><p><a href="${escHtml(publicUrl)}">View uploaded file: ${escHtml(f.name)}</a></p>`;
+
+    // Log the inbound upload event to rebuild_messages so PMs see it in
+    // the Messages tab on rebuild.html. Direction='inbound' since the
+    // customer initiated this action.
+    try {
+      await sb.from('rebuild_messages').insert({
+        project_id: project.id,
+        direction: 'inbound',
+        channel: 'portal',
+        status: 'received',
+        subject: `Signed draw form uploaded: ${f.name}`,
+        body: `<p>${escHtml(project.customer_name || 'Customer')} uploaded a signed draw form via the project portal.</p><p><b>File:</b> <a href="${escHtml(publicUrl)}">${escHtml(f.name)}</a></p>`,
+        recipient_type: 'pm',
+        recipient_name: project.albi_pm_name || '',
+        recipient_email: notifyTo,
+        sent_by_name: project.customer_name || 'Customer',
+        sent_by_email: project.customer_email || '',
+      });
+    } catch (logErr) {
+      console.warn('[draw-upload] inbound log failed (non-blocking):', logErr);
+    }
+
+    // Outbound PM notification email — also logged so the PM can see
+    // exactly what was sent and when.
     // no-cors so Zapier's hook accepts the POST without preflight.
     // Send body + body_html + message — the Zap's Gmail step maps "body".
+    let notifyMsgId = null;
     try {
-      const notifyBody = `<p>${escHtml(project.customer_name || 'Customer')} uploaded a signed draw form for their project at ${escHtml(project.property_address || '')}.</p><p><a href="${escHtml(publicUrl)}">View uploaded file: ${escHtml(f.name)}</a></p>`;
-      const notifyTo = project.albi_pm_email || 'office@jg-restoration.com';
-      const notifySubject = `Customer uploaded signed draw form — ${project.customer_name || ''} ${project.albi_job_number || ''}`;
+      const { data: notifyRows } = await sb.from('rebuild_messages').insert({
+        project_id: project.id,
+        direction: 'outbound',
+        channel: 'email',
+        status: 'queued',
+        subject: notifySubject,
+        body: notifyBody,
+        recipient_type: 'pm',
+        recipient_name: project.albi_pm_name || '',
+        recipient_email: notifyTo,
+        sent_by_name: 'JG Platform',
+        sent_by_email: 'office@jg-restoration.com',
+      }).select();
+      notifyMsgId = notifyRows?.[0]?.id || null;
+    } catch (logErr) {
+      console.warn('[draw-upload] PM-notify log insert failed (non-blocking):', logErr);
+    }
+
+    try {
       await fetch('https://hooks.zapier.com/hooks/catch/12653197/uvule41/', {
         method: 'POST',
         mode: 'no-cors',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          message_id: notifyMsgId,
           channel: 'email',
+          direction: 'outbound',
+          recipient_type: 'pm',
+          recipient_email: notifyTo,
           to_email: notifyTo,
           to: notifyTo,
           from_email: 'office@jg-restoration.com',
@@ -1975,8 +2021,17 @@ async function handleDrawUpload(e, project) {
           albi_job_number: project.albi_job_number || '',
         }),
       });
+      if (notifyMsgId) {
+        await sb.from('rebuild_messages').update({ status: 'sent' }).eq('id', notifyMsgId);
+      }
     } catch (notifyErr) {
-      console.warn('[draw-upload] PM notification failed (non-blocking):', notifyErr);
+      console.warn('[draw-upload] PM notification email failed (non-blocking):', notifyErr);
+      if (notifyMsgId) {
+        await sb.from('rebuild_messages').update({
+          status: 'failed',
+          error_message: String(notifyErr).slice(0, 500),
+        }).eq('id', notifyMsgId);
+      }
     }
 
     // Re-render — realtime listener also fires but this is faster.
