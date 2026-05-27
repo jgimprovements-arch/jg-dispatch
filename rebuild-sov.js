@@ -775,19 +775,43 @@ toast('SOV superseded — create a new one to replace it');
 function openRequestDrawModal(drawId) {
 const draw = state.sovDraws.find(d => d.id === drawId);
 if (!draw) return;
+const p = state.activeProject || {};
+const customerEmail = p.customer_email || '';
 const html = `
   <div class="modal-back on" id="sov_req_overlay">
-    <div class="modal" style="max-width:420px;">
+    <div class="modal" style="max-width:480px;">
       <h3>Request Draw #${draw.draw_num} <button class="close" data-close>×</button></h3>
       <div class="modal-body">
-        <p style="font-size:13px;color:var(--muted);">Amount: <b style="color:var(--navy);">${usd(draw.total_amount)}</b></p>
-        <div style="margin-bottom:10px;">
-          <label style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;">Note (optional)</label>
-          <textarea id="sov_req_note" rows="3" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;margin-top:4px;font-family:inherit;" placeholder="e.g. Sent invoice INV-#"></textarea>
+        <div style="background:var(--bg);padding:10px 12px;border-radius:6px;margin-bottom:12px;font-size:13px;">
+          <div><b>Trigger:</b> ${esc(draw.trigger_event || '—')}</div>
+          <div><b>Amount:</b> <span style="color:var(--navy);font-weight:700;">${usd(draw.total_amount)}</span></div>
+          <div><b>Customer email:</b> ${customerEmail ? esc(customerEmail) : '<span style="color:var(--danger);">none on file</span>'}</div>
         </div>
-        <div style="display:flex;gap:8px;margin-top:14px;justify-content:flex-end;">
+
+        <div style="margin-bottom:12px;">
+          <label style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:.05em;">JG Invoice PDF <span style="color:var(--danger);">*</span></label>
+          <div id="sov_req_drop" style="margin-top:6px;border:2px dashed var(--border);border-radius:8px;padding:18px;text-align:center;cursor:pointer;background:#fafafa;">
+            <input type="file" id="sov_req_invoice_file" accept="application/pdf" style="display:none;">
+            <div id="sov_req_drop_msg" style="font-size:13px;color:var(--muted);">
+              <div style="font-size:24px;margin-bottom:4px;">📄</div>
+              Click or drop the JG invoice PDF here
+            </div>
+            <div id="sov_req_filename" style="display:none;font-size:13px;color:var(--navy);font-weight:600;"></div>
+          </div>
+        </div>
+
+        <div style="margin-bottom:10px;">
+          <label style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:.05em;">Message to Customer (optional)</label>
+          <textarea id="sov_req_note" rows="3" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;margin-top:4px;font-family:inherit;font-size:13px;" placeholder="Anything specific you want to tell them about this draw"></textarea>
+        </div>
+
+        <div style="background:rgba(245,166,35,.08);border:1px solid rgba(245,166,35,.3);border-radius:6px;padding:10px 12px;font-size:12px;color:var(--navy);margin-bottom:12px;">
+          <b>When you submit:</b> A Progress Draw Request PDF is auto-generated, both PDFs are emailed to the customer along with a link to view and upload their bank/lender draw form back to you.
+        </div>
+
+        <div style="display:flex;gap:8px;justify-content:flex-end;">
           <button class="btn ghost" data-close>Cancel</button>
-          <button class="btn primary" id="sov_req_submit">Mark Requested</button>
+          <button class="btn primary" id="sov_req_submit" disabled style="opacity:.5;">Send Request to Customer</button>
         </div>
       </div>
     </div>
@@ -796,24 +820,204 @@ const html = `
 document.body.insertAdjacentHTML('beforeend', html);
 const overlay = document.getElementById('sov_req_overlay');
 overlay.querySelectorAll('[data-close]').forEach(b => b.addEventListener('click', () => overlay.remove()));
-document.getElementById('sov_req_submit').addEventListener('click', async () => {
+
+// File picker wiring
+const drop = document.getElementById('sov_req_drop');
+const fileInput = document.getElementById('sov_req_invoice_file');
+const dropMsg = document.getElementById('sov_req_drop_msg');
+const fileLabel = document.getElementById('sov_req_filename');
+const submitBtn = document.getElementById('sov_req_submit');
+let pickedFile = null;
+
+function handleFile(f) {
+  if (!f) return;
+  if (!/pdf/i.test(f.type) && !/\.pdf$/i.test(f.name)) {
+    toast('Invoice must be a PDF');
+    return;
+  }
+  pickedFile = f;
+  dropMsg.style.display = 'none';
+  fileLabel.style.display = 'block';
+  fileLabel.textContent = '✓ ' + f.name;
+  submitBtn.disabled = false;
+  submitBtn.style.opacity = '1';
+}
+drop.addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', e => handleFile(e.target.files[0]));
+drop.addEventListener('dragover', e => { e.preventDefault(); drop.style.background = '#f0f0f0'; });
+drop.addEventListener('dragleave', () => { drop.style.background = '#fafafa'; });
+drop.addEventListener('drop', e => {
+  e.preventDefault();
+  drop.style.background = '#fafafa';
+  handleFile(e.dataTransfer.files[0]);
+});
+
+submitBtn.addEventListener('click', async () => {
+  if (!pickedFile) { toast('Upload the JG invoice PDF first'); return; }
+  if (!customerEmail) { toast('No customer email on file — cannot send'); return; }
   const note = document.getElementById('sov_req_note').value.trim();
-  const now = new Date().toISOString();
-  await sb.from('rebuild_sov_draws').update({
-    status: 'requested',
-    requested_at: now,
-    requested_by: state.pmEmail || null,
-    request_note: note || null,
-  }).eq('id', drawId);
-  await logSovEvent('draw_requested', {
-    draw_id: drawId,
-    new_values: { draw_num: draw.draw_num, amount: draw.total_amount },
-    notes: `Draw ${draw.draw_num} requested${note ? ': ' + note : ''}`,
-  });
-  if (typeof logToAlbi === 'function') logToAlbi('draw_requested', `Draw ${draw.draw_num} requested (${usd(draw.total_amount)})`);
-  overlay.remove();
-  await loadSov();
-  renderDetail();
+  submitBtn.disabled = true;
+  submitBtn.textContent = 'Uploading invoice…';
+
+  try {
+    const now = new Date().toISOString();
+    // Generate token used by customer upload-back to write a file scoped to
+    // this draw without needing auth. Token also gates the customer page view.
+    const token = (crypto.randomUUID ? crypto.randomUUID() : (Date.now() + '-' + Math.random().toString(36).slice(2)));
+    const ts = Date.now();
+
+    // 1) Upload JG invoice PDF to sov-draws bucket
+    const invoicePath = `${state.activeProjectId}/draw-${draw.draw_num}-${ts}-invoice.pdf`;
+    const { error: invErr } = await sb.storage.from('sov-draws').upload(invoicePath, pickedFile, {
+      contentType: 'application/pdf',
+      upsert: false,
+    });
+    if (invErr) throw new Error('Invoice upload failed: ' + invErr.message);
+    const invoiceUrl = sb.storage.from('sov-draws').getPublicUrl(invoicePath).data.publicUrl;
+
+    // 2) Call render worker to generate Progress Draw Request PDF
+    submitBtn.textContent = 'Rendering draw request…';
+    const sov = state.sov || {};
+    const draws = state.sovDraws || [];
+    const paidToDate = draws.filter(d => d.status === 'paid').reduce((s, d) => s + Number(d.paid_amount || d.total_amount || 0), 0);
+    const renderPayload = {
+      type: 'draw_request',
+      draw: {
+        id: draw.id,
+        draw_num: draw.draw_num,
+        trigger_event: draw.trigger_event,
+        percent: draw.percent,
+        total_amount: Number(draw.total_amount || 0),
+        requested_at: now,
+        note: note || null,
+      },
+      sov: {
+        contract_total: Number(sov.contract_total || 0),
+        paid_to_date: paidToDate,
+        balance_remaining: Number(sov.contract_total || 0) - paidToDate - Number(draw.total_amount || 0),
+        draw_count: draws.length,
+      },
+      project: {
+        id: p.id,
+        albi_job_number: p.albi_job_number || '',
+        customer_name: p.customer_name || '',
+        customer_email: customerEmail,
+        property_address: p.property_address || '',
+        pm_name: p.albi_pm_name || '',
+        pm_email: p.albi_pm_email || '',
+        pm_phone: p.albi_pm_phone || '',
+      },
+      all_draws: draws.map(d => ({
+        draw_num: d.draw_num,
+        trigger_event: d.trigger_event,
+        amount: Number(d.total_amount || 0),
+        status: d.status,
+      })),
+    };
+
+    const workerRes = await fetch('https://jg-render-contract.josh-70f.workers.dev/render-draw-request', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(renderPayload),
+    });
+    if (!workerRes.ok) {
+      const errTxt = await workerRes.text().catch(() => '');
+      throw new Error('Render worker failed (' + workerRes.status + '): ' + errTxt.slice(0, 200));
+    }
+    const requestPdfBlob = await workerRes.blob();
+
+    // 3) Upload generated PDF
+    submitBtn.textContent = 'Saving request PDF…';
+    const reqPath = `${state.activeProjectId}/draw-${draw.draw_num}-${ts}-request.pdf`;
+    const { error: rErr } = await sb.storage.from('sov-draws').upload(reqPath, requestPdfBlob, {
+      contentType: 'application/pdf',
+      upsert: false,
+    });
+    if (rErr) throw new Error('Request PDF upload failed: ' + rErr.message);
+    const requestPdfUrl = sb.storage.from('sov-draws').getPublicUrl(reqPath).data.publicUrl;
+
+    // 4) Flip draw status + persist URLs
+    submitBtn.textContent = 'Updating draw…';
+    const { error: drawErr } = await sb.from('rebuild_sov_draws').update({
+      status: 'requested',
+      requested_at: now,
+      requested_by: state.pmEmail || null,
+      request_note: note || null,
+      jg_invoice_url: invoiceUrl,
+      request_pdf_url: requestPdfUrl,
+      request_token: token,
+    }).eq('id', drawId);
+    if (drawErr) throw new Error('DB update failed: ' + drawErr.message);
+
+    // 5) Email customer with link to customer.html#draws + PDFs attached
+    submitBtn.textContent = 'Emailing customer…';
+    const portalBase = 'https://jgimprovements-arch.github.io/jg-dispatch';
+    const customerLink = `${portalBase}/customer.html?t=${p.customer_token}#draws`;
+    const subject = `Progress Draw Request — ${p.customer_name || 'Your Project'} (Draw #${draw.draw_num})`;
+    const emailBody = (typeof buildBrandedEmail === 'function') ? buildBrandedEmail({
+      preheader: `Progress draw #${draw.draw_num} — ${usd(draw.total_amount)}`,
+      headline: `Progress Draw Request — Draw #${draw.draw_num}`,
+      body: `
+        <p>Hi ${esc(p.customer_name || 'there')},</p>
+        <p>We've completed the milestone for <b>Draw #${draw.draw_num}</b>${draw.trigger_event ? ' (' + esc(draw.trigger_event) + ')' : ''} on your project at ${esc(p.property_address || '')}. The progress draw amount of <b>${usd(draw.total_amount)}</b> is now due.</p>
+        <p><b>Attached:</b></p>
+        <ul style="margin:6px 0 12px 18px;padding:0;">
+          <li>JG Restoration invoice</li>
+          <li>Progress Draw Request form (for your bank or lender)</li>
+        </ul>
+        <p>Please forward the Draw Request to your bank or lender. Once they sign and return it to you, please <b>upload it back to us</b> using the project portal link below so we can keep your project moving without delay.</p>
+        ${note ? `<p style="background:#fff8e7;border-left:3px solid #f5a623;padding:10px 14px;margin:12px 0;font-style:italic;">${esc(note)}</p>` : ''}
+        <p>If you have any questions, just reply to this email or call your project manager.</p>
+      `,
+      ctaLabel: 'View Project & Upload Signed Form',
+      ctaUrl: customerLink,
+      signoff: p.albi_pm_name ? `— ${p.albi_pm_name}, Project Manager<br>JG Restoration` : '— JG Restoration',
+    }) : `<p>Draw #${draw.draw_num} (${usd(draw.total_amount)}) request — open ${customerLink} to view and upload the signed form back.</p>`;
+
+    const fromEmail = p.albi_pm_email || 'office@jg-restoration.com';
+    try {
+      await fetch('https://hooks.zapier.com/hooks/catch/12653197/uvule41/', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          channel: 'email',
+          to_email: customerEmail,
+          from_email: fromEmail,
+          subject: subject,
+          body_html: emailBody,
+          attachments: [
+            { url: requestPdfUrl, filename: `Draw_${draw.draw_num}_Request.pdf` },
+            { url: invoiceUrl, filename: `JG_Invoice_Draw_${draw.draw_num}.pdf` },
+          ],
+          project_id: p.id,
+          albi_job_number: p.albi_job_number || '',
+        }),
+      });
+    } catch (emailErr) {
+      console.error('[sov] draw request email send failed:', emailErr);
+      // Don't fail the whole flow — status is flipped, PM can resend
+    }
+
+    // 6) Logs
+    await logSovEvent('draw_requested', {
+      draw_id: drawId,
+      new_values: { draw_num: draw.draw_num, amount: draw.total_amount, sent_to: customerEmail },
+      notes: `Draw ${draw.draw_num} requested from customer (${usd(draw.total_amount)})${note ? ': ' + note : ''}`,
+    });
+    if (typeof logToAlbi === 'function') {
+      logToAlbi('draw_requested', `Draw ${draw.draw_num} request sent to ${customerEmail} (${usd(draw.total_amount)})`);
+    }
+
+    overlay.remove();
+    toast(`Draw #${draw.draw_num} request sent to ${customerEmail}`);
+    await loadSov();
+    renderDetail();
+  } catch (err) {
+    console.error('[sov] request draw flow failed:', err);
+    submitBtn.disabled = false;
+    submitBtn.textContent = 'Send Request to Customer';
+    alert('Error: ' + (err.message || err));
+  }
 });
 }
 
