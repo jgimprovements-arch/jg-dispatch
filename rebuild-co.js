@@ -39,7 +39,11 @@ async function loadChangeOrders() {
 }
 
 // ─── Render CO Section ──────────────────────────────────────────────────────
-function renderCoSection() {
+function renderCoSection(mode) {
+  // mode: 'full' (Contract Packet tab) shows trade table + all action buttons
+  //       'slim' (Work Orders tab) shows one-row summary per CO
+  // Defaults to 'full' for callers that don't pass a mode.
+  const isSlim = mode === 'slim';
   const p = state.activeProject || {};
   const contractSigned = !!p.contract_signed_at;
   const cos = state.changeOrders || [];
@@ -58,12 +62,6 @@ function renderCoSection() {
     `;
   }
 
-  // ── Slim CO summary ─────────────────────────────────────────────────────
-  // Rebuild page shows ONE LINE per CO (number, title, status pill, delta,
-  // View CO link). All authoring/sending/signing/deleting lives on the
-  // dedicated Contract Packet page. The trade-row CO badges + $ delta are
-  // surfaced separately by the WO Builder (renderCoScopeForTrade / KPI
-  // roll-ups). Unmark Contract Signed stays here because it's contract-level.
   const coStatusMeta = {
     draft:             { lbl: 'Draft',              color: 'var(--muted)' },
     sent_to_customer:  { lbl: 'Awaiting Customer',  color: 'var(--gold)' },
@@ -73,7 +71,10 @@ function renderCoSection() {
     complete:          { lbl: 'Complete',            color: 'var(--green)' },
   };
 
-  const cosHtml = cos.map(co => {
+  // ── Slim view: one-row summary per CO ──────────────────────────────────
+  // Used on the Work Orders tab where space is at a premium and the bucket
+  // workflow handles the actual scope/sub assignment.
+  const slimCosHtml = cos.map(co => {
     const meta = coStatusMeta[co.status] || { lbl: co.status, color: 'var(--muted)' };
     return `
       <div class="wobx-co-card" data-co-id="${esc(co.id)}" style="padding:10px 14px;">
@@ -89,17 +90,94 @@ function renderCoSection() {
     `;
   }).join('');
 
+  // ── Full view: trade table + complete action button set per CO ────────
+  // Used on the Contract Packet tab where the PM authors COs end-to-end:
+  // edit, send to customer for signature, mark signed, send to sub, view
+  // PDF, delete. Trade-grouped line items table shows the scope per CO.
+  const fullCosHtml = cos.map(co => {
+    const items = state.coLineItems[co.id] || [];
+    const meta = coStatusMeta[co.status] || { lbl: co.status, color: 'var(--muted)' };
+
+    // Group items by trade for the inner table
+    const tradeGroups = {};
+    items.forEach(item => {
+      const trade = item.trade_category || 'general';
+      if (!tradeGroups[trade]) tradeGroups[trade] = [];
+      tradeGroups[trade].push(item);
+    });
+
+    const tradeRowsHtml = Object.entries(tradeGroups).map(([trade, its]) => {
+      const label = (typeof MERGED_TRADE_GROUPS !== 'undefined' && MERGED_TRADE_GROUPS[trade]?.label) || trade;
+      const delta = its.reduce((s, i) => s + (Number(i.delta_amount) || 0), 0);
+      return `
+        <tr class="wobx-co-trade-row" data-co-id="${esc(co.id)}" data-trade="${esc(trade)}">
+          <td><b>${esc(label)}</b> <span class="wobx-co-badge">CO#${co.co_number}</span></td>
+          <td class="r">${its.length} item${its.length===1?'':'s'}</td>
+          <td class="r" style="color:${delta >= 0 ? 'var(--green)' : 'var(--red)'};font-weight:700;">${delta >= 0 ? '+' : '−'}${usdCompact(Math.abs(delta))}</td>
+        </tr>
+      `;
+    }).join('');
+
+    // Per-status action buttons
+    const canSendCustomer = co.status === 'draft';
+    const canMarkCustomerSigned = co.status === 'sent_to_customer';
+    const canSendSub = co.status === 'customer_signed';
+    const canEdit = co.status === 'draft';
+    const canDelete = co.status === 'draft';
+
+    return `
+      <div class="wobx-co-card" data-co-id="${esc(co.id)}">
+        <div class="wobx-co-card-head">
+          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+            <button class="wobx-co-toggle" data-co-id="${esc(co.id)}" title="Expand/collapse">▾</button>
+            <span class="wobx-co-title">CO #${co.co_number}${co.description ? ' — ' + esc(co.description) : ''}</span>
+            <span class="wobx-status-pill" style="background:${meta.color}20;color:${meta.color};border:1px solid ${meta.color}40;font-size:11px;padding:2px 8px;border-radius:20px;">${meta.lbl}</span>
+            <span style="color:var(--green);font-weight:700;">+${usdCompact(co.amount_delta)}</span>
+          </div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;">
+            ${canSendCustomer ? `<button class="btn primary" data-co-act="send-customer" data-co-id="${esc(co.id)}" style="font-size:12px;padding:5px 10px;">✉ Send to Customer</button>` : ''}
+            ${canMarkCustomerSigned ? `<button class="btn primary" data-co-act="mark-customer-signed" data-co-id="${esc(co.id)}" style="font-size:12px;padding:5px 10px;">✓ Mark Customer Signed</button>` : ''}
+            ${canSendSub ? `<button class="btn primary" data-co-act="send-sub" data-co-id="${esc(co.id)}" style="font-size:12px;padding:5px 10px;">✉ Send to Sub</button>` : ''}
+            <button class="btn ghost" data-co-act="view-pdf" data-co-id="${esc(co.id)}" style="font-size:12px;padding:5px 10px;">📄 View CO</button>
+            ${canEdit ? `<button class="btn ghost" data-co-act="edit" data-co-id="${esc(co.id)}" style="font-size:12px;padding:5px 10px;">✎ Edit</button>` : ''}
+            ${canDelete ? `<button class="btn ghost" data-co-act="delete" data-co-id="${esc(co.id)}" style="font-size:12px;padding:5px 10px;color:var(--red);border-color:var(--red);">🗑</button>` : ''}
+          </div>
+        </div>
+        <div class="wobx-co-body" data-co-body="${esc(co.id)}">
+          ${items.length ? `
+            <table class="wobx-trade-table" style="margin-top:8px;">
+              <thead><tr>
+                <th>Trade</th>
+                <th class="r">Items</th>
+                <th class="r">Delta</th>
+              </tr></thead>
+              <tbody>${tradeRowsHtml}</tbody>
+            </table>
+          ` : `<div style="padding:16px;color:var(--muted);font-size:13px;">No line items yet. Upload a change order estimate to populate.</div>`}
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  const cosHtml = isSlim ? slimCosHtml : fullCosHtml;
+
   const signedDate = new Date(p.contract_signed_at).toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' });
+  // Slim view doesn't show the Upload Change Order button — only the Contract
+  // Packet (full) view has it, since that's where COs are authored.
+  const headerActions = isSlim
+    ? ''
+    : `
+        <button class="btn ghost" id="markContractUnsignedBtn" style="font-size:11px;padding:4px 10px;color:var(--muted);">↩ Unmark</button>
+        <button class="btn primary" id="wobx_new_co" style="font-size:12px;padding:5px 12px;">+ Upload Change Order</button>
+      `;
+
   return `
     <div class="wobx-co-section">
       <div class="wobx-trades-title" style="margin-top:16px;border-top:2px solid var(--line);padding-top:16px;">
         <span>Change Orders <span style="font-size:11px;color:var(--green);font-weight:600;margin-left:8px;">✓ Contract signed ${signedDate}</span></span>
-        <span style="display:flex;gap:8px;align-items:center;">
-          <button class="btn ghost" id="markContractUnsignedBtn" style="font-size:11px;padding:4px 10px;color:var(--muted);">↩ Unmark</button>
-          <button class="btn primary" id="wobx_new_co" style="font-size:12px;padding:5px 12px;">+ Upload Change Order</button>
-        </span>
+        <span style="display:flex;gap:8px;align-items:center;">${headerActions}</span>
       </div>
-      ${cos.length ? cosHtml : `<div style="padding:16px 0;color:var(--muted);font-size:13px;">No change orders yet. Click <b>+ Upload Change Order</b> to add a supplement estimate.</div>`}
+      ${cos.length ? cosHtml : (isSlim ? '' : `<div style="padding:16px 0;color:var(--muted);font-size:13px;">No change orders yet. Click <b>+ Upload Change Order</b> to add a supplement estimate.</div>`)}
     </div>
   `;
 }
