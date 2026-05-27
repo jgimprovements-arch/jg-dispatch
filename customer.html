@@ -447,6 +447,16 @@
     min-width: 0;
   }
   .cust-doc-icon { font-size: 24px; flex-shrink: 0; }
+  .cust-doc-thumb {
+    flex-shrink: 0;
+    width: 44px;
+    height: 56px;
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 4px;
+    display: block;
+    object-fit: cover;
+  }
   .cust-doc-info { flex: 1; min-width: 0; }
   .cust-doc-name {
     font-weight: 600;
@@ -1569,13 +1579,17 @@ async function render() {
       <h3>Documents</h3>
       <div class="cust-doc-list">
         ${visibleOtherDocs.map(d => {
-          const isPdf = /\.pdf$/i.test(d.filename || '');
+          const isPdf = /\.pdf$/i.test(d.filename || '') || /pdf/i.test(d.mime_type || '');
           const sizeKb = d.file_size_bytes ? (d.file_size_bytes / 1024).toFixed(0) + ' KB' : '';
           const cleanName = (d.filename || '').replace(/^\d{8,}[_-]+/, '');
+          // For PDFs, render a thumbnail canvas. Non-PDFs keep the emoji.
+          const iconHtml = isPdf
+            ? `<canvas class="cust-doc-thumb" data-pdf-url="${escHtml(d.file_url)}"></canvas>`
+            : `<span class="cust-doc-icon">📄</span>`;
           return `
             <div class="cust-doc">
               <a href="${d.file_url}" target="_blank" class="cust-doc-main">
-                <span class="cust-doc-icon">${isPdf ? '📕' : '📄'}</span>
+                ${iconHtml}
                 <div class="cust-doc-info">
                   <div class="cust-doc-name">${escHtml(cleanName)}</div>
                   <div class="cust-doc-meta">${escHtml(d.category || '')}${sizeKb ? ' · ' + sizeKb : ''}</div>
@@ -1836,20 +1850,23 @@ async function render() {
   // Wire customer composer
   wireCustomerComposer(project);
 
-  // Render PDF thumbnails on draw cards. pdf.js is already loaded at top of
-  // file for journal attachments; we just point it at the draw PDFs and
-  // paint the first page to each canvas at thumbnail size.
-  document.querySelectorAll('canvas.draw-pdf-canvas[data-pdf-url]').forEach(canvas => {
+  // Render PDF thumbnails on draw cards + on every PDF in the Documents
+  // section. pdf.js is already loaded at top of file for journal
+  // attachments; we just point it at the URLs and paint the first page.
+  document.querySelectorAll('canvas.draw-pdf-canvas[data-pdf-url], canvas.cust-doc-thumb[data-pdf-url]').forEach(canvas => {
     renderDrawPdfThumb(canvas).catch(err => {
-      console.warn('[draw-thumb] render failed', err);
+      console.warn('[pdf-thumb] render failed', err);
       // Fallback to a generic icon if the PDF won't render in browser
       const ctx = canvas.getContext('2d');
-      canvas.width = 160; canvas.height = 200;
-      ctx.fillStyle = '#f1f5f9'; ctx.fillRect(0, 0, 160, 200);
+      const w = canvas.clientWidth || 160;
+      const h = canvas.clientHeight || 200;
+      canvas.width = w * 2; canvas.height = h * 2;
+      ctx.fillStyle = '#f1f5f9'; ctx.fillRect(0, 0, canvas.width, canvas.height);
       ctx.fillStyle = '#94a3b8';
-      ctx.font = '48px serif';
+      ctx.font = (w * 0.5) + 'px serif';
       ctx.textAlign = 'center';
-      ctx.fillText('📄', 80, 120);
+      ctx.textBaseline = 'middle';
+      ctx.fillText('📄', canvas.width / 2, canvas.height / 2);
     });
   });
 
@@ -1932,9 +1949,11 @@ async function renderPdfThumbsIn(scope) {
   }
 }
 
-// ─── Draw PDF thumbnail renderer ──────────────────────────────────────────
-// Paints page 1 of a PDF (request form or invoice) into a small canvas so
-// the customer sees a visual preview rather than a generic icon button.
+// ─── PDF thumbnail renderer (shared) ──────────────────────────────────────
+// Paints page 1 of a PDF into a canvas at thumbnail size. Used by both the
+// Draws section (large cards) and the Documents section (small row icons).
+// Target width is read from canvas.clientWidth or data-thumb-width, falling
+// back to 160px for compatibility with the original draw-card sizing.
 async function renderDrawPdfThumb(canvas) {
   if (!window.pdfjsLib) return;
   const url = canvas.dataset.pdfUrl;
@@ -1946,16 +1965,23 @@ async function renderDrawPdfThumb(canvas) {
   });
   const pdf = await loadingTask.promise;
   const page = await pdf.getPage(1);
-  // Scale to fit a 160px-wide thumb (height auto-scales). Render at 2x
-  // for sharpness on high-DPI screens, then display at 1x via CSS.
+  // Read the display width from the rendered CSS box. Falls back to data
+  // attribute or 160px. Render at 2x for HiDPI sharpness.
+  const cssWidth = canvas.clientWidth
+    || Number(canvas.dataset.thumbWidth)
+    || 160;
   const baseViewport = page.getViewport({ scale: 1 });
-  const targetWidth = 160;
-  const scale = (targetWidth * 2) / baseViewport.width;
+  const scale = (cssWidth * 2) / baseViewport.width;
   const viewport = page.getViewport({ scale });
   canvas.width = viewport.width;
   canvas.height = viewport.height;
-  canvas.style.width = (viewport.width / 2) + 'px';
-  canvas.style.height = (viewport.height / 2) + 'px';
+  // Only set CSS sizing if the canvas didn't already have a fixed size from
+  // its parent stylesheet. Doc-list thumbs use fixed 44x56 from CSS; draw
+  // cards rely on canvas-element sizing.
+  if (!canvas.style.width) {
+    canvas.style.width = (viewport.width / 2) + 'px';
+    canvas.style.height = (viewport.height / 2) + 'px';
+  }
   const ctx = canvas.getContext('2d');
   await page.render({ canvasContext: ctx, viewport }).promise;
 }
