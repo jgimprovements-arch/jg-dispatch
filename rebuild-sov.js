@@ -975,8 +975,13 @@ submitBtn.addEventListener('click', async () => {
 
     const fromEmail = p.albi_pm_email || 'office@jg-restoration.com';
     try {
+      // no-cors mode skips the preflight that Zapier's hook doesn't allow.
+      // Response is opaque (can't read status), so this is fire-and-forget.
+      // If the email fails downstream, PM can resend from the same modal —
+      // status is already flipped, draw is already requested in the DB.
       await fetch('https://hooks.zapier.com/hooks/catch/12653197/uvule41/', {
         method: 'POST',
+        mode: 'no-cors',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           channel: 'email',

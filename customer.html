@@ -1228,6 +1228,8 @@ if (!token) {
     .on('postgres_changes', { event: '*', schema: 'public', table: 'rebuild_journal_entries' }, () => render())
     .on('postgres_changes', { event: '*', schema: 'public', table: 'rebuild_documents' }, () => render())
     .on('postgres_changes', { event: '*', schema: 'public', table: 'rebuild_selections' }, () => render())
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'rebuild_sov_draws' }, () => render())
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'rebuild_sov' }, () => render())
     .subscribe();
 }
 
@@ -1282,6 +1284,23 @@ async function render() {
     .order('created_at', { ascending: false });
   const selectionsArr = selections || [];
 
+  // Schedule of Values + draws (only show if SOV is past draft)
+  const { data: sovRow } = await sb.from('rebuild_sov')
+    .select('*')
+    .eq('project_id', project.id)
+    .in('status', ['customer_signed', 'active', 'complete'])
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  let sovDrawsArr = [];
+  if (sovRow) {
+    const { data: drws } = await sb.from('rebuild_sov_draws')
+      .select('*')
+      .eq('sov_id', sovRow.id)
+      .order('draw_num', { ascending: true });
+    sovDrawsArr = drws || [];
+  }
+
   const completedCount = phasesArr.filter(p => p.status === 'complete').length;
   const totalCount = phasesArr.length;
   const pct = totalCount ? Math.round((completedCount / totalCount) * 100) : 0;
@@ -1297,6 +1316,104 @@ async function render() {
     const page = sel.status === 'awaiting_customer_install' ? 'install_approval.html' : 'approval.html';
     return `${approvalBase}/${page}?t=${sel.customer_token}`;
   };
+
+  // ─── Schedule of Values / Draws section ───────────────────────────────────
+  // Read-only view of all draws + upload-back path for requested draws.
+  // Customer can: see status of every draw, download the PDF request + JG
+  // invoice for any requested draw, and upload the signed bank/lender form
+  // back. Upload writes to the sov-draws bucket and updates the draw row.
+  const drawStatusLabel = {
+    pending:   { lbl: 'Upcoming',     color: '#64748b', bg: 'rgba(100,116,139,.10)' },
+    requested: { lbl: 'Action Needed', color: '#d97706', bg: 'rgba(217,119,6,.12)' },
+    partial:   { lbl: 'Partially Paid', color: '#d97706', bg: 'rgba(217,119,6,.12)' },
+    paid:      { lbl: 'Paid',         color: '#16a34a', bg: 'rgba(22,163,74,.10)' },
+    waived:    { lbl: 'Waived',       color: '#64748b', bg: 'rgba(100,116,139,.10)' },
+    locked:    { lbl: 'Locked',       color: '#64748b', bg: 'rgba(100,116,139,.10)' },
+  };
+  const sovPaid = sovDrawsArr
+    .filter(d => d.status === 'paid')
+    .reduce((s, d) => s + Number(d.paid_amount || d.total_amount || 0), 0);
+  const sovRequested = sovDrawsArr
+    .filter(d => d.status === 'requested' || d.status === 'partial')
+    .reduce((s, d) => s + Number(d.total_amount || 0), 0);
+  const sovPending = sovDrawsArr
+    .filter(d => d.status === 'pending')
+    .reduce((s, d) => s + Number(d.total_amount || 0), 0);
+
+  const drawsHtml = (sovRow && sovDrawsArr.length) ? `
+    <div class="cust-section" id="draws">
+      <h3>Payment Schedule (Draws)</h3>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;margin:8px 0 14px;">
+        <div style="background:#f8fafc;padding:10px;border-radius:6px;">
+          <div style="font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.05em;">Contract</div>
+          <div style="font-size:16px;font-weight:700;color:#0f172a;">${fmtMoney(sovRow.contract_total)}</div>
+        </div>
+        <div style="background:rgba(22,163,74,.08);padding:10px;border-radius:6px;">
+          <div style="font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.05em;">Paid</div>
+          <div style="font-size:16px;font-weight:700;color:#16a34a;">${fmtMoney(sovPaid)}</div>
+        </div>
+        <div style="background:rgba(217,119,6,.10);padding:10px;border-radius:6px;">
+          <div style="font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.05em;">Requested</div>
+          <div style="font-size:16px;font-weight:700;color:#d97706;">${fmtMoney(sovRequested)}</div>
+        </div>
+        <div style="background:#f8fafc;padding:10px;border-radius:6px;">
+          <div style="font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.05em;">Upcoming</div>
+          <div style="font-size:16px;font-weight:700;color:#0f172a;">${fmtMoney(sovPending)}</div>
+        </div>
+      </div>
+      <div class="cust-sel-list">
+        ${sovDrawsArr.map(d => {
+          const meta = drawStatusLabel[d.status] || drawStatusLabel.pending;
+          const isRequested = d.status === 'requested' || d.status === 'partial';
+          const hasUpload = !!d.customer_upload_url;
+          return `
+            <div class="cust-sel-card${isRequested && !hasUpload ? ' pending' : (d.status === 'paid' ? ' approved' : '')}" data-draw-id="${escHtml(d.id)}">
+              <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap;">
+                <div style="flex:1;min-width:0;">
+                  <div style="font-weight:700;color:#0f172a;">Draw #${d.draw_num} · ${fmtMoney(d.total_amount)}</div>
+                  ${d.trigger_event ? `<div style="font-size:13px;color:#475569;margin-top:2px;">${escHtml(d.trigger_event)}</div>` : ''}
+                  ${d.requested_at ? `<div style="font-size:11px;color:#64748b;margin-top:4px;">Requested ${fmtSelDate(d.requested_at)}</div>` : ''}
+                  ${d.paid_at ? `<div style="font-size:11px;color:#16a34a;margin-top:4px;">Paid ${fmtSelDate(d.paid_at)}</div>` : ''}
+                </div>
+                <div style="background:${meta.bg};color:${meta.color};border:1px solid ${meta.color}55;font-size:11px;padding:3px 10px;border-radius:20px;font-weight:600;white-space:nowrap;">${meta.lbl}</div>
+              </div>
+              ${isRequested ? `
+                <div style="margin-top:10px;padding-top:10px;border-top:1px solid #e2e8f0;">
+                  ${d.request_note ? `<div style="background:#fff8e7;border-left:3px solid #f5a623;padding:8px 12px;border-radius:4px;margin-bottom:10px;font-size:13px;font-style:italic;">${escHtml(d.request_note)}</div>` : ''}
+                  <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px;">
+                    ${d.request_pdf_url ? `<a href="${escHtml(d.request_pdf_url)}" target="_blank" class="hero-pm-btn" style="font-size:12px;text-decoration:none;">📄 Draw Request PDF</a>` : ''}
+                    ${d.jg_invoice_url ? `<a href="${escHtml(d.jg_invoice_url)}" target="_blank" class="hero-pm-btn ghost" style="font-size:12px;text-decoration:none;">📄 JG Invoice</a>` : ''}
+                  </div>
+                  ${hasUpload ? `
+                    <div style="background:rgba(22,163,74,.08);border:1px solid rgba(22,163,74,.3);border-radius:6px;padding:10px 12px;font-size:13px;color:#166534;">
+                      ✓ Signed form uploaded ${fmtSelDate(d.customer_uploaded_at)}${d.customer_upload_name ? ` — <a href="${escHtml(d.customer_upload_url)}" target="_blank" style="color:#166534;">${escHtml(d.customer_upload_name)}</a>` : ''}
+                      <div style="margin-top:6px;font-size:11px;color:#475569;">Need to replace it? Upload again below.</div>
+                    </div>
+                    <div style="margin-top:8px;">
+                      <button class="hero-pm-btn ghost" data-draw-reupload="${escHtml(d.id)}" data-draw-token="${escHtml(d.request_token || '')}" style="font-size:12px;cursor:pointer;border:none;">📤 Upload a different file</button>
+                    </div>
+                  ` : `
+                    <div style="background:#fff8e7;border:1px dashed #f5a623;border-radius:6px;padding:12px;text-align:center;">
+                      <div style="font-size:13px;color:#0f172a;margin-bottom:8px;"><b>Action needed:</b> upload the signed Draw Request from your bank or lender</div>
+                      <label class="hero-pm-btn" style="display:inline-block;cursor:pointer;font-size:12px;">
+                        📤 Upload Signed Form
+                        <input type="file" data-draw-upload="${escHtml(d.id)}" data-draw-token="${escHtml(d.request_token || '')}" accept="application/pdf,image/*" style="display:none;">
+                      </label>
+                    </div>
+                  `}
+                </div>
+              ` : ''}
+              ${d.status === 'paid' && d.customer_upload_url ? `
+                <div style="margin-top:10px;padding-top:10px;border-top:1px solid #e2e8f0;font-size:12px;color:#64748b;">
+                  ✓ Bank form on file: <a href="${escHtml(d.customer_upload_url)}" target="_blank" style="color:#64748b;">${escHtml(d.customer_upload_name || 'view')}</a>
+                </div>
+              ` : ''}
+            </div>
+          `;
+        }).join('')}
+      </div>
+    </div>
+  ` : '';
   const selectionsHtml = selectionsArr.length ? `
     <div class="cust-section">
       <h3>Material Selections</h3>
@@ -1677,6 +1794,7 @@ async function render() {
       </div>
     </div>
 
+    ${drawsHtml}
     ${selectionsHtml}
     ${extLinksHtml}
     ${photosHtml}
@@ -1687,6 +1805,27 @@ async function render() {
 
   // Wire customer composer
   wireCustomerComposer(project);
+
+  // Wire draw upload-back inputs (one listener per file input on this render)
+  document.querySelectorAll('input[data-draw-upload]').forEach(input => {
+    input.addEventListener('change', e => handleDrawUpload(e, project));
+  });
+  document.querySelectorAll('button[data-draw-reupload]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const id = btn.dataset.drawReupload;
+      const token = btn.dataset.drawToken;
+      // Trigger a hidden file picker
+      const tmp = document.createElement('input');
+      tmp.type = 'file';
+      tmp.accept = 'application/pdf,image/*';
+      tmp.addEventListener('change', e => {
+        e.target.dataset.drawUpload = id;
+        e.target.dataset.drawToken = token;
+        handleDrawUpload(e, project);
+      });
+      tmp.click();
+    });
+  });
 
   // Wire journal expand/collapse + lazy PDF thumb render
   document.querySelectorAll('.cj-entry.collapsed, .cj-entry:not(.collapsed)').forEach(entry => {
@@ -1764,6 +1903,79 @@ async function renderPdfThumbsIn(scope) {
     } catch (e) {
       console.warn('PDF thumb failed', url, e);
     }
+  }
+}
+
+// ─── Draw upload-back handler ─────────────────────────────────────────────
+// Customer uploads signed bank/lender form for a requested draw. Writes the
+// file to sov-draws bucket scoped by request_token, then updates the draw
+// row with the URL + filename + timestamp. PM is notified via the realtime
+// subscription on rebuild_sov_draws (fires renderDetail() on rebuild.html).
+async function handleDrawUpload(e, project) {
+  const input = e.target;
+  const f = input.files && input.files[0];
+  if (!f) return;
+  const drawId = input.dataset.drawUpload;
+  const token = input.dataset.drawToken;
+  if (!drawId || !token) {
+    alert('Upload not available. Please refresh this page.');
+    return;
+  }
+  // Size guard — 25MB cap, bank forms are usually <2MB
+  if (f.size > 25 * 1024 * 1024) {
+    alert('File is too large (25MB max). Please compress or try a different file.');
+    return;
+  }
+  // Find the card to show progress inline
+  const card = input.closest('.cust-sel-card');
+  const dropEl = input.closest('div[style*="dashed"]') || card;
+  if (dropEl) dropEl.innerHTML = `<div style="font-size:13px;color:#475569;">Uploading ${escHtml(f.name)}…</div>`;
+
+  try {
+    const cleanName = f.name.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 80);
+    const path = `${project.id}/customer-uploads/${token}-${Date.now()}-${cleanName}`;
+    const { error: upErr } = await sb.storage.from('sov-draws').upload(path, f, {
+      contentType: f.type || 'application/octet-stream',
+      upsert: false,
+    });
+    if (upErr) throw upErr;
+    const publicUrl = sb.storage.from('sov-draws').getPublicUrl(path).data.publicUrl;
+
+    const { error: dbErr } = await sb.from('rebuild_sov_draws').update({
+      customer_upload_url: publicUrl,
+      customer_upload_name: f.name,
+      customer_uploaded_at: new Date().toISOString(),
+    }).eq('id', drawId).eq('request_token', token);
+    if (dbErr) throw dbErr;
+
+    // Optional: ping PM via Zapier so they get an email/Slack right away.
+    // Realtime sub on rebuild.html also fires renderDetail() automatically.
+    // no-cors so Zapier's hook accepts the POST without preflight.
+    try {
+      await fetch('https://hooks.zapier.com/hooks/catch/12653197/uvule41/', {
+        method: 'POST',
+        mode: 'no-cors',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          channel: 'email',
+          to_email: project.albi_pm_email || 'office@jg-restoration.com',
+          from_email: 'office@jg-restoration.com',
+          subject: `Customer uploaded signed draw form — ${project.customer_name || ''} ${project.albi_job_number || ''}`,
+          body_html: `<p>${escHtml(project.customer_name || 'Customer')} uploaded a signed draw form for their project at ${escHtml(project.property_address || '')}.</p><p><a href="${escHtml(publicUrl)}">View uploaded file: ${escHtml(f.name)}</a></p>`,
+          project_id: project.id,
+          albi_job_number: project.albi_job_number || '',
+        }),
+      });
+    } catch (notifyErr) {
+      console.warn('[draw-upload] PM notification failed (non-blocking):', notifyErr);
+    }
+
+    // Re-render — realtime listener also fires but this is faster.
+    await render();
+  } catch (err) {
+    console.error('[draw-upload] failed:', err);
+    alert('Upload failed: ' + (err.message || err) + '\n\nPlease try again or contact your project manager.');
+    await render();
   }
 }
 
