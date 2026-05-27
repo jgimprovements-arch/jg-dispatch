@@ -96,9 +96,10 @@ function renderCoSection() {
         <span>Change Orders <span style="font-size:11px;color:var(--green);font-weight:600;margin-left:8px;">✓ Contract signed ${signedDate}</span></span>
         <span style="display:flex;gap:8px;align-items:center;">
           <button class="btn ghost" id="markContractUnsignedBtn" style="font-size:11px;padding:4px 10px;color:var(--muted);">↩ Unmark</button>
+          <button class="btn primary" id="wobx_new_co" style="font-size:12px;padding:5px 12px;">+ Upload Change Order</button>
         </span>
       </div>
-      ${cos.length ? cosHtml : `<div style="padding:16px 0;color:var(--muted);font-size:13px;">No change orders yet. Manage change orders from the Contract Packet page.</div>`}
+      ${cos.length ? cosHtml : `<div style="padding:16px 0;color:var(--muted);font-size:13px;">No change orders yet. Click <b>+ Upload Change Order</b> to add a supplement estimate.</div>`}
     </div>
   `;
 }
