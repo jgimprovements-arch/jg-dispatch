@@ -442,7 +442,11 @@ function wireModal(doc) {
       // ── Change Order status cascade ──────────────────────────────────────
       // When a customer signs a CO, cascade:
       //   1. rebuild_change_orders — status → customer_signed
-      //   2. rebuild_sov_draws — lock the CO draw
+      //   2. rebuild_co_line_items — flip is_unassigned=false so WO Builder
+      //      surfaces the items (badges, $ delta, trade hints). Without this,
+      //      getActiveCoItemsByTrade() defensively skips every item and the
+      //      WO Builder shows $0 CO Delta even though the CO is signed.
+      //   3. rebuild_sov_draws — lock the CO draw
       if (doc.kind === 'change_order') {
         const { error: coErr } = await sb.from('rebuild_change_orders')
           .update({
@@ -455,15 +459,31 @@ function wireModal(doc) {
           console.error('[sign] CO status update failed:', coErr);
         }
 
-        // Lock the CO's SOV draw
+        // Look up the CO id once — reused for line-item flip and draw lock.
         const { data: coRows } = await sb.from('rebuild_change_orders')
           .select('id')
           .eq('signed_document_id', doc.id)
           .limit(1);
         if (coRows && coRows.length) {
+          const coId = coRows[0].id;
+
+          // Flip CO line items from is_unassigned=true → false so the WO
+          // Builder picks them up. This is the cascade the WO Builder reads
+          // (see getActiveCoItemsByTrade in rebuild-co.js — items with
+          // is_unassigned=true are skipped as "CO signed but cascade hasn't
+          // run yet"). This IS that cascade.
+          const { error: liErr } = await sb.from('rebuild_co_line_items')
+            .update({ is_unassigned: false })
+            .eq('co_id', coId)
+            .eq('is_unassigned', true);
+          if (liErr) {
+            console.error('[sign] CO line items is_unassigned flip failed:', liErr);
+          }
+
+          // Lock the CO's SOV draw
           const { error: drawErr } = await sb.from('rebuild_sov_draws')
             .update({ status: 'locked' })
-            .eq('co_id', coRows[0].id);
+            .eq('co_id', coId);
           if (drawErr) {
             console.error('[sign] CO SOV draw lock failed:', drawErr);
           }
