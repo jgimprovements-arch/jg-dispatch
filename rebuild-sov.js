@@ -912,7 +912,11 @@ submitBtn.addEventListener('click', async () => {
         draw_num: d.draw_num,
         trigger_event: d.trigger_event,
         amount: Number(d.total_amount || 0),
-        status: d.status,
+        // The draw being requested right now hasn't had its DB status flipped
+        // yet — that happens after the worker returns. Override here so the
+        // rendered PDF correctly shows this draw as "requested" instead of
+        // "pending" in the schedule table.
+        status: d.id === draw.id ? 'requested' : d.status,
       })),
     };
 
@@ -994,19 +998,19 @@ submitBtn.addEventListener('click', async () => {
       body: `
         <p>Hi ${esc(p.customer_name || 'there')},</p>
         <p>We've completed the milestone for <b>Draw #${draw.draw_num}</b>${draw.trigger_event ? ' (' + esc(draw.trigger_event) + ')' : ''} on your project at ${esc(p.property_address || '')}. The progress draw amount of <b>${usd(draw.total_amount)}</b> is now due.</p>
-        <p><b>Attached:</b></p>
+        <p><b>Attached for your records:</b></p>
         <ul style="margin:6px 0 12px 18px;padding:0;">
           <li>JG Restoration invoice</li>
-          <li>Progress Draw Request form (for your bank or lender)</li>
+          <li>Progress Draw Request summary</li>
         </ul>
-        <p>Please forward the Draw Request to your bank or lender. Once they sign and return it to you, please <b>upload it back to us</b> using the project portal link below so we can keep your project moving without delay.</p>
+        <p>You can also view both documents anytime in your project portal.</p>
         ${note ? `<p style="background:#fff8e7;border-left:3px solid #f5a623;padding:10px 14px;margin:12px 0;font-style:italic;">${esc(note)}</p>` : ''}
         <p>If you have any questions, just reply to this email or call your project manager.</p>
       `,
-      ctaLabel: 'View Project & Upload Signed Form',
+      ctaLabel: 'View Project Portal',
       ctaUrl: customerLink,
       signoff: p.albi_pm_name ? `— ${p.albi_pm_name}, Project Manager<br>JG Restoration` : '— JG Restoration',
-    }) : `<p>Draw #${draw.draw_num} (${usd(draw.total_amount)}) request — open ${customerLink} to view and upload the signed form back.</p>`;
+    }) : `<p>Draw #${draw.draw_num} (${usd(draw.total_amount)}) request — view at ${customerLink}.</p>`;
 
     const fromEmail = p.albi_pm_email || 'office@jg-restoration.com';
     const fromName = p.albi_pm_name || 'JG Restoration';
