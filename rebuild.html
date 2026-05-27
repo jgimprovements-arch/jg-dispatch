@@ -2514,13 +2514,31 @@ function renderDetail() {
     </div>
 
     <div class="kpis">
-      <div class="kpi">
-        <div class="label">Estimated</div>
-        <div class="value">${p.estimated_revenue ? '$' + Number(p.estimated_revenue).toLocaleString(undefined,{maximumFractionDigits:0}) : '—'}</div>
-        <div class="sub">revenue</div>
-      </div>
       ${(() => {
-        // BUDGETED: prefer manual project.budget_revenue, fall back to WO Builder rollup once the user has built it
+        // Estimated reflects the live Schedule of Values contract_total —
+        // that's the post-CO consolidated number. When the SOV gets
+        // superseded after a CO, its contract_total automatically includes
+        // both original scope + CO delta, so it's the single source of
+        // truth for what we're billing the customer.
+        // Falls back to project.estimated_revenue (Albi-synced) only if no
+        // SOV exists yet (early stage projects).
+        const sovTotal = state.sov ? Number(state.sov.contract_total || 0) : 0;
+        const useSov = sovTotal > 0;
+        const estimatedValue = useSov ? sovTotal : (p.estimated_revenue ? Number(p.estimated_revenue) : null);
+        const estimatedSub = useSov ? 'contract (incl. COs)' : 'revenue';
+        return `
+          <div class="kpi">
+            <div class="label">Estimated</div>
+            <div class="value">${estimatedValue ? '$' + Number(estimatedValue).toLocaleString(undefined,{maximumFractionDigits:0}) : '—'}</div>
+            <div class="sub">${estimatedSub}</div>
+          </div>
+        `;
+      })()}
+      ${(() => {
+        // BUDGETED is internal cost target (what we plan to spend on subs +
+        // materials to hit our margin). NOT the same as Estimated revenue.
+        // Prefer manual project.budget_revenue, fall back to WO Builder
+        // rollup. SOV total is NOT used here — different concept.
         let budgetedValue = p.budget_revenue ? Number(p.budget_revenue) : null;
         let budgetedSource = 'manual';
         let budgetedMargin = p.budgeted_gross_margin_pct ? Number(p.budgeted_gross_margin_pct) : null;
