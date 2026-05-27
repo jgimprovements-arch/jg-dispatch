@@ -6135,6 +6135,44 @@ function wireWoDetailModal(tradeKey) {
     });
   });
 
+  // ─── CO line item trade reassignment ────────────────────────────────────
+  // Each CO row in the "Change Order Scope" section has a per-row trade
+  // dropdown. Changing it updates rebuild_co_line_items.trade_category so
+  // the item moves to a different merged trade group on next render.
+  // Disabled when the WO is already locked (item has converted_to_wo_id)
+  // or when the WO is locked overall — see render hint.
+  document.querySelectorAll('.wobx-co-trade-row-select').forEach(sel => {
+    let lastValue = sel.value;
+    sel.addEventListener('change', async () => {
+      const coItemId = sel.dataset.coItemId;
+      const newTradeCategory = sel.value;
+      if (!coItemId || !newTradeCategory) return;
+      sel.disabled = true;
+      try {
+        const { error } = await sb.from('rebuild_co_line_items')
+          .update({ trade_category: newTradeCategory })
+          .eq('id', coItemId);
+        if (error) throw error;
+        // Reload COs so state.coLineItems reflects the new trade_category
+        if (typeof loadChangeOrders === 'function') await loadChangeOrders();
+        // Re-aggregate WO Builder rollup so revenue/budget/margin move with the item
+        if (typeof loadWoBudget === 'function') await loadWoBudget();
+        if (typeof refreshBudgetSummary === 'function') await refreshBudgetSummary();
+        toast('✓ CO item reassigned');
+        // Re-render: close modal, redraw tab, reopen this same trade modal
+        const tradeLabel = MERGED_TRADE_GROUPS[tradeKey]?.label || (tradeKey === '__unassigned__' ? 'Unassigned' : tradeKey);
+        closeWoDetailModal();
+        renderTabContent();
+        setTimeout(() => openWoDetailModal(tradeKey, tradeLabel), 50);
+      } catch (e) {
+        console.error('CO trade reassign failed:', e);
+        toast('Reassign failed: ' + (e.message || e), true);
+        sel.value = lastValue;
+        sel.disabled = false;
+      }
+    });
+  });
+
   // Trade-level budget input (in modal totals strip) — saves to wo_builder_work_orders.trade_budget
   document.querySelectorAll('.wobx-trade-budget-input-modal').forEach(inp => {
     let originalValue = inp.value;
@@ -7298,12 +7336,19 @@ function renderCoScopeForTrade(tradeKey, wo) {
   const unprocessedCount = coItems.filter(i => !i.converted_to_wo_id).length;
   let hint = '';
   if (!isLocked) {
-    hint = `<div class="wobx-co-amend-banner">These ${coItems.length} CO line item${coItems.length===1?'':'s'} will be <b>folded into the new Work Order</b> when you click Convert. The WO scope will list them as a separate "Change Order Additions" section.</div>`;
+    hint = `<div class="wobx-co-amend-banner">These ${coItems.length} CO line item${coItems.length===1?'':'s'} will be <b>folded into the new Work Order</b> when you click Convert. <b>Reassign individual items to other trades using the dropdowns below before converting.</b></div>`;
   } else if (unprocessedCount > 0) {
-    hint = `<div class="wobx-co-amend-banner">⚠ <b>${unprocessedCount} CO item${unprocessedCount===1?'':'s'} not yet in the WO.</b> Click <b>Amend WO with CO Scope</b> below to bump the WO to v${(wo?.version || 1) + 1} and append the CO scope. The sub will see a "REVISED" banner on re-send.</div>`;
+    hint = `<div class="wobx-co-amend-banner">⚠ <b>${unprocessedCount} CO item${unprocessedCount===1?'':'s'} not yet in the WO.</b> Click <b>Amend WO with CO Scope</b> below to bump the WO to v${(wo?.version || 1) + 1} and append the CO scope. <i>Trade reassignment is locked once items are in a converted WO.</i></div>`;
   } else {
     hint = `<div class="wobx-co-amend-banner" style="background:#F0FDF4;border-left-color:#16A34A;color:#14532D;">✓ All CO items above already folded into this WO (v${wo?.version || 1}). Re-send the WO PDF if the sub doesn't have the latest version.</div>`;
   }
+
+  // Trade options for the per-row dropdown. Pulls all merged trade groups
+  // sorted by their sort order. Items can be reassigned only when WO is not
+  // yet locked (i.e. before Amend WO with CO Scope is clicked).
+  const tradeOptions = Object.entries(MERGED_TRADE_GROUPS || {})
+    .sort((a, b) => (a[1].sort || 99) - (b[1].sort || 99))
+    .map(([key, g]) => ({ key, label: g.label, firstCat: g.categories[0] }));
 
   const groupsHtml = Object.values(byCo).sort((a, b) => a.co_number - b.co_number).map(g => {
     const groupDelta = g.items.reduce((s, i) => s + (Number(i.delta_amount) || 0), 0);
@@ -7313,6 +7358,25 @@ function renderCoScopeForTrade(tradeKey, wo) {
       const inWoBadge = inWo ? '<span class="co-item-new" style="background:#DCFCE7;color:#14532D;">IN WO</span>' : '';
       const qty = i.qty != null ? `${i.qty} ${i.unit || ''}` : '—';
       const delta = Number(i.delta_amount) || 0;
+      // The current item's merged trade key — used to mark the dropdown's
+      // selected option. Falls back to the raw trade_category if no merged
+      // group matches.
+      const currentMergedKey = (typeof mergedGroupFor === 'function')
+        ? mergedGroupFor(i.trade_category || 'general')
+        : (i.trade_category || 'general');
+      // Reassignment dropdown — disabled once item is in a locked WO
+      const dropdownDisabled = inWo || isLocked;
+      const dropdown = `
+        <select class="wobx-co-trade-row-select"
+                data-co-item-id="${esc(i.id)}"
+                data-current-trade="${esc(i.trade_category || '')}"
+                ${dropdownDisabled ? 'disabled' : ''}
+                title="${dropdownDisabled ? 'Trade reassignment locked — item is already in a converted WO' : 'Reassign this CO line item to a different trade'}">
+          ${tradeOptions.map(opt =>
+            `<option value="${esc(opt.firstCat)}" ${opt.key === currentMergedKey ? 'selected' : ''}>${esc(opt.label)}</option>`
+          ).join('')}
+        </select>
+      `;
       return `
         <tr>
           <td>${esc(i.description || '')}${newBadge}${inWoBadge}</td>
@@ -7320,6 +7384,7 @@ function renderCoScopeForTrade(tradeKey, wo) {
           <td style="text-align:right;color:var(--muted);font-size:11px;">${i.original_amount > 0 ? '$' + Number(i.original_amount).toLocaleString(undefined,{minimumFractionDigits:2}) : '—'}</td>
           <td style="text-align:right;">$${Number(i.new_amount || 0).toLocaleString(undefined,{minimumFractionDigits:2})}</td>
           <td style="text-align:right;color:${delta >= 0 ? '#16A34A' : '#DC2626'};font-weight:700;">${delta >= 0 ? '+' : '−'}$${Math.abs(delta).toLocaleString(undefined,{minimumFractionDigits:2})}</td>
+          <td>${dropdown}</td>
         </tr>
       `;
     }).join('');
@@ -7336,6 +7401,7 @@ function renderCoScopeForTrade(tradeKey, wo) {
               <th style="text-align:right;">Original</th>
               <th style="text-align:right;">New</th>
               <th style="text-align:right;">Delta</th>
+              <th>Trade</th>
             </tr>
           </thead>
           <tbody>${rows}</tbody>
