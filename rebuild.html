@@ -2575,11 +2575,39 @@ function renderDetail() {
         <div class="value">${p.paid_amount ? '$' + Number(p.paid_amount).toLocaleString(undefined,{maximumFractionDigits:0}) : '—'}</div>
         <div class="sub">${p.actual_revenue && p.paid_amount ? Math.round((p.paid_amount / p.actual_revenue) * 100) + '% of billed' : 'collected'}</div>
       </div>
-      <div class="kpi">
-        <div class="label">Margin</div>
-        <div class="value" style="color:${p.gross_margin_pct >= 30 ? 'var(--green)' : p.gross_margin_pct >= 15 ? 'var(--amber)' : 'var(--red)'};">${p.gross_margin_pct != null ? Number(p.gross_margin_pct).toFixed(1) + '%' : '—'}</div>
-        <div class="sub">${p.gross_profit ? '$' + Number(p.gross_profit).toLocaleString(undefined,{maximumFractionDigits:0}) + ' GP' : 'gross'}</div>
-      </div>
+      ${(() => {
+        // Margin reads from live QB actuals (same source as the Financials
+        // tab) so the two cards always match. Falls back to Albi-synced
+        // p.gross_margin_pct only when QB hasn't been pulled yet.
+        const a = state.qbActuals;
+        let marginPct = null;
+        let gpDollars = null;
+        let marginSource = 'no data';
+        if (a) {
+          const revenue = a.invoices_total != null ? Number(a.invoices_total) : 0;
+          const cost = a.total_cost != null ? Number(a.total_cost) : 0;
+          gpDollars = a.gross_profit != null ? Number(a.gross_profit) : (revenue - cost);
+          marginPct = a.margin_pct != null ? Number(a.margin_pct) : (revenue > 0 ? (gpDollars / revenue * 100) : null);
+          marginSource = 'QB';
+        }
+        if (marginPct == null && p.gross_margin_pct != null) {
+          marginPct = Number(p.gross_margin_pct);
+          gpDollars = p.gross_profit ? Number(p.gross_profit) : null;
+          marginSource = 'Albi';
+        }
+        const color = marginPct == null ? 'var(--muted)' : marginPct >= 30 ? 'var(--green)' : marginPct >= 15 ? 'var(--amber)' : 'var(--red)';
+        const valueText = marginPct != null ? marginPct.toFixed(1) + '%' : '—';
+        const subText = gpDollars != null
+          ? '$' + Number(gpDollars).toLocaleString(undefined,{maximumFractionDigits:0}) + ' GP'
+          : marginSource;
+        return `
+          <div class="kpi">
+            <div class="label">Margin</div>
+            <div class="value" style="color:${color};">${valueText}</div>
+            <div class="sub">${subText}</div>
+          </div>
+        `;
+      })()}
     </div>
 
     <div class="kpis" style="grid-template-columns:repeat(5, 1fr);">
