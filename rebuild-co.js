@@ -123,7 +123,7 @@ function renderCoSection(mode) {
     const canMarkCustomerSigned = co.status === 'sent_to_customer';
     const canSendSub = co.status === 'customer_signed';
     const canEdit = co.status === 'draft';
-    const canDelete = co.status === 'draft';
+    const canDelete = co.status === 'draft' || co.status === 'sent_to_customer';
 
     return `
       <div class="wobx-co-card" data-co-id="${esc(co.id)}">
