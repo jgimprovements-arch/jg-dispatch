@@ -655,31 +655,71 @@ async function processCoUpload(estimateFile, componentsFile, coNum, title, budge
     // multiple rooms (e.g. "Toilet" in Bathroom + Kitchen). Including unit
     // catches qty/unit mismatches; including room (when populated by Xact)
     // distinguishes the same scope item across rooms.
-    function matchKey(item) {
+    //
+    // Two-pass match: strict (desc|unit|room) first, then loose (desc|unit)
+    // for items where room is missing on one side. The CO upload's parsed
+    // items can have room=null even when the original has it populated, so
+    // strict-only matching false-positives them as "new" items.
+    function strictKey(item) {
       const desc = (item.description || '').trim().toLowerCase();
       const unit = (item.unit || '').trim().toLowerCase();
       const room = (item.room || '').trim().toLowerCase();
       return `${desc}|${unit}|${room}`;
     }
+    function looseKey(item) {
+      const desc = (item.description || '').trim().toLowerCase();
+      const unit = (item.unit || '').trim().toLowerCase();
+      return `${desc}|${unit}`;
+    }
 
-    const origLookup = {};
+    // Build both lookups — strict for primary match, loose for fallback
+    const origStrict = {};
+    const origLoose = {};
     (budget.items || []).forEach(item => {
-      const key = matchKey(item);
-      if (!origLookup[key]) origLookup[key] = [];
-      origLookup[key].push(item);
+      const sk = strictKey(item);
+      const lk = looseKey(item);
+      if (!origStrict[sk]) origStrict[sk] = [];
+      origStrict[sk].push(item);
+      if (!origLoose[lk]) origLoose[lk] = [];
+      origLoose[lk].push(item);
     });
-    const origConsumed = {};
+    const strictConsumed = {};
+    const looseConsumed = {};
 
     // Items in the new estimate
     newItems.forEach(item => {
-      const key = matchKey(item);
+      const sk = strictKey(item);
+      const lk = looseKey(item);
       const newAmt = Number(item.line_total || item.total || item.amount || 0);
-      const origList = origLookup[key] || [];
-      const consumedCount = origConsumed[key] || 0;
-      const orig = origList[consumedCount] || null;
+
+      // Try strict match first
+      let orig = null;
+      let matched = 'none';
+      const strictList = origStrict[sk] || [];
+      const strictCount = strictConsumed[sk] || 0;
+      if (strictList[strictCount]) {
+        orig = strictList[strictCount];
+        strictConsumed[sk] = strictCount + 1;
+        matched = 'strict';
+        // Also mark that we consumed one from the loose pool for consistency
+        const consumedLooseIdx = (origLoose[lk] || []).findIndex(i => i === orig);
+        if (consumedLooseIdx >= 0) {
+          // Bump the loose counter past this item so we don't double-match
+          looseConsumed[lk] = Math.max((looseConsumed[lk] || 0), consumedLooseIdx + 1);
+        }
+      }
+      // Fall back to loose match if strict missed
+      if (!orig) {
+        const looseList = origLoose[lk] || [];
+        const looseCount = looseConsumed[lk] || 0;
+        if (looseList[looseCount]) {
+          orig = looseList[looseCount];
+          looseConsumed[lk] = looseCount + 1;
+          matched = 'loose';
+        }
+      }
 
       if (orig) {
-        origConsumed[key] = consumedCount + 1;
         const origAmt = Number(orig.line_total || orig.total || orig.amount || 0);
         const delta = newAmt - origAmt;
         // Only show items that changed or are new — skip unchanged items
