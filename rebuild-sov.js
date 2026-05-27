@@ -942,11 +942,12 @@ submitBtn.addEventListener('click', async () => {
     // 3) File both PDFs into the project's Documents folder (Invoices
     // category, customer-visible). This makes them discoverable in the
     // Documents tab on rebuild.html and on customer.html. Insert is
-    // non-blocking — if it fails, the draw flow still completes.
+    // non-blocking — if it fails, the draw flow still completes, but the
+    // error is surfaced via toast + console.error so it's noticed.
     submitBtn.textContent = 'Filing documents…';
     try {
       const drawLabel = `Draw_${draw.draw_num}`;
-      await sb.from('rebuild_documents').insert([
+      const { error: docInsErr, data: docRows } = await sb.from('rebuild_documents').insert([
         {
           project_id: p.id,
           category: 'Invoices',
@@ -955,7 +956,7 @@ submitBtn.addEventListener('click', async () => {
           file_size_bytes: pickedFile.size,
           mime_type: 'application/pdf',
           uploaded_by_email: state.pmEmail || null,
-          uploaded_by_name: state.pmName || null,
+          uploaded_by_name: state.pmName || state.pmEmail || null,
           customer_visible: true,
         },
         {
@@ -966,12 +967,23 @@ submitBtn.addEventListener('click', async () => {
           file_size_bytes: workerJson.byte_size || null,
           mime_type: 'application/pdf',
           uploaded_by_email: state.pmEmail || null,
-          uploaded_by_name: state.pmName || null,
+          uploaded_by_name: state.pmName || state.pmEmail || null,
           customer_visible: true,
         },
-      ]);
+      ]).select();
+      if (docInsErr) {
+        console.error('[sov] rebuild_documents insert returned error:', docInsErr);
+        toast('Draw sent — but filing to Documents failed: ' + (docInsErr.message || 'unknown'));
+      } else {
+        console.log('[sov] filed', docRows?.length || 0, 'draw PDFs to rebuild_documents');
+        // Refresh the docs tab so the new files appear without a page reload.
+        if (typeof loadDocuments === 'function') {
+          try { await loadDocuments(); } catch (_) { /* non-blocking */ }
+        }
+      }
     } catch (docErr) {
-      console.warn('[sov] document folder insert failed (non-blocking):', docErr);
+      console.error('[sov] document folder insert threw:', docErr);
+      toast('Draw sent — but filing to Documents threw: ' + (docErr.message || docErr));
     }
 
     // 4) Flip draw status + persist URLs
