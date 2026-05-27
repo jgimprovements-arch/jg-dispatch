@@ -421,8 +421,8 @@ function openCoUploadModal() {
       <input id="co_title_input" style="width:100%;padding:8px;border:1px solid var(--line);border-radius:6px;font-size:13px;margin:4px 0 12px;box-sizing:border-box;" value="${defaultTitle}">
       <label style="font-size:12px;font-weight:600;color:var(--navy);">Estimate Type</label>
       <div style="display:flex;gap:8px;margin:6px 0 14px;" id="co_est_type_btns">
-        <button type="button" class="btn" id="co_type_standalone" style="font-size:11px;padding:6px 12px;border:2px solid var(--orange);background:rgba(232,116,60,.08);color:var(--navy);font-weight:600;">Standalone CO estimate</button>
-        <button type="button" class="btn" id="co_type_diff" style="font-size:11px;padding:6px 12px;border:2px solid var(--line);background:transparent;color:var(--muted);">Updated full estimate (diff)</button>
+        <button type="button" class="btn" id="co_type_standalone" style="font-size:11px;padding:6px 12px;border:2px solid var(--line);background:transparent;color:var(--muted);">Standalone CO estimate</button>
+        <button type="button" class="btn" id="co_type_diff" style="font-size:11px;padding:6px 12px;border:2px solid var(--orange);background:rgba(232,116,60,.08);color:var(--navy);font-weight:600;">Updated full estimate (diff)</button>
       </div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px;">
         <div>
@@ -447,7 +447,7 @@ function openCoUploadModal() {
   `;
   document.body.appendChild(back);
   let estFile = null, compFile = null;
-  let selectedEstType = 'standalone';
+  let selectedEstType = 'diff';
   const processBtn = back.querySelector('#co_process_btn');
   const statusEl = back.querySelector('#co_parse_status');
 
@@ -571,11 +571,21 @@ async function processCoUpload(estimateFile, componentsFile, coNum, title, budge
     const newTotal = newItems.reduce((s, i) => s + (Number(i.line_total || i.total || i.amount || 0)), 0);
     totalDelta = newTotal - origTotal;
 
-    // Build lookup of original items for matching (display purposes only —
-    // totalDelta is already computed from the gross totals above).
+    // ── Composite match key: description + unit + room ─────────────────
+    // Matching on description alone collides when the same item appears in
+    // multiple rooms (e.g. "Toilet" in Bathroom + Kitchen). Including unit
+    // catches qty/unit mismatches; including room (when populated by Xact)
+    // distinguishes the same scope item across rooms.
+    function matchKey(item) {
+      const desc = (item.description || '').trim().toLowerCase();
+      const unit = (item.unit || '').trim().toLowerCase();
+      const room = (item.room || '').trim().toLowerCase();
+      return `${desc}|${unit}|${room}`;
+    }
+
     const origLookup = {};
     (budget.items || []).forEach(item => {
-      const key = (item.description || '').trim().toLowerCase();
+      const key = matchKey(item);
       if (!origLookup[key]) origLookup[key] = [];
       origLookup[key].push(item);
     });
@@ -583,7 +593,7 @@ async function processCoUpload(estimateFile, componentsFile, coNum, title, budge
 
     // Items in the new estimate
     newItems.forEach(item => {
-      const key = (item.description || '').trim().toLowerCase();
+      const key = matchKey(item);
       const newAmt = Number(item.line_total || item.total || item.amount || 0);
       const origList = origLookup[key] || [];
       const consumedCount = origConsumed[key] || 0;
