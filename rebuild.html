@@ -6304,6 +6304,359 @@ function closeWoDetailModal() {
   document.querySelectorAll('.wobx-modal-back').forEach(m => m.remove());
 }
 
+// ─── CO BUCKET MODAL ────────────────────────────────────────────────────────
+// Opens a list of all unassigned CO items (is_unassigned=true, not yet in
+// a WO). PM multi-selects items, picks a target Work Order from a dropdown,
+// clicks Move. The selected items are:
+//   - assigned trade_category = target WO's trade
+//   - is_unassigned = false
+//   - converted_to_wo_id = target WO's converted_work_order_id
+// Plus, the target WO is version-bumped IF it was already signed by sub
+// (status in sub_signed/converted_to_po/invoice_received). Draft/sent WOs
+// just absorb the items with no version change.
+//
+// Feature-flagged via state.platformConfig.feature_co_bucket_workflow.
+function openCoBucketModal() {
+  if (typeof getUnassignedCoItems !== 'function') return;
+  closeWoDetailModal();
+
+  const items = getUnassignedCoItems();
+  if (!items.length) {
+    toast('No items in the Change Orders bucket', false);
+    return;
+  }
+
+  // Build target WO list — all WOs (any status), including drafts
+  const wos = (state.woBudget?.wos || []).filter(w => w.converted_work_order_id);
+  // Hydrate with actual rebuild_work_orders rows for status info
+  const woMetaByWoId = {};
+  (state.workOrders || []).forEach(w => { woMetaByWoId[w.id] = w; });
+
+  const woOptions = wos.map(wbWo => {
+    const woMeta = woMetaByWoId[wbWo.converted_work_order_id] || {};
+    const tradeLabel = MERGED_TRADE_GROUPS[wbWo.trade_category]?.label || wbWo.trade_category;
+    const subName = woMeta.sub?.company_name
+      || (state.subs.find(s => s.id === woMeta.sub_id) || {}).company_name
+      || (state.employees || []).find(e => e.id === woMeta.employee_id)?.name
+      || '(no assignee)';
+    const statusLabel = woMeta.status || 'unknown';
+    const versionTag = woMeta.version > 1 ? ` v${woMeta.version}` : '';
+    return {
+      wbWoId: wbWo.id,
+      woId: wbWo.converted_work_order_id,
+      label: `${tradeLabel} — ${subName} (${statusLabel}${versionTag})`,
+      tradeCategory: wbWo.trade_category,
+      status: statusLabel,
+    };
+  });
+
+  // Group items by CO# for display
+  const byCo = {};
+  items.forEach(i => {
+    if (!byCo[i.co_number]) byCo[i.co_number] = { co_number: i.co_number, co_description: i.co_description, items: [] };
+    byCo[i.co_number].items.push(i);
+  });
+
+  const totalDelta = items.reduce((s, i) => s + (Number(i.delta_amount) || 0), 0);
+
+  const groupsHtml = Object.values(byCo).sort((a, b) => a.co_number - b.co_number).map(g => {
+    const rows = g.items.map(i => {
+      const aiTradeKey = (typeof mergedGroupFor === 'function') ? mergedGroupFor(i.trade_category || 'general') : (i.trade_category || 'general');
+      const aiTradeLabel = MERGED_TRADE_GROUPS[aiTradeKey]?.label || aiTradeKey;
+      const qty = i.qty != null ? `${i.qty} ${i.unit || ''}` : '—';
+      const delta = Number(i.delta_amount) || 0;
+      return `
+        <tr>
+          <td style="width:30px;"><input type="checkbox" class="co-bucket-item-cb" data-item-id="${esc(i.id)}"></td>
+          <td>
+            ${esc(i.description || '')}
+            ${i.is_new ? '<span class="co-item-new">NEW</span>' : ''}
+            <div style="font-size:11px;color:var(--muted);margin-top:2px;">AI suggests: <b>${esc(aiTradeLabel)}</b></div>
+          </td>
+          <td style="text-align:right;color:var(--muted);font-size:12px;">${esc(qty)}</td>
+          <td style="text-align:right;color:${delta >= 0 ? '#16A34A' : '#DC2626'};font-weight:700;">${delta >= 0 ? '+' : '−'}$${Math.abs(delta).toLocaleString(undefined,{minimumFractionDigits:2})}</td>
+        </tr>
+      `;
+    }).join('');
+    return `
+      <div class="wobx-co-scope-group">
+        <div class="wobx-co-scope-group-head">
+          <span class="co-num-badge">CO#${g.co_number}</span>${esc(g.co_description || 'Change Order')}
+        </div>
+        <table class="wobx-co-scope-table">
+          <thead>
+            <tr>
+              <th style="width:30px;"><input type="checkbox" id="co-bucket-select-all-${g.co_number}" data-co-number="${g.co_number}" title="Select all items in this CO"></th>
+              <th>Description</th>
+              <th style="text-align:right;">Qty</th>
+              <th style="text-align:right;">Delta</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    `;
+  }).join('');
+
+  const woDropdownOptions = woOptions.length
+    ? woOptions.map(o => `<option value="${esc(o.woId)}" data-trade-category="${esc(o.tradeCategory)}" data-status="${esc(o.status)}">${esc(o.label)}</option>`).join('')
+    : '<option value="" disabled>No Work Orders created yet — convert at least one trade first</option>';
+
+  const modalHtml = `
+    <div class="wobx-modal-back" id="co_bucket_modal_back">
+      <div class="wobx-modal" style="max-width:900px;">
+        <div class="wobx-modal-head">
+          <div style="display:flex;flex-direction:column;gap:4px;">
+            <div style="font-size:18px;font-weight:700;color:var(--navy);">📝 Change Orders Bucket</div>
+            <div style="font-size:13px;color:var(--muted);">${items.length} item${items.length===1?'':'s'} awaiting assignment · Total +${usdCompact(totalDelta)}</div>
+          </div>
+          <button class="wobx-modal-close" id="co_bucket_close">✕</button>
+        </div>
+        <div class="wobx-modal-body">
+          <div class="wobx-co-amend-banner" style="background:#FEF3C7;border-left-color:#D97706;color:#78350F;">
+            ⚠ Items in this bucket aren't in any Work Order yet. Select items, pick a target WO, and click <b>Move</b> to fold them into that WO's scope. Sub-signed WOs will be version-bumped and require re-sending.
+          </div>
+          ${groupsHtml}
+        </div>
+        <div class="wobx-modal-foot" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
+          <div style="display:flex;flex-direction:column;gap:4px;flex:1;min-width:280px;">
+            <label style="font-size:12px;color:var(--muted);font-weight:600;">MOVE SELECTED ITEMS TO:</label>
+            <select id="co_bucket_target_wo" style="padding:8px;font-size:14px;border:1px solid var(--line);border-radius:6px;">
+              <option value="">— pick a Work Order —</option>
+              ${woDropdownOptions}
+            </select>
+          </div>
+          <button class="wobx-modal-convert" id="co_bucket_move_btn" style="background:#E85D04;" disabled>⊕ Move 0 items</button>
+        </div>
+      </div>
+    </div>
+  `;
+
+  const wrap = document.createElement('div');
+  wrap.innerHTML = modalHtml;
+  document.body.appendChild(wrap.firstElementChild);
+
+  wireCoBucketModal();
+}
+
+function wireCoBucketModal() {
+  const back = document.getElementById('co_bucket_modal_back');
+  if (!back) return;
+
+  const closeBtn = document.getElementById('co_bucket_close');
+  const moveBtn = document.getElementById('co_bucket_move_btn');
+  const woSelect = document.getElementById('co_bucket_target_wo');
+  const itemCbs = document.querySelectorAll('.co-bucket-item-cb');
+
+  closeBtn?.addEventListener('click', () => back.remove());
+  back.addEventListener('click', (e) => { if (e.target === back) back.remove(); });
+
+  // "Select all in this CO" checkbox per-group
+  document.querySelectorAll('[id^="co-bucket-select-all-"]').forEach(masterCb => {
+    masterCb.addEventListener('change', () => {
+      const coNum = masterCb.dataset.coNumber;
+      // Find sibling rows (within same group) and toggle
+      const group = masterCb.closest('.wobx-co-scope-group');
+      group?.querySelectorAll('.co-bucket-item-cb').forEach(cb => {
+        cb.checked = masterCb.checked;
+      });
+      updateMoveButton();
+    });
+  });
+
+  function updateMoveButton() {
+    const selected = Array.from(itemCbs).filter(cb => cb.checked);
+    const hasTarget = woSelect.value && woSelect.value !== '';
+    moveBtn.textContent = `⊕ Move ${selected.length} item${selected.length===1?'':'s'}`;
+    moveBtn.disabled = selected.length === 0 || !hasTarget;
+  }
+
+  itemCbs.forEach(cb => cb.addEventListener('change', updateMoveButton));
+  woSelect.addEventListener('change', updateMoveButton);
+
+  moveBtn.addEventListener('click', async () => {
+    const selectedIds = Array.from(itemCbs).filter(cb => cb.checked).map(cb => cb.dataset.itemId);
+    if (!selectedIds.length) return;
+
+    const opt = woSelect.options[woSelect.selectedIndex];
+    const targetWoId = woSelect.value;
+    const targetTradeCategory = opt.dataset.tradeCategory;
+    const targetStatus = opt.dataset.status;
+    if (!targetWoId) return;
+
+    // Confirm
+    const subSignedStatuses = new Set(['sub_signed', 'converted_to_po', 'invoice_received']);
+    const willVersionBump = subSignedStatuses.has(targetStatus);
+    const confirmMsg = willVersionBump
+      ? `Move ${selectedIds.length} CO item${selectedIds.length===1?'':'s'} into this WO?\n\n` +
+        `⚠ This WO is already SIGNED by the sub. Moving items will:\n` +
+        `  • Supersede the current version\n` +
+        `  • Create a new draft v+1 with the CO scope appended\n` +
+        `  • You'll need to RE-SEND the WO to the sub for signature\n\n` +
+        `Continue?`
+      : `Move ${selectedIds.length} CO item${selectedIds.length===1?'':'s'} into this draft/unsent WO?\n\n` +
+        `Items will be folded into the WO scope. No version bump needed since the sub hasn't signed.\n\n` +
+        `Continue?`;
+    if (!confirm(confirmMsg)) return;
+
+    moveBtn.disabled = true;
+    moveBtn.textContent = '⏳ Moving…';
+
+    try {
+      const result = await moveCoBucketItemsToWo(selectedIds, targetWoId, targetTradeCategory, willVersionBump);
+      if (!result.ok) throw new Error(result.error);
+      const versionMsg = willVersionBump
+        ? ` · WO bumped to v${result.newVersion} — RE-SEND TO SUB`
+        : ' · folded into draft WO';
+      toast(`✓ Moved ${selectedIds.length} item${selectedIds.length===1?'':'s'}${versionMsg}`);
+      // Reload data and re-render
+      await loadChangeOrders();
+      await loadWorkOrders();
+      await loadWoBudget();
+      await refreshBudgetSummary();
+      back.remove();
+      renderTabContent();
+    } catch (e) {
+      console.error('Bucket move failed:', e);
+      toast('Move failed: ' + (e.message || e), true);
+      moveBtn.disabled = false;
+      moveBtn.textContent = `⊕ Move ${selectedIds.length} item${selectedIds.length===1?'':'s'}`;
+    }
+  });
+}
+
+// Bulk move a set of CO bucket items into a target WO.
+// If willVersionBump=true, supersedes the current WO and creates v+1 draft.
+// If false, just appends to the current WO's scope_text and updates total.
+async function moveCoBucketItemsToWo(itemIds, targetWoId, targetTradeCategory, willVersionBump) {
+  if (!itemIds?.length || !targetWoId) return { ok: false, error: 'Missing items or target' };
+
+  // Fetch all selected items in full (to compute deltas + build scope text)
+  const { data: fullItems, error: fetchErr } = await sb.from('rebuild_co_line_items')
+    .select('*, rebuild_change_orders!inner(co_number, description, title)')
+    .in('id', itemIds);
+  if (fetchErr || !fullItems?.length) return { ok: false, error: 'Item fetch failed' };
+
+  // Fetch the target WO
+  const { data: currentWo, error: woFetchErr } = await sb.from('rebuild_work_orders')
+    .select('*')
+    .eq('id', targetWoId)
+    .single();
+  if (woFetchErr || !currentWo) return { ok: false, error: 'Target WO fetch failed' };
+
+  // Group items by CO# for the appended scope block
+  const byCo = {};
+  fullItems.forEach(i => {
+    const co = i.rebuild_change_orders || {};
+    const k = co.co_number;
+    if (!byCo[k]) byCo[k] = { co_number: k, co_id: i.co_id, co_description: co.description || co.title || '', items: [] };
+    byCo[k].items.push(i);
+  });
+
+  const today = new Date().toISOString().slice(0, 10);
+  const appendLines = ['', '', `═══════════════════════════════════════════════`, `CHANGE ORDER AMENDMENT (added ${today})`, `═══════════════════════════════════════════════`, ''];
+  Object.values(byCo).sort((a, b) => a.co_number - b.co_number).forEach(g => {
+    appendLines.push(`CO #${g.co_number}${g.co_description ? ' — ' + g.co_description : ''}`);
+    g.items.forEach(i => {
+      const qty = i.qty != null ? `${i.qty} ${i.unit || ''}` : '';
+      const newTag = i.is_new ? ' [NEW]' : ' [REVISED]';
+      const delta = Number(i.delta_amount) || 0;
+      const deltaTxt = (delta >= 0 ? '+$' : '−$') + Math.abs(delta).toLocaleString(undefined, { minimumFractionDigits: 2 });
+      appendLines.push(`  • ${i.description || ''}${newTag} — ${qty} (${deltaTxt})`);
+    });
+    appendLines.push('');
+  });
+  const newScopeText = (currentWo.scope_text || '') + '\n' + appendLines.join('\n').trim();
+
+  const totalDelta = fullItems.reduce((s, i) => s + (Number(i.delta_amount) || 0), 0);
+  const newTotal = Number((Number(currentWo.total_amount || 0) + totalDelta).toFixed(2));
+  const sourceCoId = Object.values(byCo).sort((a, b) => b.co_number - a.co_number)[0].co_id;
+
+  if (willVersionBump) {
+    // ─── Path A: Sub-signed WO → version bump ───
+    // 1. Mark current WO superseded
+    const { error: supErr } = await sb.from('rebuild_work_orders')
+      .update({ status: 'superseded' })
+      .eq('id', currentWo.id);
+    if (supErr) return { ok: false, error: 'Supersede failed: ' + supErr.message };
+
+    await sb.from('rebuild_work_order_history').insert({
+      work_order_id: currentWo.id,
+      action: 'superseded',
+      actor: state.pmEmail,
+      details: `Superseded by v${currentWo.version + 1} via CO bucket move (CO#${[...new Set(fullItems.map(i => i.rebuild_change_orders?.co_number))].join(', CO#')})`,
+    });
+
+    // 2. Create new draft v+1
+    const { data: newWoRow, error: newErr } = await sb.from('rebuild_work_orders').insert({
+      project_id: currentWo.project_id,
+      sub_id: currentWo.sub_id,
+      employee_id: currentWo.employee_id,
+      assignee_type: currentWo.assignee_type,
+      version: currentWo.version + 1,
+      status: 'draft',
+      scope_text: newScopeText,
+      total_amount: newTotal,
+      amount_source: 'wo_builder_co_bucket',
+      payment_terms: currentWo.payment_terms,
+      start_date: currentWo.start_date,
+      end_date: currentWo.end_date,
+      created_by_email: state.pmEmail,
+      created_by_name: state.pmName,
+      sent_to_email: currentWo.sent_to_email,
+      sent_to_phone: currentWo.sent_to_phone,
+      source_co_id: sourceCoId,
+    }).select().single();
+    if (newErr) {
+      await sb.from('rebuild_work_orders').update({ status: currentWo.status }).eq('id', currentWo.id);
+      return { ok: false, error: 'New version create failed: ' + newErr.message };
+    }
+
+    // 3. Repoint wo_builder_work_orders to new WO
+    await sb.from('wo_builder_work_orders').update({
+      converted_work_order_id: newWoRow.id,
+    }).eq('converted_work_order_id', currentWo.id);
+
+    // 4. Flip CO items
+    await sb.from('rebuild_co_line_items').update({
+      is_unassigned: false,
+      trade_category: targetTradeCategory,
+      converted_to_wo_id: newWoRow.id,
+    }).in('id', itemIds);
+
+    await sb.from('rebuild_work_order_history').insert({
+      work_order_id: newWoRow.id,
+      action: 'created',
+      actor: state.pmEmail,
+      details: `Created v${newWoRow.version} from CO bucket move · ${fullItems.length} CO items · +$${totalDelta.toFixed(2)} · RE-SEND REQUIRED`,
+    });
+
+    return { ok: true, newVersion: newWoRow.version, woId: newWoRow.id, delta: totalDelta };
+  } else {
+    // ─── Path B: Draft/sent WO → absorb without version bump ───
+    const { error: updErr } = await sb.from('rebuild_work_orders').update({
+      scope_text: newScopeText,
+      total_amount: newTotal,
+    }).eq('id', currentWo.id);
+    if (updErr) return { ok: false, error: 'WO update failed: ' + updErr.message };
+
+    await sb.from('rebuild_co_line_items').update({
+      is_unassigned: false,
+      trade_category: targetTradeCategory,
+      converted_to_wo_id: currentWo.id,
+    }).in('id', itemIds);
+
+    await sb.from('rebuild_work_order_history').insert({
+      work_order_id: currentWo.id,
+      action: 'co_absorbed',
+      actor: state.pmEmail,
+      details: `Absorbed ${fullItems.length} CO bucket items (CO#${[...new Set(fullItems.map(i => i.rebuild_change_orders?.co_number))].join(', CO#')}) · +$${totalDelta.toFixed(2)} · no version bump (WO not yet sub-signed)`,
+    });
+
+    return { ok: true, newVersion: currentWo.version, woId: currentWo.id, delta: totalDelta };
+  }
+}
+
 // JG Purchased Materials modal — shows all materials carved out from JG-supplies trades,
 // grouped by trade, sortable, with section totals. View-only for now.
 function openJgMaterialsModal() {
@@ -7082,10 +7435,10 @@ function renderWoBuilderSection(budget) {
               const isLocked = !!wbWo?.is_locked;
               const isSynthetic = !!t.isSynthetic;
               return `
-                <tr class="wobx-trade-row ${isLocked ? 'wobx-locked' : ''} ${isSynthetic ? 'wobx-synthetic-row' : ''} ${t.hasCoAdditions ? 'wobx-has-co' : ''} ${t.isCoOnly ? 'wobx-co-only' : ''}" ${(isLocked || isSynthetic) ? '' : 'draggable="true"'} data-trade="${esc(t.category)}" data-trade-label="${esc(t.label)}" data-locked="${isLocked ? '1' : '0'}">
+                <tr class="wobx-trade-row ${isLocked ? 'wobx-locked' : ''} ${isSynthetic ? 'wobx-synthetic-row' : ''} ${t.isCoBucket ? 'wobx-co-bucket-row' : ''} ${t.hasCoAdditions ? 'wobx-has-co' : ''} ${t.isCoOnly ? 'wobx-co-only' : ''}" ${(isLocked || isSynthetic) ? '' : 'draggable="true"'} data-trade="${esc(t.category)}" data-trade-label="${esc(t.label)}" data-locked="${isLocked ? '1' : '0'}">
                   <td>
-                    <b>${esc(t.label)}</b>${isLocked ? ' <span class="wobx-lock-pill">🔒 Locked</span>' : ''}${isSynthetic ? ' <span class="wobx-synthetic-pill">AUTO</span>' : ''}${t.hasCoAdditions ? (t.coNumbers || []).map(n => `<span class="wobx-co-row-badge" title="Change Order #${n} affects this trade">CO#${n}</span>`).join('') : ''}${t.isCoOnly ? ' <span class="wobx-co-only-pill" title="This trade exists only because of a Change Order">CO ADDITION</span>' : ''}
-                    <div class="wobx-row-hint">${isSynthetic ? 'Click to view materials list · paid to vendors' : `${t.itemCount} items${t.coItems?.length ? ` + ${t.coItems.length} CO item${t.coItems.length===1?'':'s'}` : ''} · click for detail${isLocked ? ' · WO created — re-open to amend with CO scope' : ' · drag to merge'}`}</div>
+                    <b>${esc(t.label)}</b>${isLocked ? ' <span class="wobx-lock-pill">🔒 Locked</span>' : ''}${isSynthetic && !t.isCoBucket ? ' <span class="wobx-synthetic-pill">AUTO</span>' : ''}${t.isCoBucket ? ' <span class="wobx-synthetic-pill" style="background:#FED7AA;color:#9A3412;">CO BUCKET</span>' : ''}${t.hasCoAdditions ? (t.coNumbers || []).map(n => `<span class="wobx-co-row-badge" title="Change Order #${n} affects this trade">CO#${n}</span>`).join('') : ''}${t.isCoOnly ? ' <span class="wobx-co-only-pill" title="This trade exists only because of a Change Order">CO ADDITION</span>' : ''}
+                    <div class="wobx-row-hint">${t.isCoBucket ? 'Click to assign these items to specific Work Orders' : (isSynthetic ? 'Click to view materials list · paid to vendors' : `${t.itemCount} items${t.coItems?.length ? ` + ${t.coItems.length} CO item${t.coItems.length===1?'':'s'}` : ''} · click for detail${isLocked ? ' · WO created — re-open to amend with CO scope' : ' · drag to merge'}`)}</div>
                   </td>
                   <td class="r">${(t.hours && !isSynthetic) ? t.hours.toFixed(1) : '—'}</td>
                   <td class="r">${usdCompact(t.revenue)}${t.coDelta ? `<div class="wobx-row-hint" style="margin-top:2px;color:var(--orange);font-weight:600;">incl. +${usdCompact(t.coDelta)} CO</div>` : ''}${isSynthetic ? '<div class="wobx-row-hint" style="margin-top:2px;">materials portion of contract</div>' : ''}</td>
@@ -7786,6 +8139,39 @@ function computeTradeRollup(budget) {
     tradeRows.sort((a, b) => (a.sort || 100) - (b.sort || 100));
   }
 
+  // ─── CO BUCKET (feature flag) ──────────────────────────────────────────
+  // When feature_co_bucket_workflow is on, unassigned CO items don't fan out
+  // into individual trade rows. They sit in a single synthetic "Change
+  // Orders" bucket row that the PM clicks to open the bucket modal and
+  // manually move items into specific WOs.
+  if (state.platformConfig?.feature_co_bucket_workflow === 'true' && typeof getUnassignedCoItems === 'function') {
+    const bucketItems = getUnassignedCoItems();
+    if (bucketItems.length) {
+      const bucketRevenue = bucketItems.reduce((s, i) => s + (Number(i.delta_amount) || 0), 0);
+      tradeRows.push({
+        category: '__co_bucket__',
+        label: `Change Orders (${bucketItems.length} item${bucketItems.length === 1 ? '' : 's'} awaiting assignment)`,
+        sort: 9000,                        // always near the bottom, just before Unassigned
+        itemCount: bucketItems.length,
+        grossRevenue: bucketRevenue,
+        revenue: bucketRevenue,
+        materialsCarveOut: 0,
+        xactMaterialsTotal: 0,
+        budget: 0,
+        materialsBudget: 0,
+        totalCost: 0,
+        jgSupplies: false,
+        budgetIsOverride: false,
+        profit: bucketRevenue,             // no budget yet so "profit" is the full delta
+        hours: 0,
+        suggestedPhaseId: null,
+        isSynthetic: true,
+        isCoBucket: true,                  // renderers can flag this row specially
+        bucketItems: bucketItems,
+      });
+    }
+  }
+
   return tradeRows;
 }
 
@@ -8082,6 +8468,11 @@ function wireWoBuilderControls() {
       if (e.target.closest('select, button, input')) return;
       if (row.dataset.justDragged === '1') {
         row.dataset.justDragged = '0';
+        return;
+      }
+      // CO bucket row → bucket modal
+      if (row.classList.contains('wobx-co-bucket-row')) {
+        openCoBucketModal();
         return;
       }
       // Synthetic JG Purchased Materials row → its own modal
@@ -11526,7 +11917,7 @@ function setupRealtime() {
 <script src="rebuild-pdf.js?v=2026.05.24-r1"></script>
 <script src="rebuild-sov.js?v=2026.05.27-r8"></script>
 <script src="rebuild-packet.js?v=2026.05.26-r1"></script>
-<script src="rebuild-co.js?v=2026.05.27-co-wo-r2"></script>
+<script src="rebuild-co.js?v=2026.05.27-co-bucket-r1"></script>
 <script src="rebuild-messages.js?v=2026.05.24-r1"></script>
 <script src="rebuild-documents.js?v=2026.05.24-r1"></script>
 <script src="rebuild-relationships.js?v=2026.05.20-r3"></script>

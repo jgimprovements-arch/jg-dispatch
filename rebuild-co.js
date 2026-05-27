@@ -147,12 +147,21 @@ function wireCoActions() {
           .update({ status: 'customer_signed', customer_signed_at: new Date().toISOString(), customer_signed_name: name })
           .eq('id', coId);
         if (error) { toast('Failed: ' + error.message); return; }
-        await sb.from('rebuild_co_line_items')
-          .update({ is_unassigned: false })
-          .eq('co_id', coId);
+        // Feature flag — when CO bucket workflow is on, items stay
+        // is_unassigned=true and the PM manually moves them from the
+        // Change Orders bucket into specific WOs (forces re-sign).
+        // When off, the legacy cascade fans items out to their guessed trades.
+        const useBucket = (state.platformConfig?.feature_co_bucket_workflow === 'true');
+        if (!useBucket) {
+          await sb.from('rebuild_co_line_items')
+            .update({ is_unassigned: false })
+            .eq('co_id', coId);
+        }
         await loadChangeOrders();
         await loadWoBudget();
-        toast(`CO #${co.co_number} customer signature recorded — items now available in WO Builder`);
+        toast(useBucket
+          ? `CO #${co.co_number} signed — items in Change Orders bucket, move to WO when ready`
+          : `CO #${co.co_number} customer signature recorded — items now available in WO Builder`);
         renderTabContent();
 
       } else if (act === 'send-sub') {
@@ -724,6 +733,37 @@ function getActiveCoItemsByTrade() {
   return out;
 }
 
+// Returns ALL active CO line items still waiting in the "Change Orders"
+// bucket — i.e. is_unassigned=true on a customer-signed-or-later CO, and
+// not yet converted to a WO. These are the items the PM needs to manually
+// assign to a Work Order via the new bucket modal.
+// Returns a flat array (not grouped by trade) since the bucket is one list.
+function getUnassignedCoItems() {
+  const out = [];
+  const cos = state.changeOrders || [];
+  const ACTIVE_STATUSES = new Set(['customer_signed', 'sent_to_sub', 'sub_signed', 'complete']);
+
+  cos.forEach(co => {
+    if (!ACTIVE_STATUSES.has(co.status)) return;
+    const items = state.coLineItems[co.id] || [];
+    items.forEach(item => {
+      if (!item.is_unassigned) return;          // already moved out of bucket
+      if (item.converted_to_wo_id) return;      // already in a WO
+      out.push({
+        ...item,
+        co_number: co.co_number,
+        co_id: co.id,
+        co_status: co.status,
+        co_description: co.description || co.title || '',
+      });
+    });
+  });
+
+  // Sort by CO# then description for stable display
+  out.sort((a, b) => (a.co_number - b.co_number) || (a.description || '').localeCompare(b.description || ''));
+  return out;
+}
+
 // Returns the dollar delta for a given merged trade key from all active COs.
 // Uses delta_amount (the generated column on rebuild_co_line_items).
 function getCoDeltaForMergedTrade(mergedTradeKey) {
@@ -767,3 +807,4 @@ window.sendCoToCustomer = sendCoToCustomer;
 window.getActiveCoItemsByTrade = getActiveCoItemsByTrade;
 window.getCoDeltaForMergedTrade = getCoDeltaForMergedTrade;
 window.getCoItemsForMergedTrade = getCoItemsForMergedTrade;
+window.getUnassignedCoItems = getUnassignedCoItems;
