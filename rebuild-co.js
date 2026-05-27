@@ -661,6 +661,29 @@ async function processCoUpload(estimateFile, componentsFile, coNum, title, budge
   })));
   if (itemErr) throw new Error('Failed to save CO items: ' + itemErr.message);
 
+  // ─── Save source PDFs to Documents folder under "Change Orders" ─────────
+  // Audit trail: file both the estimate and components PDFs that built this
+  // CO so the source data is preserved. Non-blocking — if file save fails
+  // the CO data is still good.
+  if (typeof JG?.saveProjectDocument === 'function') {
+    statusEl.textContent = 'Filing source PDFs...';
+    const coTag = `CO${String(coNum).padStart(2, '0')}`;
+    try {
+      await JG.saveProjectDocument(estimateFile, {
+        category: 'Change Orders',
+        customerVisible: false,
+        filenameOverride: `${coTag}_estimate_${estimateFile.name}`,
+      });
+      await JG.saveProjectDocument(componentsFile, {
+        category: 'Change Orders',
+        customerVisible: false,
+        filenameOverride: `${coTag}_components_${componentsFile.name}`,
+      });
+    } catch (docErr) {
+      console.warn('CO source PDF doc filing failed (non-blocking):', docErr);
+    }
+  }
+
   statusEl.textContent = 'Done!';
 }
 

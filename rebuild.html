@@ -1161,6 +1161,62 @@ JG.openMarkupOverlay = function(doc, onSave) {
   });
 };
 
+// ─── Reusable: save a File to the project's Documents folder ───────────────
+// Uploads the raw File object to the rebuild-documents storage bucket, then
+// inserts a rebuild_documents row pointing at it. Used by CO upload and
+// Xact estimate upload to file source PDFs for audit trail.
+//
+// Returns { ok: true, doc } on success, { ok: false, error } on failure.
+// Failures are logged but do NOT throw — the calling flow (CO parse, etc)
+// should continue even if the doc filing fails (data is more important).
+JG.saveProjectDocument = async function(file, opts = {}) {
+  if (!file || !state.activeProjectId) {
+    return { ok: false, error: 'Missing file or active project' };
+  }
+  const {
+    category = 'Documents',
+    customerVisible = false,
+    filenameOverride,
+  } = opts;
+
+  try {
+    const filename = filenameOverride || file.name || `document_${Date.now()}.pdf`;
+    const path = `projects/${state.activeProjectId}/${Date.now()}-${filename}`;
+
+    const { error: upErr } = await sb.storage.from('rebuild-documents').upload(path, file, {
+      contentType: file.type || 'application/pdf',
+      upsert: false,
+    });
+    if (upErr) throw upErr;
+
+    const { data: urlData } = sb.storage.from('rebuild-documents').getPublicUrl(path);
+
+    const { data: inserted, error: insErr } = await sb.from('rebuild_documents').insert({
+      project_id: state.activeProjectId,
+      category,
+      filename,
+      file_url: urlData.publicUrl,
+      file_size_bytes: file.size,
+      mime_type: file.type || 'application/pdf',
+      uploaded_by_email: state.pmEmail || null,
+      uploaded_by_name: state.pmName || null,
+      customer_visible: customerVisible,
+      push_status: 'pending',
+    }).select();
+    if (insErr) throw insErr;
+
+    const savedDoc = inserted?.[0];
+    // Refresh state.documents so the Documents tab reflects the new file immediately
+    if (typeof loadDocuments === 'function') await loadDocuments();
+    // Background push to Albi
+    if (savedDoc && typeof pushDocumentToAlbi === 'function') pushDocumentToAlbi(savedDoc);
+    return { ok: true, doc: savedDoc };
+  } catch (e) {
+    console.error('[saveProjectDocument] failed:', e);
+    return { ok: false, error: e.message || String(e) };
+  }
+};
+
 JG.collectProjectImages = function() {
   const isImg = name => /\.(jpg|jpeg|png|gif|webp|heic|heif)$/i.test(name || '');
   const out = [];
@@ -8980,6 +9036,27 @@ async function runWoBuilderParse(estimateFile, componentsFile) {
       uploadedByName: state.pmName,
     });
     toast(`✓ Parsed: ${result.summary.itemCount} items, margin ${result.summary.marginPct}%`);
+
+    // ─── File source PDFs to Documents under "Estimates" ────────────────
+    // Audit trail: preserves the original Xact estimate + components PDFs
+    // alongside the parsed line items. Non-blocking — parse succeeds even
+    // if the doc filing fails (data already in WO Builder).
+    if (typeof JG?.saveProjectDocument === 'function') {
+      try {
+        await JG.saveProjectDocument(estimateFile, {
+          category: 'Estimates',
+          customerVisible: false,
+          filenameOverride: `estimate_${estimateFile.name}`,
+        });
+        await JG.saveProjectDocument(componentsFile, {
+          category: 'Estimates',
+          customerVisible: false,
+          filenameOverride: `components_${componentsFile.name}`,
+        });
+      } catch (docErr) {
+        console.warn('Source PDF doc filing failed (non-blocking):', docErr);
+      }
+    }
   } catch (err) {
     console.error('WO Builder parse failed:', err);
     toast('Parse failed: ' + (err.message || err), true);
@@ -11917,7 +11994,7 @@ function setupRealtime() {
 <script src="rebuild-pdf.js?v=2026.05.24-r1"></script>
 <script src="rebuild-sov.js?v=2026.05.27-r8"></script>
 <script src="rebuild-packet.js?v=2026.05.26-r1"></script>
-<script src="rebuild-co.js?v=2026.05.27-co-bucket-r2"></script>
+<script src="rebuild-co.js?v=2026.05.27-co-bucket-r3"></script>
 <script src="rebuild-messages.js?v=2026.05.24-r1"></script>
 <script src="rebuild-documents.js?v=2026.05.24-r1"></script>
 <script src="rebuild-relationships.js?v=2026.05.20-r3"></script>
