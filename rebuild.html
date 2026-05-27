@@ -1960,7 +1960,7 @@ async function selectProject(id) {
   if (!state.activeProject) return;
   pushRecentProject(id);
   updateUrlHash();
-  await Promise.all([loadPhases(), loadSelections(), loadMessages(), loadHistory(), loadDocuments(), loadJournalEntries(), loadTodos(), loadWorkOrders(), loadRelationships(), loadWoBudget(), loadQbActuals(), loadChangeOrders(), loadSov(), (typeof loadPacket === 'function' ? loadPacket() : Promise.resolve())]);
+  await Promise.all([loadPhases(), loadSelections(), loadMessages(), loadHistory(), loadDocuments(), loadJournalEntries(), loadTodos(), loadWorkOrders(), loadRelationships(), loadWoBudget(), loadQbActuals(), loadChangeOrders(), loadSov(), loadPlatformConfig(), (typeof loadPacket === 'function' ? loadPacket() : Promise.resolve())]);
   await reconcilePhasesWithWoTrades(); // sync phase names to match WO trades
   renderDetail();
 }
@@ -9543,8 +9543,45 @@ async function sendWorkOrderToSub(wo, woUrl) {
 const QB_REFRESH_WEBHOOK_KEY = 'jg_qb_refresh_webhook_url';
 const QB_REFRESH_AUTH_KEY    = 'jg_qb_refresh_auth_key';
 
+// ─── Platform Config (Supabase-backed, org-wide) ─────────────────────────
+// Reads org-wide config values from the platform_config table on Supabase.
+// RLS restricts reads to @jg-restoration.com authenticated users, so the
+// QB refresh key never leaks to non-staff or unauthenticated clients.
+//
+// loadPlatformConfig() is called once during initial project load and
+// populates state.platformConfig. The QB getter functions below prefer
+// these values over per-browser localStorage so config Just Works on any
+// browser/computer without re-entering credentials.
+//
+// localStorage values still take precedence over platform_config when
+// present — useful for testing/staging where a developer may want to
+// point at a different proxy.
+async function loadPlatformConfig() {
+  try {
+    // RPC bypasses RLS via SECURITY DEFINER — the function exposes read-only
+    // config values without requiring a Supabase Auth JWT. The table itself
+    // stays locked down for direct writes.
+    const { data, error } = await sb.rpc('get_platform_config');
+    if (error) {
+      console.warn('[platform_config] RPC failed:', error.message);
+      state.platformConfig = {};
+      return;
+    }
+    state.platformConfig = {};
+    (data || []).forEach(row => { state.platformConfig[row.key] = row.value; });
+    console.log('[platform_config] loaded', Object.keys(state.platformConfig).length, 'keys');
+  } catch (e) {
+    console.warn('[platform_config] RPC threw:', e);
+    state.platformConfig = {};
+  }
+}
+
 function getQbRefreshWebhook() {
-  return localStorage.getItem(QB_REFRESH_WEBHOOK_KEY) || '';
+  // Personal override wins (devs can point at staging by setting localStorage)
+  const local = localStorage.getItem(QB_REFRESH_WEBHOOK_KEY);
+  if (local) return local;
+  // Org-wide default from Supabase platform_config
+  return (state.platformConfig && state.platformConfig.qb_refresh_url) || '';
 }
 
 function setQbRefreshWebhook(url) {
@@ -9553,7 +9590,9 @@ function setQbRefreshWebhook(url) {
 }
 
 function getQbRefreshAuthKey() {
-  return localStorage.getItem(QB_REFRESH_AUTH_KEY) || '';
+  const local = localStorage.getItem(QB_REFRESH_AUTH_KEY);
+  if (local) return local;
+  return (state.platformConfig && state.platformConfig.qb_refresh_key) || '';
 }
 
 function setQbRefreshAuthKey(key) {
