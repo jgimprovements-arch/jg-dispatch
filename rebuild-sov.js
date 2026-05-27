@@ -875,13 +875,14 @@ submitBtn.addEventListener('click', async () => {
     if (invErr) throw new Error('Invoice upload failed: ' + invErr.message);
     const invoiceUrl = sb.storage.from('sov-draws').getPublicUrl(invoicePath).data.publicUrl;
 
-    // 2) Call render worker to generate Progress Draw Request PDF
+    // 2) Call render worker to generate Progress Draw Request PDF.
+    // Worker uploads the PDF to rebuild-documents bucket itself and returns
+    // { ok, draw_pdf_url }. We only need to capture the URL.
     submitBtn.textContent = 'Rendering draw request…';
     const sov = state.sov || {};
     const draws = state.sovDraws || [];
     const paidToDate = draws.filter(d => d.status === 'paid').reduce((s, d) => s + Number(d.paid_amount || d.total_amount || 0), 0);
-    const renderPayload = {
-      type: 'draw_request',
+    const drawPayload = {
       draw: {
         id: draw.id,
         draw_num: draw.draw_num,
@@ -915,26 +916,24 @@ submitBtn.addEventListener('click', async () => {
       })),
     };
 
-    const workerRes = await fetch('https://jg-render-contract.josh-70f.workers.dev/render-draw-request', {
+    const workerRes = await fetch('https://jg-render-contract.josh-70f.workers.dev', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(renderPayload),
+      body: JSON.stringify({
+        type: 'draw_request',
+        project_id: p.id,
+        draw_payload: drawPayload,
+      }),
     });
     if (!workerRes.ok) {
       const errTxt = await workerRes.text().catch(() => '');
-      throw new Error('Render worker failed (' + workerRes.status + '): ' + errTxt.slice(0, 200));
+      throw new Error('Render worker HTTP ' + workerRes.status + ': ' + errTxt.slice(0, 200));
     }
-    const requestPdfBlob = await workerRes.blob();
-
-    // 3) Upload generated PDF
-    submitBtn.textContent = 'Saving request PDF…';
-    const reqPath = `${state.activeProjectId}/draw-${draw.draw_num}-${ts}-request.pdf`;
-    const { error: rErr } = await sb.storage.from('sov-draws').upload(reqPath, requestPdfBlob, {
-      contentType: 'application/pdf',
-      upsert: false,
-    });
-    if (rErr) throw new Error('Request PDF upload failed: ' + rErr.message);
-    const requestPdfUrl = sb.storage.from('sov-draws').getPublicUrl(reqPath).data.publicUrl;
+    const workerJson = await workerRes.json();
+    if (!workerJson.ok || !workerJson.draw_pdf_url) {
+      throw new Error('Render worker error: ' + (workerJson.error || 'no draw_pdf_url returned'));
+    }
+    const requestPdfUrl = workerJson.draw_pdf_url;
 
     // 4) Flip draw status + persist URLs
     submitBtn.textContent = 'Updating draw…';
