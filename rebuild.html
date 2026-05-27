@@ -130,6 +130,16 @@
     color: #C2410C;
     margin-bottom: 4px;
   }
+  /* Collapsible details panels (CO + History on the Contract Packet tab) */
+  .jg-collapsible > summary { user-select: none; }
+  .jg-collapsible > summary::-webkit-details-marker { display: none; }
+  .jg-collapsible > summary::marker { content: ''; }
+  .jg-collapsible[open] > summary .jg-collapsible-chev { transform: rotate(90deg); }
+  .jg-collapsible > summary .jg-collapsible-chev {
+    display: inline-block;
+    transition: transform 0.15s ease;
+  }
+  .jg-collapsible > summary:hover { background: #f8fafc; border-radius: 8px; }
 </style>
 </head>
 <body>
@@ -2644,11 +2654,14 @@ function renderDetail() {
 function renderTabContent() {
   const c = $('#tabContent');
   if (state.tab === 'packet') {
-    // Contract-first workflow: assemble SOV → CO → Packet → Xact Upload
+    // Order: SOV → Contract Packet → CO (collapsed) → Xact Parse → History (collapsed)
     const uploadHtml = renderPacketXactUpload();
     const packetHtml = (typeof renderPacketSection === 'function') ? renderPacketSection() : '<div style="padding:20px;color:var(--muted);">Packet module not loaded</div>';
     const coHtml = (typeof renderCoSection === 'function') ? renderCoSection() : '';
-    // SOV section (inline, no longer its own tab)
+    const historyHtml = (typeof renderSovHistory === 'function') ? renderSovHistory() : '';
+    // SOV section (inline, no longer its own tab) — split into header+draws
+    // only. CO and History are pulled out and placed at their own positions
+    // in the section stack.
     let sovHtml = '';
     if (state.sovLoading) {
       sovHtml = '<div class="empty" style="padding:24px 20px;color:var(--muted);">Loading Schedule of Values…</div>';
@@ -2656,11 +2669,34 @@ function renderTabContent() {
       sovHtml = (typeof renderSovEmpty === 'function') ? renderSovEmpty() : '';
     } else {
       sovHtml = ((typeof renderSovHeader === 'function') ? renderSovHeader() : '')
-              + ((typeof renderSovDrawsTable === 'function') ? renderSovDrawsTable() : '')
-              + coHtml
-              + ((typeof renderSovHistory === 'function') ? renderSovHistory() : '');
+              + ((typeof renderSovDrawsTable === 'function') ? renderSovDrawsTable() : '');
     }
-    c.innerHTML = sovHtml + packetHtml + uploadHtml;
+
+    // Collapsible wrapper for CO and History so they don't crowd the page
+    // when not needed. Native <details> handles open/close — no JS wiring.
+    // If no COs exist yet, hide the CO collapsible entirely.
+    const hasCos = (state.changeOrders || []).length > 0;
+    const coCollapsed = (hasCos && coHtml) ? `
+      <details class="jg-collapsible" style="margin-top:16px;border:1px solid var(--line);border-radius:8px;background:#fff;">
+        <summary style="cursor:pointer;padding:12px 16px;font-weight:600;color:var(--navy);font-size:14px;list-style:none;display:flex;align-items:center;justify-content:space-between;">
+          <span>📝 Change Orders <span style="color:var(--muted);font-weight:400;font-size:12px;margin-left:6px;">(${(state.changeOrders || []).length})</span></span>
+          <span class="jg-collapsible-chev" style="color:var(--muted);font-size:12px;">▸</span>
+        </summary>
+        <div style="padding:0 16px 12px;">${coHtml}</div>
+      </details>
+    ` : (coHtml || '');
+
+    const historyCollapsed = historyHtml ? `
+      <details class="jg-collapsible" style="margin-top:16px;border:1px solid var(--line);border-radius:8px;background:#fff;">
+        <summary style="cursor:pointer;padding:12px 16px;font-weight:600;color:var(--navy);font-size:14px;list-style:none;display:flex;align-items:center;justify-content:space-between;">
+          <span>📜 History <span style="color:var(--muted);font-weight:400;font-size:12px;margin-left:6px;">(last 10)</span></span>
+          <span class="jg-collapsible-chev" style="color:var(--muted);font-size:12px;">▸</span>
+        </summary>
+        <div style="padding:0 16px 12px;">${historyHtml}</div>
+      </details>
+    ` : '';
+
+    c.innerHTML = sovHtml + packetHtml + coCollapsed + uploadHtml + historyCollapsed;
   }
   else if (state.tab === 'relationships') c.innerHTML = renderRelationshipsTab();
   else if (state.tab === 'phases')      c.innerHTML = renderPhasesTab();
@@ -7058,10 +7094,9 @@ function renderCoSection() {
   // ── Slim CO summary ─────────────────────────────────────────────────────
   // Rebuild page shows ONE LINE per CO (number, title, status pill, delta,
   // View CO link). All authoring/sending/signing/deleting lives on the
-  // dedicated CO page. The trade-row CO badges + $ delta are surfaced
-  // separately by the WO Builder (renderCoScopeForTrade / KPI roll-ups).
-  // The "+ Upload Change Order" button also lives only on the CO page.
-  // Unmark Contract Signed stays here because it is a contract-level action.
+  // dedicated Contract Packet page. The trade-row CO badges + $ delta are
+  // surfaced separately by the WO Builder (renderCoScopeForTrade / KPI
+  // roll-ups). Unmark Contract Signed stays here because it's contract-level.
   const coStatusMeta = {
     draft:             { lbl: 'Draft',              color: 'var(--muted)' },
     sent_to_customer:  { lbl: 'Awaiting Customer',  color: 'var(--gold)' },
@@ -7096,7 +7131,7 @@ function renderCoSection() {
           <button class="btn ghost" id="markContractUnsignedBtn" style="font-size:11px;padding:4px 10px;color:var(--muted);">↩ Unmark</button>
         </span>
       </div>
-      ${cos.length ? cosHtml : `<div style="padding:16px 0;color:var(--muted);font-size:13px;">No change orders yet. Manage change orders from the Change Orders page.</div>`}
+      ${cos.length ? cosHtml : `<div style="padding:16px 0;color:var(--muted);font-size:13px;">No change orders yet. Manage change orders from the Contract Packet page.</div>`}
     </div>
   `;
 }
