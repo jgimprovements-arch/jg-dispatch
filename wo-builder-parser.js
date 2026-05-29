@@ -14,8 +14,9 @@
 //   // result = { uploadId, summary: { rcv, cost, margin, ... }, errors: [] }
 
 const ANTHROPIC_API = 'https://api.anthropic.com/v1/messages';
-const MODEL = 'claude-opus-4-5'; // best for structured document extraction
+const MODEL = 'claude-opus-4-7'; // best for structured document extraction
 const MAX_TOKENS = 16000;
+const CHUNK_BATCH_SIZE = 40; // line items per estimate chunk before forcing a continuation call
 
 // ─── Public entrypoint ─────────────────────────────────────────────
 // opts:
@@ -46,10 +47,13 @@ export async function parseAndStoreXactPDFs(sb, projectId, estimateFile, compone
       fileToBase64(componentsFile),
     ]);
     onProgress('Sending to Claude for extraction…', 25);
-    const [estimateData, componentsData] = await Promise.all([
-      callClaude(apiKey, estimateB64, ESTIMATE_PROMPT, 'estimate'),
+    // Estimate uses chunked parsing (big PDFs can have 100+ line items that
+    // exceed max_tokens in one call). Components parsing fits in one call.
+    const [estimateData, componentsResult] = await Promise.all([
+      callClaudeEstimateChunked(apiKey, estimateB64, msg => onProgress(msg, 40)),
       callClaude(apiKey, componentsB64, COMPONENTS_PROMPT, 'components'),
     ]);
+    const componentsData = componentsResult.parsed;
     onProgress('Computing totals…', 80);
     const materialsTotal = sum(componentsData.materials, 'total');
     const equipmentTotal = sum(componentsData.equipment, 'total');
@@ -133,10 +137,11 @@ export async function parseAndStoreXactPDFs(sb, projectId, estimateFile, compone
 
     // ─── 4. Run both Anthropic calls in parallel ───
     onProgress('Sending to Claude for extraction…', 25);
-    const [estimateData, componentsData] = await Promise.all([
-      callClaude(apiKey, estimateB64, ESTIMATE_PROMPT, 'estimate'),
+    const [estimateData, componentsResult] = await Promise.all([
+      callClaudeEstimateChunked(apiKey, estimateB64, msg => onProgress(msg, 40)),
       callClaude(apiKey, componentsB64, COMPONENTS_PROMPT, 'components'),
     ]);
+    const componentsData = componentsResult.parsed;
     onProgress('Got data back from Claude…', 65);
 
     // ─── 5. Load trade mappings to classify codes/items ───
@@ -324,21 +329,91 @@ async function callClaude(apiKey, pdfBase64, prompt, label) {
     throw new Error(`Claude API error (${label}): ${resp.status} ${text.slice(0, 500)}`);
   }
   const json = await resp.json();
-  // Extract first text content block
   const text = (json.content || []).find(c => c.type === 'text')?.text;
   if (!text) throw new Error(`Claude returned no text (${label})`);
-  // Strip ```json fences if present
   const cleaned = text.replace(/^```json\s*|\s*```$/g, '').trim();
+  // Detect truncation: stop_reason='max_tokens' OR JSON parse fails
+  const wasTruncated = json.stop_reason === 'max_tokens';
   try {
-    return JSON.parse(cleaned);
+    const parsed = JSON.parse(cleaned);
+    return { parsed, wasTruncated };
   } catch (e) {
-    throw new Error(`Claude returned invalid JSON (${label}): ${e.message}\nFirst 300 chars: ${cleaned.slice(0, 300)}`);
+    throw new Error(`Claude returned invalid JSON (${label}): ${e.message}\nFirst 300 chars: ${cleaned.slice(0, 300)}\nstop_reason: ${json.stop_reason}`);
   }
 }
 
+// Chunked variant for the estimate: pages through line items in batches so
+// big estimates don't blow past max_tokens. First call grabs metadata + the
+// first N items. Subsequent calls grab items starting at the highest line
+// number we've seen so far. Stops when a call returns no new items or when
+// stop_reason !== 'max_tokens' on a call.
+//
+// Safety: caps at 50 chunks (~2000 items) to prevent infinite loops on
+// pathological PDFs. Should never happen in real restoration estimates.
+async function callClaudeEstimateChunked(apiKey, pdfBase64, onProgress) {
+  const allItems = [];
+  let metadata = null;
+  let lastLineNumber = 0;
+  let chunkIdx = 0;
+  const MAX_CHUNKS = 50;
+
+  while (chunkIdx < MAX_CHUNKS) {
+    chunkIdx++;
+    const isFirst = chunkIdx === 1;
+    const prompt = isFirst
+      ? ESTIMATE_PROMPT_CHUNK_FIRST
+      : ESTIMATE_PROMPT_CHUNK_CONT(lastLineNumber);
+
+    if (onProgress) onProgress(`Parsing estimate (chunk ${chunkIdx}, line ${lastLineNumber + 1}+)`);
+
+    const { parsed, wasTruncated } = await callClaude(apiKey, pdfBase64, prompt, `estimate-chunk-${chunkIdx}`);
+
+    // First call carries metadata
+    if (isFirst) {
+      metadata = { ...parsed };
+      delete metadata.items;
+    }
+
+    const newItems = parsed.items || [];
+    if (!newItems.length) {
+      // No more items — we're done
+      break;
+    }
+
+    // Append items, skipping any we've already seen (defensive against
+    // Claude returning overlapping ranges)
+    const seenLineNumbers = new Set(allItems.map(i => i.line_number));
+    for (const item of newItems) {
+      if (!seenLineNumbers.has(item.line_number)) {
+        allItems.push(item);
+        seenLineNumbers.add(item.line_number);
+      }
+    }
+
+    // Track highest line number for next continuation
+    const highest = Math.max(lastLineNumber, ...newItems.map(i => Number(i.line_number) || 0));
+    if (highest <= lastLineNumber) {
+      // Couldn't advance — something's stuck. Bail to prevent infinite loop.
+      console.warn(`[parser] Chunk ${chunkIdx} didn't advance line number past ${lastLineNumber}, stopping`);
+      break;
+    }
+    lastLineNumber = highest;
+
+    // If the response wasn't truncated, we likely got everything
+    if (!wasTruncated) break;
+  }
+
+  if (chunkIdx >= MAX_CHUNKS) {
+    console.warn(`[parser] Hit MAX_CHUNKS=${MAX_CHUNKS} cap. Estimate may be incomplete.`);
+  }
+
+  return { ...metadata, items: allItems };
+}
+
 // ─── Prompts ─────────────────────────────────────────────────────────
-const ESTIMATE_PROMPT = `You are parsing an Xactimate Estimate PDF for a restoration project.
-Extract EVERY line item across all rooms and sections, plus the top-level totals.
+// First chunk: extract metadata + first N items (or all items if small estimate)
+const ESTIMATE_PROMPT_CHUNK_FIRST = `You are parsing an Xactimate Estimate PDF for a restoration project.
+Extract metadata (headers/totals) AND every line item from the FIRST portion of the estimate.
 
 Return ONLY valid JSON (no markdown fences, no explanation) matching exactly this shape:
 
@@ -362,7 +437,6 @@ Return ONLY valid JSON (no markdown fences, no explanation) matching exactly thi
       "line_total": 44.06,
       "notes": null
     }
-    // ... ALL line items, in order, NEVER skip any
   ],
   "line_item_total": 42968.17,
   "material_sales_tax": 363.05,
@@ -375,17 +449,56 @@ Return ONLY valid JSON (no markdown fences, no explanation) matching exactly thi
 }
 
 Rules:
+- Include line items in order starting from line 1.
+- If the estimate is large, prioritize quality over completeness — stop adding items when you sense the response will get cut off. The caller will request the rest in a follow-up call.
 - The PDF is grouped into rooms, with each room having sections (Floor, Walls, Doors, Contents, Containment, etc.). Track the current room and section as you go.
 - "level" tracks "Main Level", "Upper Level", etc. (it appears as a bold header above rooms).
-- "line_number" = the leading number on each line ("1.", "2.", "121.", etc.)
+- "line_number" = the leading number on each line ("1.", "2.", "121.", etc.) — these MUST be returned in ascending order.
 - "section" = subheaders inside a room ("Floor", "Walls", "Doors", "Contents", "Containment", "Cabinets and Countertops", "Labor Minimums Applied"). If no section, use null.
 - "notes" = any descriptive text that appears between a line item and the next line item (e.g. "15 % waste added for Vinyl floor covering"). null if none.
 - Numbers must be numeric (no $ signs, no commas, no quotes).
 - If a value is genuinely missing, use null. Do not invent values.
-- Include EVERY numbered line item, even tiny ones like "Insulation labor minimum".
 - Do NOT include room dimension headers ("Height: 9'") or door/window dimension lines.
 - Do NOT include the floorplan diagrams.
+- Always return ALL the top-level metadata fields (estimate_number, totals, etc.) even on this first chunk.
 `;
+
+// Continuation chunk: only return items, with line_number > startLine. No metadata.
+const ESTIMATE_PROMPT_CHUNK_CONT = (startLine) => `You are continuing to parse an Xactimate Estimate PDF.
+
+A previous call already extracted items up through line_number ${startLine}. Now extract ONLY the line items with line_number > ${startLine}, in ascending line_number order.
+
+Return ONLY valid JSON (no markdown fences, no explanation) matching this shape:
+
+{
+  "items": [
+    {
+      "line_number": ${startLine + 1},
+      "level": "Main Level",
+      "room": "Bedroom",
+      "section": "Floor",
+      "description": "...",
+      "quantity": 26.54,
+      "unit": "LF",
+      "unit_price": 1.66,
+      "line_total": 44.06,
+      "notes": null
+    }
+  ]
+}
+
+Rules:
+- ONLY return line items with line_number STRICTLY GREATER THAN ${startLine}.
+- Items must be in ascending line_number order.
+- If the response will get cut off, stop early — the caller will request the rest.
+- If there are NO more items past line ${startLine}, return: {"items": []}
+- Do NOT include any top-level metadata (estimate_number, totals, etc.) — only the items array.
+- Same rules as the first chunk: track level/room/section, numbers must be numeric, etc.
+- Do NOT include room dimension headers or floorplan diagrams.
+`;
+
+// Original ESTIMATE_PROMPT kept as alias for any external callers
+const ESTIMATE_PROMPT = ESTIMATE_PROMPT_CHUNK_FIRST;
 
 const COMPONENTS_PROMPT = `You are parsing an Xactimate Components PDF (which breaks an estimate into raw material, equipment, and labor costs).
 
