@@ -5841,7 +5841,7 @@ function renderDetailSection(title, kind, rows, isUnassigned, mode, tradeDefault
                         return `<option value="${esc(g.categories[0])}" data-merged-key="${esc(key)}" ${isCurrent ? 'selected' : ''}>${esc(g.label)}</option>`;
                       }).join('')}
                       <option value="__unassigned__" ${isUnassignedRow ? 'selected' : ''}>📦 Unassigned</option>
-                      <option value="__create__" style="font-style:italic;color:var(--orange);">+ Create new WO…</option>
+                      <option value="__new_trade__" style="font-style:italic;color:var(--orange);">+ New trade…</option>
                     </select>
                   </td>
                 ` : ''}
@@ -6148,21 +6148,18 @@ function wireWoDetailModal(tradeKey) {
       const tableName = tableForKind[kind];
       if (!tableName) return;
 
-      // "+ Create new WO..." — let user pick from unused trades
-      if (val === '__create__') {
+      // "+ New trade…" — let user TYPE a brand-new trade name. Stored as the
+      // raw trade_category on the item; mergedGroupFor will self-group it and
+      // reconcilePhasesWithWoTrades will auto-create the matching phase.
+      if (val === '__new_trade__') {
         sel.value = lastValue;
-        const rollup = computeTradeRollup(state.woBudget);
-        const usedKeys = new Set(rollup.filter(t => !t.isSynthetic).map(t => t.category));
-        const unused = Object.entries(MERGED_TRADE_GROUPS)
-          .filter(([k]) => !usedKeys.has(k))
-          .sort((a, b) => (a[1].sort || 99) - (b[1].sort || 99));
-        if (!unused.length) {
-          toast('All trades are already in use.');
-          return;
-        }
-        const choice = await pickFromList('Create new Work Order — pick a trade:', unused.map(([k, g]) => ({ value: g.categories[0], label: g.label })));
-        if (!choice) return;
-        val = choice;
+        const raw = (prompt('New trade name (e.g. "Siding", "Roofing"):') || '').trim();
+        if (!raw) return;
+        // Normalize: lowercase, collapse whitespace to single underscore.
+        // Display label is title-cased downstream by computeTradeRollup.
+        const normalized = raw.toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_-]/g, '');
+        if (!normalized) { toast('Invalid trade name.', true); return; }
+        val = normalized;
       }
 
       const update = {};
@@ -6181,6 +6178,10 @@ function wireWoDetailModal(tradeKey) {
         return;
       }
       lastValue = val;
+      // Trade is now "real" — remove from pending list if it was there.
+      if (state.pendingNewTrades && state.pendingNewTrades.length) {
+        state.pendingNewTrades = state.pendingNewTrades.filter(t => t !== val);
+      }
       await loadWoBudget();
       await refreshBudgetSummary();
       const tradeLabel = MERGED_TRADE_GROUPS[tradeKey]?.label || (tradeKey === '__unassigned__' ? 'Unassigned' : tradeKey);
@@ -7460,6 +7461,7 @@ function renderWoBuilderSection(budget) {
         <div class="wobx-trades-title">
           <span>Work Orders by Trade</span>
           <span class="wobx-trades-controls">
+            <button class="wobx-reset-merges" id="wobx_add_trade" title="Create a new trade name (e.g. Siding, Roofing). After it appears in the rail, move items into it using the per-item trade dropdown.">+ Add Trade</button>
             ${Object.keys(state.tradeMerges || {}).length ? `
               <button class="wobx-reset-merges" id="wobx_reset_merges">↩ Reset Merges (${Object.keys(state.tradeMerges).length})</button>
             ` : ''}
@@ -7693,9 +7695,17 @@ function anyFinishTradeIn(tradeKeys) { return (tradeKeys || []).some(k => FINISH
 // Reverse lookup: raw category → merged group key
 function mergedGroupFor(rawCategory) {
   // Step 1: find the default merged group from MERGED_TRADE_GROUPS
-  let groupKey = 'general';
+  let groupKey = null;
   for (const [k, group] of Object.entries(MERGED_TRADE_GROUPS)) {
     if (group.categories.includes(rawCategory)) { groupKey = k; break; }
+  }
+  // No match in the canonical list:
+  //   - empty/null → General Labor (legacy unclassified)
+  //   - any non-empty string → treat as a user-defined trade and self-group.
+  //     This lets the PM type custom trade names (e.g. "siding") and have them
+  //     surface as their own row in the rollup + auto-create a matching phase.
+  if (!groupKey) {
+    groupKey = (rawCategory && String(rawCategory).trim()) ? String(rawCategory) : 'general';
   }
   // Step 2: follow any user-defined merge chain (with safety cap)
   return resolveTradeMerge(groupKey);
@@ -7966,10 +7976,15 @@ function computeTradeRollup(budget) {
     const groupKey = mergedGroupFor(rawCategory || 'general');
     const group = MERGED_TRADE_GROUPS[groupKey];
     if (!group) {
-      // Defensive: unknown group key — fall back to a synthetic entry so we don't crash.
-      // Real fix is to add the missing group to MERGED_TRADE_GROUPS or fix mergedGroupFor().
-      console.warn('[computeTradeRollup] unknown trade group:', groupKey, 'for rawCategory:', rawCategory);
-      return { key: groupKey || 'general', label: groupKey || 'General', sort: 9999 };
+      // No canonical entry — this is a user-defined trade (typed via the
+      // "+ New trade…" dropdown option or "+ Add Trade" button). Build a
+      // synthetic group on the fly with a title-cased label. sort=98 puts
+      // user trades just above General Labor in the rail.
+      const titleCased = (groupKey || 'General')
+        .split(/[\s_-]+/)
+        .map(w => w ? w.charAt(0).toUpperCase() + w.slice(1) : w)
+        .join(' ');
+      return { key: groupKey || 'general', label: titleCased, sort: 98 };
     }
     return { key: groupKey, label: group.label, sort: group.sort };
   }
@@ -7991,6 +8006,12 @@ function computeTradeRollup(budget) {
 
   // Ensure 'Internal' trade always appears even with 0 items
   getGroup('internal');
+
+  // Force empty rows for any user-created trades that don't yet have items assigned.
+  // These live in state.pendingNewTrades and are session-scoped — they disappear
+  // on page refresh UNLESS an item gets reassigned to them first (at which point
+  // the trade is "real" because the item carries the trade_category).
+  (state.pendingNewTrades || []).forEach(t => { if (t) getGroup(t); });
 
   // For each trade group, compute revenue + a single trade-level budget
   // First pass — compute each trade row
@@ -8591,6 +8612,35 @@ function wireWoBuilderControls() {
   if (unassignedRow) {
     unassignedRow.addEventListener('click', () => {
       openWoDetailModal('__unassigned__', 'Unassigned');
+    });
+  }
+
+  // ─── "+ Add Trade" button — create a new (empty) trade in the rail ──────
+  // Stores the name in state.pendingNewTrades (session-scoped). The empty row
+  // appears in the rollup immediately; PM moves items into it via the per-item
+  // trade dropdown. Once an item carries the trade_category, the trade is
+  // "real" and survives page refresh. Empty pending trades do NOT persist.
+  const addTradeBtn = $('#wobx_add_trade');
+  if (addTradeBtn) {
+    addTradeBtn.addEventListener('click', () => {
+      const raw = (prompt('New trade name (e.g. "Siding", "Roofing"):') || '').trim();
+      if (!raw) return;
+      const normalized = raw.toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_-]/g, '');
+      if (!normalized) { toast('Invalid trade name.', true); return; }
+      state.pendingNewTrades = state.pendingNewTrades || [];
+      if (state.pendingNewTrades.includes(normalized)) {
+        toast(`Trade "${raw}" already exists.`);
+        return;
+      }
+      // If this name already corresponds to a real (item-bearing) trade, no-op.
+      const existingRollup = state.woBudget ? computeTradeRollup(state.woBudget) : [];
+      if (existingRollup.some(t => t.category === normalized)) {
+        toast(`Trade "${raw}" already exists.`);
+        return;
+      }
+      state.pendingNewTrades.push(normalized);
+      toast(`✓ Trade "${raw}" added. Move items into it via the per-item dropdown.`);
+      renderTabContent();
     });
   }
 
