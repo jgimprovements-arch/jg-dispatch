@@ -332,13 +332,102 @@ async function callClaude(apiKey, pdfBase64, prompt, label) {
   const text = (json.content || []).find(c => c.type === 'text')?.text;
   if (!text) throw new Error(`Claude returned no text (${label})`);
   const cleaned = text.replace(/^```json\s*|\s*```$/g, '').trim();
-  // Detect truncation: stop_reason='max_tokens' OR JSON parse fails
   const wasTruncated = json.stop_reason === 'max_tokens';
+
+  // Try to parse as-is first
   try {
     const parsed = JSON.parse(cleaned);
     return { parsed, wasTruncated };
   } catch (e) {
-    throw new Error(`Claude returned invalid JSON (${label}): ${e.message}\nFirst 300 chars: ${cleaned.slice(0, 300)}\nstop_reason: ${json.stop_reason}`);
+    // If not truncated, this is a genuine parse error — propagate.
+    if (!wasTruncated) {
+      throw new Error(`Claude returned invalid JSON (${label}): ${e.message}\nFirst 300 chars: ${cleaned.slice(0, 300)}\nstop_reason: ${json.stop_reason}`);
+    }
+
+    // Truncated mid-stream. Salvage the items that DID make it through by
+    // finding the last "}" that's at the same indentation as a complete item,
+    // truncating the items array there, and closing the JSON.
+    //
+    // Strategy: walk backward to find the last "    }" (4-space indent — items
+    // are indented one level inside the items array). That's the close of the
+    // last fully-emitted item. Truncate just past it, then close the array
+    // and object.
+    const recovered = recoverTruncatedItems(cleaned, label);
+    if (recovered) {
+      return { parsed: recovered, wasTruncated: true };
+    }
+
+    // Recovery failed — propagate
+    throw new Error(`Claude returned truncated unrecoverable JSON (${label}): ${e.message}\nFirst 300 chars: ${cleaned.slice(0, 300)}\nstop_reason: ${json.stop_reason}`);
+  }
+}
+
+// Salvage complete items from a truncated JSON response. Returns the parsed
+// object on success, null if recovery isn't possible.
+//
+// The truncation always cuts mid-string (or mid-property), so we need to
+// find the last point where a complete item object ended, then close the
+// JSON structure ourselves.
+function recoverTruncatedItems(text, label) {
+  // Find the items array start
+  const itemsStartMatch = text.match(/"items"\s*:\s*\[/);
+  if (!itemsStartMatch) {
+    console.warn(`[parser] recoverTruncatedItems: no items array found in ${label}`);
+    return null;
+  }
+  const itemsStart = itemsStartMatch.index + itemsStartMatch[0].length;
+
+  // Walk through the items array tracking brace depth. Every time we close
+  // a top-level item (depth back to 1, meaning we're inside the array but
+  // outside any single item), remember that position.
+  // Note: depth 0 = outside the items array, 1 = inside array, 2+ = inside an item.
+  let depth = 1;
+  let lastCompleteItemEnd = -1;
+  let inString = false;
+  let escapeNext = false;
+  for (let i = itemsStart; i < text.length; i++) {
+    const ch = text[i];
+    if (escapeNext) { escapeNext = false; continue; }
+    if (ch === '\\' && inString) { escapeNext = true; continue; }
+    if (ch === '"') { inString = !inString; continue; }
+    if (inString) continue;
+    if (ch === '{' || ch === '[') depth++;
+    else if (ch === '}' || ch === ']') {
+      depth--;
+      if (depth === 1) {
+        // Just closed a complete item, we're back at array-level
+        lastCompleteItemEnd = i + 1;
+      } else if (depth === 0) {
+        // Array fully closed — no truncation actually
+        break;
+      }
+    }
+  }
+
+  if (lastCompleteItemEnd === -1) {
+    console.warn(`[parser] recoverTruncatedItems: no complete items found in ${label}`);
+    return null;
+  }
+
+  // Build recovered JSON: text up through last complete item + ] to close
+  // the array + } to close any remaining open objects.
+  // The first-chunk prompt response also has top-level metadata fields AFTER
+  // items, but they're lost on truncation — recovery gives us items array
+  // with whatever metadata appeared BEFORE items (estimate_number, dates, etc.)
+  // and null/0 for the totals. Caller can compute totals from items.
+  let recovered = text.slice(0, lastCompleteItemEnd) + ']';
+  // We're now closed at array level. If there were further top-level fields
+  // they're gone; close the outer object.
+  recovered += '}';
+
+  try {
+    const parsed = JSON.parse(recovered);
+    const itemCount = (parsed.items || []).length;
+    console.log(`[parser] Recovered ${itemCount} complete items from truncated ${label} response`);
+    return parsed;
+  } catch (e) {
+    console.warn(`[parser] recoverTruncatedItems parse failed for ${label}:`, e.message);
+    return null;
   }
 }
 
