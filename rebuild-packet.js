@@ -134,7 +134,17 @@ async function _packetGateCheck() {
 // ─── renderPacketSection — STATUS CARD WITH BUTTONS ─────────────────────────
 function renderPacketSection() {
   const pkt = state.packet;
+  const contractSigned = !!(state.activeProject && state.activeProject.contract_signed_at);
   const containerStyle = 'background:#fff;border:1px solid var(--border);border-radius:10px;padding:14px 16px;margin-bottom:12px;';
+
+  // Paper-sign affordance. Surfaced on packets that are still pending
+  // customer action (draft/sent/declined/expired). Hidden once the contract
+  // is already signed (no need) or the packet was completed via e-sign.
+  // Keeps the ID `markContractSignedBtn` so the existing handler in
+  // wireWoBuilderControls() picks it up without changes.
+  const paperSignBtn = contractSigned
+    ? ''
+    : `<button class="btn ghost" id="markContractSignedBtn" style="font-size:12px;padding:5px 14px;" title="Use when the customer signed a printed copy of the contract instead of via the e-sign link.">✓ Mark Contract Signed (Signed on Paper)</button>`;
 
   function actions(statusKey) {
     if (!statusKey) {
@@ -143,6 +153,7 @@ function renderPacketSection() {
     if (statusKey === 'draft') {
       return `
         <button class="btn primary" id="packet_send_btn" style="font-size:12px;padding:5px 14px;">✉ Send to Customer</button>
+        ${paperSignBtn}
         <button class="btn ghost" id="packet_discard_btn" style="font-size:12px;padding:5px 14px;color:var(--danger);border-color:var(--danger);">🗑 Discard</button>
       `;
     }
@@ -150,6 +161,7 @@ function renderPacketSection() {
       return `
         <button class="btn ghost" id="packet_copy_link_btn" style="font-size:12px;padding:5px 14px;">🔗 Copy Link</button>
         <button class="btn ghost" id="packet_resend_btn" style="font-size:12px;padding:5px 14px;">✉ Resend Email</button>
+        ${paperSignBtn}
         <button class="btn ghost" id="packet_void_btn" style="font-size:12px;padding:5px 14px;color:var(--danger);border-color:var(--danger);">🚫 Void</button>
       `;
     }
