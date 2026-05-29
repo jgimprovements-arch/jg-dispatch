@@ -7495,6 +7495,46 @@ function renderWoBuilderSection(budget) {
         })()}
       </div>
 
+      ${(() => {
+        // ─── Zero-quantity items detector ──────────────────────────────────
+        // Flags line items the estimator priced but never measured. Common
+        // failure mode that silently removes scope from the contract — JG
+        // performs the work, line totals $0, revenue lost.
+        const zeroQtyItems = (budget.items || []).filter(it => {
+          const qty = Number(it.quantity) || 0;
+          const unitPrice = Number(it.unit_price) || 0;
+          return qty === 0 && unitPrice > 0;
+        });
+        if (!zeroQtyItems.length) return '';
+        // Group by description so repeated items (e.g. Casing across 6 rooms) collapse.
+        const byDesc = new Map();
+        zeroQtyItems.forEach(it => {
+          const key = (it.description || '—').trim();
+          if (!byDesc.has(key)) byDesc.set(key, { desc: key, unit: it.unit || '', unit_price: Number(it.unit_price) || 0, rooms: [] });
+          if (it.room) byDesc.get(key).rooms.push(it.room);
+        });
+        return `
+          <div class="wobx-zeroqty-warn" style="background:rgba(245,166,35,0.08);border:1px solid rgba(245,166,35,0.35);border-radius:8px;padding:12px 14px;margin:0 0 12px 0;font-size:13px;color:var(--navy);">
+            <div style="font-weight:700;margin-bottom:4px;">⚠️ ${zeroQtyItems.length} line item${zeroQtyItems.length === 1 ? '' : 's'} priced but not measured</div>
+            <div style="font-size:12px;color:var(--muted);margin-bottom:8px;">
+              The estimator entered unit pricing but never took the measurement, so these total $0 in the contract. If JG performs this scope anyway, it's <b>unbilled work</b>. Fix in Xact and re-upload before sending the packet.
+            </div>
+            <details>
+              <summary style="cursor:pointer;font-size:12px;font-weight:600;color:var(--navy);user-select:none;">Show items (${byDesc.size} unique)</summary>
+              <ul style="margin:8px 0 0 18px;padding:0;font-size:12px;color:var(--navy);max-height:240px;overflow-y:auto;">
+                ${[...byDesc.values()].map(g => `
+                  <li style="margin-bottom:4px;">
+                    <b>${esc(g.desc)}</b>
+                    <span style="color:var(--muted);"> — ${esc(g.unit)} @ ${usdCompact(g.unit_price)}/${esc(g.unit || 'unit')}</span>
+                    ${g.rooms.length ? `<div style="color:var(--muted);font-size:11px;margin-top:2px;">${esc(g.rooms.join(' · '))}</div>` : ''}
+                  </li>
+                `).join('')}
+              </ul>
+            </details>
+          </div>
+        `;
+      })()}
+
       <div class="wobx-trades">
         <div class="wobx-trades-title">
           <span>Work Orders by Trade</span>
