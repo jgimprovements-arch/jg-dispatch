@@ -5680,11 +5680,21 @@ function renderWoDetailModal(tradeKey, tradeLabel, budget) {
             <div class="wobx-jg-supplies-note">
               📦 Materials moved to <b>JG Purchased Materials</b> bucket. Click that row in the main table to view the materials list.
             </div>
-          ` : `
-            ${renderDetailSection('Materials (reference — from Components PDF)', 'material', materials, isUnassigned)}
-            ${renderDetailSection('Labor (reference — from Components PDF)', 'labor', labor, isUnassigned)}
-            ${renderDetailSection('Equipment (reference — from Components PDF)', 'equipment', equipment, isUnassigned)}
-          `}
+          ` : (() => {
+            // Recompute existingTradeKeys for the components sections so the
+            // per-row trade dropdowns there match the rail (including any
+            // user-typed trades from "+ New trade…"). Cheap — runs once per
+            // modal open.
+            const rollup = computeTradeRollup(budget);
+            const existingTradeKeys = rollup
+              .filter(t => !t.isSynthetic)
+              .map(t => t.category);
+            return `
+              ${renderDetailSection('Materials (reference — from Components PDF)', 'material', materials, isUnassigned, null, null, existingTradeKeys)}
+              ${renderDetailSection('Labor (reference — from Components PDF)', 'labor', labor, isUnassigned, null, null, existingTradeKeys)}
+              ${renderDetailSection('Equipment (reference — from Components PDF)', 'equipment', equipment, isUnassigned, null, null, existingTradeKeys)}
+            `;
+          })()}
         </div>
 
         <div class="wobx-modal-foot">
@@ -5846,7 +5856,7 @@ function renderDetailSection(title, kind, rows, isUnassigned, mode, tradeDefault
             <th class="r">Qty</th>
             <th class="r">Unit</th>
             <th class="r">${isRevenue ? 'Revenue' : 'Xact $'}</th>
-            ${isRevenue ? '<th>Trade</th>' : ''}
+            <th>Trade</th>
           </tr>
         </thead>
         <tbody>
@@ -5865,19 +5875,17 @@ function renderDetailSection(title, kind, rows, isUnassigned, mode, tradeDefault
                 <td class="r">${qty}</td>
                 <td class="r">${esc(unit)}</td>
                 <td class="r">${usdCompact(lineAmount)}</td>
-                ${isRevenue ? `
-                  <td>
-                    <select class="wobx-trade-row-select" data-kind="${kind}" data-id="${esc(r.id)}" data-current-trade="${esc(r.trade_category || '')}">
-                      ${(existingTradeKeys || []).map(key => {
-                        const g = MERGED_TRADE_GROUPS[key] || { label: key, categories: [key] };
-                        const isCurrent = g.categories.includes(r.trade_category);
-                        return `<option value="${esc(g.categories[0])}" data-merged-key="${esc(key)}" ${isCurrent ? 'selected' : ''}>${esc(g.label)}</option>`;
-                      }).join('')}
-                      <option value="__unassigned__" ${isUnassignedRow ? 'selected' : ''}>📦 Unassigned</option>
-                      <option value="__new_trade__" style="font-style:italic;color:var(--orange);">+ New trade…</option>
-                    </select>
-                  </td>
-                ` : ''}
+                <td>
+                  <select class="wobx-trade-row-select" data-kind="${kind}" data-id="${esc(r.id)}" data-current-trade="${esc(r.trade_category || '')}">
+                    ${(existingTradeKeys || []).map(key => {
+                      const g = MERGED_TRADE_GROUPS[key] || { label: key, categories: [key] };
+                      const isCurrent = g.categories.includes(r.trade_category);
+                      return `<option value="${esc(g.categories[0])}" data-merged-key="${esc(key)}" ${isCurrent ? 'selected' : ''}>${esc(g.label)}</option>`;
+                    }).join('')}
+                    <option value="__unassigned__" ${isUnassignedRow ? 'selected' : ''}>📦 Unassigned</option>
+                    <option value="__new_trade__" style="font-style:italic;color:var(--orange);">+ New trade…</option>
+                  </select>
+                </td>
               </tr>
             `;
           }).join('')}
@@ -5886,7 +5894,7 @@ function renderDetailSection(title, kind, rows, isUnassigned, mode, tradeDefault
           <tr class="wobx-section-totals">
             <td colspan="3"><b>Section Total</b></td>
             <td class="r"><b>${usdCompact(totalAmount)}</b></td>
-            ${isRevenue ? '<td></td>' : ''}
+            <td></td>
           </tr>
         </tfoot>
       </table>
