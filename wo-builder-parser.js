@@ -91,12 +91,15 @@ export async function parseAndStoreXactPDFs(sb, projectId, estimateFile, compone
 
   // ─── COMMIT PATH (writes to Supabase) ─────────────────────────────
 
-  // ─── 1. Mark older uploads for this project as not-current ───
+  // ─── 1. Mark ALL older uploads for this project as not-current ───
+  //   Note: we deliberately do NOT filter by `deleted_at IS NULL` here.
+  //   A soft-deleted row logically cannot be "current", so the flag must
+  //   be cleared regardless of soft-delete state. Without this, soft-deleted
+  //   rows retain is_current=true and pollute audit/diligence queries.
   onProgress('Preparing upload session…', 5);
   await sb.from('wo_builder_uploads')
     .update({ is_current: false })
-    .eq('project_id', projectId)
-    .is('deleted_at', null);
+    .eq('project_id', projectId);
 
   // ─── 1b. Upload both PDFs to rebuild-documents (audit trail) ───
   // These land in the Estimate/Invoices folder alongside other estimate docs.
@@ -157,7 +160,69 @@ export async function parseAndStoreXactPDFs(sb, projectId, estimateFile, compone
     const miscLabor = componentsData.misc_labor || 0;
     const laborTotal = laborSubtotal + miscLabor;
     const componentsGrandTotal = materialsTotal + equipmentTotal + laborTotal;
-    const rcv = estimateData.replacement_cost_value || 0;
+
+    // ─── 6b. Validate LLM-extracted estimate totals against Xact arithmetic ───
+    // Xact summary page invariants:
+    //   subtotal == line_item_total + material_sales_tax           (within rounding)
+    //   RCV      == subtotal + overhead + profit + service_sales_tax
+    // We've observed two LLM failure modes in production:
+    //   (a) header totals missed entirely → all-null fields
+    //   (b) one field extracted but stuffed into the wrong column (e.g. RCV
+    //       value written to `line_item_total`) — internally inconsistent.
+    // Failure mode (b) is silent without these invariants and produces
+    // contracts that don't match the source Xact. So: validate, and if it
+    // fails, store nulls in canonical fields + flag the row for manual entry.
+    // DO NOT substitute summed items.line_total — per-line totals include
+    // tax and O&P at the line level, so their sum equals neither the printed
+    // Line Item Total nor the printed RCV.
+    const TOTALS_TOL = 1.00;
+    const llmLIT     = Number(estimateData.line_item_total)        || 0;
+    const llmMatTax  = Number(estimateData.material_sales_tax)     || 0;
+    const llmSvcTax  = Number(estimateData.service_sales_tax)      || 0;
+    const llmSubtot  = Number(estimateData.subtotal)               || 0;
+    const llmOH      = Number(estimateData.overhead)               || 0;
+    const llmProfit  = Number(estimateData.profit)                 || 0;
+    const llmRCV     = Number(estimateData.replacement_cost_value) || 0;
+
+    const allPresent     = llmLIT > 0 && llmSubtot > 0 && llmRCV > 0;
+    const subtotalInvOk  = Math.abs(llmSubtot - (llmLIT + llmMatTax)) <= TOTALS_TOL;
+    const rcvInvariantOk = Math.abs(llmRCV - (llmSubtot + llmOH + llmProfit + llmSvcTax)) <= TOTALS_TOL;
+    const totalsValid    = allPresent && subtotalInvOk && rcvInvariantOk;
+
+    let totalsRecoveryState;
+    let canonicalTotals;
+    if (totalsValid) {
+      totalsRecoveryState = 'parsed';
+      canonicalTotals = {
+        line_item_total:        round2(llmLIT),
+        material_sales_tax:     round2(llmMatTax),
+        service_sales_tax:      round2(llmSvcTax),
+        subtotal:               round2(llmSubtot),
+        overhead:               round2(llmOH),
+        profit:                 round2(llmProfit),
+        replacement_cost_value: round2(llmRCV),
+        net_claim:              Number(estimateData.net_claim) || round2(llmRCV),
+      };
+    } else {
+      totalsRecoveryState = !allPresent ? 'missing' : 'invalid';
+      canonicalTotals = {
+        line_item_total:        null,
+        material_sales_tax:     null,
+        service_sales_tax:      null,
+        subtotal:               null,
+        overhead:               null,
+        profit:                 null,
+        replacement_cost_value: null,
+        net_claim:              null,
+      };
+      console.warn('[WO Builder] LLM estimate totals failed validation — manual entry required', {
+        uploadId, totalsRecoveryState,
+        checks: { allPresent, subtotalInvOk, rcvInvariantOk },
+        llm: { llmLIT, llmMatTax, llmSvcTax, llmSubtot, llmOH, llmProfit, llmRCV },
+      });
+    }
+
+    const rcv = canonicalTotals.replacement_cost_value || 0;
     const grossProfit = rcv - componentsGrandTotal;
     const marginPct = rcv > 0 ? (grossProfit / rcv) * 100 : 0;
 
@@ -171,15 +236,18 @@ export async function parseAndStoreXactPDFs(sb, projectId, estimateFile, compone
       price_list: estimateData.price_list || null,
       type_of_estimate: estimateData.type_of_estimate || null,
       estimator: estimateData.estimator || null,
-      // Estimate totals
-      line_item_total: estimateData.line_item_total || null,
-      material_sales_tax: estimateData.material_sales_tax || null,
-      subtotal: estimateData.subtotal || null,
-      overhead: estimateData.overhead || null,
-      profit: estimateData.profit || null,
-      service_sales_tax: estimateData.service_sales_tax || null,
-      replacement_cost_value: rcv,
-      net_claim: estimateData.net_claim || null,
+      // Estimate totals (canonical — written ONLY when LLM extraction
+      // passed validation; nulls otherwise so downstream UI can force
+      // manual entry rather than ship bad numbers into a contract).
+      line_item_total:        canonicalTotals.line_item_total,
+      material_sales_tax:     canonicalTotals.material_sales_tax,
+      subtotal:               canonicalTotals.subtotal,
+      overhead:               canonicalTotals.overhead,
+      profit:                 canonicalTotals.profit,
+      service_sales_tax:      canonicalTotals.service_sales_tax,
+      replacement_cost_value: canonicalTotals.replacement_cost_value,
+      net_claim:              canonicalTotals.net_claim,
+      totals_recovery_state:  totalsRecoveryState,  // 'parsed' | 'missing' | 'invalid'
       // Component totals
       components_materials_total: materialsTotal,
       components_equipment_total: equipmentTotal,

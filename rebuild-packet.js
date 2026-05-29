@@ -285,6 +285,71 @@ async function createPacket() {
   };
   const totalTax = fin.material_tax + fin.service_tax;
 
+  // ─── Hard-block: refuse to draft a contract on bad totals ───────────
+  // Mirrors the parser's invariants. Two failure modes blocked here:
+  //   1. RCV <= 0 (parser missed the header totals — modal would show $0)
+  //   2. Arithmetic inconsistency (subtotal ≠ LIT+matTax, or RCV ≠
+  //      subtotal+O&P+svcTax) — means some field was extracted into the
+  //      wrong column and the numbers don't reconcile against the Xact PDF.
+  // Either way, creating a packet now would bake bad numbers into a signed
+  // legal contract. Force PM to fix the upload first.
+  const PACKET_TOL = 1.00;
+  const subtotalInvariantOk = Math.abs(fin.subtotal - (fin.line_item_total + fin.material_tax)) <= PACKET_TOL;
+  const rcvInvariantOk      = Math.abs(fin.rcv - (fin.subtotal + fin.overhead + fin.profit + fin.service_tax)) <= PACKET_TOL;
+  const recoveryState = up.totals_recovery_state || null;
+  const totalsValid   = fin.rcv > 0 && subtotalInvariantOk && rcvInvariantOk
+                        && (recoveryState === null || recoveryState === 'parsed');
+
+  if (!totalsValid) {
+    const reasons = [];
+    if (fin.rcv <= 0)              reasons.push('Replacement Cost Value is zero or missing.');
+    if (!subtotalInvariantOk)      reasons.push(`Subtotal (${usd(fin.subtotal)}) ≠ Line Item Total + Material Tax (${usd(fin.line_item_total + fin.material_tax)}).`);
+    if (!rcvInvariantOk)           reasons.push(`RCV (${usd(fin.rcv)}) ≠ Subtotal + O&P + Service Tax (${usd(fin.subtotal + fin.overhead + fin.profit + fin.service_tax)}).`);
+    if (recoveryState === 'invalid') reasons.push('Parser flagged the LLM extraction as inconsistent (totals_recovery_state = invalid).');
+    if (recoveryState === 'missing') reasons.push('Parser could not extract the estimate header totals (totals_recovery_state = missing).');
+
+    const blockHtml = `
+      <div class="modal-back on" id="packet_block_overlay">
+        <div class="modal" style="max-width:560px;">
+          <h3>Cannot Create Packet — Xact Totals Failed Validation <button class="close" data-close>×</button></h3>
+          <div class="modal-body">
+            <div style="background:rgba(220,53,69,0.08);border:1px solid rgba(220,53,69,0.3);border-radius:6px;padding:12px 14px;margin-bottom:14px;font-size:13px;color:var(--navy);">
+              <strong>Why this is blocked:</strong> the parsed Xact totals don't reconcile against
+              the source PDF's summary page. Creating a packet now would bake inconsistent
+              numbers into a signed legal contract.
+            </div>
+            <div style="font-size:12px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;">What failed</div>
+            <ul style="margin:0 0 14px 18px;padding:0;font-size:13px;color:var(--navy);">
+              ${reasons.map(r => `<li style="margin-bottom:4px;">${esc(r)}</li>`).join('')}
+            </ul>
+            <div style="font-size:12px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;">What's stored</div>
+            <div style="display:grid;grid-template-columns:1fr auto;gap:4px 14px;font-size:12px;margin-bottom:14px;padding:10px;background:var(--bg);border-radius:6px;">
+              <div style="color:var(--muted);">Line items subtotal</div><div style="text-align:right;">${usd(fin.line_item_total)}</div>
+              <div style="color:var(--muted);">Material sales tax</div><div style="text-align:right;">${usd(fin.material_tax)}</div>
+              <div style="color:var(--muted);">Service sales tax</div><div style="text-align:right;">${usd(fin.service_tax)}</div>
+              <div style="color:var(--muted);">Subtotal</div><div style="text-align:right;">${usd(fin.subtotal)}</div>
+              <div style="color:var(--muted);">Overhead</div><div style="text-align:right;">${usd(fin.overhead)}</div>
+              <div style="color:var(--muted);">Profit</div><div style="text-align:right;">${usd(fin.profit)}</div>
+              <div style="color:var(--muted);font-weight:700;">RCV</div><div style="text-align:right;font-weight:700;">${usd(fin.rcv)}</div>
+            </div>
+            <div style="font-size:12px;color:var(--muted);margin-bottom:14px;">
+              <strong>Next steps:</strong> Re-upload the Xact PDFs (the LLM extraction is non-deterministic
+              and a re-parse may succeed), or have an admin patch <code>wo_builder_uploads</code> with
+              the correct values from the Xact summary page before re-opening this modal.
+            </div>
+            <div class="modal-actions" style="display:flex;gap:8px;justify-content:flex-end;">
+              <button class="btn primary" data-close>OK</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+    document.body.insertAdjacentHTML('beforeend', blockHtml);
+    const blockOverlay = document.getElementById('packet_block_overlay');
+    blockOverlay.querySelectorAll('[data-close]').forEach(b => b.addEventListener('click', () => blockOverlay.remove()));
+    return;
+  }
+
   const html = `
     <div class="modal-back on" id="packet_create_overlay">
       <div class="modal" style="max-width:560px;">
@@ -363,6 +428,15 @@ async function createPacket() {
     if (!completionInput.value) { statusEl.textContent = 'Substantial Completion Date is required.'; statusEl.style.color = 'var(--danger)'; return; }
     if (new Date(completionInput.value) <= new Date(startInput.value)) {
       statusEl.textContent = 'Substantial Completion must be after Commencement.';
+      statusEl.style.color = 'var(--danger)';
+      return;
+    }
+    // Defense in depth: re-check totals at submit. The render-time gate above
+    // already blocked this modal from opening on invalid totals, but state
+    // could in principle change in between. Refuse to ship a $0/inconsistent
+    // contract regardless of how we got here.
+    if (fin.rcv <= 0 || !subtotalInvariantOk || !rcvInvariantOk) {
+      statusEl.textContent = 'Xact totals are invalid — close this modal and re-open after fixing the upload.';
       statusEl.style.color = 'var(--danger)';
       return;
     }
@@ -928,7 +1002,7 @@ function renderPacketXactUpload() {
         <div class="wobx-body">
           <p style="color:var(--muted);font-size:13px;margin:0 0 14px;">
             Upload the <b>Estimate PDF</b> and <b>Components PDF</b> from Xactimate.
-            The platform will parse them, generate the Schedule of Values (50/50 split),
+            The platform will parse them, generate a default Schedule of Values for review,
             and prepare the contract document for the customer to sign.
           </p>
           <div class="wobx-dropzone" id="wobx_dropzone">
@@ -980,7 +1054,7 @@ function renderPacketXactUpload() {
             <div><span style="color:var(--muted);">Contract Price (RCV):</span> <strong>${usdCompact(budget.upload.replacement_cost_value || 0)}</strong></div>
           </div>
           <p style="color:var(--muted);font-size:12px;margin:0;">
-            The Schedule of Values has been auto-generated (50/50 split). Proceed to enter contract dates and exclusions below.
+            A default Schedule of Values has been generated. Review the draws, confirm the SOV for the packet, then enter contract dates and exclusions below.
           </p>
         </div>
       </div>
