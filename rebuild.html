@@ -1304,6 +1304,39 @@ function pickFromList(title, options) {
   });
 }
 
+// Lightweight text-input modal — promise resolves with trimmed string or null
+// on cancel. Enter submits, Esc cancels, input auto-focuses. Matches the
+// platform's modal pattern (modal-back overlay, navy primary button).
+function promptModal({ title, label = '', placeholder = '', okLabel = 'OK', initialValue = '' }) {
+  return new Promise(resolve => {
+    const back = document.createElement('div');
+    back.className = 'modal-back on';
+    back.style.cssText = 'position:fixed;inset:0;background:rgba(13,45,94,.6);z-index:9999;display:flex;align-items:center;justify-content:center;';
+    back.innerHTML = `
+      <div style="background:#fff;border-radius:12px;padding:20px;max-width:380px;width:90%;box-shadow:0 20px 60px rgba(0,0,0,.3);">
+        <div style="font-weight:700;font-size:15px;color:var(--navy);margin-bottom:6px;">${esc(title)}</div>
+        ${label ? `<div style="font-size:13px;color:var(--muted);margin-bottom:10px;">${esc(label)}</div>` : ''}
+        <input type="text" class="prompt-input" placeholder="${esc(placeholder)}" value="${esc(initialValue)}" style="width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:6px;font-size:14px;color:var(--navy);box-sizing:border-box;" />
+        <div style="text-align:right;margin-top:14px;display:flex;gap:8px;justify-content:flex-end;">
+          <button class="prompt-cancel" style="padding:6px 14px;border:1px solid var(--line);background:#fff;border-radius:6px;cursor:pointer;font-size:13px;color:var(--muted);">Cancel</button>
+          <button class="prompt-ok" style="padding:6px 14px;border:1px solid var(--navy);background:var(--navy);color:#fff;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600;">${esc(okLabel)}</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(back);
+    const input = back.querySelector('.prompt-input');
+    const done = (v) => { back.remove(); resolve(v == null ? null : String(v).trim()); };
+    back.querySelector('.prompt-ok').addEventListener('click', () => done(input.value));
+    back.querySelector('.prompt-cancel').addEventListener('click', () => done(null));
+    back.addEventListener('click', e => { if (e.target === back) done(null); });
+    input.addEventListener('keydown', e => {
+      if (e.key === 'Enter') { e.preventDefault(); done(input.value); }
+      else if (e.key === 'Escape') { e.preventDefault(); done(null); }
+    });
+    setTimeout(() => input.focus(), 30);
+  });
+}
+
 // ──── PM badge ────
 // PM email is shown in sidebar.js footer (sb-user). No in-page badge needed.
 
@@ -6153,7 +6186,12 @@ function wireWoDetailModal(tradeKey) {
       // reconcilePhasesWithWoTrades will auto-create the matching phase.
       if (val === '__new_trade__') {
         sel.value = lastValue;
-        const raw = (prompt('New trade name (e.g. "Siding", "Roofing"):') || '').trim();
+        const raw = await promptModal({
+          title: 'New trade name',
+          label: 'e.g. Siding, Roofing — a phase with this name will be created automatically.',
+          placeholder: 'Siding',
+          okLabel: 'Create & assign',
+        });
         if (!raw) return;
         // Normalize: lowercase, collapse whitespace to single underscore.
         // Display label is title-cased downstream by computeTradeRollup.
@@ -8622,8 +8660,13 @@ function wireWoBuilderControls() {
   // "real" and survives page refresh. Empty pending trades do NOT persist.
   const addTradeBtn = $('#wobx_add_trade');
   if (addTradeBtn) {
-    addTradeBtn.addEventListener('click', () => {
-      const raw = (prompt('New trade name (e.g. "Siding", "Roofing"):') || '').trim();
+    addTradeBtn.addEventListener('click', async () => {
+      const raw = await promptModal({
+        title: 'Add new trade',
+        label: 'Type a name like "Siding" or "Roofing". The trade will appear in the rail — move items into it from the per-item trade dropdown.',
+        placeholder: 'Siding',
+        okLabel: 'Add',
+      });
       if (!raw) return;
       const normalized = raw.toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_-]/g, '');
       if (!normalized) { toast('Invalid trade name.', true); return; }
