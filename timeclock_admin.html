@@ -9943,6 +9943,8 @@ function openEditEmployee(id) {
   ST.editEmp = id;
   var html = buildEmpForm(emp);
   showModal('Edit Employee', html, 'saveEmployee()');
+  // Modal renders sync; load absence history async into the empty container.
+  setTimeout(function(){ loadEmployeeAbsenceHistory(emp.name); }, 0);
 }
 
 async function approveEmployee(id, name) {
@@ -10017,6 +10019,92 @@ function calcAflac() {
 }
 
 // Vacation & 401(k) eligibility = start_date + 6 calendar months
+// Load and render this employee's absence history into the modal's
+// #emp-absence-history container. Fetches from absence_records, groups by
+// year, and shows YTD totals (broken out by reason) plus a chronological
+// list with date, reason, hours, and paid/unpaid status badge.
+async function loadEmployeeAbsenceHistory(empName) {
+  var container = document.getElementById('emp-absence-history');
+  if (!container) return;
+  try {
+    var emp = (ST.employees || []).find(function(e){ return e.name === empName; });
+    var url = SB_URL + '/rest/v1/absence_records?employee_name=eq.' +
+      encodeURIComponent(empName) + '&order=date.desc&select=*';
+    var resp = await fetch(url, { headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY } });
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    var rows = await resp.json();
+
+    if (!rows.length) {
+      container.innerHTML = '<div style="font-size:12px;color:var(--muted);font-style:italic;padding:4px 0;">No absence records on file.</div>';
+      return;
+    }
+
+    var thisYear = new Date().getFullYear();
+    var ytd = rows.filter(function(a){ return new Date(a.date).getFullYear() === thisYear; });
+
+    // YTD summary — count by reason + total paid hours
+    var byReason = {};
+    var paidHrs = 0, unpaidHrs = 0;
+    ytd.forEach(function(a){
+      var reason = a.reason || 'Other';
+      byReason[reason] = (byReason[reason] || 0) + 1;
+      var c = (typeof classifyAbsence === 'function') ? classifyAbsence(a, emp) : { paidHours: 0, category: 'unpaid' };
+      var hrs = parseFloat(a.hours) || (typeof ABSENCE_FULL_DAY !== 'undefined' ? ABSENCE_FULL_DAY : 8);
+      if (c.paidHours > 0) paidHrs += c.paidHours;
+      else unpaidHrs += hrs;
+    });
+    var summaryBits = Object.keys(byReason).sort().map(function(r){
+      return byReason[r] + ' ' + r.toLowerCase() + (byReason[r] > 1 ? '' : '');
+    });
+
+    var h = '<div style="background:rgba(13,45,94,.04);border-left:3px solid var(--navy);padding:8px 12px;border-radius:4px;margin-bottom:10px;font-size:12px;color:var(--navy);line-height:1.5;">';
+    h += '<div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:3px;">This year (' + thisYear + ')</div>';
+    if (summaryBits.length) {
+      h += '<div>' + summaryBits.join(' · ') + '</div>';
+      h += '<div style="font-size:11px;color:var(--muted);margin-top:3px;">';
+      if (paidHrs)   h += '<span style="color:#2e7d32;font-weight:700;">' + paidHrs.toFixed(1) + ' paid hrs</span>';
+      if (paidHrs && unpaidHrs) h += ' · ';
+      if (unpaidHrs) h += '<span style="color:#c62828;font-weight:700;">' + unpaidHrs.toFixed(1) + ' unpaid hrs</span>';
+      h += '</div>';
+    } else {
+      h += '<div style="color:var(--muted);font-style:italic;">No absences this year.</div>';
+    }
+    h += '</div>';
+
+    // Chronological list — most recent first, cap at 50 to keep modal light
+    h += '<div style="max-height:240px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;background:#fff;">';
+    rows.slice(0, 50).forEach(function(a, i){
+      var c = (typeof classifyAbsence === 'function') ? classifyAbsence(a, emp) : { paidHours: 0, category: 'unpaid' };
+      var reason = a.reason || 'Other';
+      var hrs = parseFloat(a.hours) || (typeof ABSENCE_FULL_DAY !== 'undefined' ? ABSENCE_FULL_DAY : 8);
+      var d = new Date(a.date);
+      var dateStr = d.toLocaleDateString('en-US', { weekday: 'short', month: 'numeric', day: 'numeric', year: 'numeric' });
+
+      // Status badge — match the existing PTO/PAID/UNPAID style from the timesheet view
+      var badge;
+      if (c.category === 'pto_paid') badge = '<span style="font-size:9px;padding:1px 6px;background:rgba(46,125,50,.15);color:#2e7d32;border-radius:3px;font-weight:700;">PTO</span>';
+      else if (c.category === 'regular_paid') badge = '<span style="font-size:9px;padding:1px 6px;background:rgba(13,45,94,.15);color:var(--navy);border-radius:3px;font-weight:700;">PAID</span>';
+      else badge = '<span style="font-size:9px;padding:1px 6px;background:rgba(198,40,40,.10);color:#c62828;border-radius:3px;font-weight:700;">UNPAID</span>';
+
+      var bg = (i % 2) ? 'background:rgba(13,45,94,.02);' : '';
+      h += '<div style="display:grid;grid-template-columns:1fr auto auto auto;gap:10px;align-items:center;padding:7px 12px;font-size:12px;border-bottom:1px solid var(--border);' + bg + '">';
+      h += '<div style="color:var(--navy);"><strong>' + escAttr(reason) + '</strong>' + (a.notes ? ' <span style="color:var(--muted);font-style:italic;font-size:11px;">— ' + escAttr(a.notes) + '</span>' : '') + '</div>';
+      h += '<div style="color:var(--muted);font-size:11px;">' + dateStr + '</div>';
+      h += '<div style="color:var(--navy);font-weight:600;font-size:11px;font-variant-numeric:tabular-nums;">' + hrs.toFixed(1) + 'h</div>';
+      h += '<div>' + badge + '</div>';
+      h += '</div>';
+    });
+    if (rows.length > 50) {
+      h += '<div style="padding:6px 12px;font-size:11px;color:var(--muted);font-style:italic;text-align:center;">Showing 50 most recent of ' + rows.length + ' records.</div>';
+    }
+    h += '</div>';
+
+    container.innerHTML = h;
+  } catch (err) {
+    container.innerHTML = '<div style="font-size:12px;color:#c62828;padding:4px 0;">Failed to load absence history: ' + (err.message || err) + '</div>';
+  }
+}
+
 function calcSixMonth() {
   var startEl = document.getElementById('emp-start-date');
   var dateEl  = document.getElementById('sixmonth-date');
@@ -10142,6 +10230,8 @@ function buildEmpForm(emp) {
     '<div><label class="form-label">Sick Days This Year</label><input class="form-input" id="emp-sick-count" type="number" step="1" value="'+(emp.sick_days_ytd||0)+'" placeholder="0" readonly style="background:rgba(13,45,94,.03);"></div>' +
     '</div>' +
     '<div style="font-size:11px;color:var(--muted);margin-top:4px;">Employee gets a warning when sick days reach the threshold. Auto-counted from absence records.</div>' +
+    '<div style="border-top:1px solid var(--border);margin:12px 0;padding-top:12px;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;">Absence History</div>' +
+    '<div id="emp-absence-history" style="font-size:12px;color:var(--muted);font-style:italic;padding:8px 0;">Loading absence history…</div>' +
     '<div style="border-top:1px solid var(--border);margin:12px 0;padding-top:12px;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;">Commission / Sales</div>' +
     '<div class="form-row">' +
     '<div><label class="form-label">Default Commission Rate (% of actual revenue)</label><input class="form-input" id="emp-comm-rate" type="number" step="0.1" value="'+(emp.default_commission_rate||'')+'" placeholder="e.g. 5 for 5%"></div>' +
