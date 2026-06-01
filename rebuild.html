@@ -5713,22 +5713,28 @@ function renderWoDetailModal(tradeKey, tradeLabel, budget) {
             return renderDetailSection('Estimate Line Items (Revenue)', 'item', items, isUnassigned, 'revenue', wo?.phase_id || null, existingTradeKeys);
           })()}
           ${renderCoScopeForTrade(tradeKey, wo)}
-          ${wo?.materials_supplier === 'jg' ? (() => {
-            // JG provides materials → show labor + equipment so the sub knows
-            // what's left for them (labor-only scope when JG handles materials).
-            // Materials themselves stay in the JG Purchased Materials bucket.
+          ${(() => {
+            // Materials list is ALWAYS shown — it's a useful reference of
+            // what materials are needed for this trade regardless of who
+            // buys them. Labor and equipment are only shown when JG supplies
+            // materials (so the sub sees their remaining labor-only scope),
+            // because their $ columns look like double-counting against the
+            // line item revenue when shown alongside.
             const rollup = computeTradeRollup(budget);
             const existingTradeKeys = rollup
               .filter(t => !t.isSynthetic)
               .map(t => t.category);
+            const isJg = wo?.materials_supplier === 'jg';
             return `
-              <div class="wobx-jg-supplies-note">
-                📦 Materials moved to <b>JG Purchased Materials</b> bucket. Click that row in the main table to view the materials list.
-              </div>
-              ${renderDetailSection('Labor (sub scope — JG provides materials)', 'labor', labor, isUnassigned, null, null, existingTradeKeys)}
-              ${renderDetailSection('Equipment (sub scope — JG provides materials)', 'equipment', equipment, isUnassigned, null, null, existingTradeKeys)}
+              ${isJg ? `
+                <div class="wobx-jg-supplies-note">
+                  📦 Materials moved to <b>JG Purchased Materials</b> bucket. Click that row in the main table to view the materials list.
+                </div>
+              ` : renderDetailSection('Materials (reference — included in line item revenue above)', 'material', materials, isUnassigned, null, null, existingTradeKeys)}
+              ${isJg ? renderDetailSection('Labor (sub scope — JG provides materials)', 'labor', labor, isUnassigned, null, null, existingTradeKeys) : ''}
+              ${isJg ? renderDetailSection('Equipment (sub scope — JG provides materials)', 'equipment', equipment, isUnassigned, null, null, existingTradeKeys) : ''}
             `;
-          })() : ''}
+          })()}
         </div>
 
         <div class="wobx-modal-foot">
@@ -12330,9 +12336,18 @@ function setupRealtime() {
 
   // Load cached projects + roster in parallel — renders board instantly
   await Promise.all([loadProjects(), loadSubs(), loadEmployees(), loadAllStaff()]);
-  // Restore any persisted upload queue from previous session
-  // (after first await so deferred script tags — including rebuild-uploads.js — have loaded)
-  loadUploadQueue();
+  // Restore any persisted upload queue from previous session.
+  // rebuild-uploads.js is loaded as a separate <script> after this inline
+  // block; defensive guard handles the race where Promise.all resolves
+  // before the external script finishes parsing.
+  if (typeof loadUploadQueue === 'function') {
+    loadUploadQueue();
+  } else {
+    setTimeout(() => {
+      if (typeof loadUploadQueue === 'function') loadUploadQueue();
+      else console.warn('[init] loadUploadQueue still not defined after 100ms; skipping queue restore');
+    }, 100);
+  }
   setupRealtime();
   wireNotifBell();
   loadNotifications();
