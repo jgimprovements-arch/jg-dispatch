@@ -681,6 +681,22 @@ async function loadAll() {
   var abs = await sb('/rest/v1/absence_records?date=gte.' + since + '&order=date.desc&limit=200&select=*');
   ST.absences = abs || [];
 
+  // ── Auto-populate missing holiday absence records ─────────────────────
+  // For each holiday in the loaded window, ensure every active hourly
+  // employee has an absence_record with reason='Holiday' for that date.
+  // This is the safety net for cases where the day passes and nobody
+  // manually adds the holiday (e.g. Memorial Day 2026). Idempotent:
+  // re-running creates nothing if the records already exist.
+  try {
+    await autoFillHolidayAbsences();
+    // Re-load absences if we created any, so subsequent renders see them
+    if (ST._holidaysCreatedThisLoad) {
+      var refreshed = await sb('/rest/v1/absence_records?date=gte.' + since + '&order=date.desc&limit=200&select=*');
+      ST.absences = refreshed || [];
+      ST._holidaysCreatedThisLoad = false;
+    }
+  } catch(e) { console.warn('[autoFillHolidayAbsences] skipped:', e && e.message); }
+
   // Load timecard approvals (keyed by period|employee)
   var aps = await sb('/rest/v1/timecard_approvals?select=*&order=approved_at.desc&limit=500');
   ST.approvals = {};
@@ -2308,8 +2324,88 @@ function _exportEmployeeAbsences(empName) {
 var ABSENCE_FULL_DAY = 8;
 var DEFAULT_PAID_PTO_REASONS = ['PTO', 'Personal Day', 'Bereavement', 'Jury Duty'];
 var DEFAULT_UNPAID_WITH_OPTION = ['Sick'];  // Unpaid by default but can be overridden
-var PAID_REGULAR_REASONS = ['Training', 'Shop Time'];
+var PAID_REGULAR_REASONS = ['Training', 'Shop Time', 'Holiday'];
 var DEFAULT_UNPAID_REASONS = ['No Call No Show', 'Injured', 'Missed On-Call'];
+
+// Auto-create absence_records with reason='Holiday' for every active
+// hourly employee on every loaded holiday date that's already passed
+// (or is today). Skips:
+//   - Salary employees (paid regardless)
+//   - Inactive employees
+//   - Future holidays (let admin populate manually if they want to pre-load)
+//   - Dates an employee already has any time_entry or absence_record on
+//     (no double-counting; manual logs win)
+//
+// Sets ST._holidaysCreatedThisLoad = true if any rows were inserted so
+// the caller can refresh ST.absences afterward.
+async function autoFillHolidayAbsences() {
+  if (!ST.holidays || !ST.holidays.length) return;
+  if (!ST.employees || !ST.employees.length) return;
+
+  var todayIso = new Date().toISOString().split('T')[0];
+  var pastOrToday = ST.holidays.filter(function(d){ return d <= todayIso; });
+  if (!pastOrToday.length) return;
+
+  // Build a set of "already covered" {empName, date} pairs from existing absences
+  var coveredAbs = new Set();
+  (ST.absences || []).forEach(function(a){
+    coveredAbs.add(a.employee_name + '|' + a.date);
+  });
+
+  // Also skip if the employee actually clocked in on the holiday — that's
+  // worked-on-holiday, deal with separately (premium pay, not auto-pad).
+  var coveredEntries = new Set();
+  (ST.entries || []).forEach(function(e){
+    if (!e.clock_in) return;
+    var d = e.clock_in.split('T')[0];
+    coveredEntries.add(e.employee_name + '|' + d);
+  });
+
+  // Hourly + active employees only — salary employees are paid regardless
+  var eligibleEmps = ST.employees.filter(function(e){
+    return e.active !== false && (e.pay_type || 'hourly') !== 'salary' && e.name;
+  });
+
+  var toInsert = [];
+  pastOrToday.forEach(function(holDate){
+    var holName = (ST.holidayNames && ST.holidayNames[holDate]) || 'Holiday';
+    eligibleEmps.forEach(function(emp){
+      var key = emp.name + '|' + holDate;
+      if (coveredAbs.has(key)) return;     // already an absence record on this date
+      if (coveredEntries.has(key)) return; // employee worked — skip
+      toInsert.push({
+        employee_name: emp.name,
+        date: holDate,
+        reason: 'Holiday',
+        notes: holName,
+        market: emp.market || null,
+        logged_by: 'auto',
+        hours: (typeof ABSENCE_FULL_DAY !== 'undefined' ? ABSENCE_FULL_DAY : 8),
+        paid: true
+      });
+    });
+  });
+
+  if (!toInsert.length) return;
+
+  // Batch insert. Supabase accepts an array for bulk POST.
+  var resp = await fetch(SB_URL + '/rest/v1/absence_records', {
+    method: 'POST',
+    headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
+    body: JSON.stringify(toInsert)
+  });
+  if (resp.ok) {
+    ST._holidaysCreatedThisLoad = true;
+    console.log('[autoFillHolidayAbsences] Created ' + toInsert.length + ' holiday absence records');
+    if (typeof logActivity === 'function') {
+      // One summary log entry rather than one per record
+      var hols = Array.from(new Set(toInsert.map(function(r){ return r.notes + ' (' + r.date + ')'; }))).join(', ');
+      logActivity('Holidays Auto-Populated', toInsert.length + ' records: ' + hols, 'time_clock', 'system');
+    }
+  } else {
+    console.warn('[autoFillHolidayAbsences] POST failed:', resp.status);
+  }
+}
 
 function isReasonEligibleForPtoPayment(reason) {
   return DEFAULT_PAID_PTO_REASONS.indexOf(reason) !== -1
@@ -2320,9 +2416,12 @@ function classifyAbsence(absence, emp) {
   var reason = (absence.reason || '').trim();
   var hrs = absence.hours != null ? parseFloat(absence.hours) : ABSENCE_FULL_DAY;
 
-  // Training / Shop Time — always paid as regular hours
+  // Training / Shop Time / Holiday — always paid as regular hours.
+  // Holiday gets its own earnings code (HOL) so payroll exports can
+  // distinguish it from straight regular time.
   if (PAID_REGULAR_REASONS.indexOf(reason) !== -1) {
-    return { paidHours: hrs, earningsCode: 'REG', category: 'regular_paid' };
+    var code = (reason === 'Holiday') ? 'HOL' : 'REG';
+    return { paidHours: hrs, earningsCode: code, category: 'regular_paid' };
   }
 
   // Determine whether this absence is paid — explicit override wins over default
