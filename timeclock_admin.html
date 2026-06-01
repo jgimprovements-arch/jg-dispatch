@@ -1279,6 +1279,16 @@ async function addAbsence() {
 
   closeModal();
   await loadAll();
+  // If this absence was added from inside the employee edit modal, jump
+  // back into that modal so the new record shows in the history section.
+  if (ST._afterAbsenceSave === name) {
+    ST._afterAbsenceSave = null;
+    var freshEmp = (ST.employees || []).find(function(e){ return e.name === name; });
+    if (freshEmp && typeof openEditEmployee === 'function') {
+      openEditEmployee(freshEmp.id);
+      return;
+    }
+  }
   render();
 }
 
@@ -10023,6 +10033,7 @@ function calcAflac() {
 // #emp-absence-history container. Fetches from absence_records, groups by
 // year, and shows YTD totals (broken out by reason) plus a chronological
 // list with date, reason, hours, and paid/unpaid status badge.
+// Each row has edit/delete actions; the section has a + Add Absence button.
 async function loadEmployeeAbsenceHistory(empName) {
   var container = document.getElementById('emp-absence-history');
   if (!container) return;
@@ -10034,8 +10045,15 @@ async function loadEmployeeAbsenceHistory(empName) {
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
     var rows = await resp.json();
 
+    // Header with "+ Add Absence" button — visible whether or not records exist
+    var header = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">';
+    header += '<div style="font-size:11px;color:var(--muted);">' + rows.length + ' record' + (rows.length===1?'':'s') + ' on file</div>';
+    header += '<button type="button" class="btn btn-sm" onclick="openAbsenceModalForEmployee(\'' + escAttr(empName).replace(/\'/g, "\\'") + '\')" style="font-size:11px;padding:4px 10px;background:var(--orange);color:#fff;border-color:var(--orange);">+ Add Absence</button>';
+    header += '</div>';
+
     if (!rows.length) {
-      container.innerHTML = '<div style="font-size:12px;color:var(--muted);font-style:italic;padding:4px 0;">No absence records on file.</div>';
+      container.innerHTML = header +
+        '<div style="font-size:12px;color:var(--muted);font-style:italic;padding:4px 0;">No absence records on file.</div>';
       return;
     }
 
@@ -10057,7 +10075,8 @@ async function loadEmployeeAbsenceHistory(empName) {
       return byReason[r] + ' ' + r.toLowerCase() + (byReason[r] > 1 ? '' : '');
     });
 
-    var h = '<div style="background:rgba(13,45,94,.04);border-left:3px solid var(--navy);padding:8px 12px;border-radius:4px;margin-bottom:10px;font-size:12px;color:var(--navy);line-height:1.5;">';
+    var h = header;
+    h += '<div style="background:rgba(13,45,94,.04);border-left:3px solid var(--navy);padding:8px 12px;border-radius:4px;margin-bottom:10px;font-size:12px;color:var(--navy);line-height:1.5;">';
     h += '<div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:3px;">This year (' + thisYear + ')</div>';
     if (summaryBits.length) {
       h += '<div>' + summaryBits.join(' · ') + '</div>';
@@ -10080,18 +10099,22 @@ async function loadEmployeeAbsenceHistory(empName) {
       var d = new Date(a.date);
       var dateStr = d.toLocaleDateString('en-US', { weekday: 'short', month: 'numeric', day: 'numeric', year: 'numeric' });
 
-      // Status badge — match the existing PTO/PAID/UNPAID style from the timesheet view
       var badge;
       if (c.category === 'pto_paid') badge = '<span style="font-size:9px;padding:1px 6px;background:rgba(46,125,50,.15);color:#2e7d32;border-radius:3px;font-weight:700;">PTO</span>';
       else if (c.category === 'regular_paid') badge = '<span style="font-size:9px;padding:1px 6px;background:rgba(13,45,94,.15);color:var(--navy);border-radius:3px;font-weight:700;">PAID</span>';
       else badge = '<span style="font-size:9px;padding:1px 6px;background:rgba(198,40,40,.10);color:#c62828;border-radius:3px;font-weight:700;">UNPAID</span>';
 
       var bg = (i % 2) ? 'background:rgba(13,45,94,.02);' : '';
-      h += '<div style="display:grid;grid-template-columns:1fr auto auto auto;gap:10px;align-items:center;padding:7px 12px;font-size:12px;border-bottom:1px solid var(--border);' + bg + '">';
-      h += '<div style="color:var(--navy);"><strong>' + escAttr(reason) + '</strong>' + (a.notes ? ' <span style="color:var(--muted);font-style:italic;font-size:11px;">— ' + escAttr(a.notes) + '</span>' : '') + '</div>';
-      h += '<div style="color:var(--muted);font-size:11px;">' + dateStr + '</div>';
+      var empNameEsc = escAttr(empName).replace(/\'/g, "\\'");
+      h += '<div style="display:grid;grid-template-columns:1fr auto auto auto auto;gap:10px;align-items:center;padding:7px 12px;font-size:12px;border-bottom:1px solid var(--border);' + bg + '">';
+      h += '<div style="color:var(--navy);min-width:0;"><strong>' + escAttr(reason) + '</strong>' + (a.notes ? ' <span style="color:var(--muted);font-style:italic;font-size:11px;">— ' + escAttr(a.notes) + '</span>' : '') + '</div>';
+      h += '<div style="color:var(--muted);font-size:11px;white-space:nowrap;">' + dateStr + '</div>';
       h += '<div style="color:var(--navy);font-weight:600;font-size:11px;font-variant-numeric:tabular-nums;">' + hrs.toFixed(1) + 'h</div>';
       h += '<div>' + badge + '</div>';
+      h += '<div style="display:flex;gap:4px;">';
+      h += '<button type="button" class="btn btn-sm" onclick="editAbsenceFromHistory(\'' + a.id + '\',\'' + empNameEsc + '\')" title="Edit" style="font-size:10px;padding:2px 6px;">✏️</button>';
+      h += '<button type="button" class="btn btn-sm" onclick="removeAbsenceFromEmployeeModal(\'' + a.id + '\',\'' + empNameEsc + '\')" title="Delete" style="font-size:10px;padding:2px 6px;color:#c62828;">✕</button>';
+      h += '</div>';
       h += '</div>';
     });
     if (rows.length > 50) {
@@ -10102,6 +10125,119 @@ async function loadEmployeeAbsenceHistory(empName) {
     container.innerHTML = h;
   } catch (err) {
     container.innerHTML = '<div style="font-size:12px;color:#c62828;padding:4px 0;">Failed to load absence history: ' + (err.message || err) + '</div>';
+  }
+}
+
+// Open the existing absence modal, but stash a reload callback so that
+// after Save, the employee edit modal's history section refreshes.
+function openAbsenceModalForEmployee(empName) {
+  if (typeof openAbsenceModal === 'function') {
+    ST._afterAbsenceSave = empName;  // sentinel for the after-save reload
+    openAbsenceModal(empName);
+  }
+}
+
+// Edit an existing absence inline. Reuses the same fields as openAbsenceModal
+// but pre-fills them with the absence's current values and PATCHes instead
+// of POSTing. Reloads the employee history after save.
+function editAbsenceFromHistory(absenceId, empName) {
+  var a = (ST.absences || []).find(function(x){ return x.id === absenceId; });
+  if (!a) { alert('Absence record not found in cache. Reload and try again.'); return; }
+
+  var reasons = ['Sick','PTO','Personal Day','Missed On-Call','No Call No Show','Injured','Training','Shop Time','Jury Duty','Bereavement','Other'];
+  var reasonOpts = reasons.map(function(r){
+    return '<option value="' + r + '"' + (a.reason === r ? ' selected' : '') + '>' + r + '</option>';
+  }).join('');
+
+  var body = '<p style="font-size:12px;color:var(--muted);margin-bottom:14px;line-height:1.5;">Edit this absence record. Changes affect PTO balance and sick-day counts where applicable.</p>';
+  body += '<div class="form-row">';
+  body += '<div><label class="form-label">Date *</label><input type="date" class="form-input" id="edit-abs-date" value="' + (a.date || '') + '"></div>';
+  body += '<div><label class="form-label">Reason</label><select class="form-select" id="edit-abs-reason">' + reasonOpts + '</select></div>';
+  body += '</div>';
+  body += '<div class="form-row">';
+  body += '<div><label class="form-label">Hours</label><input type="number" step="0.5" class="form-input" id="edit-abs-hours" value="' + (a.hours != null ? a.hours : (typeof ABSENCE_FULL_DAY !== 'undefined' ? ABSENCE_FULL_DAY : 8)) + '"></div>';
+  body += '<div><label class="form-label">Market</label><select class="form-select" id="edit-abs-market"><option' + (a.market==='Appleton'?' selected':'') + '>Appleton</option><option' + (a.market==='Stevens Point'?' selected':'') + '>Stevens Point</option></select></div>';
+  body += '</div>';
+  body += '<div><label class="form-label">Notes</label><input type="text" class="form-input" id="edit-abs-notes" value="' + escAttr(a.notes || '') + '" placeholder="Optional"></div>';
+
+  ST._editingAbsence = { id: absenceId, empName: empName, original: a };
+  showModal('✏️ Edit Absence — ' + empName, body, 'saveAbsenceEdit()');
+}
+
+async function saveAbsenceEdit() {
+  var ctx = ST._editingAbsence;
+  if (!ctx) return;
+
+  var date    = (document.getElementById('edit-abs-date')   || {}).value || '';
+  var reason  = (document.getElementById('edit-abs-reason') || {}).value || 'Sick';
+  var hours   = parseFloat((document.getElementById('edit-abs-hours') || {}).value) || (typeof ABSENCE_FULL_DAY !== 'undefined' ? ABSENCE_FULL_DAY : 8);
+  var market  = (document.getElementById('edit-abs-market') || {}).value || null;
+  var notes   = (document.getElementById('edit-abs-notes')  || {}).value || null;
+
+  if (!date) { alert('Date is required.'); return; }
+
+  try {
+    var resp = await fetch(SB_URL + '/rest/v1/absence_records?id=eq.' + ctx.id, {
+      method: 'PATCH',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ date: date, reason: reason, hours: hours, market: market, notes: notes || null })
+    });
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+
+    if (typeof logActivity === 'function') {
+      logActivity('Absence Edited', ctx.empName + ' — ' + date + ' ' + reason, 'time_clock', ctx.empName);
+    }
+    if (typeof toast === 'function') toast('✓ Absence updated');
+
+    closeModal();
+    // Reload data + re-open the employee edit modal so the history reflects changes
+    if (typeof loadAll === 'function') await loadAll();
+    var emp = (ST.employees || []).find(function(e){ return e.name === ctx.empName; });
+    if (emp && typeof openEditEmployee === 'function') {
+      openEditEmployee(emp.id);
+    }
+    ST._editingAbsence = null;
+  } catch (err) {
+    alert('Failed to save: ' + (err.message || err));
+  }
+}
+
+// Wrapper around removeAbsenceFromHistory that, on success, returns to the
+// employee edit modal instead of the per-employee absence-history modal.
+async function removeAbsenceFromEmployeeModal(absenceId, empName) {
+  if (!confirm('Remove this absence? If it was PTO-paid, the balance will be restored.')) return;
+  var absence = (ST.absences || []).find(function(a){ return a.id === absenceId; });
+  if (!absence) return;
+
+  await fetch(SB_URL + '/rest/v1/absence_records?id=eq.' + absenceId, {
+    method: 'DELETE',
+    headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+  });
+
+  // PTO balance refund (same logic as removeAbsenceFromHistory)
+  var emp = ST.employees.find(function(e){ return e.name === absence.employee_name; });
+  if (emp && typeof isReasonEligibleForPtoPayment === 'function' && isReasonEligibleForPtoPayment(absence.reason)) {
+    var c = classifyAbsence(absence, emp);
+    if (c.category === 'pto_paid' && c.paidHours > 0) {
+      var newAvail = parseFloat(emp.pto_hours_available || 0) + c.paidHours;
+      var newUsed = Math.max(0, parseFloat(emp.pto_hours_used || 0) - c.paidHours);
+      await fetch(SB_URL + '/rest/v1/employees?id=eq.' + emp.id, {
+        method: 'PATCH',
+        headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pto_hours_available: newAvail, pto_hours_used: newUsed })
+      });
+      if (typeof toast === 'function') toast('✓ Absence removed • ' + c.paidHours + 'hr returned to PTO balance');
+    } else if (typeof toast === 'function') toast('✓ Absence removed');
+  } else if (typeof toast === 'function') toast('✓ Absence removed');
+
+  if (typeof logActivity === 'function') {
+    logActivity('Absence Removed', empName + ' — ' + absence.date + ' ' + absence.reason, 'time_clock', empName);
+  }
+  if (typeof loadAll === 'function') await loadAll();
+  // Re-render the employee edit modal so balance + history both refresh
+  var freshEmp = (ST.employees || []).find(function(e){ return e.name === empName; });
+  if (freshEmp && typeof openEditEmployee === 'function') {
+    openEditEmployee(freshEmp.id);
   }
 }
 
