@@ -48,6 +48,17 @@
   .wobx-trade-row.wobx-co-only > td:first-child {
     border-left: 3px dashed #E85D04;
   }
+  /* Unassigned bucket row — items with is_unassigned=true that aren't counted in Revenue */
+  .wobx-trade-row.wobx-unassigned-bucket-row > td {
+    background: rgba(245, 158, 11, 0.08);
+  }
+  .wobx-trade-row.wobx-unassigned-bucket-row > td:first-child {
+    border-left: 3px solid #F59E0B;
+  }
+  .wobx-trade-row.wobx-unassigned-bucket-row .wobx-row-hint {
+    color: #92400E;
+    font-weight: 600;
+  }
   /* CO Scope section inside WO Detail modal */
   .wobx-co-scope-section {
     margin-top: 16px;
@@ -5922,7 +5933,6 @@ function renderDetailSection(title, kind, rows, isUnassigned, mode, tradeDefault
                       const isCurrent = g.categories.includes(r.trade_category);
                       return `<option value="${esc(g.categories[0])}" data-merged-key="${esc(key)}" ${isCurrent ? 'selected' : ''}>${esc(g.label)}</option>`;
                     }).join('')}
-                    <option value="__unassigned__" ${isUnassignedRow ? 'selected' : ''}>📦 Unassigned</option>
                     <option value="__new_trade__" style="font-style:italic;color:var(--orange);">+ New trade…</option>
                   </select>
                 </td>
@@ -7617,11 +7627,12 @@ function renderWoBuilderSection(budget) {
               const wbWo = (budget.wos || []).find(w => w.trade_category === t.category);
               const isLocked = !!wbWo?.is_locked;
               const isSynthetic = !!t.isSynthetic;
+              const isUnassignedBucket = !!t.isUnassignedBucket;
               return `
-                <tr class="wobx-trade-row ${isLocked ? 'wobx-locked' : ''} ${isSynthetic ? 'wobx-synthetic-row' : ''} ${t.isCoBucket ? 'wobx-co-bucket-row' : ''} ${t.hasCoAdditions ? 'wobx-has-co' : ''} ${t.isCoOnly ? 'wobx-co-only' : ''}" ${(isLocked || isSynthetic) ? '' : 'draggable="true"'} data-trade="${esc(t.category)}" data-trade-label="${esc(t.label)}" data-locked="${isLocked ? '1' : '0'}">
+                <tr class="wobx-trade-row ${isLocked ? 'wobx-locked' : ''} ${isSynthetic ? 'wobx-synthetic-row' : ''} ${t.isCoBucket ? 'wobx-co-bucket-row' : ''} ${t.hasCoAdditions ? 'wobx-has-co' : ''} ${t.isCoOnly ? 'wobx-co-only' : ''} ${isUnassignedBucket ? 'wobx-unassigned-bucket-row' : ''}" ${(isLocked || isSynthetic || isUnassignedBucket) ? '' : 'draggable="true"'} data-trade="${esc(t.category)}" data-trade-label="${esc(t.label)}" data-locked="${isLocked ? '1' : '0'}">
                   <td>
                     <b>${esc(t.label)}</b>${isLocked ? ' <span class="wobx-lock-pill">🔒 Locked</span>' : ''}${isSynthetic && !t.isCoBucket ? ' <span class="wobx-synthetic-pill">AUTO</span>' : ''}${t.isCoBucket ? ' <span class="wobx-synthetic-pill" style="background:#FED7AA;color:#9A3412;">CO BUCKET</span>' : ''}${t.hasCoAdditions ? (t.coNumbers || []).map(n => `<span class="wobx-co-row-badge" title="Change Order #${n} affects this trade">CO#${n}</span>`).join('') : ''}${t.isCoOnly ? ' <span class="wobx-co-only-pill" title="This trade exists only because of a Change Order">CO ADDITION</span>' : ''}
-                    <div class="wobx-row-hint">${t.isCoBucket ? 'Click to assign these items to specific Work Orders' : (isSynthetic ? 'Click to view materials list · paid to vendors' : `${t.itemCount} items${t.coItems?.length ? ` + ${t.coItems.length} CO item${t.coItems.length===1?'':'s'}` : ''} · click for detail${isLocked ? ' · WO created — re-open to amend with CO scope' : ' · drag to merge'}`)}</div>
+                    <div class="wobx-row-hint">${isUnassignedBucket ? `${t.itemCount} item${t.itemCount===1?'':'s'} not yet assigned to a trade · NOT counted in Revenue · click to reassign` : (t.isCoBucket ? 'Click to assign these items to specific Work Orders' : (isSynthetic ? 'Click to view materials list · paid to vendors' : `${t.itemCount} items${t.coItems?.length ? ` + ${t.coItems.length} CO item${t.coItems.length===1?'':'s'}` : ''} · click for detail${isLocked ? ' · WO created — re-open to amend with CO scope' : ' · drag to merge'}`))}</div>
                   </td>
                   <td class="r">${(t.hours && !isSynthetic) ? t.hours.toFixed(1) : '—'}</td>
                   <td class="r">${usdCompact(t.revenue)}${t.coDelta ? `<div class="wobx-row-hint" style="margin-top:2px;color:var(--orange);font-weight:600;">incl. +${usdCompact(t.coDelta)} CO</div>` : ''}${isSynthetic ? '<div class="wobx-row-hint" style="margin-top:2px;">materials portion of contract</div>' : ''}</td>
@@ -8125,10 +8136,41 @@ function computeTradeRollup(budget) {
     return groups[k.key];
   }
 
-  (budget.items || []).forEach(it => { if (!it.is_unassigned) getGroup(it.trade_category).items.push(it); });
-  (budget.materials || []).forEach(m => { if (!m.is_unassigned) getGroup(m.trade_category).materials.push(m); });
-  (budget.labor || []).forEach(l => { if (!l.is_unassigned) getGroup(l.trade_category).labor.push(l); });
-  (budget.equipment || []).forEach(e => { if (!e.is_unassigned) getGroup(e.trade_category).equipment.push(e); });
+  // Unassigned items get their own dedicated row at the very top of the
+  // rollup so they're always visible. Previously these silently dropped
+  // from the trade table entirely, which let $5K+ of scope hide from
+  // Revenue. Now if any item is unassigned (from any code path), it
+  // surfaces here with a count and total — PM can click into it and
+  // reassign to a real trade.
+  const ensureUnassignedGroup = () => {
+    if (!groups['__unassigned__']) {
+      groups['__unassigned__'] = {
+        key: '__unassigned__', category: '__unassigned__',
+        label: '⚠️ Unassigned',
+        sort: -1, // forces to top of sorted list
+        items: [], materials: [], labor: [], equipment: [],
+        isUnassignedBucket: true,
+      };
+    }
+    return groups['__unassigned__'];
+  };
+
+  (budget.items || []).forEach(it => {
+    if (it.is_unassigned) ensureUnassignedGroup().items.push(it);
+    else getGroup(it.trade_category).items.push(it);
+  });
+  (budget.materials || []).forEach(m => {
+    if (m.is_unassigned) ensureUnassignedGroup().materials.push(m);
+    else getGroup(m.trade_category).materials.push(m);
+  });
+  (budget.labor || []).forEach(l => {
+    if (l.is_unassigned) ensureUnassignedGroup().labor.push(l);
+    else getGroup(l.trade_category).labor.push(l);
+  });
+  (budget.equipment || []).forEach(e => {
+    if (e.is_unassigned) ensureUnassignedGroup().equipment.push(e);
+    else getGroup(e.trade_category).equipment.push(e);
+  });
 
   // Ensure 'Internal' trade always appears even with 0 items
   getGroup('internal');
@@ -8199,6 +8241,7 @@ function computeTradeRollup(budget) {
       profit,
       hours,
       suggestedPhaseId: matchPhaseForTrade(g.category),
+      isUnassignedBucket: !!g.isUnassignedBucket,  // flag the synthetic Unassigned row so renderer styles it as a warning
     };
   }).sort((a, b) => (a.sort || 100) - (b.sort || 100));
 
