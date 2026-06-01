@@ -3870,6 +3870,9 @@ function phaseRowHtml(ph) {
         ${ph.scheduled_start
           ? `<b>${fmtDate(ph.scheduled_start)}</b> → ${fmtDate(ph.scheduled_end)}`
           : '<span style="color:var(--muted);">no schedule</span>'}
+        ${Array.isArray(ph.stages) && ph.stages.length
+          ? `<div style="margin-top:4px;line-height:1.6;">${renderStagesSummary(ph.stages)}</div>`
+          : ''}
       </div>
       <div class="status-pill ${ph.status}">${titleCase(ph.status)}</div>
       <div class="row-actions">
@@ -11664,6 +11667,62 @@ async function addNewPhase() {
   renderDetail();
 }
 
+// ─── Stage support (multi-window phases) ──────────────────────────────────
+// Presets are quick-pick suggestions in the Edit Phase modal. PMs can also
+// type a custom name. Keys are lowercased matches against ph.phase_name.
+const STAGE_PRESETS = {
+  plumbing:   ['Rough-in', 'Top-out', 'Finish'],
+  electrical: ['Rough-in', 'Trim', 'Final'],
+  electric:   ['Rough-in', 'Trim', 'Final'],
+  hvac:       ['Rough-in', 'Set Equipment', 'Start-up'],
+  drywall:    ['Hang', 'Tape & Finish'],
+  paint:      ['Prime', 'Finish'],
+  flooring:   ['Subfloor Prep', 'Install', 'Finish'],
+  cabinets:   ['Install', 'Counter Template', 'Counter Install'],
+  framing:    ['Walls', 'Decking', 'Roof Framing'],
+};
+
+function presetStagesForPhase(phaseName) {
+  if (!phaseName) return [];
+  const key = String(phaseName).toLowerCase().trim();
+  for (const k of Object.keys(STAGE_PRESETS)) {
+    if (key.includes(k)) return STAGE_PRESETS[k];
+  }
+  return [];
+}
+
+function newStageId() {
+  // crypto.randomUUID is available in all modern browsers + Supabase env
+  return (crypto && crypto.randomUUID) ? crypto.randomUUID()
+    : 'stg_' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+}
+
+// Aggregate stage statuses into a single rollup value for the phase.
+// Rules: any in_progress wins; else all complete → complete; else pending.
+function rollupStageStatus(stages) {
+  if (!Array.isArray(stages) || !stages.length) return null;
+  const any = (s) => stages.some(x => x.status === s);
+  const all = (s) => stages.every(x => x.status === s);
+  if (any('in_progress')) return 'in_progress';
+  if (all('complete'))    return 'complete';
+  return 'pending';
+}
+
+// Compact summary string for the phase list when stages are populated.
+function renderStagesSummary(stages) {
+  if (!Array.isArray(stages) || !stages.length) return '';
+  const icon = (s) => s.status === 'complete' ? '✓' : s.status === 'in_progress' ? '⏳' : '○';
+  const range = (s) => {
+    if (!s.scheduled_start) return '';
+    if (!s.scheduled_end || s.scheduled_end === s.scheduled_start) return fmtDate(s.scheduled_start);
+    return `${fmtDate(s.scheduled_start)}–${fmtDate(s.scheduled_end)}`;
+  };
+  return stages.map(s => {
+    const r = range(s);
+    return `<span style="display:inline-block;margin-right:10px;font-size:11px;"><b>${esc(s.name || 'Stage')}</b> ${r ? `<span style="color:var(--muted);">${r}</span>` : ''} ${icon(s)}</span>`;
+  }).join('');
+}
+
 function openPhaseEditor(phaseId) {
   const ph = state.phases.find(p => p.id === phaseId);
   if (!ph) return;
@@ -11694,6 +11753,28 @@ function openPhaseEditor(phaseId) {
         <input id="eph_se" type="date" value="${ph.scheduled_end || ''}">
       </div>
       <div></div>
+    </div>
+
+    <!-- ─── Stages (optional multi-window scheduling) ─────────────────── -->
+    <div id="eph_stages_section" style="margin-top:18px;padding:12px 14px;background:var(--bg);border:1px solid var(--line);border-radius:8px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+        <label style="margin:0;">Stages <span style="color:var(--muted);font-weight:400;">(optional — for trades with multiple visits)</span></label>
+        <button type="button" class="btn" id="eph_add_stage" style="font-size:11px;padding:4px 10px;">+ Add Stage</button>
+      </div>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:8px;">
+        Add separate windows when a trade has rough-in + finish, hang + tape, etc. When stages are present, the dates above become derived (min start / max end) and the phase status rolls up automatically.
+      </div>
+      ${(() => {
+        const presets = presetStagesForPhase(ph.phase_name);
+        if (!presets.length) return '';
+        return `<div style="margin-bottom:8px;">
+          <div style="font-size:11px;color:var(--muted);margin-bottom:4px;">Quick-pick for ${esc(ph.phase_name)}:</div>
+          <div style="display:flex;flex-wrap:wrap;gap:6px;">
+            ${presets.map(p => `<button type="button" class="btn ghost" data-stage-preset="${esc(p)}" style="font-size:11px;padding:3px 10px;">+ ${esc(p)}</button>`).join('')}
+          </div>
+        </div>`;
+      })()}
+      <div id="eph_stages_list" style="display:flex;flex-direction:column;gap:6px;"></div>
     </div>
 
     <label style="margin-top:14px;">Assigned Subs <span style="color:var(--muted);font-weight:400;">(multi-select)</span><span class="assignee-count" id="eph_subs_count"></span></label>
@@ -11747,6 +11828,102 @@ function openPhaseEditor(phaseId) {
   wireSearch('eph_subs_search', 'eph_subs_list', 'subName');
   wireSearch('eph_emps_search', 'eph_emps_list', 'empName');
 
+  // ─── Stages wireup (mutable local state, re-rendered on every change) ──
+  let stagesDraft = Array.isArray(ph.stages) ? ph.stages.map(s => ({ ...s })) : [];
+
+  const renderStagesList = () => {
+    const list = $('#eph_stages_list');
+    if (!list) return;
+    if (!stagesDraft.length) {
+      list.innerHTML = '<div style="color:var(--muted);font-size:11px;font-style:italic;padding:6px 0;">No stages — phase uses the single Start/End above.</div>';
+      return;
+    }
+    list.innerHTML = stagesDraft.map((s, i) => `
+      <div style="display:grid;grid-template-columns:1.4fr 1fr 1fr 1fr auto;gap:6px;align-items:center;background:#fff;border:1px solid var(--line);border-radius:6px;padding:6px 8px;">
+        <input type="text" data-stage-field="name" data-stage-idx="${i}" value="${esc(s.name || '')}" placeholder="Stage name" style="font-size:12px;padding:5px 8px;">
+        <select data-stage-field="status" data-stage-idx="${i}" style="font-size:12px;padding:5px 8px;">
+          ${['pending','in_progress','complete'].map(st =>
+            `<option value="${st}" ${st === (s.status || 'pending') ? 'selected' : ''}>${titleCase(st)}</option>`).join('')}
+        </select>
+        <input type="date" data-stage-field="scheduled_start" data-stage-idx="${i}" value="${s.scheduled_start || ''}" title="Scheduled start" style="font-size:12px;padding:5px 8px;">
+        <input type="date" data-stage-field="scheduled_end" data-stage-idx="${i}" value="${s.scheduled_end || ''}" title="Scheduled end" style="font-size:12px;padding:5px 8px;">
+        <button type="button" data-stage-remove="${i}" title="Remove stage" style="background:transparent;border:none;color:var(--danger,#d64545);cursor:pointer;font-size:16px;line-height:1;padding:2px 8px;">×</button>
+      </div>
+    `).join('');
+
+    // Wire field inputs
+    list.querySelectorAll('[data-stage-field]').forEach(el => {
+      el.addEventListener('input', () => {
+        const i = Number(el.dataset.stageIdx);
+        const field = el.dataset.stageField;
+        if (!stagesDraft[i]) return;
+        stagesDraft[i][field] = el.value || null;
+      });
+      el.addEventListener('change', () => {
+        const i = Number(el.dataset.stageIdx);
+        const field = el.dataset.stageField;
+        if (!stagesDraft[i]) return;
+        stagesDraft[i][field] = el.value || null;
+      });
+    });
+
+    // Wire remove buttons
+    list.querySelectorAll('[data-stage-remove]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const i = Number(btn.dataset.stageRemove);
+        stagesDraft.splice(i, 1);
+        renderStagesList();
+      });
+    });
+  };
+
+  // + Add Stage (blank)
+  const addStageBtn = $('#eph_add_stage');
+  if (addStageBtn) {
+    addStageBtn.addEventListener('click', () => {
+      stagesDraft.push({
+        id: newStageId(),
+        name: '',
+        status: 'pending',
+        scheduled_start: null,
+        scheduled_end: null,
+        actual_start: null,
+        actual_end: null,
+      });
+      renderStagesList();
+      // Focus the new row's name input
+      setTimeout(() => {
+        const inputs = document.querySelectorAll('#eph_stages_list [data-stage-field="name"]');
+        const last = inputs[inputs.length - 1];
+        if (last) last.focus();
+      }, 50);
+    });
+  }
+
+  // Preset quick-pick chips
+  document.querySelectorAll('[data-stage-preset]').forEach(chip => {
+    chip.addEventListener('click', () => {
+      const name = chip.dataset.stagePreset;
+      // Don't add a duplicate by name (case-insensitive)
+      if (stagesDraft.some(s => (s.name || '').toLowerCase() === name.toLowerCase())) {
+        toast(`"${name}" stage already added.`);
+        return;
+      }
+      stagesDraft.push({
+        id: newStageId(),
+        name,
+        status: 'pending',
+        scheduled_start: null,
+        scheduled_end: null,
+        actual_start: null,
+        actual_end: null,
+      });
+      renderStagesList();
+    });
+  });
+
+  renderStagesList();
+
   // Live count badges + selected pills strip
   const updateCount = (listId, countId, pillsId, labelGetter) => {
     const list = $('#' + listId);
@@ -11790,12 +11967,42 @@ function openPhaseEditor(phaseId) {
 
   $('#eph_save').onclick = async () => {
     const before = ph;
+
+    // Sanitize stages — drop any with no name (treated as deleted), normalize empty strings to null
+    const cleanedStages = stagesDraft
+      .filter(s => (s.name || '').trim().length > 0)
+      .map(s => ({
+        id: s.id || newStageId(),
+        name: String(s.name).trim(),
+        status: s.status || 'pending',
+        scheduled_start: s.scheduled_start || null,
+        scheduled_end:   s.scheduled_end   || null,
+        actual_start:    s.actual_start    || null,
+        actual_end:      s.actual_end      || null,
+      }));
+
+    // When stages are present, derive top-level dates + status from them.
+    // When empty, honor the form's single Start/End/Status as-is.
+    let derivedStart = $('#eph_ss').value || null;
+    let derivedEnd   = $('#eph_se').value || null;
+    let derivedStatus = $('#eph_status').value;
+
+    if (cleanedStages.length) {
+      const starts = cleanedStages.map(s => s.scheduled_start).filter(Boolean).sort();
+      const ends   = cleanedStages.map(s => s.scheduled_end).filter(Boolean).sort();
+      derivedStart = starts.length ? starts[0]                 : null;
+      derivedEnd   = ends.length   ? ends[ends.length - 1]     : null;
+      const rolled = rollupStageStatus(cleanedStages);
+      if (rolled) derivedStatus = rolled;
+    }
+
     const updates = {
       phase_name: $('#eph_name').value,
-      status: $('#eph_status').value,
-      scheduled_start: $('#eph_ss').value || null,
-      scheduled_end: $('#eph_se').value || null,
+      status: derivedStatus,
+      scheduled_start: derivedStart,
+      scheduled_end:   derivedEnd,
       notes: $('#eph_notes').value || null,
+      stages: cleanedStages,
     };
 
     // Read selected subs + carpenters
