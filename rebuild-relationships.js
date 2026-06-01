@@ -620,9 +620,25 @@ function relCloseDirectory() {
   $('#rel_dir_back')?.classList.remove('on');
 }
 
-async function relRunDirectorySearch(q) {
+async function relRunDirectorySearch(q, opts = {}) {
   q = (q || '').trim();
+  const append = !!opts.append;
   const showCust = state.relDirShowCustomers;
+
+  // Reset pagination on new search/filter; only append mode preserves it
+  if (!append) {
+    state.relDirPage = 0;
+    state.relDirHasMore = true;
+    state.relDirLastQuery = q;
+    state.relDirLoading = false;
+  }
+  if (state.relDirLoading || !state.relDirHasMore) return;
+  state.relDirLoading = true;
+
+  const PAGE_SIZE = 100;
+  const from = state.relDirPage * PAGE_SIZE;
+  const to   = from + PAGE_SIZE - 1;
+
   let queryRes;
   if (state.relDirTab === 'people') {
     let qb = sb.from('contact_directory')
@@ -630,7 +646,7 @@ async function relRunDirectorySearch(q) {
       .is('deleted_at', null);
     if (!showCust) qb = qb.eq('is_customer_only', false);
     if (q.length >= 2) qb = qb.or(`display_name.ilike.%${q}%,organization_name.ilike.%${q}%,email.ilike.%${q}%`);
-    qb = qb.order('display_name').limit(50);
+    qb = qb.order('display_name').range(from, to);
     queryRes = await qb;
   } else {
     let qb = sb.from('organization_directory')
@@ -638,15 +654,30 @@ async function relRunDirectorySearch(q) {
       .is('deleted_at', null);
     if (!showCust) qb = qb.eq('is_customer_only', false);
     if (q.length >= 2) qb = qb.or(`name.ilike.%${q}%,email.ilike.%${q}%,city.ilike.%${q}%`);
-    qb = qb.order('name').limit(50);
+    qb = qb.order('name').range(from, to);
     queryRes = await qb;
   }
+
   const { data, error } = queryRes;
   const list = $('#rel_dir_list');
-  if (error) { list.innerHTML = `<div style="padding:20px;color:var(--red);">Error: ${esc(error.message)}</div>`; return; }
-  if (!data || !data.length) { list.innerHTML = `<div style="padding:30px;text-align:center;color:var(--muted);">No matches.</div>`; return; }
-  if (state.relDirTab === 'people') {
-    list.innerHTML = data.map(c => `
+  state.relDirLoading = false;
+
+  if (error) {
+    if (!append) list.innerHTML = `<div style="padding:20px;color:var(--red);">Error: ${esc(error.message)}</div>`;
+    state.relDirHasMore = false;
+    return;
+  }
+
+  // If fewer rows returned than we asked for, we've reached the end.
+  if (!data || data.length < PAGE_SIZE) state.relDirHasMore = false;
+
+  if (!append && (!data || !data.length)) {
+    list.innerHTML = `<div style="padding:30px;text-align:center;color:var(--muted);">No matches.</div>`;
+    return;
+  }
+
+  const renderRow = state.relDirTab === 'people'
+    ? c => `
       <div class="rel-dir-item" data-pick="contact" data-id="${esc(c.id)}">
         <div style="font-weight:700;color:var(--text);font-size:14px;">${esc(c.display_name)}</div>
         <div style="font-size:11px;color:var(--muted);margin-top:3px;line-height:1.4;">
@@ -655,10 +686,8 @@ async function relRunDirectorySearch(q) {
           ${c.email ? `<br>${esc(c.email)}` : ''}
           ${c.mobile_phone ? ` · ${esc(c.mobile_phone)}` : ''}
         </div>
-      </div>
-    `).join('');
-  } else {
-    list.innerHTML = data.map(o => `
+      </div>`
+    : o => `
       <div class="rel-dir-item" data-pick="org" data-id="${esc(o.id)}">
         <div style="font-weight:700;color:var(--text);font-size:14px;">${esc(o.name)}</div>
         <div style="font-size:11px;color:var(--muted);margin-top:3px;line-height:1.4;">
@@ -667,18 +696,47 @@ async function relRunDirectorySearch(q) {
           ${o.email ? `<br>${esc(o.email)}` : ''}
           ${o.phone ? ` · ${esc(o.phone)}` : ''}
         </div>
-      </div>
-    `).join('');
+      </div>`;
+
+  const newRowsHtml = (data || []).map(renderRow).join('');
+
+  if (append) {
+    list.insertAdjacentHTML('beforeend', newRowsHtml);
+  } else {
+    list.innerHTML = newRowsHtml;
+    // Attach scroll listener once. Triggers ~120px before bottom for smooth load.
+    if (!list._scrollWired) {
+      list.addEventListener('scroll', () => {
+        if (list.scrollTop + list.clientHeight >= list.scrollHeight - 120) {
+          if (state.relDirHasMore && !state.relDirLoading) {
+            state.relDirPage += 1;
+            relRunDirectorySearch(state.relDirLastQuery || '', { append: true });
+          }
+        }
+      });
+      list._scrollWired = true;
+    }
   }
+
+  // Bind click handlers on newly added rows only (idempotent via _pickWired flag).
+  // Picked rows are refetched by id so we always get current data regardless of
+  // which page rendered them — works correctly across pagination.
   list.querySelectorAll('[data-pick]').forEach(el => {
-    el.addEventListener('click', () => {
+    if (el._pickWired) return;
+    el._pickWired = true;
+    el.addEventListener('click', async () => {
       const id = el.dataset.id;
-      if (el.dataset.pick === 'contact') {
-        const c = data.find(x => x.id === id);
+      const tab = el.dataset.pick;
+      if (tab === 'contact') {
+        const { data: c } = await sb.from('contact_directory')
+          .select('id, display_name, role, contact_type, mobile_phone, email, organization_name, job_title, is_customer_only')
+          .eq('id', id).maybeSingle();
         if (!$('#rel_sheet_back').classList.contains('on')) relOpenAddSheet();
         if (c) relPickDirectoryContact(c);
       } else {
-        const o = data.find(x => x.id === id);
+        const { data: o } = await sb.from('organization_directory')
+          .select('id, name, org_type, phone, email, city, state, is_customer_only')
+          .eq('id', id).maybeSingle();
         if (!$('#rel_sheet_back').classList.contains('on')) relOpenAddSheet();
         if (o) relPickDirectoryOrg(o);
       }
