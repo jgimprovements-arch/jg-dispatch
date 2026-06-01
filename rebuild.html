@@ -3700,11 +3700,20 @@ function renderCalendarView() {
       </div>`;
   }
 
-  // Determine timeline window — earliest start to latest end (or start+1d if no end)
+  // Determine timeline window — earliest start to latest end across phases
+  // AND their stages (so a stage-only date isn't off-screen).
   const dates = scheduled.flatMap(p => {
-    const s = new Date(p.scheduled_start);
-    const e = p.scheduled_end ? new Date(p.scheduled_end) : new Date(s.getTime() + 86400000);
-    return [s, e];
+    const collected = [];
+    if (p.scheduled_start) collected.push(new Date(p.scheduled_start));
+    if (p.scheduled_end)   collected.push(new Date(p.scheduled_end));
+    else if (p.scheduled_start) collected.push(new Date(new Date(p.scheduled_start).getTime() + 86400000));
+    if (Array.isArray(p.stages)) {
+      p.stages.forEach(s => {
+        if (s.scheduled_start) collected.push(new Date(s.scheduled_start));
+        if (s.scheduled_end)   collected.push(new Date(s.scheduled_end));
+      });
+    }
+    return collected;
   });
   let minDate = new Date(Math.min(...dates));
   let maxDate = new Date(Math.max(...dates));
@@ -3727,7 +3736,10 @@ function renderCalendarView() {
   const todayPct = ((today - minDate) / totalMs) * 100;
   const todayInRange = todayPct >= 0 && todayPct <= 100;
 
-  // Build phase bars
+  // Build phase bars — when a phase has stages, render one bar per stage
+  // (multiple bars on the same row); otherwise render a single bar from
+  // scheduled_start → scheduled_end. The "trade row" stays as one row in
+  // the timeline, but multi-visit trades now show their actual windows.
   const bars = state.phases.map(p => {
     if (!p.scheduled_start) {
       return `
@@ -3738,26 +3750,48 @@ function renderCalendarView() {
           </div>
         </div>`;
     }
-    const start = new Date(p.scheduled_start);
-    const end = p.scheduled_end ? new Date(p.scheduled_end) : new Date(start.getTime() + 86400000);
-    const left = ((start - minDate) / totalMs) * 100;
-    const width = Math.max(((end - start) / totalMs) * 100, 1);
+
+    // Decide which "segments" to render: each stage with dates, or one phase-wide segment.
+    const stages = Array.isArray(p.stages) ? p.stages.filter(s => s.scheduled_start) : [];
+    const segments = stages.length
+      ? stages.map(s => ({
+          start: new Date(s.scheduled_start),
+          end: new Date(s.scheduled_end || s.scheduled_start),
+          status: s.status || p.status,
+          label: s.name || 'Stage',
+          tooltip: `${p.phase_name} — ${s.name || 'Stage'}`,
+        }))
+      : [{
+          start: new Date(p.scheduled_start),
+          end: p.scheduled_end ? new Date(p.scheduled_end) : new Date(new Date(p.scheduled_start).getTime() + 86400000),
+          status: p.status,
+          label: null, // will be replaced by assignee label below
+          tooltip: p.phase_name,
+        }];
+
     const assignees = p.assignees || [];
     const assigneeNames = assignees.map(a => a.assignee_type === 'sub'
       ? (a.sub?.company_name || 'Sub')
       : (a.employee?.name || 'Carpenter'));
-    const barLabel = assigneeNames.length === 0 ? 'Unassigned'
+    const assigneeLabel = assigneeNames.length === 0 ? 'Unassigned'
       : assigneeNames.length === 1 ? assigneeNames[0]
       : `${assigneeNames[0]} +${assigneeNames.length - 1}`;
     const titleAssignees = assigneeNames.length ? assigneeNames.join(', ') : 'Unassigned';
+
+    const barsHtml = segments.map(seg => {
+      const left = ((seg.start - minDate) / totalMs) * 100;
+      const width = Math.max(((seg.end - seg.start) / totalMs) * 100, 1);
+      const segLabel = seg.label || assigneeLabel;
+      return `
+          <div class="cal-bar cal-bar-${seg.status}" style="left:${left}%;width:${width}%;" title="${esc(seg.tooltip)} · ${titleAssignees} · ${fmtDate(seg.start)} → ${fmtDate(seg.end)} · click to edit">
+            <span class="cal-bar-text">${esc(segLabel)}</span>
+          </div>`;
+    }).join('');
+
     return `
       <div class="cal-row" data-phase="${p.id}">
         <div class="cal-label">${String(p.sequence).padStart(2,'0')} · ${p.phase_name}</div>
-        <div class="cal-track">
-          <div class="cal-bar cal-bar-${p.status}" style="left:${left}%;width:${width}%;" title="${p.phase_name} · ${titleAssignees} · ${fmtDate(start)} → ${fmtDate(end)} · click to edit">
-            <span class="cal-bar-text">${barLabel}</span>
-          </div>
-        </div>
+        <div class="cal-track">${barsHtml}</div>
       </div>`;
   }).join('');
 

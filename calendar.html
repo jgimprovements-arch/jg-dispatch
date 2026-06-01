@@ -560,7 +560,7 @@ async function loadAll() {
   const [{ data: projects }, { data: phases }, selRes, { data: allSubs }, vacRes] = await Promise.all([
     sb.from('rebuild_projects').select('id, albi_job_number, customer_name, customer_email, albi_pm_name, market').order('albi_job_number'),
     sb.from('rebuild_phases').select(`
-      id, project_id, sequence, phase_name, status, scheduled_start, scheduled_end,
+      id, project_id, sequence, phase_name, status, scheduled_start, scheduled_end, stages,
       assignees:rebuild_phase_assignees(
         id, assignee_type,
         sub:rebuild_subs(company_name),
@@ -599,23 +599,49 @@ async function loadAll() {
       .map(a => a.sub?.company_name)
       .filter(Boolean);
     const assigneeNames = [...carpenterNames, ...subNames];
-    events.push({
-      id: 'ph_' + ph.id,
-      kind: isWalkthrough ? 'walkthrough' : 'phase',
-      projectId: ph.project_id,
-      projectLabel: proj.albi_job_number || 'Project',
-      customerName: proj.customer_name || '',
-      pmName: proj.albi_pm_name || '',
-      market: proj.market || '',
-      title: ph.phase_name,
-      start: new Date(ph.scheduled_start),
-      end: ph.scheduled_end ? new Date(ph.scheduled_end) : new Date(ph.scheduled_start),
-      assignees: assigneeNames,
-      _carpenterNames: carpenterNames,
-      _subNames: subNames,
-      status: ph.status,
-      color: colorForProject(ph.project_id),
-      _phaseId: ph.id,
+
+    // When the phase has stages with dates, emit one event per stage instead
+    // of one phase-level event. Multi-window trades (plumbing rough-in +
+    // finish, etc.) now render as multiple distinct events on the calendar.
+    const stages = Array.isArray(ph.stages) ? ph.stages.filter(s => s.scheduled_start) : [];
+    const segments = stages.length
+      ? stages.map((s, idx) => ({
+          id: 'ph_' + ph.id + '_stg_' + (s.id || idx),
+          title: ph.phase_name + ' — ' + (s.name || 'Stage'),
+          start: new Date(s.scheduled_start),
+          end: s.scheduled_end ? new Date(s.scheduled_end) : new Date(s.scheduled_start),
+          status: s.status || ph.status,
+          _stageId: s.id || null,
+        }))
+      : [{
+          id: 'ph_' + ph.id,
+          title: ph.phase_name,
+          start: new Date(ph.scheduled_start),
+          end: ph.scheduled_end ? new Date(ph.scheduled_end) : new Date(ph.scheduled_start),
+          status: ph.status,
+          _stageId: null,
+        }];
+
+    segments.forEach(seg => {
+      events.push({
+        id: seg.id,
+        kind: isWalkthrough ? 'walkthrough' : 'phase',
+        projectId: ph.project_id,
+        projectLabel: proj.albi_job_number || 'Project',
+        customerName: proj.customer_name || '',
+        pmName: proj.albi_pm_name || '',
+        market: proj.market || '',
+        title: seg.title,
+        start: seg.start,
+        end: seg.end,
+        assignees: assigneeNames,
+        _carpenterNames: carpenterNames,
+        _subNames: subNames,
+        status: seg.status,
+        color: colorForProject(ph.project_id),
+        _phaseId: ph.id,
+        _stageId: seg._stageId,
+      });
     });
   }
 
@@ -1331,6 +1357,24 @@ async function applyReschedule({ ev, newStartStr, newEndStr, cascade, offsetDays
       const { error } = await sb.from('rebuild_selections').update({
         approved_install_date: newStartStr,
       }).eq('id', ev._selectionId);
+      if (error) throw error;
+    } else if (ev._stageId) {
+      // Stage-level drag: update only this stage within the phase's stages
+      // array, then re-derive the phase's top-level dates from all stages.
+      const { data: phaseRow, error: fetchErr } = await sb.from('rebuild_phases')
+        .select('stages').eq('id', ev._phaseId).single();
+      if (fetchErr) throw fetchErr;
+      const stages = Array.isArray(phaseRow.stages) ? [...phaseRow.stages] : [];
+      const idx = stages.findIndex(s => s.id === ev._stageId);
+      if (idx < 0) throw new Error('Stage not found on phase');
+      stages[idx] = { ...stages[idx], scheduled_start: newStartStr, scheduled_end: newEndStr };
+      const starts = stages.map(s => s.scheduled_start).filter(Boolean).sort();
+      const ends   = stages.map(s => s.scheduled_end).filter(Boolean).sort();
+      const { error } = await sb.from('rebuild_phases').update({
+        stages,
+        scheduled_start: starts[0] || newStartStr,
+        scheduled_end:   ends.length ? ends[ends.length - 1] : newEndStr,
+      }).eq('id', ev._phaseId);
       if (error) throw error;
     } else {
       const { error } = await sb.from('rebuild_phases').update({
