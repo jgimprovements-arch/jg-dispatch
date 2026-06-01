@@ -12454,18 +12454,115 @@ function openTimecardDetail(empName) {
     h += '</div>';
   }
 
-  // ── Entries table (consolidated by day) ──
-  if (entries.length) {
-    var dayGroupsD = groupEntriesByDay(entries);
+  // ── Entries + Absences table (consolidated by day) ──
+  // Build a map of absence records keyed by date so we can interleave
+  // them with work-day rows in chronological order. After rendering work
+  // days, any absence dates that didn't have a matching work day are
+  // appended in their own loop. Salary employees keep the legacy
+  // separate absences section unchanged.
+  var absencesByDate = {};
+  if (!isSalary && absBrk.records && absBrk.records.length) {
+    absBrk.records.forEach(function(rec){
+      if (rec && rec.absence && rec.absence.date) {
+        (absencesByDate[rec.absence.date] = absencesByDate[rec.absence.date] || []).push(rec);
+      }
+    });
+  }
+
+  // Helper: render an absence record as a table row matching the
+  // work-day columns. Date / Reason (in Clock-In) / Hours / Billable /
+  // Status badge. Styled with a left-border accent (green=paid, red=unpaid).
+  function _renderAbsenceRow(rec) {
+    var a = rec.absence;
+    var c = rec.classification || {};
+    var paid = c.category === 'pto_paid' || c.category === 'regular_paid';
+    var color = paid ? '#2e7d32' : '#c62828';
+    var bg = paid ? 'rgba(46,125,50,.04)' : 'rgba(198,40,40,.04)';
+    var hrs = parseFloat(a.hours) || (typeof ABSENCE_FULL_DAY !== 'undefined' ? ABSENCE_FULL_DAY : 8);
+    var dateStr = new Date(a.date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'numeric', day: 'numeric', year: 'numeric' });
+
+    // Pick the right icon + label
+    var icon = '📋', label = a.reason || 'Absent';
+    if (a.reason === 'Holiday')      { icon = '🎉'; label = 'Holiday' + (a.notes ? ' · ' + a.notes : ''); }
+    else if (a.reason === 'Sick')    { icon = '🤒'; label = 'Sick'; }
+    else if (a.reason === 'PTO' || a.reason === 'Vacation') { icon = '🏖'; label = a.reason; }
+    else if (a.reason === 'Personal' || a.reason === 'Personal Day') { icon = '👤'; label = 'Personal'; }
+    else if (a.reason === 'Bereavement') { icon = '🕊'; label = 'Bereavement'; }
+    else if (a.reason === 'Jury Duty')   { icon = '⚖️'; label = 'Jury Duty'; }
+    else if (a.reason === 'Training' || a.reason === 'Shop Time') { icon = '🛠'; label = a.reason; }
+
+    var billable = paid ? fmtDur(hrs * 60) : '<span style="color:#c62828;">unpaid</span>';
+    var badge;
+    if (c.category === 'pto_paid') badge = '<span style="font-size:10px;padding:2px 7px;background:rgba(46,125,50,.15);color:#2e7d32;border-radius:4px;font-weight:700;">PTO</span>';
+    else if (c.category === 'regular_paid') badge = '<span style="font-size:10px;padding:2px 7px;background:rgba(13,45,94,.15);color:var(--navy);border-radius:4px;font-weight:700;">PAID</span>';
+    else badge = '<span style="font-size:10px;padding:2px 7px;background:rgba(198,40,40,.10);color:#c62828;border-radius:4px;font-weight:700;">UNPAID</span>';
+
+    var clickable = !isApproved && typeof isAdmin === 'function' && isAdmin();
+    var clickAttr = clickable ? ' style="cursor:pointer;background:' + bg + ';" onclick="_dgEditDay(\'' + escAttr(a.employee_name) + '\',\'' + a.date + '\')"' : ' style="background:' + bg + ';"';
+
+    var row = '<tr' + clickAttr + '>';
+    row += '<td style="border-left:3px solid ' + color + ';"><strong>' + dateStr + '</strong></td>';
+    row += '<td colspan="2" style="color:' + color + ';font-weight:600;">' + icon + ' ' + escAttr(label) + '</td>';
+    row += '<td>' + fmtDur(hrs * 60) + '</td>';
+    row += '<td><strong>' + billable + '</strong></td>';
+    row += '<td>—</td>';
+    row += '<td>' + badge + '</td>';
+    row += '<td style="text-align:center;">—</td>';
+    row += '<td>' + (a.notes && a.reason !== 'Holiday' ? '<span style="font-size:11px;color:var(--muted);font-style:italic;">' + escAttr(a.notes) + '</span>' : '') + '</td>';
+    if (clickable) {
+      row += '<td><button class="btn btn-sm" onclick="event.stopPropagation();_dgEditDay(\'' + escAttr(a.employee_name) + '\',\'' + a.date + '\')">Edit</button></td>';
+    } else {
+      row += '<td></td>';
+    }
+    row += '</tr>';
+    return row;
+  }
+
+  // Render the table when EITHER work entries OR absences exist
+  if (entries.length || Object.keys(absencesByDate).length) {
+    var dayGroupsD = entries.length ? groupEntriesByDay(entries) : {};
     var dayKeysD = Object.keys(dayGroupsD).sort(function(a,b){
       var ea = dayGroupsD[a][0], eb = dayGroupsD[b][0];
       return new Date(ea.clock_in) - new Date(eb.clock_in);
     });
 
-    h += '<div style="font-size:12px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:8px;">Time Entries — '+dayKeysD.length+(dayKeysD.length===1?' day':' days')+', '+entries.length+' total punches</div>';
+    // Build unified chronological list combining work days and absences.
+    // Each slot has either {dk: workDayKey} OR {absDate: isoDate}; when a
+    // date has both, the work slot comes first and absences are flagged
+    // on it so they render immediately after.
+    var workDateMap = {};
+    dayKeysD.forEach(function(dk){
+      var dateIso = _dayKey(dayGroupsD[dk][0].clock_in);
+      workDateMap[dateIso] = dk;
+    });
+
+    var allDateSlots = [];
+    var seen = {};
+    Object.keys(workDateMap).forEach(function(dateIso){
+      allDateSlots.push({ dateIso: dateIso, dk: workDateMap[dateIso], absences: absencesByDate[dateIso] || null });
+      seen[dateIso] = true;
+    });
+    Object.keys(absencesByDate).forEach(function(dateIso){
+      if (seen[dateIso]) return;  // already handled (work + abs same day)
+      allDateSlots.push({ dateIso: dateIso, dk: null, absences: absencesByDate[dateIso] });
+    });
+    allDateSlots.sort(function(a, b){ return a.dateIso < b.dateIso ? -1 : (a.dateIso > b.dateIso ? 1 : 0); });
+
+    var totalAbsCount = (absBrk.records || []).length;
+    var headerLabel = 'Time Entries — ' + dayKeysD.length + (dayKeysD.length === 1 ? ' day' : ' days') +
+      ', ' + entries.length + ' total punch' + (entries.length === 1 ? '' : 'es') +
+      (totalAbsCount ? ' · ' + totalAbsCount + ' absence' + (totalAbsCount === 1 ? '' : 's') : '');
+    h += '<div style="font-size:12px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:8px;">' + headerLabel + '</div>';
     h += '<div style="overflow-x:auto;"><table class="tc-table" style="width:100%;font-size:13px;"><thead><tr><th>Date</th><th>Clock In</th><th>Clock Out</th><th>Actual</th><th>Billable</th><th>Break</th><th>Punches</th><th>Verified</th><th>Flags</th><th></th></tr></thead><tbody>';
 
-    dayKeysD.forEach(function(dkD){
+    allDateSlots.forEach(function(slot){
+      // If this slot has no work entry, just render its absence rows and bail.
+      if (!slot.dk) {
+        slot.absences.forEach(function(rec){ h += _renderAbsenceRow(rec); });
+        return;
+      }
+      // Otherwise: render the work day, then any same-date absences.
+      var dkD = slot.dk;
       var dayEntriesD = dayGroupsD[dkD];
       var firstD = dayEntriesD[0];
       var dmD = dayMetrics(dayEntriesD, ST.breaks);
@@ -12562,14 +12659,22 @@ function openTimecardDetail(empName) {
         h += dayNotesD.join('<br>');
         h += '</div></td></tr>';
       }
+
+      // Same-date absences (e.g. work + partial sick day): render right
+      // after the work row so they stay in chronological flow.
+      if (slot.absences && slot.absences.length) {
+        slot.absences.forEach(function(rec){ h += _renderAbsenceRow(rec); });
+      }
     });
     h += '</tbody></table></div>';
   } else if (!isSalary && empCommissions.length === 0) {
     h += '<div style="padding:40px;text-align:center;color:var(--muted);font-size:13px;">No entries for this period.</div>';
   }
 
-  // ── Other absences (anything not on the day grid for hourly, or PTO summary for salary) ──
-  if (absBrk.records && absBrk.records.length && !isSalary) {
+  // ── Legacy absences section ──
+  // For SALARY only — hourly employees now see absences inline in the
+  // entries table (rendered above as table rows in chronological order).
+  if (absBrk.records && absBrk.records.length && isSalary) {
     h += '<div style="margin-top:20px;font-size:12px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:8px;">Absences / PTO ('+absBrk.records.length+')</div>';
     h += '<div style="display:flex;flex-direction:column;gap:6px;">';
     absBrk.records.forEach(function(rec) {
