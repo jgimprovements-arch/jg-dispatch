@@ -1201,6 +1201,27 @@ var TYPE_COLORS = (window.JG_SHARED && window.JG_SHARED.TYPE_COLORS) || {
   'Customer':'#546e7a','Other':'#546e7a'
 };
 
+// ── DATE HELPERS ──────────────────────────────────────────────────────────
+// localTodayStr() returns YYYY-MM-DD in the user's LOCAL timezone.
+//
+// History: the app previously used localTodayStr()
+// which returns the UTC date. For Wisconsin (Central time) anytime after
+// 7pm local, UTC has already rolled to "tomorrow." Result: routes planned
+// for today silently disappeared from the home screen during evening
+// hours. Same root cause as the dispatch board's pre-fix bug.
+function localTodayStr() {
+  // Intl.DateTimeFormat with sv-SE locale formats as YYYY-MM-DD natively.
+  // The empty locale array uses the user's system locale's calendar but
+  // 'en-CA' is a safer explicit YYYY-MM-DD format. We override timeZone
+  // with the user's actual zone via Intl resolved options if needed.
+  return new Date().toLocaleDateString('en-CA');  // 'en-CA' → "2026-06-02"
+}
+
+// localDateStr(date) — same idea for an arbitrary Date object.
+function localDateStr(d) {
+  return (d instanceof Date ? d : new Date(d)).toLocaleDateString('en-CA');
+}
+
 // ── STATE ─────────────────────────────────────────────────────────────────
 var APP = {
   user: null,
@@ -1417,7 +1438,7 @@ async function loadAll() {
   APP.touches = t || [];
 
   // Routes
-  var today = new Date().toISOString().split('T')[0];
+  var today = localTodayStr();
   var r = await sb('/rest/v1/sales_routes?rep_name=eq.' + encodeURIComponent(APP.repName) + '&order=route_date.desc&limit=20');
   APP.routes = r || [];
 
@@ -1467,7 +1488,7 @@ async function loadAll() {
 
 // ── HOME ──────────────────────────────────────────────────────────────────
 function renderHome() {
-  var today = new Date().toISOString().split('T')[0];
+  var today = localTodayStr();
 
   // ── Daily touch goal widget ──
   // Counts touches logged TODAY by this rep. Goal lives in shared module
@@ -2137,7 +2158,7 @@ function renderTouchesSA() {
   if (APP.touchFilterRange !== 'All') {
     var cutoff = new Date();
     if (APP.touchFilterRange === 'today') {
-      cutoff = new Date(new Date().toISOString().split('T')[0] + 'T00:00:00');
+      cutoff = new Date(localTodayStr() + 'T00:00:00');
     } else if (APP.touchFilterRange === '7d')  cutoff.setDate(cutoff.getDate() - 7);
     else if (APP.touchFilterRange === '30d') cutoff.setDate(cutoff.getDate() - 30);
     else if (APP.touchFilterRange === '90d') cutoff.setDate(cutoff.getDate() - 90);
@@ -2503,7 +2524,7 @@ function closeRecurring() {
 async function confirmRecurring() {
   var t = _pendingRecurring[_recurringIdx];
   if (!t) return;
-  var today = new Date().toISOString().split('T')[0];
+  var today = localTodayStr();
   var stops = (t.stops||[]).map(function(s, i) {
     return { partner_id: s.partner_id, partner_name: s.partner_name, address: s.address||'', duration: s.duration||45, order: i, completed: false };
   });
@@ -2542,7 +2563,7 @@ async function skipRecurring() {
   var t = _pendingRecurring[_recurringIdx];
   // Mark as skipped for today so it doesn't re-prompt
   if (t) {
-    var today = new Date().toISOString().split('T')[0];
+    var today = localTodayStr();
     await fetch(SB_URL + '/rest/v1/sales_route_templates?id=eq.' + t.id, {
       method: 'PATCH',
       headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
@@ -2621,7 +2642,7 @@ function prUpdateMonthlyPattern() {
 function openPlanRoute() {
   _prStops = [];
   APP._editingRouteId = null;
-  var today = new Date().toISOString().split('T')[0];
+  var today = localTodayStr();
   document.getElementById('pr-date').value = today;
   document.getElementById('pr-rep').value = APP.repName || '';
   document.getElementById('pr-search').value = '';
@@ -3003,7 +3024,7 @@ async function acceptSmartRoute() {
   if (!SR_STATE.proposedRoute || !SR_STATE.proposedRoute.stops.length) return;
 
   // Build the route record matching the existing sales_routes schema
-  var todayStr = new Date().toISOString().split('T')[0];
+  var todayStr = localTodayStr();
   var market = APP.repMarket || 'Appleton';
   var stops = SR_STATE.proposedRoute.stops.map(function(s){
     return {
@@ -5370,7 +5391,7 @@ function openLogTouchForStop(pid, pname) {
   // by scanning APP.routes for a stop matching the partner_id on today's
   // route (or the earliest upcoming route, if multiple exist).
   APP.ltRouteContext = null;
-  var today = new Date().toISOString().split('T')[0];
+  var today = localTodayStr();
   // Prefer a route dated today; otherwise nearest future route. We don't
   // touch past routes — completing a stop on a 3-day-old route would be
   // suspicious and probably wrong.
@@ -5428,7 +5449,7 @@ function selectLtPartner(id, name, type) {
 
 async function submitLogTouch() {
   if (!APP.ltPartnerId) { toast('Select a partner first'); return; }
-  var today = new Date().toISOString().split('T')[0];
+  var today = localTodayStr();
   // Find the selected partner so we can inherit its market. Mobile had been
   // hardcoding 'Appleton' here which corrupted Stevens Point data.
   var selectedPartner = APP.partners.find(function(x){ return x.id === APP.ltPartnerId; });
