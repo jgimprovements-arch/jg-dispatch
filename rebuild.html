@@ -382,46 +382,63 @@ const $$ = sel => document.querySelectorAll(sel);
 
 // ─── Contract-first workflow: is this project gated? ────────────────────
 // Returns true if the WO Builder and other operations tabs should be locked.
-// Projects are gated unless: (1) contract is signed, OR (2) override is active
-// and not yet expired.
-function isProjectGated(p) {
+// ─── Contract-first workflow: TWO-TIER GATING MODEL ────────────────────
+//
+// Tier 1 — isTabsGated(p): controls whether internal-planning tabs are
+//   accessible (Work Orders / Schedule / Messages / To-Dos). Unlocks once
+//   the customer-facing packet is SENT, so PMs can organize the job and
+//   draft WOs while the customer is reviewing. Also unlocks on signed or
+//   override-active.
+//
+// Tier 2 — canSendExternal(p): controls whether outbound actions are
+//   permitted (sending a WO to a sub, sending a CO to the customer, etc.)
+//   Stays locked until the contract is actually SIGNED (or override).
+//   This prevents premature external commitments before the customer
+//   is locked in.
+//
+// `isProjectGated` is preserved as a backward-compat alias of isTabsGated
+// since lots of call sites use it.
+
+function isTabsGated(p) {
   if (!p) return true; // safety: null project is gated
-  
-  // If contract is already signed, project is NOT gated
+
+  // Signed contract or active override → fully unlocked
   if (p.contract_signed_at) return false;
-  
-  // Check if there's an active override
   if (p.contract_override_at && p.contract_override_expires_at) {
     const now = new Date();
     const expiresAt = new Date(p.contract_override_expires_at);
-    // Override is active if it hasn't expired yet
-    if (expiresAt > now) return false; // override active, NOT gated
+    if (expiresAt > now) return false;
   }
-  
-  // No signed contract, no active override → gated
+
+  // Packet has been sent to customer → unlock tabs so PM can organize
+  // (state.packet is the project's current packet record; status='sent'
+  // means it's out for signature)
+  if (state.packet && (state.packet.status === 'sent' || state.packet.status === 'customer_signed')) {
+    return false;
+  }
+
   return true;
 }
 
-// ─── Contract-first workflow: is this project gated? ────────────────────
-// Returns true if the WO Builder and other operations tabs should be locked.
-// Projects are gated unless: (1) contract is signed, OR (2) override is active
-// and not yet expired.
-function isProjectGated(p) {
-  if (!p) return true; // safety: null project is gated
-  
-  // If contract is already signed, project is NOT gated
-  if (p.contract_signed_at) return false;
-  
-  // Check if there's an active override
+// Backward-compat alias — many existing call sites use this name.
+function isProjectGated(p) { return isTabsGated(p); }
+
+// Tier 2 — outbound actions require an actually-signed contract.
+// Returns { ok: true } or { ok: false, reason: '...' } so callers can
+// surface a clear message when blocked.
+function canSendExternal(p) {
+  if (!p) return { ok: false, reason: 'No active project loaded.' };
+  if (p.contract_signed_at) return { ok: true };
   if (p.contract_override_at && p.contract_override_expires_at) {
     const now = new Date();
     const expiresAt = new Date(p.contract_override_expires_at);
-    // Override is active if it hasn't expired yet
-    if (expiresAt > now) return false; // override active, NOT gated
+    if (expiresAt > now) return { ok: true };
   }
-  
-  // No signed contract, no active override → gated
-  return true;
+  // Not signed → blocked
+  if (state.packet && state.packet.status === 'sent') {
+    return { ok: false, reason: 'Contract packet is out for customer signature but not yet signed. Work orders and change orders can be drafted and organized, but cannot be sent to subcontractors or customers until the contract is signed.' };
+  }
+  return { ok: false, reason: 'Contract packet has not been sent to the customer yet. Send the packet first, then wait for customer signature before sending work orders or change orders.' };
 }
 
 // ─── Global lightbox + download helpers ───
@@ -2740,11 +2757,11 @@ function renderDetail() {
     <div class="tabs" id="tabs">
       <button class="${state.tab==='relationships'?'on':''}" data-tab="relationships">Relationships ${(state.relationships||[]).length ? `<span class="badge">${state.relationships.length}</span>` : ''}</button>
       <button class="${state.tab==='packet'?'on':''}" data-tab="packet">📋 Contract Packet</button>
-      <button class="${state.tab==='workorders'?'on':''}" data-tab="workorders" ${isProjectGated(p) ? 'disabled title="Locked until customer signs contract"' : ''}>Work Orders ${(overdueSelections + (state.workOrders||[]).filter(w => w.status === 'sent').length) ? `<span class="badge">${overdueSelections + (state.workOrders||[]).filter(w => w.status === 'sent').length}</span>` : ''}</button>
-      <button class="${state.tab==='phases'?'on':''}" data-tab="phases" ${isProjectGated(p) ? 'disabled title="Locked until customer signs contract"' : ''}>Schedule <span class="badge">${state.phases.length}</span></button>
+      <button class="${state.tab==='workorders'?'on':''}" data-tab="workorders" ${isProjectGated(p) ? 'disabled title="Locked until contract packet is sent to customer"' : ''}>Work Orders ${(overdueSelections + (state.workOrders||[]).filter(w => w.status === 'sent').length) ? `<span class="badge">${overdueSelections + (state.workOrders||[]).filter(w => w.status === 'sent').length}</span>` : ''}</button>
+      <button class="${state.tab==='phases'?'on':''}" data-tab="phases" ${isProjectGated(p) ? 'disabled title="Locked until contract packet is sent to customer"' : ''}>Schedule <span class="badge">${state.phases.length}</span></button>
       <button class="${state.tab==='financials'?'on':''}" data-tab="financials">Financials ${state.qbActuals?.invoice_balance > 0 ? `<span class="badge">AR</span>` : ''}</button>
-      <button class="${state.tab==='messages'?'on':''}" data-tab="messages" ${isProjectGated(p) ? 'disabled title="Locked until customer signs contract"' : ''}>Messages ${(state.journalEntries||[]).filter(e => !e.deleted_at).length ? `<span class="badge">${state.journalEntries.filter(e=>!e.deleted_at).length}</span>` : ''}</button>
-      <button class="${state.tab==='todos'?'on':''}" data-tab="todos" ${isProjectGated(p) ? 'disabled title="Locked until customer signs contract"' : ''}>To-Dos ${(state.todos||[]).filter(t => t.status === 'open' || t.status === 'in_progress').length ? `<span class="badge">${state.todos.filter(t => t.status === 'open' || t.status === 'in_progress').length}</span>` : ''}</button>
+      <button class="${state.tab==='messages'?'on':''}" data-tab="messages" ${isProjectGated(p) ? 'disabled title="Locked until contract packet is sent to customer"' : ''}>Messages ${(state.journalEntries||[]).filter(e => !e.deleted_at).length ? `<span class="badge">${state.journalEntries.filter(e=>!e.deleted_at).length}</span>` : ''}</button>
+      <button class="${state.tab==='todos'?'on':''}" data-tab="todos" ${isProjectGated(p) ? 'disabled title="Locked until contract packet is sent to customer"' : ''}>To-Dos ${(state.todos||[]).filter(t => t.status === 'open' || t.status === 'in_progress').length ? `<span class="badge">${state.todos.filter(t => t.status === 'open' || t.status === 'in_progress').length}</span>` : ''}</button>
       <button class="${state.tab==='documents'?'on':''}" data-tab="documents">Documents</button>
       <button class="${state.tab==='audit'?'on':''}" data-tab="audit">Audit Trail</button>
     </div>
@@ -9926,7 +9943,17 @@ function openWoEditModal(woId) {
         <button class="btn ghost" data-wo-modal-act="download-pdf">📄 Download PDF</button>
         <button class="btn" data-wo-modal-act="close">Close</button>
         ${!isReadOnly ? `<button class="btn primary" data-wo-modal-act="save">Save</button>` : ''}
-        ${wo.status === 'draft' ? `<button class="btn primary" data-wo-modal-act="save-and-send">Save & Send to Sub</button>` : ''}
+        ${(() => {
+          if (wo.status !== 'draft') return '';
+          // Disable the Send button when contract isn't signed yet (Tier 2).
+          // Save remains enabled — PMs can draft and organize during the
+          // packet-sent-but-not-signed window.
+          const sendCheck = (typeof canSendExternal === 'function') ? canSendExternal(state.activeProject) : { ok: true };
+          if (sendCheck.ok) {
+            return `<button class="btn primary" data-wo-modal-act="save-and-send">Save & Send to Sub</button>`;
+          }
+          return `<button class="btn primary" disabled title="${esc(sendCheck.reason)}" style="opacity:.5;cursor:not-allowed;">🔒 Save & Send to Sub</button>`;
+        })()}
       </div>
     </div>
   `;
@@ -10264,6 +10291,16 @@ async function sendPoToSub(wo) {
 }
 
 async function sendWorkOrderToSub(wo, woUrl) {
+  // ─── TIER 2 GATE — contract must be signed before WOs can go out ───
+  // The Project tabs unlock at packet-sent so PMs can plan, but actually
+  // sending a WO to a subcontractor commits JG to external work. Block
+  // that until the customer signs the contract.
+  const sendCheck = canSendExternal(state.activeProject);
+  if (!sendCheck.ok) {
+    alert('Cannot send work order:\n\n' + sendCheck.reason);
+    return;
+  }
+
   const sub = wo.sub || state.subs.find(s => s.id === wo.sub_id);
   // Prefer override email entered in modal, fall back to sub profile email
   const toEmail = wo.sent_to_email || sub?.email;

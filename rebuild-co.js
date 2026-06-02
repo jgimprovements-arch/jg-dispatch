@@ -118,12 +118,25 @@ function renderCoSection(mode) {
       `;
     }).join('');
 
-    // Per-status action buttons
-    const canSendCustomer = co.status === 'draft';
+    // Per-status action buttons. Gating: CO operations are always
+    // downstream of the main contract being signed (or override active).
+    // Customer can't amend a contract that hasn't been signed yet.
+    const externalCheck = (typeof canSendExternal === 'function')
+      ? canSendExternal(state.activeProject)
+      : { ok: true };
+    const externalOk = externalCheck.ok;
+    const externalBlockedReason = externalCheck.reason || '';
+
+    const canSendCustomer = co.status === 'draft' && externalOk;
     const canMarkCustomerSigned = co.status === 'sent_to_customer';
-    const canSendSub = co.status === 'customer_signed';
+    const canSendSub = co.status === 'customer_signed' && externalOk;
     const canEdit = co.status === 'draft';
     const canDelete = co.status === 'draft' || co.status === 'sent_to_customer';
+
+    // For UX, show a locked button (instead of nothing) when CO send is
+    // blocked specifically because the main contract isn't signed yet.
+    const blockedSendCustomer = co.status === 'draft' && !externalOk;
+    const blockedSendSub = co.status === 'customer_signed' && !externalOk;
 
     return `
       <div class="wobx-co-card" data-co-id="${esc(co.id)}">
@@ -136,8 +149,10 @@ function renderCoSection(mode) {
           </div>
           <div style="display:flex;gap:6px;flex-wrap:wrap;">
             ${canSendCustomer ? `<button class="btn primary" data-co-act="send-customer" data-co-id="${esc(co.id)}" style="font-size:12px;padding:5px 10px;">✉ Send to Customer</button>` : ''}
+            ${blockedSendCustomer ? `<button class="btn primary" disabled title="${esc(externalBlockedReason)}" style="font-size:12px;padding:5px 10px;opacity:.5;cursor:not-allowed;">🔒 Send to Customer</button>` : ''}
             ${canMarkCustomerSigned ? `<button class="btn primary" data-co-act="mark-customer-signed" data-co-id="${esc(co.id)}" style="font-size:12px;padding:5px 10px;">✓ Mark Customer Signed</button>` : ''}
             ${canSendSub ? `<button class="btn primary" data-co-act="send-sub" data-co-id="${esc(co.id)}" style="font-size:12px;padding:5px 10px;">✉ Send to Sub</button>` : ''}
+            ${blockedSendSub ? `<button class="btn primary" disabled title="${esc(externalBlockedReason)}" style="font-size:12px;padding:5px 10px;opacity:.5;cursor:not-allowed;">🔒 Send to Sub</button>` : ''}
             <button class="btn ghost" data-co-act="view-pdf" data-co-id="${esc(co.id)}" style="font-size:12px;padding:5px 10px;">📄 View CO</button>
             ${canEdit ? `<button class="btn ghost" data-co-act="edit" data-co-id="${esc(co.id)}" style="font-size:12px;padding:5px 10px;">✎ Edit</button>` : ''}
             ${canDelete ? `<button class="btn ghost" data-co-act="delete" data-co-id="${esc(co.id)}" style="font-size:12px;padding:5px 10px;color:var(--red);border-color:var(--red);">🗑</button>` : ''}
@@ -274,6 +289,19 @@ function wireCoActions() {
 async function sendCoToCustomer(co) {
   const p = state.activeProject;
   if (!p) { toast('No active project'); return; }
+
+  // ─── TIER 2 GATE — contract must be signed before COs can be sent ───
+  // A CO is an amendment to an existing contract. Without a signed
+  // contract there's nothing to amend. PMs can still draft and organize
+  // COs; this only blocks the send action.
+  if (typeof canSendExternal === 'function') {
+    const sendCheck = canSendExternal(p);
+    if (!sendCheck.ok) {
+      alert('Cannot send change order:\n\n' + sendCheck.reason);
+      return;
+    }
+  }
+
   if (!p.customer_email) { toast('No customer email on file'); return; }
   if (co.status !== 'draft') { toast(`Cannot send CO in status "${co.status}"`); return; }
 
