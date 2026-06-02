@@ -59,6 +59,43 @@
     color: #92400E;
     font-weight: 600;
   }
+  /* Email-preview frame for system-generated journal entries */
+  .jr-email-preview {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    background: #f8f9fb;
+    margin-top: 4px;
+  }
+  .jr-email-preview-bar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 6px 10px;
+    background: rgba(13,45,94,.04);
+    border-bottom: 1px solid var(--border);
+  }
+  .jr-email-iframe {
+    width: 100%;
+    border: 0;
+    display: block;
+    background: #fff;
+    min-height: 200px;
+  }
+  .jr-email-source {
+    margin: 0;
+    padding: 10px 14px;
+    font-family: 'Monaco', 'Consolas', monospace;
+    font-size: 11px;
+    line-height: 1.5;
+    color: var(--text);
+    background: #fff;
+    white-space: pre-wrap;
+    word-break: break-all;
+    max-height: 400px;
+    overflow: auto;
+  }
+
   /* CO Scope section inside WO Detail modal */
   .wobx-co-scope-section {
     margin-top: 16px;
@@ -11331,8 +11368,8 @@ function renderJournalEntry(e, canEdit) {
     : '<span class="jr-vis-badge jr-vis-off">🔒 Internal only</span>';
   const editedNote = e.edited_at ? ` <span class="jr-edited">(edited ${fmtRelative(e.edited_at)})</span>` : '';
 
-  // Render body with @mentions highlighted
-  const body = formatJournalBody(e.body || '', e.mentions || []);
+  // Render body — system emails render as iframe, typed notes as escaped text
+  const body = formatJournalBody(e.body || '', e.mentions || [], e.id);
 
   // Attachments
   const atts = (e.attachments || []);
@@ -11384,9 +11421,41 @@ function renderJournalEntry(e, canEdit) {
 
 // esc moved to rebuild-utils.js
 
-function formatJournalBody(body, mentions) {
+function formatJournalBody(body, mentions, entryId) {
+  // Detect system-generated emails — they're stored as raw HTML and
+  // should render as the customer sees them, not as escaped source code.
+  // Heuristic: presence of <!DOCTYPE, <html, or a top-level <table that
+  // dominates the content. Human-typed notes never start with these.
+  const trimmed = (body || '').trim();
+  const looksLikeEmailHtml =
+    /^<!DOCTYPE\b/i.test(trimmed) ||
+    /^<html\b/i.test(trimmed) ||
+    (/^<table\b/i.test(trimmed) && /<\/table>\s*$/i.test(trimmed) && trimmed.length > 400);
+
+  if (looksLikeEmailHtml) {
+    // Render inside a sandboxed iframe. The sandbox attribute with no
+    // values blocks scripts/forms/popups — the customer's email view is
+    // visually faithful but inert. Use srcdoc so we don't need a separate
+    // resource fetch. Height is set via a one-time onload measurement.
+    const iframeId = `jr-iframe-${entryId || Math.random().toString(36).slice(2,9)}`;
+    // Escape only for srcdoc attribute safety (quotes/ampersands)
+    const srcdoc = trimmed
+      .replace(/&/g, '&amp;')
+      .replace(/"/g, '&quot;');
+    return `
+      <div class="jr-email-preview" data-iframe-id="${iframeId}">
+        <div class="jr-email-preview-bar">
+          <span style="font-size:11px;color:var(--muted);">📧 Email preview — as the customer sees it</span>
+          <button type="button" class="jr-email-toggle-src" data-toggle-iframe="${iframeId}" style="font-size:10px;background:transparent;border:1px solid var(--border);padding:2px 8px;border-radius:4px;color:var(--muted);cursor:pointer;">View source</button>
+        </div>
+        <iframe id="${iframeId}" class="jr-email-iframe" sandbox srcdoc="${srcdoc}" onload="this.style.height = Math.min(this.contentWindow.document.documentElement.scrollHeight + 20, 800) + 'px';"></iframe>
+        <pre class="jr-email-source" data-iframe-id="${iframeId}" style="display:none;">${esc(trimmed)}</pre>
+      </div>
+    `;
+  }
+
+  // Human-typed: escape + highlight @mentions + linebreak-to-br
   const escaped = esc(body);
-  // Highlight @name patterns. Use mentions list for known people, otherwise just style.
   return escaped.replace(/@([A-Za-z][A-Za-z0-9_.\-\s]{1,40})/g, (m, name) => {
     const trimmed = name.trim();
     return `<span class="jr-mention">@${esc(trimmed)}</span>`;
@@ -11591,6 +11660,26 @@ function wireJournalTab() {
   document.querySelectorAll('.jr-edit').forEach(b => b.addEventListener('click', () => editJournalEntry(b.dataset.id)));
   document.querySelectorAll('.jr-delete').forEach(b => b.addEventListener('click', () => deleteJournalEntry(b.dataset.id)));
   document.querySelectorAll('.jr-toggle-vis').forEach(b => b.addEventListener('click', () => toggleJournalVisibility(b.dataset.id)));
+
+  // Email preview "View source" toggle — swap between iframe and raw <pre>
+  document.querySelectorAll('.jr-email-toggle-src').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const iframeId = btn.dataset.toggleIframe;
+      const iframe = document.getElementById(iframeId);
+      const src = document.querySelector(`.jr-email-source[data-iframe-id="${iframeId}"]`);
+      if (!iframe || !src) return;
+      const showingSrc = src.style.display !== 'none';
+      if (showingSrc) {
+        src.style.display = 'none';
+        iframe.style.display = '';
+        btn.textContent = 'View source';
+      } else {
+        iframe.style.display = 'none';
+        src.style.display = 'block';
+        btn.textContent = 'View rendered';
+      }
+    });
+  });
 
   // @mention autocomplete
   const ta = document.getElementById('jrBody');
