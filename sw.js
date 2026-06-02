@@ -12,7 +12,7 @@
 //   2. Narrowed fetch handler to an explicit allow-list of sales paths.
 //      All other requests pass through with no SW involvement.
 
-const VERSION = '2026-05-04-v1';
+const VERSION = '2026-06-02-v1';
 const CACHE = 'jg-sales-' + VERSION;
 
 // Strict allow-list. Only these paths are precached AND only these are
@@ -71,9 +71,12 @@ self.addEventListener('fetch', function(e) {
   // no SW involvement.
   if (!isSalesPath(e.request.url)) return;
 
-  // Network-first with cache fallback for the sales-app assets only
+  // Network-first with cache fallback for the sales-app assets only.
+  // cache:'no-cache' forces revalidation against the server so the
+  // browser's HTTP cache can't serve a stale response under the SW.
+  // Offline still works — the catch() falls back to caches.match().
   e.respondWith(
-    fetch(e.request, { credentials: 'same-origin' }).then(function(response) {
+    fetch(e.request, { credentials: 'same-origin', cache: 'no-cache' }).then(function(response) {
       if (response && response.status === 200 && response.type !== 'opaque') {
         var clone = response.clone();
         caches.open(CACHE).then(function(cache) { cache.put(e.request, clone); });
