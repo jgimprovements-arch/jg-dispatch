@@ -102,16 +102,46 @@ function _packetTimeToSignHours(sentAt, signedAt) {
   return hrs;
 }
 
-// ─── Find the most recent Xactimate PDF document for the project ────────────
+// ─── Find the Xactimate PDF that should attach to the contract packet ──────
+// Strategy: prefer the wo_builder_uploads row that drove the SOV. Its
+// estimate_file_url IS the exact PDF the parser ingested, so it's
+// guaranteed to match the contract numbers byte-for-byte. Only fall back
+// to a documents-table lookup if no upload exists (legacy projects).
+//
+// History: previously this used a substring ILIKE %estimate% on category,
+// which let an "invoice" or "final estimate" document accidentally win
+// when sorted by uploaded_at DESC.
 async function _findXactDoc() {
   if (!sb || !state.activeProjectId) return null;
-  const { data } = await sb.from('rebuild_documents')
+
+  // Primary: the active wo_builder_uploads row for this project
+  const { data: upload, error: upErr } = await sb.from('wo_builder_uploads')
+    .select('id, estimate_file_url, estimate_filename')
+    .eq('project_id', state.activeProjectId)
+    .eq('is_current', true)
+    .is('deleted_at', null)
+    .maybeSingle();
+
+  if (upload && upload.estimate_file_url) {
+    return {
+      id: upload.id,
+      file_url: upload.estimate_file_url,
+      filename: upload.estimate_filename || 'Xactimate Estimate.pdf',
+      _source: 'wo_builder_upload'
+    };
+  }
+
+  // Fallback: legacy projects without an upload row. Tightened so only
+  // explicitly-tagged Xactimate documents match — no substring ILIKE.
+  console.warn('[packet] No wo_builder_upload found for project; falling back to rebuild_documents lookup.');
+  const { data: docs } = await sb.from('rebuild_documents')
     .select('id, file_url, filename, category, uploaded_at')
     .eq('project_id', state.activeProjectId)
-    .or('category.ilike.%xact%,category.ilike.%estimate%')
+    .in('category', ['xactimate', 'xact_estimate', 'estimate'])
+    .is('deleted_at', null)
     .order('uploaded_at', { ascending: false })
     .limit(1);
-  return (data && data[0]) || null;
+  return (docs && docs[0]) || null;
 }
 
 // ─── Gate check ─────────────────────────────────────────────────────────────
