@@ -2967,6 +2967,155 @@ function exportPayrollReport(periodLabel, byEmp, curPer) {
   toast('✓ Paychex import + summary downloaded');
 }
 
+// ─── Paychex Punch Detail Import format ────────────────────────────────────
+// Different from the SPI/Pay Component import above — this format records
+// individual clock-in/out times per day. Paychex maps:
+//   Company ID | Worker ID | Punch/Apply Date | Punch Type 1 | Punch Time 1
+//   | Punch Type 2 | Punch Time 2 | Punch Type 3 | Punch Time 3
+//   | Punch Type 4 | Punch Time 4 | Check Seq Number | Total Hours
+//
+// Use this when Paychex's "Import payroll data" tile rejects the SPI
+// format (account isn't configured for Pay Component import — common in
+// Paychex Flex setups that use Punch Detail as the primary path).
+//
+// Salary employees are EXCLUDED (paid via Paychex's auto-salary processor).
+// Absences (Holiday/PTO/Sick) are EXCLUDED (entered separately in Paychex —
+// the Punch Detail format has no representation for them).
+function exportPunchDetailReport(periodLabel, byEmp, curPer) {
+  if (!byEmp || !Object.keys(byEmp).length) { toast('No data to export'); return; }
+
+  var PAYCHEX_COMPANY_ID = '12054799';
+
+  function _fmtDate(iso) {
+    // YYYY-MM-DD → MM/DD/YYYY
+    var parts = iso.split('-');
+    return parts[1] + '/' + parts[2] + '/' + parts[0];
+  }
+  function _fmtTime(isoTimestamp) {
+    // ISO string → HH:MM AM/PM in local time
+    var d = new Date(isoTimestamp);
+    var h = d.getHours();
+    var m = d.getMinutes();
+    var period = h >= 12 ? 'PM' : 'AM';
+    var h12 = h % 12; if (h12 === 0) h12 = 12;
+    return h12 + ':' + (m < 10 ? '0' : '') + m + ' ' + period;
+  }
+
+  var rows = [];
+  rows.push([
+    'Company ID', 'Worker ID', 'Punch/Apply Date',
+    'Punch Type 1', 'Punch Time 1',
+    'Punch Type 2', 'Punch Time 2',
+    'Punch Type 3', 'Punch Time 3',
+    'Punch Type 4', 'Punch Time 4',
+    'Check Seq Number', 'Total Hours'
+  ]);
+
+  var missingIds = [];
+  var notApproved = [];
+  var skippedSalary = [];
+  var multiPunchWarnings = [];
+
+  Object.entries(byEmp).forEach(function(kv) {
+    var nm = kv[0], d = kv[1];
+    var emp = ST.employees.find(function(e){ return e.name === nm; });
+    if (!emp) return;
+
+    // Skip salary — they're paid via Paychex's auto-salary processor
+    var isSalaryEmp = parseFloat(emp.annual_salary || 0) > 0;
+    if (isSalaryEmp) { skippedSalary.push(nm); return; }
+
+    var paychexId = emp.paychex_id || '';
+    if (!paychexId) missingIds.push(nm);
+    if (getApprovalStatus(periodLabel, nm) !== 'approved') notApproved.push(nm);
+
+    // Group this employee's time_entries by date
+    var byDate = {};
+    (d.entries || []).forEach(function(e) {
+      if (!e.clock_in || !e.clock_out) return;  // skip open punches
+      var dayIso = e.clock_in.split('T')[0];
+      if (!byDate[dayIso]) byDate[dayIso] = [];
+      byDate[dayIso].push(e);
+    });
+
+    // For each day, build one punch detail row
+    Object.keys(byDate).sort().forEach(function(dayIso) {
+      var entries = byDate[dayIso].sort(function(a, b) {
+        return new Date(a.clock_in) - new Date(b.clock_in);
+      });
+
+      // Collect up to 4 punches (2 in/out pairs). Paychex format maxes out
+      // at 4 punch slots per day. If the employee has 3+ sessions, we
+      // collapse to first-in / last-out as best-effort and flag a warning.
+      var punches = [];
+      entries.forEach(function(e) {
+        punches.push({ type: 'In',  time: e.clock_in });
+        punches.push({ type: 'Out', time: e.clock_out });
+      });
+
+      if (punches.length > 4) {
+        multiPunchWarnings.push(nm + ' on ' + dayIso + ' (had ' + (punches.length/2) + ' sessions, collapsed)');
+        punches = [
+          { type: 'In',  time: entries[0].clock_in },
+          { type: 'Out', time: entries[entries.length - 1].clock_out }
+        ];
+      }
+
+      // Total hours = sum of (clock_out - clock_in) minus any breaks
+      var totalMins = 0;
+      entries.forEach(function(e) {
+        var eb = ST.breaks.filter(function(b){ return b.entry_id === e.id; });
+        totalMins += billableMins(e, eb);
+      });
+      var totalHrs = (totalMins / 60).toFixed(2);
+
+      // Build row — 13 columns
+      var row = [
+        PAYCHEX_COMPANY_ID,
+        paychexId,
+        _fmtDate(dayIso),
+        punches[0] ? punches[0].type : '',
+        punches[0] ? _fmtTime(punches[0].time) : '',
+        punches[1] ? punches[1].type : '',
+        punches[1] ? _fmtTime(punches[1].time) : '',
+        punches[2] ? punches[2].type : '',
+        punches[2] ? _fmtTime(punches[2].time) : '',
+        punches[3] ? punches[3].type : '',
+        punches[3] ? _fmtTime(punches[3].time) : '',
+        '',  // Check Seq Number — blank
+        totalHrs
+      ];
+      rows.push(row);
+    });
+  });
+
+  var warnings = [];
+  if (missingIds.length) warnings.push('⚠ Missing Paychex ID: ' + missingIds.join(', '));
+  if (notApproved.length) warnings.push('⚠ Not approved yet: ' + notApproved.join(', '));
+  if (multiPunchWarnings.length) warnings.push('⚠ Days with >2 sessions (collapsed to first-in/last-out):\n  ' + multiPunchWarnings.join('\n  '));
+  if (skippedSalary.length) warnings.push('ℹ️ Salary employees skipped (paid via Paychex auto-salary): ' + skippedSalary.join(', '));
+
+  if (warnings.length) {
+    if (!confirm(warnings.join('\n\n') + '\n\nExport anyway?')) return;
+  }
+
+  var toCsv = function(rs) {
+    return rs.map(function(r){
+      return r.map(function(c){ var s = String(c == null ? '' : c).split('"').join('""'); return '"' + s + '"'; }).join(',');
+    }).join('\n');
+  };
+
+  var safeName = periodLabel.replace(/[^a-z0-9]+/gi, '_');
+  download(toCsv(rows), 'paychex_punch_detail_' + safeName + '.csv');
+  logActivity('Punch Detail Export', periodLabel + ' — ' + (rows.length - 1) + ' day-rows', 'time_clock', null);
+  toast('✓ Punch Detail file exported (' + (rows.length - 1) + ' day-rows)');
+}
+
+function _tcPunchDetailReport() {
+  var period = _tcEmpKeys[0] ? _tcEmpKeys[0][0] : '';
+  exportPunchDetailReport(period, _tcByEmp, _tcCurPer);
+}
+
 function renderTimesheets() {
   var fmt = function(iso){ if(!iso)return ''; var d=new Date(iso),h=d.getHours()%12||12,m=d.getMinutes(),ap=d.getHours()>=12?'PM':'AM'; return h+':'+(m<10?'0':'')+m+' '+ap; };
   var fmtDur = function(mins){ if(!mins&&mins!==0)return '-'; return Math.floor(mins/60)+'h '+(mins%60)+'m'; };
@@ -3473,7 +3622,8 @@ function renderTimesheets() {
       bannerBlock += '<div style="font-size:12px;color:var(--navy);">Next: download Paychex CSV, then advance to the next pay period.</div>';
       bannerBlock += '</div>';
       bannerBlock += '<div style="display:flex;gap:8px;flex-wrap:wrap;">';
-      bannerBlock += '<button class="btn btn-primary" onclick="_tcPayrollReport()" style="background:#2e7d32;border-color:#2e7d32;">📥 Paychex Export</button>';
+      bannerBlock += '<button class="btn btn-primary" onclick="_tcPayrollReport()" style="background:#2e7d32;border-color:#2e7d32;">📥 Pay Component CSV</button>';
+      bannerBlock += '<button class="btn btn-primary" onclick="_tcPunchDetailReport()" style="background:#0d2d5e;border-color:#0d2d5e;">📥 Punch Detail CSV</button>';
       if (nextUnapprovedPeriod) {
         bannerBlock += '<button class="btn btn-primary" onclick="_tcGoToPeriod(\''+nextUnapprovedPeriod.replace(/\'/g,"\\'")+'\')" style="background:#0d2d5e;border-color:#0d2d5e;">→ Next Pay Period</button>';
       }
@@ -3492,7 +3642,8 @@ function renderTimesheets() {
       // Function sendVerificationReminders() retained in case the SMS path is ever needed again.
       // h += '<button class="btn" onclick="sendVerificationReminders()" style="background:#0d2d5e;color:#fff;border-color:#0d2d5e;">📱 Text Unverified</button>';
       bannerBlock += '<button class="btn" onclick="_runReminderRules()" style="background:#6a1b9a;color:#fff;border-color:#6a1b9a;">🔔 Send Reminders</button>';
-      bannerBlock += '<button class="btn btn-primary" onclick="_tcPayrollReport()">📥 Paychex Export</button>';
+      bannerBlock += '<button class="btn btn-primary" onclick="_tcPayrollReport()">📥 Pay Component CSV</button>';
+      bannerBlock += '<button class="btn btn-primary" onclick="_tcPunchDetailReport()" style="background:#0d2d5e;border-color:#0d2d5e;">📥 Punch Detail CSV</button>';
       bannerBlock += '</div></div>';
     }
     // Inject banner at the placeholder position (top of tab)
