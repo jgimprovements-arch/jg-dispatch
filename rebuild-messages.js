@@ -131,6 +131,10 @@ function renderMessagesTab() {
             <label>Subject</label>
             <input id="msg_subject" placeholder="Re: ${p.albi_job_number || 'project'}">
           </div>
+          <div id="msg_cc_wrap" style="display:none;">
+            <label>CC <span style="color:var(--muted);font-weight:400;">(optional · comma-separate multiple)</span></label>
+            <input id="msg_cc" placeholder="adjuster@example.com, manager@example.com">
+          </div>
         </div>
         <textarea id="msg_body" placeholder="Type your message…" rows="10"></textarea>
         <div id="msg_attachments_wrap" style="display:none;margin-top:8px;">
@@ -244,6 +248,19 @@ async function sendMessage() {
   const channel = $('#msg_channel').value;
   let body = $('#msg_body').value.trim();
   const subject = $('#msg_subject') ? $('#msg_subject').value.trim() : '';
+
+  // CC — optional, comma-separated. Normalize and basic-validate.
+  // Only used for email channel; SMS / internal notes ignore.
+  let ccList = [];
+  const rawCc = $('#msg_cc') ? $('#msg_cc').value.trim() : '';
+  if (rawCc && channel === 'email') {
+    ccList = rawCc.split(/[,;]/).map(s => s.trim()).filter(Boolean);
+    const invalid = ccList.filter(e => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e));
+    if (invalid.length) { toast('Invalid CC email(s): ' + invalid.join(', ')); return; }
+    // Dedupe + drop if same as primary recipient (no point CCing the To address)
+    ccList = [...new Set(ccList.map(e => e.toLowerCase()))];
+  }
+  const ccEmails = ccList.join(',');
   if (!body) { toast('Message body required'); return; }
 
   // For outbound SMS, append the job reference so customers can identify which job
@@ -297,6 +314,12 @@ async function sendMessage() {
   const fromName = selectedSender.name || p.albi_pm_name || 'JG Restoration';
   const fromPhone = selectedSender.phone || '';
 
+  // Drop CC entries that match the primary recipient (no self-cc)
+  if (ccList.length && recipient.email) {
+    ccList = ccList.filter(e => e !== recipient.email.toLowerCase());
+  }
+  const ccEmailsClean = ccList.join(',');
+
   // Insert into Supabase first (source of truth)
   const insertRow = {
     project_id: p.id,
@@ -305,6 +328,7 @@ async function sendMessage() {
     recipient_name: recipient.name,
     recipient_phone: recipient.phone,
     recipient_email: recipient.email,
+    cc_email: ccEmailsClean || null,
     channel: effectiveChannel,
     direction: 'outbound',
     subject: subject || null,
@@ -430,6 +454,7 @@ async function sendMessage() {
       channel: channel,
       to_phone: toE164(recipient.phone),
       to_email: recipient.email || '',
+      cc_email: ccEmailsClean || '',
       from_email: fromEmail,
       from_name: fromName,
       recipient_name: recipient.name || '',
