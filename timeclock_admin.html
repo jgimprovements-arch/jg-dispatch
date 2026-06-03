@@ -2859,9 +2859,32 @@ function exportPayrollReport(periodLabel, byEmp, curPer) {
     if (payType === 'salary' && emp && emp.annual_salary) {
       var pp = parseFloat(emp.annual_salary) / (ST.payPeriod.type === 'weekly' ? 52 : ST.payPeriod.type === 'biweekly' ? 26 : 24);
       var pd = ST.payPeriod.type === 'weekly' ? 5 : 10;
-      var wd = new Set(d.entries.map(function(e){ return e.clock_in.split('T')[0]; })).size;
-      var md = Math.max(0, pd - wd);
-      gross = pp - md * (pp / pd);
+      var standardHrs = pd * 7.5;  // 5×7.5=37.5 weekly, 10×7.5=75 biweekly
+
+      // Sum unpaid absence hours for this employee in this period. Salary
+      // pay and hours are reduced ONLY by unpaid absences (Unpaid /
+      // No Call No Show / forced-unpaid). PTO/Vacation/Sick/Holiday all
+      // count toward standard hours because salary covers them.
+      var unpaidAbsenceHrs = 0;
+      try {
+        if (curPer) {
+          var perEndIncl2 = new Date(curPer.end); perEndIncl2.setHours(23,59,59,999);
+          (ST.absences || []).forEach(function(a) {
+            if (a.employee_name !== nm) return;
+            var ad = new Date(a.date + 'T00:00:00');
+            if (ad < curPer.start || ad > perEndIncl2) return;
+            var c = classifyAbsence(a, emp);
+            if (c.category === 'unpaid_tracked') {
+              unpaidAbsenceHrs += parseFloat(a.hours) || 0;
+            }
+          });
+        }
+      } catch(e) { /* fall back to standardHrs with no deduction */ }
+
+      regHrs = Math.max(0, standardHrs - unpaidAbsenceHrs);
+      otHrs = 0;
+      totalHrs = regHrs;
+      gross = pp * (regHrs / standardHrs);
       regPay = gross;
       rate = emp.annual_salary + '/yr';
     } else if (rate) {
