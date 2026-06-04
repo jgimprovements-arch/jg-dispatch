@@ -1174,32 +1174,50 @@ async function replaceXactEstimate() {
     const now = new Date().toISOString();
     const uploadId = currentUpload.id;
 
-    // 1. Soft-delete the wo_builder_uploads row.
-    //    Items are linked by upload_id so they become orphaned but remain
-    //    in the DB for audit. Custom trade mappings and trade categories
-    //    are NOT deleted — they're PM's manual work and likely reusable
-    //    for the new estimate.
+    // Step 0 — Query the DB directly for any SOV on this project. state.sov
+    // can be null (or stale) while a SOV row actually exists, especially
+    // if the UI rendered before loadSov() completed. We want the authoritative
+    // truth here since we're about to delete.
+    const { data: liveSovRows, error: sovFetchErr } = await sb.from('rebuild_sov')
+      .select('id')
+      .eq('project_id', p.id);
+    if (sovFetchErr) throw new Error('SOV lookup failed: ' + sovFetchErr.message);
+    const sovIds = (liveSovRows || []).map(r => r.id);
+
+    // Step 1 — Delete SOV children first (draws + history) so the parent
+    // delete in Step 2 doesn't fail with a 409 FK conflict. Some Supabase
+    // setups don't have ON DELETE CASCADE on these constraints.
+    if (sovIds.length) {
+      const { error: histErr } = await sb.from('rebuild_sov_history')
+        .delete()
+        .in('sov_id', sovIds);
+      if (histErr) throw new Error('SOV history delete failed: ' + histErr.message);
+
+      const { error: drawsErr } = await sb.from('rebuild_sov_draws')
+        .delete()
+        .in('sov_id', sovIds);
+      if (drawsErr) throw new Error('SOV draws delete failed: ' + drawsErr.message);
+
+      const { error: sovErr } = await sb.from('rebuild_sov')
+        .delete()
+        .in('id', sovIds);
+      if (sovErr) throw new Error('SOV delete failed: ' + sovErr.message);
+    }
+
+    // Step 2 — Soft-delete the wo_builder_uploads row. Items are linked
+    // by upload_id so they become orphaned but remain for audit. Custom
+    // trade mappings + categories are NOT deleted — PM's manual work is
+    // likely reusable for the new estimate.
     const { error: upErr } = await sb.from('wo_builder_uploads')
       .update({ deleted_at: now, is_current: false })
       .eq('id', uploadId);
-    if (upErr) throw upErr;
+    if (upErr) throw new Error('Upload archive failed: ' + upErr.message);
 
-    // 2. Hard-delete any SOV. Draws and history cascade via FK constraint.
-    //    Pre-contract draft SOVs only — confirmed/sent SOVs are blocked
-    //    by the guards above.
-    if (currentSov && currentSov.id) {
-      const { error: sovErr } = await sb.from('rebuild_sov')
-        .delete()
-        .eq('id', currentSov.id);
-      if (sovErr) throw sovErr;
-    }
-
-    // 3. Audit log entry — captures who, what, when, and the underlying
-    //    file replaced, for diligence and dispute resolution.
+    // Step 3 — Audit log
     if (typeof logActivity === 'function') {
       logActivity(
         'Xact Estimate Replaced',
-        `Pre-contract replacement — old file '${currentUpload.filename}' (RCV ${usdCompact(currentUpload.replacement_cost_value || 0)}) archived${currentSov ? '; SOV with ' + (currentSov.draws?.length || 0) + ' draws deleted' : ''}`,
+        `Pre-contract replacement — old file '${currentUpload.filename}' (RCV ${usdCompact(currentUpload.replacement_cost_value || 0)}) archived${sovIds.length ? '; SOV cleared (' + sovIds.length + ' row' + (sovIds.length > 1 ? 's' : '') + ')' : ''}`,
         'estimate',
         currentUpload.filename
       );
@@ -1207,8 +1225,7 @@ async function replaceXactEstimate() {
 
     toast('✓ Estimate cleared — upload the new Xact above');
 
-    // 4. Reload the world so the UI returns to the empty-estimate state.
-    //    The upload area + Create SOV button will reappear.
+    // Step 4 — Reload state. UI returns to the empty-estimate state.
     await Promise.all([
       typeof loadWoBudget === 'function' ? loadWoBudget() : Promise.resolve(),
       typeof loadSov === 'function' ? loadSov() : Promise.resolve(),
@@ -1217,7 +1234,7 @@ async function replaceXactEstimate() {
     if (typeof renderProject === 'function') renderProject();
   } catch (err) {
     console.error('[replaceXactEstimate] failed:', err);
-    alert('Replace failed: ' + (err.message || err) + '\n\nNothing was changed.');
+    alert('Replace failed: ' + (err.message || err) + '\n\nThe operation stopped before completion. Check the browser console for details and retry.');
   }
 }
 
