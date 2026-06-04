@@ -169,9 +169,29 @@ function renderSovHeader() {
 const s = state.sov;
 const meta = SOV_STATUS_META[s.status] || SOV_STATUS_META.draft;
 const draws = state.sovDraws || [];
-const paid = draws.filter(d => d.status === 'paid').reduce((sum, d) => sum + Number(d.paid_amount || d.total_amount || 0), 0);
-const requested = draws.filter(d => d.status === 'requested').reduce((sum, d) => sum + Number(d.total_amount || 0), 0);
-const pending = draws.filter(d => d.status === 'pending').reduce((sum, d) => sum + Number(d.total_amount || 0), 0);
+// SOV header totals reconcile with QuickBooks invoices when QB is synced:
+//   REQUESTED = invoiced but unpaid (i.e. what we asked customer for, still owed)
+//   PAID      = received from customer
+//   PENDING   = remaining contract value not yet invoiced
+// This makes the SOV header agree with the top-of-project BILLED card,
+// which also reads from QB. If QB hasn't been synced, falls back to the
+// draw-status totals.
+const qb = state.qbActuals || null;
+const qbInvoiced = qb && qb.invoices_total != null ? Number(qb.invoices_total) : null;
+const qbBalance = qb && qb.invoice_balance != null ? Number(qb.invoice_balance) : null;
+let paid, requested, pending;
+if (qbInvoiced != null) {
+  // QB is the source of truth for money flow on this project
+  const qbPaid = Math.max(0, qbInvoiced - (qbBalance || 0));
+  paid = qbPaid;
+  requested = qbBalance || 0;
+  pending = Math.max(0, total - qbInvoiced);
+} else {
+  // No QB sync — use the draw status totals (legacy behavior)
+  paid = draws.filter(d => d.status === 'paid').reduce((sum, d) => sum + Number(d.paid_amount || d.total_amount || 0), 0);
+  requested = draws.filter(d => d.status === 'requested').reduce((sum, d) => sum + Number(d.total_amount || 0), 0);
+  pending = draws.filter(d => d.status === 'pending').reduce((sum, d) => sum + Number(d.total_amount || 0), 0);
+}
 const total = Number(s.contract_total || 0);
 
 const signedLine = s.customer_signed_at
