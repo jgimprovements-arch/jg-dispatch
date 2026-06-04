@@ -1083,10 +1083,26 @@ function renderPacketXactUpload() {
 
   // Parsed successfully — show summary + next steps
   if (budget.upload.parse_status === 'parsed') {
+    // Replace button is only shown when the project is still in pre-contract
+    // state — packet not yet sent and no change orders exist. After packet
+    // send, the SOV / contract reference this estimate and replacing it
+    // would corrupt downstream artifacts.
+    const packetStatus = (state.packet && state.packet.status) || null;
+    const canReplace = !packetStatus || packetStatus === 'draft';
+    const coCount = (state.changeOrders || []).length;
+    const replaceBlocked = !canReplace || coCount > 0;
+    const blockReason = !canReplace
+      ? `Packet is already ${packetStatus} — cannot replace estimate after packet is sent.`
+      : (coCount > 0 ? 'Change orders exist on this project — cannot replace original estimate.' : '');
+
     return `
       <div class="wobx-card wobx-success">
-        <div class="wobx-head">
-          <h3>✓ Xactimate Parsed Successfully</h3>
+        <div class="wobx-head" style="display:flex;justify-content:space-between;align-items:center;gap:10px;">
+          <h3 style="margin:0;">✓ Xactimate Parsed Successfully</h3>
+          ${replaceBlocked
+            ? `<button class="btn btn-sm" disabled title="${esc(blockReason)}" style="opacity:.5;cursor:not-allowed;font-size:11px;">🔒 Replace Estimate</button>`
+            : `<button class="btn btn-sm" onclick="replaceXactEstimate()" title="Customer requested changes pre-contract — clear and re-upload" style="background:#fff;color:#c05621;border:1px solid #c05621;font-size:11px;">🔄 Replace Estimate</button>`
+          }
         </div>
         <div class="wobx-body">
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px;font-size:13px;">
@@ -1109,6 +1125,104 @@ function renderPacketXactUpload() {
 // ────────────────────────────────────────────────────────────────────────────
 // Expose to window so HTML onclick= attributes and other modules can call
 // ────────────────────────────────────────────────────────────────────────────
+// ─── Replace Xactimate estimate (pre-contract only) ──────────────────────
+// When the customer requests changes BEFORE the contract is signed, the
+// PM needs to clear the originally-uploaded Xact estimate (and any
+// auto-generated SOV) and start over with the revised Xact.
+//
+// Guards: only allowed when packet is still in draft (or no packet exists)
+// AND there are no change orders. After packet is sent, downstream
+// artifacts reference the estimate and replacing it would corrupt them.
+async function replaceXactEstimate() {
+  const p = state.activeProject;
+  if (!p || !state.woBudget || !state.woBudget.upload) {
+    toast('No Xact estimate on file to replace');
+    return;
+  }
+
+  // Re-check guards client-side (UI already disables the button, but
+  // belt-and-suspenders in case something raced).
+  const packetStatus = (state.packet && state.packet.status) || null;
+  if (packetStatus && packetStatus !== 'draft') {
+    alert(`Cannot replace estimate — contract packet is in status '${packetStatus}'.\n\nIf changes are needed after the packet has been sent, void the packet first, then replace.`);
+    return;
+  }
+  const coCount = (state.changeOrders || []).length;
+  if (coCount > 0) {
+    alert(`Cannot replace estimate — ${coCount} change order${coCount > 1 ? 's' : ''} already exist on this project.\n\nChange orders reference the original estimate. To replace the estimate, those would have to be voided first.`);
+    return;
+  }
+
+  const currentUpload = state.woBudget.upload;
+  const currentSov = state.sov || null;
+
+  const msg = [
+    `Replace the current Xact estimate?`,
+    ``,
+    `Current file: ${currentUpload.filename}`,
+    `RCV on file: ${usdCompact(currentUpload.replacement_cost_value || 0)}`,
+    currentSov ? `\nThis will also DELETE the existing Schedule of Values${currentSov.draws && currentSov.draws.length ? ` (${currentSov.draws.length} draws)` : ''}.` : '',
+    ``,
+    `Existing estimate items will be archived (kept for audit trail, but no longer active). You'll then need to upload the new Xact estimate.`,
+    ``,
+    `This cannot be undone. Continue?`
+  ].filter(Boolean).join('\n');
+
+  if (!confirm(msg)) return;
+
+  try {
+    const now = new Date().toISOString();
+    const uploadId = currentUpload.id;
+
+    // 1. Soft-delete the wo_builder_uploads row.
+    //    Items are linked by upload_id so they become orphaned but remain
+    //    in the DB for audit. Custom trade mappings and trade categories
+    //    are NOT deleted — they're PM's manual work and likely reusable
+    //    for the new estimate.
+    const { error: upErr } = await sb.from('wo_builder_uploads')
+      .update({ deleted_at: now, is_current: false })
+      .eq('id', uploadId);
+    if (upErr) throw upErr;
+
+    // 2. Hard-delete any SOV. Draws and history cascade via FK constraint.
+    //    Pre-contract draft SOVs only — confirmed/sent SOVs are blocked
+    //    by the guards above.
+    if (currentSov && currentSov.id) {
+      const { error: sovErr } = await sb.from('rebuild_sov')
+        .delete()
+        .eq('id', currentSov.id);
+      if (sovErr) throw sovErr;
+    }
+
+    // 3. Audit log entry — captures who, what, when, and the underlying
+    //    file replaced, for diligence and dispute resolution.
+    if (typeof logActivity === 'function') {
+      logActivity(
+        'Xact Estimate Replaced',
+        `Pre-contract replacement — old file '${currentUpload.filename}' (RCV ${usdCompact(currentUpload.replacement_cost_value || 0)}) archived${currentSov ? '; SOV with ' + (currentSov.draws?.length || 0) + ' draws deleted' : ''}`,
+        'estimate',
+        currentUpload.filename
+      );
+    }
+
+    toast('✓ Estimate cleared — upload the new Xact above');
+
+    // 4. Reload the world so the UI returns to the empty-estimate state.
+    //    The upload area + Create SOV button will reappear.
+    await Promise.all([
+      typeof loadWoBudget === 'function' ? loadWoBudget() : Promise.resolve(),
+      typeof loadSov === 'function' ? loadSov() : Promise.resolve(),
+      typeof loadPacket === 'function' ? loadPacket() : Promise.resolve(),
+    ]);
+    if (typeof renderProject === 'function') renderProject();
+  } catch (err) {
+    console.error('[replaceXactEstimate] failed:', err);
+    alert('Replace failed: ' + (err.message || err) + '\n\nNothing was changed.');
+  }
+}
+
+window.replaceXactEstimate = replaceXactEstimate;
+
 window.loadPacket = loadPacket;
 window.renderPacketSection = renderPacketSection;
 window.wirePacketActions = wirePacketActions;
