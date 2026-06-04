@@ -38,6 +38,8 @@
 </head>
 <body>
 
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+
 <header>
   <img src="https://jgimprovements-arch.github.io/jg-dispatch/logo.png" alt="JG Restoration">
   <div>
@@ -59,6 +61,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 const SB_URL = 'https://nuykvchgecpiuikoerze.supabase.co';
 const SB_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im51eWt2Y2hnZWNwaXVpa29lcnplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYyNjM3ODYsImV4cCI6MjA5MTgzOTc4Nn0.39hZ8DdjT_0iFJXPeAL2FXUSLw8FZBirDVzxZTO1W9s';
 const sb = createClient(SB_URL, SB_ANON);
+const ALBI_DOC_HOOK = 'https://hooks.zapier.com/hooks/catch/12653197/uves4j9/';
 const params = new URLSearchParams(window.location.search);
 const token = params.get('t');
 const main = document.getElementById('main');
@@ -145,8 +148,212 @@ async function decide(decision) {
 
   if (decision === 'install_scheduled') {
     main.innerHTML = `<div class="card success-state"><div class="check">✓</div><h2>Confirmed!</h2><p>Your install date is locked in. JG Restoration has been notified and will coordinate with the installer.</p></div>`;
+    // Generate + file the install confirmation PDF (best-effort, fire-and-forget
+    // so the customer-facing success state shows immediately). Mirrors the
+    // signed-WO pattern in wo.html — auto-files to project Documents tab
+    // under 'Materials Selections' category and pushes to Albi for audit.
+    generateAndFileConfirmationPdf(sel.id).catch(err => {
+      console.error('Confirmation PDF generation failed:', err);
+    });
   } else {
     main.innerHTML = `<div class="card success-state changes-state"><div class="check">↻</div><h2>Got it</h2><p>Your project manager will reach out to find a date that works better.</p></div>`;
+  }
+}
+
+// ─── Selection Install Confirmation PDF (generated on customer approval) ──
+// Mirrors the signed-WO PDF pattern in wo.html. Generates a one-page PDF
+// recording the customer's install-date confirmation, files it to project
+// Documents (category 'Materials Selections'), and pushes to Albi for
+// audit parity with other signed artifacts (contracts, COs, WOs).
+async function generateAndFileConfirmationPdf(selectionId) {
+  // Re-fetch with the project fields needed for the PDF
+  const { data: sel, error } = await sb.from('rebuild_selections')
+    .select('*, project:rebuild_projects(id, albi_job_number, albi_project_id, customer_name, property_address, market), vendor_sub:rebuild_subs(company_name, primary_contact)')
+    .eq('id', selectionId).maybeSingle();
+  if (error || !sel || !sel.project) { console.warn('PDF skipped — selection or project missing'); return; }
+
+  const pdfBlob = generateSelectionPdf(sel);
+  if (!pdfBlob) return;
+
+  await uploadAndPushPdf(sel, pdfBlob);
+}
+
+function generateSelectionPdf(sel) {
+  if (!window.jspdf) { console.warn('jsPDF not loaded'); return null; }
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ unit: 'pt', format: 'letter' });
+  const pageW = doc.internal.pageSize.getWidth();
+  const margin = 48;
+  let y = margin;
+
+  const p = sel.project || {};
+  const s = sel.vendor_sub || {};
+
+  // Header band — navy
+  doc.setFillColor(13, 45, 94);
+  doc.rect(0, 0, pageW, 70, 'F');
+  doc.setTextColor(255, 255, 255);
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(18);
+  doc.text('JG Restoration', margin, 36);
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(9);
+  doc.setTextColor(245, 166, 35);
+  doc.text('FIRE · WATER · MOLD · RECONSTRUCTION', margin, 52);
+  doc.setTextColor(255, 255, 255);
+  doc.setFontSize(10);
+  doc.text('INSTALL CONFIRMATION', pageW - margin, 36, { align: 'right' });
+  doc.setFontSize(8);
+  doc.text(`SEL-${sel.id.slice(0, 8)}`, pageW - margin, 52, { align: 'right' });
+  y = 92;
+
+  // Project info
+  doc.setTextColor(13, 45, 94);
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(11);
+  doc.text('PROJECT', margin, y); y += 14;
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(10);
+  doc.setTextColor(40, 40, 40);
+  const marketLabel = p.market === 'stevens_point' ? 'Stevens Point' : (p.market === 'appleton' ? 'Appleton' : (p.market || '—'));
+  const projLines = [
+    ['Job:', p.albi_job_number || '—'],
+    ['Customer:', p.customer_name || '—'],
+    ['Address:', p.property_address || '—'],
+    ['Market:', marketLabel],
+  ];
+  projLines.forEach(([label, val]) => {
+    doc.setFont('helvetica', 'bold'); doc.text(label, margin, y);
+    doc.setFont('helvetica', 'normal'); doc.text(String(val).slice(0, 80), margin + 80, y);
+    y += 14;
+  });
+  y += 8;
+
+  // Selection info
+  doc.setTextColor(13, 45, 94);
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(11);
+  doc.text('SELECTION', margin, y); y += 14;
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(10);
+  doc.setTextColor(40, 40, 40);
+  const selLines = [
+    ['Category:', sel.category || '—'],
+    ['Vendor / Installer:', s.company_name || sel.vendor_name || '—'],
+    ['Contact:', s.primary_contact || '—'],
+  ];
+  if (sel.total_cost) selLines.push(['Total Cost:', '$' + Number(sel.total_cost).toLocaleString(undefined,{minimumFractionDigits:2, maximumFractionDigits:2})]);
+  selLines.forEach(([label, val]) => {
+    doc.setFont('helvetica', 'bold'); doc.text(label, margin, y);
+    doc.setFont('helvetica', 'normal'); doc.text(String(val).slice(0, 80), margin + 110, y);
+    y += 14;
+  });
+  y += 8;
+
+  // Install date — emphasis block
+  doc.setFillColor(245, 250, 255);
+  doc.setDrawColor(13, 45, 94);
+  doc.rect(margin, y, pageW - 2 * margin, 60, 'FD');
+  doc.setTextColor(13, 45, 94);
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(10);
+  doc.text('CONFIRMED INSTALL DATE', margin + 12, y + 18);
+  doc.setFontSize(20);
+  const dateText = sel.approved_install_date
+    ? new Date(sel.approved_install_date).toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })
+    : '—';
+  doc.text(dateText, margin + 12, y + 44);
+  y += 78;
+
+  // Customer confirmation block
+  doc.setTextColor(13, 45, 94);
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(11);
+  doc.text('CUSTOMER CONFIRMATION', margin, y); y += 14;
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(10);
+  doc.setTextColor(40, 40, 40);
+  const confirmedAt = sel.customer_install_approved_at
+    ? new Date(sel.customer_install_approved_at).toLocaleString('en-US')
+    : new Date().toLocaleString('en-US');
+  const confirmLines = [
+    ['Confirmed by:', p.customer_name || 'Customer'],
+    ['Confirmed at:', confirmedAt],
+    ['Method:', 'Customer Install Approval Portal'],
+  ];
+  confirmLines.forEach(([label, val]) => {
+    doc.setFont('helvetica', 'bold'); doc.text(label, margin, y);
+    doc.setFont('helvetica', 'normal'); doc.text(String(val).slice(0, 80), margin + 100, y);
+    y += 14;
+  });
+  y += 12;
+
+  // Footer
+  doc.setFontSize(8);
+  doc.setTextColor(120, 132, 160);
+  doc.text('This document records the customer\'s electronic confirmation of the install date for the selection above.', margin, y);
+  y += 11;
+  doc.text('JG Restoration · Fire · Water · Mold · Reconstruction · jg-restoration.com', margin, y);
+
+  return doc.output('blob');
+}
+
+async function uploadAndPushPdf(sel, pdfBlob) {
+  const p = sel.project || {};
+  const safeCategory = (sel.category || 'selection').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 30);
+  const filename = `Selection_${safeCategory}_${p.albi_job_number || sel.id.slice(0, 8)}_confirmed.pdf`;
+  const path = `projects/${p.id}/${Date.now()}-${filename}`;
+
+  const { error: upErr } = await sb.storage.from('rebuild-documents').upload(path, pdfBlob, {
+    contentType: 'application/pdf',
+    upsert: false,
+  });
+  if (upErr) { console.error('Storage upload failed:', upErr); return; }
+  const { data: urlData } = sb.storage.from('rebuild-documents').getPublicUrl(path);
+  const fileUrl = urlData.publicUrl;
+
+  const { data: docRow, error: insErr } = await sb.from('rebuild_documents').insert({
+    project_id: p.id,
+    category: 'Materials Selections',
+    filename,
+    file_url: fileUrl,
+    file_size_bytes: pdfBlob.size,
+    mime_type: 'application/pdf',
+    uploaded_by_email: 'selection-system@jg-restoration.com',
+    customer_visible: true,
+    push_status: 'pending',
+    notes: `Install confirmation — ${sel.category} on ${sel.approved_install_date} — auto-filed on customer approval`,
+  }).select();
+  if (insErr) { console.error('Doc insert failed:', insErr); return; }
+  const docId = docRow?.[0]?.id;
+
+  // Best-effort Albi push (mirrors wo.html pattern). Skips silently if no albi_project_id.
+  if (docId && p.albi_project_id) {
+    try {
+      await fetch(ALBI_DOC_HOOK, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          document_id: docId,
+          project_id: p.id,
+          albi_project_id: p.albi_project_id,
+          albi_job_number: p.albi_job_number,
+          category: 'Materials Selections',
+          filename,
+          file_url: fileUrl,
+          mime_type: 'application/pdf',
+          notes: `Install confirmation — ${sel.category}, confirmed by ${p.customer_name} on ${new Date().toLocaleDateString()}`,
+        }),
+        mode: 'no-cors',
+      });
+      await sb.from('rebuild_documents').update({
+        push_status: 'sent',
+        pushed_to_albi_at: new Date().toISOString(),
+      }).eq('id', docId);
+    } catch (e) {
+      console.error('Albi push failed:', e);
+      await sb.from('rebuild_documents').update({ push_status: 'failed' }).eq('id', docId);
+    }
   }
 }
 </script>
