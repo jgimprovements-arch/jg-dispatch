@@ -169,6 +169,7 @@ function renderSovHeader() {
 const s = state.sov;
 const meta = SOV_STATUS_META[s.status] || SOV_STATUS_META.draft;
 const draws = state.sovDraws || [];
+const total = Number(s.contract_total || 0);
 // SOV header totals reconcile with QuickBooks invoices when QB is synced:
 //   REQUESTED = invoiced but unpaid (i.e. what we asked customer for, still owed)
 //   PAID      = received from customer
@@ -201,7 +202,6 @@ if (qbInvoiced != null) {
   requested = draws.filter(d => d.status === 'requested').reduce((sum, d) => sum + Number(d.total_amount || 0), 0);
   pending = draws.filter(d => d.status === 'pending').reduce((sum, d) => sum + Number(d.total_amount || 0), 0);
 }
-const total = Number(s.contract_total || 0);
 
 const signedLine = s.customer_signed_at
   ? `<span style="font-size:12px;color:var(--success);">✓ Signed ${new Date(s.customer_signed_at).toLocaleDateString()} by ${esc(s.customer_signed_name || 'customer')}</span>`
