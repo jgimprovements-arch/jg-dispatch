@@ -173,21 +173,30 @@ const draws = state.sovDraws || [];
 //   REQUESTED = invoiced but unpaid (i.e. what we asked customer for, still owed)
 //   PAID      = received from customer
 //   PENDING   = remaining contract value not yet invoiced
-// This makes the SOV header agree with the top-of-project BILLED card,
-// which also reads from QB. If QB hasn't been synced, falls back to the
-// draw-status totals.
+// This makes the SOV header agree with the top-of-project BILLED card.
+// Priority: state.qbActuals (live QB rollup) > state.activeProject fields
+// (Albi/QB-synced). Falls back to draw-status totals only if neither is set.
 const qb = state.qbActuals || null;
-const qbInvoiced = qb && qb.invoices_total != null ? Number(qb.invoices_total) : null;
-const qbBalance = qb && qb.invoice_balance != null ? Number(qb.invoice_balance) : null;
+const p = state.activeProject || {};
+let qbInvoiced = null, qbBalance = null;
+if (qb && qb.invoices_total != null) {
+  qbInvoiced = Number(qb.invoices_total);
+  qbBalance = qb.invoice_balance != null ? Number(qb.invoice_balance) : null;
+} else if (p.actual_revenue != null) {
+  // Fall back to the project field used by the top-of-project BILLED card,
+  // so REQUESTED and BILLED always show consistent numbers even when QB
+  // hasn't been refreshed on this project yet.
+  qbInvoiced = Number(p.actual_revenue);
+  qbBalance = p.paid_amount != null ? Math.max(0, qbInvoiced - Number(p.paid_amount)) : qbInvoiced;
+}
 let paid, requested, pending;
 if (qbInvoiced != null) {
-  // QB is the source of truth for money flow on this project
   const qbPaid = Math.max(0, qbInvoiced - (qbBalance || 0));
   paid = qbPaid;
   requested = qbBalance || 0;
   pending = Math.max(0, total - qbInvoiced);
 } else {
-  // No QB sync — use the draw status totals (legacy behavior)
+  // No external billing data — use the draw status totals (legacy behavior)
   paid = draws.filter(d => d.status === 'paid').reduce((sum, d) => sum + Number(d.paid_amount || d.total_amount || 0), 0);
   requested = draws.filter(d => d.status === 'requested').reduce((sum, d) => sum + Number(d.total_amount || 0), 0);
   pending = draws.filter(d => d.status === 'pending').reduce((sum, d) => sum + Number(d.total_amount || 0), 0);
