@@ -86,10 +86,15 @@ if (!sb || !state.activeProjectId) {
   return;
 }
 state.sovLoading = true;
+// Exclusion-based filter (rather than allowlist) so new SOV statuses
+// introduced by Cloudflare workers / DB triggers / future flows auto-load.
+// Previously this was an allowlist that missed 'sent_for_signature' (set
+// when packet goes out for customer signature) — UI showed "No SOV yet"
+// for projects with packets out for signing.
 const { data: sovRows, error } = await sb.from('rebuild_sov')
   .select('*')
   .eq('project_id', state.activeProjectId)
-  .in('status', ['draft', 'sent', 'customer_signed', 'active', 'complete'])
+  .not('status', 'in', '(cancelled,superseded)')
   .order('created_at', { ascending: false })
   .limit(1);
 if (error) {
