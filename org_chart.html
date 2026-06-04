@@ -1,0 +1,605 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Org Chart · JG Restoration</title>
+<link rel="icon" href="https://jgimprovements-arch.github.io/jg-dispatch/logo.png">
+<script src="jg-version-check.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+<style>
+  :root {
+    --navy: #0d2d5e; --orange: #e85d04; --gold: #f5a623;
+    --green: #2d9c5f; --red: #d64545;
+    --bg: #f4f6fb; --card: #ffffff; --text: #1a2540;
+    --muted: #7884a0; --line: #e3e7f0;
+    --appleton: #1976d2; --stevens-point: #7b1fa2;
+    --tier1-bg: #fff5ec;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--text); overflow-x: auto; }
+
+  header {
+    background: var(--navy); color: #fff; padding: 14px 22px;
+    display: flex; align-items: center; gap: 14px;
+    box-shadow: 0 2px 8px rgba(0,0,0,.08);
+    position: sticky; top: 0; z-index: 100;
+  }
+  header img { width: 40px; height: 40px; object-fit: contain; background: #fff; padding: 4px; border-radius: 6px; }
+  header .brand-name { font-weight: 800; font-size: 17px; line-height: 1.1; }
+  header .brand-tag { font-size: 10px; opacity: .85; letter-spacing: .5px; text-transform: uppercase; }
+  header .spacer { flex: 1; }
+  header .mode-toggle {
+    display: flex; gap: 4px; background: rgba(255,255,255,.08); padding: 3px; border-radius: 6px;
+  }
+  header .mode-toggle button {
+    background: transparent; color: rgba(255,255,255,.8); border: 0;
+    padding: 6px 12px; border-radius: 4px; font-size: 12px; font-weight: 600;
+    cursor: pointer;
+  }
+  header .mode-toggle button.active { background: rgba(255,255,255,.18); color: #fff; }
+  header button.action {
+    background: rgba(255,255,255,.12); color: #fff; border: 1px solid rgba(255,255,255,.25);
+    padding: 8px 14px; border-radius: 6px; font-size: 13px; font-weight: 600;
+    cursor: pointer; margin-left: 6px;
+  }
+  header button.action:hover { background: rgba(255,255,255,.22); }
+  header button.primary { background: var(--orange); border-color: var(--orange); }
+  header button.primary:hover { background: #c4500a; }
+
+  .chart-title {
+    text-align: center; padding: 18px 24px 6px;
+  }
+  .chart-title h1 { margin: 0 0 2px; font-size: 22px; color: var(--navy); }
+  .chart-title .meta { font-size: 12px; color: var(--muted); }
+
+  .stats {
+    display: flex; gap: 8px; justify-content: center; padding: 0 24px 14px; flex-wrap: wrap;
+  }
+  .stat-card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 6px;
+    padding: 8px 14px; min-width: 110px;
+  }
+  .stat-card .label { font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; }
+  .stat-card .value { font-size: 18px; font-weight: 800; color: var(--navy); }
+
+  .canvas-wrap {
+    position: relative;
+    width: 100%;
+    overflow: auto;
+    padding: 0 24px 60px;
+  }
+  #canvas {
+    position: relative;
+    width: 1600px;
+    min-height: 1100px;
+    margin: 0 auto;
+    background: #fff;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+  }
+  #connectors {
+    position: absolute; top: 0; left: 0;
+    width: 100%; height: 100%;
+    pointer-events: none;
+  }
+
+  .org-card {
+    position: absolute;
+    width: 180px; min-height: 78px;
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 10px 12px;
+    box-shadow: 0 1px 3px rgba(0,0,0,.04);
+    cursor: default;
+    user-select: none;
+    transition: box-shadow .15s, border-color .15s;
+  }
+  .org-card.tier-1 { border: 2px solid var(--orange); background: var(--tier1-bg); }
+  .org-card:hover { box-shadow: 0 4px 12px rgba(0,0,0,.10); }
+  .org-card.dragging { opacity: .85; box-shadow: 0 8px 20px rgba(0,0,0,.18); z-index: 50; }
+  .org-card .name { font-size: 13px; font-weight: 700; color: var(--navy); line-height: 1.2; }
+  .org-card .role { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .org-card .badges { display: flex; gap: 4px; margin-top: 6px; flex-wrap: wrap; }
+  .badge { font-size: 9px; padding: 2px 7px; border-radius: 8px; font-weight: 700; letter-spacing: .02em; }
+  .badge.appleton { background: rgba(25,118,210,.12); color: var(--appleton); }
+  .badge.stevens-point { background: rgba(123,31,162,.12); color: var(--stevens-point); }
+  .badge.pay-salary { background: rgba(45,156,95,.15); color: var(--green); }
+  .badge.pay-hourly { background: rgba(120,132,160,.15); color: var(--muted); }
+
+  .org-card .actions {
+    display: none; position: absolute; top: 4px; right: 4px;
+  }
+  body.edit-mode .org-card { cursor: grab; }
+  body.edit-mode .org-card.dragging { cursor: grabbing; }
+  body.edit-mode .org-card .actions { display: flex; gap: 2px; }
+  .actions button {
+    background: transparent; border: 1px solid var(--line); color: var(--muted);
+    font-size: 9px; padding: 2px 6px; border-radius: 4px; cursor: pointer;
+  }
+  .actions button:hover { background: var(--line); color: var(--navy); }
+
+  /* Modal styles for manager picker */
+  .modal-back {
+    display: none; position: fixed; inset: 0;
+    background: rgba(13,45,94,.45); z-index: 200;
+    align-items: center; justify-content: center;
+  }
+  .modal-back.on { display: flex; }
+  .modal {
+    background: #fff; border-radius: 10px; padding: 22px;
+    max-width: 480px; width: 90%; max-height: 80vh; overflow-y: auto;
+  }
+  .modal h3 { margin: 0 0 14px; color: var(--navy); }
+  .modal-list { display: flex; flex-direction: column; gap: 4px; }
+  .modal-list button {
+    text-align: left; padding: 10px 12px; border: 1px solid var(--line);
+    background: #fff; border-radius: 6px; cursor: pointer; font-size: 13px;
+  }
+  .modal-list button:hover { background: var(--line); }
+  .modal-list button.clear { color: var(--red); font-weight: 600; }
+  .modal-close { margin-top: 14px; padding: 8px 14px; background: var(--muted); color: #fff; border: 0; border-radius: 6px; cursor: pointer; }
+
+  .loading, .error { text-align: center; padding: 60px 20px; color: var(--muted); font-size: 14px; }
+  .error { color: var(--red); }
+
+  /* Print mode — hide UI chrome, just show the chart */
+  @media print {
+    body { background: #fff; }
+    header, .chart-title, .stats { display: none; }
+    .canvas-wrap { padding: 0; overflow: visible; }
+    #canvas { box-shadow: none; border: 0; }
+    .org-card .actions { display: none !important; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <img src="https://jgimprovements-arch.github.io/jg-dispatch/logo.png" alt="JG Restoration">
+  <div>
+    <div class="brand-name">JG Restoration</div>
+    <div class="brand-tag">Organizational Chart</div>
+  </div>
+  <div class="spacer"></div>
+  <div class="mode-toggle">
+    <button id="btn-view" class="active" onclick="setMode('view')">View</button>
+    <button id="btn-edit" onclick="setMode('edit')">Edit</button>
+  </div>
+  <button class="action" onclick="autoLayout()">⤺ Auto-Layout</button>
+  <button class="action primary" onclick="exportPdf()">📄 Export PDF</button>
+  <button class="action" onclick="window.location.href='admin.html'">← Admin</button>
+</header>
+
+<div class="chart-title">
+  <h1>JG Restoration · Organizational Chart</h1>
+  <div class="meta" id="meta">Loading…</div>
+</div>
+<div class="stats" id="stats"></div>
+
+<div class="canvas-wrap">
+  <div id="canvas">
+    <svg id="connectors"></svg>
+    <div id="loading" class="loading">Loading employees…</div>
+  </div>
+</div>
+
+<!-- Manager picker modal -->
+<div class="modal-back" id="manager-modal">
+  <div class="modal">
+    <h3 id="manager-modal-title">Set Manager</h3>
+    <div class="modal-list" id="manager-list"></div>
+    <button class="modal-close" onclick="closeManagerModal()">Cancel</button>
+  </div>
+</div>
+
+<script type="module">
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+const SB_URL = 'https://nuykvchgecpiuikoerze.supabase.co';
+const SB_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im51eWt2Y2hnZWNwaXVpa29lcnplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYyNjM3ODYsImV4cCI6MjA5MTgzOTc4Nn0.39hZ8DdjT_0iFJXPeAL2FXUSLw8FZBirDVzxZTO1W9s';
+const sb = createClient(SB_URL, SB_ANON);
+
+const canvas = document.getElementById('canvas');
+const connectors = document.getElementById('connectors');
+const loadingEl = document.getElementById('loading');
+const meta = document.getElementById('meta');
+const stats = document.getElementById('stats');
+
+let employees = [];
+let supportsOrgColumns = true;
+let mode = 'view';
+
+const ROLE_TO_TIER = {
+  'Owner': 1, 'CEO': 1, 'President': 1,
+  'Admin': 2, 'Office': 2,
+  'Project Manager': 3, 'PM': 3,
+  'Estimator': 4, 'Foreman': 4, 'Lead': 4, 'Supervisor': 4,
+  'Carpenter': 5, 'Technician': 5,
+};
+
+function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+
+function tierFor(emp) {
+  if (emp.org_tier && Number(emp.org_tier) >= 1 && Number(emp.org_tier) <= 5) return Number(emp.org_tier);
+  return ROLE_TO_TIER[emp.role] || 5;
+}
+
+function marketLabel(m) {
+  if (!m) return '';
+  const lc = String(m).toLowerCase();
+  if (lc.includes('stevens')) return 'Stevens Point';
+  return 'Appleton';
+}
+
+function marketClass(m) {
+  if (!m) return 'appleton';
+  return String(m).toLowerCase().includes('stevens') ? 'stevens-point' : 'appleton';
+}
+
+// Auto-layout: position all employees in a clean tier-based grid.
+// Tier 1 row, then tier 2, etc. Cards within a tier centered horizontally.
+function autoLayoutPositions(emps) {
+  const canvasW = canvas.offsetWidth || 1600;
+  const cardW = 180, cardH = 90;
+  const hGap = 18, vGap = 80;
+  const tierStartY = 40;
+  const tiers = { 1: [], 2: [], 3: [], 4: [], 5: [] };
+  emps.forEach(e => { tiers[tierFor(e)].push(e); });
+
+  const positions = {};
+  let y = tierStartY;
+  for (let t = 1; t <= 5; t++) {
+    const row = tiers[t];
+    if (!row.length) { continue; }
+    // Sort within tier: salaried first, then alphabetical, so the visual
+    // hierarchy reads top-of-pyramid to bottom inside each tier too.
+    row.sort((a, b) => {
+      const sa = (a.pay_type === 'salary' || Number(a.annual_salary || 0) > 0) ? 0 : 1;
+      const sb = (b.pay_type === 'salary' || Number(b.annual_salary || 0) > 0) ? 0 : 1;
+      if (sa !== sb) return sa - sb;
+      return (a.name || '').localeCompare(b.name || '');
+    });
+    // Wrap if more than 7 per row
+    const maxPerRow = 7;
+    const rows = [];
+    for (let i = 0; i < row.length; i += maxPerRow) rows.push(row.slice(i, i + maxPerRow));
+    rows.forEach(rEmps => {
+      const totalW = rEmps.length * cardW + (rEmps.length - 1) * hGap;
+      const startX = (canvasW - totalW) / 2;
+      rEmps.forEach((e, i) => {
+        positions[e.id] = { x: startX + i * (cardW + hGap), y };
+      });
+      y += cardH + vGap * 0.55;
+    });
+    y += vGap * 0.45;
+  }
+  // Expand canvas height if needed
+  const maxY = Math.max(1100, y + 40);
+  canvas.style.minHeight = maxY + 'px';
+  return positions;
+}
+
+function positionOf(emp, autoPositions) {
+  if (emp.org_x != null && emp.org_y != null) {
+    return { x: Number(emp.org_x), y: Number(emp.org_y) };
+  }
+  return autoPositions[emp.id] || { x: 100, y: 100 };
+}
+
+function renderCards() {
+  // Clear all org-card elements (but not the SVG)
+  Array.from(canvas.querySelectorAll('.org-card')).forEach(el => el.remove());
+  if (!employees.length) {
+    loadingEl.style.display = '';
+    loadingEl.textContent = 'No active employees.';
+    return;
+  }
+  loadingEl.style.display = 'none';
+
+  const autoPositions = autoLayoutPositions(employees);
+  employees.forEach(emp => {
+    const pos = positionOf(emp, autoPositions);
+    const tier = tierFor(emp);
+    const card = document.createElement('div');
+    card.className = `org-card tier-${tier}`;
+    card.dataset.id = emp.id;
+    card.style.left = pos.x + 'px';
+    card.style.top = pos.y + 'px';
+    const isSalary = emp.pay_type === 'salary' || Number(emp.annual_salary || 0) > 0;
+    card.innerHTML = `
+      <div class="actions">
+        <button onclick="window.openManagerModal('${esc(emp.id)}', event)" title="Set who this person reports to">🔗 Manager</button>
+        <button onclick="window.setTier('${esc(emp.id)}', ${tier}, event)" title="Override tier placement">T${tier}</button>
+      </div>
+      <div class="name">${esc(emp.name || '—')}</div>
+      <div class="role">${esc(emp.role || '—')}</div>
+      <div class="badges">
+        <span class="badge ${marketClass(emp.market)}">${esc(marketLabel(emp.market))}</span>
+        <span class="badge ${isSalary ? 'pay-salary' : 'pay-hourly'}">${isSalary ? 'Salary' : 'Hourly'}</span>
+      </div>
+    `;
+    canvas.appendChild(card);
+    if (mode === 'edit') attachDragHandlers(card, emp);
+  });
+  drawConnectors();
+}
+
+function drawConnectors() {
+  const w = canvas.offsetWidth;
+  const h = canvas.offsetHeight;
+  connectors.setAttribute('width', w);
+  connectors.setAttribute('height', h);
+  connectors.setAttribute('viewBox', `0 0 ${w} ${h}`);
+  connectors.innerHTML = '';
+  employees.forEach(emp => {
+    if (!emp.reports_to_id) return;
+    const parent = employees.find(p => p.id === emp.reports_to_id);
+    if (!parent) return;
+    const childEl = canvas.querySelector(`.org-card[data-id="${emp.id}"]`);
+    const parentEl = canvas.querySelector(`.org-card[data-id="${parent.id}"]`);
+    if (!childEl || !parentEl) return;
+    const px = parentEl.offsetLeft + parentEl.offsetWidth / 2;
+    const py = parentEl.offsetTop + parentEl.offsetHeight;
+    const cx = childEl.offsetLeft + childEl.offsetWidth / 2;
+    const cy = childEl.offsetTop;
+    // L-shaped path: down from parent, across, down to child
+    const midY = (py + cy) / 2;
+    const path = `M ${px} ${py} L ${px} ${midY} L ${cx} ${midY} L ${cx} ${cy}`;
+    const line = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    line.setAttribute('d', path);
+    line.setAttribute('fill', 'none');
+    line.setAttribute('stroke', '#7884a0');
+    line.setAttribute('stroke-width', '1.5');
+    connectors.appendChild(line);
+  });
+}
+
+// ─── Drag handlers ─────────────────────────────────────────────────
+function attachDragHandlers(card, emp) {
+  card.addEventListener('mousedown', (e) => {
+    if (e.target.tagName === 'BUTTON') return; // don't drag from buttons
+    if (mode !== 'edit') return;
+    e.preventDefault();
+    const startX = e.clientX, startY = e.clientY;
+    const origLeft = card.offsetLeft, origTop = card.offsetTop;
+    card.classList.add('dragging');
+    function move(me) {
+      const dx = me.clientX - startX;
+      const dy = me.clientY - startY;
+      card.style.left = Math.max(0, origLeft + dx) + 'px';
+      card.style.top = Math.max(0, origTop + dy) + 'px';
+      drawConnectors();
+    }
+    function up() {
+      card.classList.remove('dragging');
+      document.removeEventListener('mousemove', move);
+      document.removeEventListener('mouseup', up);
+      const newX = card.offsetLeft, newY = card.offsetTop;
+      if (newX !== origLeft || newY !== origTop) {
+        // Persist to DB
+        saveCardPosition(emp.id, newX, newY);
+      }
+    }
+    document.addEventListener('mousemove', move);
+    document.addEventListener('mouseup', up);
+  });
+}
+
+async function saveCardPosition(id, x, y) {
+  if (!supportsOrgColumns) return;
+  const { error } = await sb.from('employees').update({ org_x: Math.round(x), org_y: Math.round(y) }).eq('id', id);
+  if (error) console.error('Position save failed:', error.message);
+  else {
+    const emp = employees.find(e => e.id === id);
+    if (emp) { emp.org_x = Math.round(x); emp.org_y = Math.round(y); }
+  }
+}
+
+// ─── Manager picker modal ──────────────────────────────────────────
+const managerModal = document.getElementById('manager-modal');
+const managerList = document.getElementById('manager-list');
+const managerModalTitle = document.getElementById('manager-modal-title');
+
+window.openManagerModal = function(empId, evt) {
+  if (evt) evt.stopPropagation();
+  const emp = employees.find(e => e.id === empId);
+  if (!emp) return;
+  managerModalTitle.textContent = `Set Manager for ${emp.name}`;
+  // Build list of possible managers (everyone except self and descendants to avoid cycles)
+  const descendantIds = collectDescendantIds(empId);
+  const candidates = employees.filter(e => e.id !== empId && !descendantIds.has(e.id));
+  candidates.sort((a, b) => tierFor(a) - tierFor(b) || (a.name || '').localeCompare(b.name || ''));
+  let html = '';
+  if (emp.reports_to_id) {
+    html += `<button class="clear" onclick="window.setManager('${esc(empId)}', null)">✗ Clear current manager</button>`;
+  }
+  candidates.forEach(c => {
+    const isCurrent = c.id === emp.reports_to_id;
+    html += `<button onclick="window.setManager('${esc(empId)}', '${esc(c.id)}')">${isCurrent ? '<b>✓ </b>' : ''}${esc(c.name)} <span style="color:var(--muted);font-size:11px;">· ${esc(c.role)}</span></button>`;
+  });
+  managerList.innerHTML = html || '<div style="color:var(--muted);font-size:12px;padding:8px;">No valid managers (avoiding cycles).</div>';
+  managerModal.classList.add('on');
+};
+
+function collectDescendantIds(rootId) {
+  const out = new Set();
+  function walk(id) {
+    employees.forEach(e => {
+      if (e.reports_to_id === id && !out.has(e.id)) {
+        out.add(e.id);
+        walk(e.id);
+      }
+    });
+  }
+  walk(rootId);
+  return out;
+}
+
+window.closeManagerModal = function() { managerModal.classList.remove('on'); };
+
+window.setManager = async function(empId, managerId) {
+  managerModal.classList.remove('on');
+  const { error } = await sb.from('employees').update({ reports_to_id: managerId }).eq('id', empId);
+  if (error) {
+    alert('Save failed: ' + error.message);
+    return;
+  }
+  const emp = employees.find(e => e.id === empId);
+  if (emp) emp.reports_to_id = managerId;
+  drawConnectors();
+};
+
+window.setTier = async function(empId, currentTier, evt) {
+  if (evt) evt.stopPropagation();
+  const v = prompt(`Override tier (1=Ownership, 5=Field Crew).\nCurrent: ${currentTier}\nEnter 1-5 or leave blank to clear:`);
+  if (v === null) return;
+  let setVal = null;
+  if (v.trim() !== '') {
+    const n = Number(v);
+    if (!Number.isInteger(n) || n < 1 || n > 5) { alert('Tier must be 1-5'); return; }
+    setVal = n;
+  }
+  const { error } = await sb.from('employees').update({ org_tier: setVal, org_x: null, org_y: null }).eq('id', empId);
+  if (error) { alert('Save failed: ' + error.message); return; }
+  const emp = employees.find(e => e.id === empId);
+  if (emp) { emp.org_tier = setVal; emp.org_x = null; emp.org_y = null; }
+  renderCards();
+};
+
+// ─── Mode toggle ───────────────────────────────────────────────────
+window.setMode = function(m) {
+  mode = m;
+  document.getElementById('btn-view').classList.toggle('active', m === 'view');
+  document.getElementById('btn-edit').classList.toggle('active', m === 'edit');
+  document.body.classList.toggle('edit-mode', m === 'edit');
+  renderCards();
+};
+
+// ─── Auto-layout: clear all manual positions and re-render ─────────
+window.autoLayout = async function() {
+  if (!confirm('Clear all manual positions and re-apply auto-layout? This will reset where each card sits but keep reporting lines and tier overrides.')) return;
+  if (supportsOrgColumns) {
+    const { error } = await sb.from('employees').update({ org_x: null, org_y: null }).neq('id', '00000000-0000-0000-0000-000000000000');
+    if (error) { alert('Reset failed: ' + error.message); return; }
+  }
+  employees.forEach(e => { e.org_x = null; e.org_y = null; });
+  renderCards();
+};
+
+// ─── Export PDF (uses html2canvas + jsPDF) ─────────────────────────
+window.exportPdf = async function() {
+  if (!window.html2canvas || !window.jspdf) {
+    alert('PDF libraries not loaded — try Print to PDF instead.');
+    return;
+  }
+  const btn = event && event.target;
+  const orig = btn ? btn.textContent : null;
+  if (btn) { btn.disabled = true; btn.textContent = 'Generating…'; }
+  try {
+    // Hide UI chrome while capturing (cards' edit-mode buttons)
+    const wasEdit = document.body.classList.contains('edit-mode');
+    document.body.classList.remove('edit-mode');
+    // Capture the canvas
+    const captureCanvas = await html2canvas(canvas, {
+      backgroundColor: '#ffffff',
+      scale: 2,
+      logging: false,
+      windowWidth: canvas.scrollWidth,
+      windowHeight: canvas.scrollHeight,
+    });
+    if (wasEdit) document.body.classList.add('edit-mode');
+    // Compose PDF
+    const { jsPDF } = window.jspdf;
+    const pdfW = 792, pdfH = 612; // landscape letter in points
+    const pdf = new jsPDF({ unit: 'pt', format: 'letter', orientation: 'landscape' });
+    // Header band
+    pdf.setFillColor(13, 45, 94);
+    pdf.rect(0, 0, pdfW, 50, 'F');
+    pdf.setTextColor(255, 255, 255);
+    pdf.setFont('helvetica', 'bold');
+    pdf.setFontSize(16);
+    pdf.text('JG Restoration', 30, 24);
+    pdf.setFont('helvetica', 'normal');
+    pdf.setFontSize(8);
+    pdf.setTextColor(245, 166, 35);
+    pdf.text('FIRE  ·  WATER  ·  MOLD  ·  RECONSTRUCTION', 30, 38);
+    pdf.setTextColor(255, 255, 255);
+    pdf.setFontSize(11);
+    pdf.text('ORGANIZATIONAL CHART', pdfW - 30, 24, { align: 'right' });
+    pdf.setFontSize(8);
+    const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+    pdf.text(`As of ${today}  ·  ${employees.length} active employees`, pdfW - 30, 38, { align: 'right' });
+
+    // Fit the captured canvas into the remaining space
+    const imgData = captureCanvas.toDataURL('image/png');
+    const availW = pdfW - 40, availH = pdfH - 70;
+    const ratio = Math.min(availW / captureCanvas.width, availH / captureCanvas.height);
+    const drawW = captureCanvas.width * ratio;
+    const drawH = captureCanvas.height * ratio;
+    const drawX = (pdfW - drawW) / 2;
+    const drawY = 60;
+    pdf.addImage(imgData, 'PNG', drawX, drawY, drawW, drawH);
+
+    pdf.save(`JG_Restoration_Org_Chart_${new Date().toISOString().slice(0,10)}.pdf`);
+  } catch (e) {
+    console.error('PDF export failed:', e);
+    alert('PDF export failed: ' + (e.message || e));
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = orig; }
+  }
+};
+
+// ─── Stats ─────────────────────────────────────────────────────────
+function renderStats() {
+  const total = employees.length;
+  let salary = 0, hourly = 0, appleton = 0, stevens = 0;
+  employees.forEach(e => {
+    if (e.pay_type === 'salary' || Number(e.annual_salary || 0) > 0) salary++; else hourly++;
+    const m = (e.market || '').toLowerCase();
+    if (m.includes('stevens')) stevens++;
+    else if (m.includes('appleton')) appleton++;
+  });
+  stats.innerHTML = `
+    <div class="stat-card"><div class="label">Total Active</div><div class="value">${total}</div></div>
+    <div class="stat-card"><div class="label">Salary</div><div class="value">${salary}</div></div>
+    <div class="stat-card"><div class="label">Hourly</div><div class="value">${hourly}</div></div>
+    <div class="stat-card"><div class="label">Appleton</div><div class="value">${appleton}</div></div>
+    <div class="stat-card"><div class="label">Stevens Point</div><div class="value">${stevens}</div></div>
+  `;
+  const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+  meta.innerHTML = `As of ${today} · ${total} active employees` + (!supportsOrgColumns ? ' · <em>Edit features disabled — run the org-chart migration</em>' : '');
+}
+
+// ─── Load employees ────────────────────────────────────────────────
+async function load() {
+  let { data, error } = await sb.from('employees')
+    .select('id, name, role, market, pay_type, annual_salary, active, reports_to_id, org_tier, org_x, org_y')
+    .eq('active', true)
+    .order('name', { ascending: true });
+  if (error && /org_tier|org_x|org_y|reports_to_id/.test(String(error.message))) {
+    // Fall back without org columns
+    supportsOrgColumns = false;
+    const retry = await sb.from('employees')
+      .select('id, name, role, market, pay_type, annual_salary, active')
+      .eq('active', true)
+      .order('name', { ascending: true });
+    data = retry.data;
+    error = retry.error;
+  }
+  if (error) {
+    loadingEl.className = 'error';
+    loadingEl.textContent = 'Failed to load: ' + error.message;
+    return;
+  }
+  employees = data || [];
+  renderStats();
+  renderCards();
+}
+
+await load();
+window.addEventListener('resize', () => renderCards());
+</script>
+</body>
+</html>
