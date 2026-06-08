@@ -440,6 +440,8 @@ function renderDocumentsTab() {
     const cat = state.docFolderOpen;
     const list = docs.filter(d => d.category === cat);
     const isCustomerDocs = cat === 'Customer Documents';
+    const UPLOAD_ICON_LG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="width:54px;height:54px;"><path d="M12 16V7"/><path d="m8.5 10.5 3.5-3.5 3.5 3.5"/><path d="M20 16.6A4.5 4.5 0 0 0 17 8.2 6 6 0 0 0 5.4 9.7 3.5 3.5 0 0 0 6 16.6"/></svg>`;
+    const UPLOAD_ICON_SM = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px;vertical-align:-3px;"><path d="M12 15V5"/><path d="m8 9 4-4 4 4"/><path d="M5 19h14"/></svg>`;
     return `
       <div class="section-head" style="display:flex;align-items:center;gap:12px;">
         <button class="btn doc-back-btn" id="docBack" title="Back to folders">← Back</button>
@@ -448,11 +450,26 @@ function renderDocumentsTab() {
         ${isCustomerDocs ? `<button class="btn-pill-orange" id="btnRegenDocs" title="Delete and regenerate standard docs (Work Auth, Insurance Recovery, COS)">↺ Regen Docs</button>` : ''}
         <button class="btn-pill-orange" data-upload-cat="${cat}">📎 Upload to ${cat}</button>
       </div>
+      <style>
+        .doc-empty-drop{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;width:100%;min-height:52vh;border:2.5px dashed var(--orange);border-radius:16px;background:rgba(232,93,4,.045);color:var(--orange);cursor:pointer;font-family:inherit;text-align:center;padding:24px;transition:background .15s ease,transform .15s ease,box-shadow .15s ease;}
+        .doc-empty-drop:hover{background:rgba(232,93,4,.10);transform:translateY(-2px);box-shadow:0 8px 24px rgba(232,93,4,.12);}
+        .doc-empty-drop .ttl{font-size:19px;font-weight:800;letter-spacing:.2px;}
+        .doc-empty-drop .sub{font-size:12.5px;font-weight:500;color:var(--muted);max-width:360px;line-height:1.4;}
+        .doc-drop-strip{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;margin-top:16px;padding:15px 18px;border:2px dashed var(--orange);border-radius:13px;background:rgba(232,93,4,.045);color:var(--orange);font-size:13px;font-weight:700;font-family:inherit;cursor:pointer;transition:background .15s ease,transform .12s ease;}
+        .doc-drop-strip:hover{background:rgba(232,93,4,.10);transform:translateY(-1px);}
+      </style>
       <div class="doc-folder-drop" data-folder-drop="${cat}" style="min-height:60vh;position:relative;">
-        ${list.length ? `<div class="doc-card-grid">${list.map(d => renderDocRow(d)).join('')}</div>`
-                      : '<div class="empty" style="padding:30px;color:var(--muted);text-align:center;">No files in this folder yet.<br><span style="font-size:12px;">Drag files here or use the Upload button above.</span></div>'}
-        <div class="doc-drop-overlay" style="position:absolute;inset:0;border:3px dashed var(--orange);border-radius:10px;background:rgba(232,93,4,.08);display:none;align-items:center;justify-content:center;font-size:18px;font-weight:700;color:var(--orange);pointer-events:none;z-index:5;">
-          📁 Drop to upload to ${cat}
+        ${list.length
+          ? `<div class="doc-card-grid">${list.map(d => renderDocRow(d)).join('')}</div>
+             <button type="button" class="doc-drop-strip" data-upload-cat="${cat}">${UPLOAD_ICON_SM} Drag more files here, or click to upload to ${cat}</button>`
+          : `<button type="button" class="doc-empty-drop" data-upload-cat="${cat}">
+               ${UPLOAD_ICON_LG}
+               <span class="ttl">Drag &amp; drop files here</span>
+               <span class="sub">or click to browse &mdash; PDFs, images &amp; Office docs land in ${cat}</span>
+             </button>`}
+        <div class="doc-drop-overlay" style="position:absolute;inset:0;border:3px dashed var(--orange);border-radius:16px;background:rgba(232,93,4,.12);display:none;flex-direction:column;align-items:center;justify-content:center;gap:8px;font-size:19px;font-weight:800;color:var(--orange);pointer-events:none;z-index:5;backdrop-filter:blur(1.5px);">
+          ${UPLOAD_ICON_LG}
+          <span>Drop to upload to ${cat}</span>
         </div>
       </div>
       <input type="file" id="docFileInput" multiple style="display:none;" accept="image/*,application/pdf,.doc,.docx,.xls,.xlsx,.heic">
