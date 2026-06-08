@@ -2801,27 +2801,55 @@ function renderDetail() {
       <div class="kpi">
         <div class="label">Billed</div>
         ${(() => {
-          // Derive BILLED from the SOV — sum of draws that have been
-          // requested or paid. The SOV is the source of truth for what's
-          // been billed; Albi/QB track reality after invoicing but can
-          // drift (stale invoices from voided contracts, manual edits, etc).
-          // Reconciles by definition with the SOV's REQUESTED + PAID totals.
+          // QB-first priority chain (matches Financials tab, SOV header, and
+          // customer portal): qbActuals.invoices_total → p.actual_revenue →
+          // SOV-derived (sum of requested/paid draws). QB is the source of
+          // truth for what's been invoiced; SOV is the fallback when QB
+          // hasn't been pulled yet.
+          const a = state.qbActuals;
           const draws = state.sovDraws || [];
-          const billed = draws
-            .filter(d => d.status === 'requested' || d.status === 'paid')
-            .reduce((s, d) => s + Number(d.total_amount || d.paid_amount || 0), 0);
+          let billed = null, source = null;
+          if (a && a.invoices_total != null) {
+            billed = Number(a.invoices_total);
+            source = 'QB';
+          } else if (p.actual_revenue != null) {
+            billed = Number(p.actual_revenue);
+            source = 'Albi';
+          } else if (draws.length) {
+            billed = draws
+              .filter(d => d.status === 'requested' || d.status === 'paid')
+              .reduce((s, d) => s + Number(d.total_amount || d.paid_amount || 0), 0);
+            source = 'SOV';
+          }
           const contractTotal = state.sov ? Number(state.sov.contract_total || 0) : 0;
-          const billedPct = contractTotal > 0 ? Math.round((billed / contractTotal) * 100) : null;
+          const billedPct = (billed != null && contractTotal > 0) ? Math.round((billed / contractTotal) * 100) : null;
           return `
-            <div class="value">${billed > 0 ? '$' + Math.round(billed).toLocaleString() : '—'}</div>
-            <div class="sub">${billedPct != null ? billedPct + '% of contract' : ''}</div>
+            <div class="value">${billed != null && billed > 0 ? '$' + Math.round(billed).toLocaleString() : '—'}</div>
+            <div class="sub">${billedPct != null ? billedPct + '% of contract' : (source ? 'no contract total' : '')}</div>
           `;
         })()}
       </div>
       <div class="kpi">
         <div class="label">Paid</div>
-        <div class="value">${p.paid_amount ? '$' + Number(p.paid_amount).toLocaleString(undefined,{maximumFractionDigits:0}) : '—'}</div>
-        <div class="sub">${p.actual_revenue && p.paid_amount ? Math.round((p.paid_amount / p.actual_revenue) * 100) + '% of billed' : 'collected'}</div>
+        ${(() => {
+          // QB-first priority chain. paid = invoices_total - invoice_balance
+          // (the portion of QB invoices already collected). Falls back to
+          // Albi's p.paid_amount only when QB hasn't been pulled.
+          const a = state.qbActuals;
+          let paid = null, billed = null;
+          if (a && a.invoices_total != null) {
+            billed = Number(a.invoices_total);
+            paid = Math.max(0, billed - Number(a.invoice_balance || 0));
+          } else if (p.paid_amount != null) {
+            paid = Number(p.paid_amount);
+            billed = p.actual_revenue != null ? Number(p.actual_revenue) : null;
+          }
+          const pct = (paid != null && billed && billed > 0) ? Math.round((paid / billed) * 100) : null;
+          return `
+            <div class="value">${paid != null ? '$' + Math.round(paid).toLocaleString() : '—'}</div>
+            <div class="sub">${pct != null ? pct + '% of billed' : 'collected'}</div>
+          `;
+        })()}
       </div>
       ${(() => {
         // Margin reads from live QB actuals (same source as the Financials
