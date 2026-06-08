@@ -1421,6 +1421,50 @@ async function render() {
       .reduce((s, d) => s + Number(d.total_amount || 0), 0);
   }
 
+  // ─── Effective draw status reconciled to QuickBooks ─────────────────
+  // The stored rebuild_sov_draws.status only changes when a PM marks it, so
+  // a draw can read "Upcoming" even after QB shows it paid. When we have QB
+  // data, derive each draw's *display* status from cumulative paid coverage.
+  // A tolerance band (5% of the draw or $50) absorbs tax/adjustment spillover
+  // so a fully-paid draw doesn't falsely tip the next draw into "Partial".
+  // waived/locked draws keep their stored label and don't consume the pool.
+  const drawEffStatus = {};
+  if (qbInvoiced != null) {
+    let cursor = 0;
+    for (const d of sovDrawsArr) {
+      if (d.status === 'waived' || d.status === 'locked') { drawEffStatus[d.id] = d.status; continue; }
+      const amt = Number(d.total_amount || 0);
+      const cumBefore = cursor;
+      const cumAfter = cursor + amt;
+      cursor = cumAfter;
+      const tol = Math.max(50, amt * 0.05);
+      if (sovPaid >= cumAfter - tol) drawEffStatus[d.id] = 'paid';
+      else if (sovPaid > cumBefore + tol) drawEffStatus[d.id] = 'partial';
+      else drawEffStatus[d.id] = (d.status === 'requested' || d.status === 'partial') ? d.status : 'pending';
+    }
+  } else {
+    for (const d of sovDrawsArr) drawEffStatus[d.id] = d.status;
+  }
+
+  // ─── Credit-card / processing fee surfaced on the portal ─────────────
+  // When QB recorded more than the sum of fully-paid draws (and no draw is
+  // partially paid), the residual is a card processing fee charged on top of
+  // the agreed draw amount. Sanity-capped at 8% so we never mislabel a real
+  // partial payment as a fee. Attributed to the most recent fully-paid draw.
+  let ccFee = 0, feeDrawId = null;
+  if (qbInvoiced != null) {
+    const paidDraws = sovDrawsArr.filter(d => drawEffStatus[d.id] === 'paid');
+    const paidSum = paidDraws.reduce((s, d) => s + Number(d.total_amount || 0), 0);
+    const anyPartial = sovDrawsArr.some(d => drawEffStatus[d.id] === 'partial');
+    if (!anyPartial && paidSum > 0) {
+      const residual = sovPaid - paidSum;
+      if (residual > 1 && residual <= paidSum * 0.08) {
+        ccFee = residual;
+        feeDrawId = paidDraws[paidDraws.length - 1].id;
+      }
+    }
+  }
+
   const drawsHtml = (sovRow && sovDrawsArr.length) ? `
     <div class="cust-section" id="draws">
       <h3>Payment Schedule (Draws)</h3>
@@ -1432,6 +1476,7 @@ async function render() {
         <div style="background:rgba(22,163,74,.08);padding:10px;border-radius:6px;">
           <div style="font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.05em;">Paid</div>
           <div style="font-size:16px;font-weight:700;color:#16a34a;">${fmtMoney(sovPaid)}</div>
+          ${ccFee > 0 ? `<div style="font-size:9px;color:#64748b;margin-top:2px;line-height:1.2;">incl. ${fmtMoney(ccFee)} card fee</div>` : ''}
         </div>
         <div style="background:rgba(217,119,6,.10);padding:10px;border-radius:6px;">
           <div style="font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.05em;">Requested</div>
@@ -1444,16 +1489,20 @@ async function render() {
       </div>
       <div class="cust-sel-list">
         ${sovDrawsArr.map(d => {
-          const meta = drawStatusLabel[d.status] || drawStatusLabel.pending;
-          const isRequested = d.status === 'requested' || d.status === 'partial';
+          const effStatus = drawEffStatus[d.id] || d.status;
+          const meta = drawStatusLabel[effStatus] || drawStatusLabel.pending;
+          const isRequested = effStatus === 'requested' || effStatus === 'partial';
+          const isPaid = effStatus === 'paid';
           return `
-            <div class="cust-sel-card${isRequested ? ' pending' : (d.status === 'paid' ? ' approved' : '')}" data-draw-id="${escHtml(d.id)}">
+            <div class="cust-sel-card${isRequested ? ' pending' : (isPaid ? ' approved' : '')}" data-draw-id="${escHtml(d.id)}">
               <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap;">
                 <div style="flex:1;min-width:0;">
                   <div style="font-weight:700;color:#0f172a;">Draw #${d.draw_num} · ${fmtMoney(d.total_amount)}</div>
                   ${d.trigger_event ? `<div style="font-size:13px;color:#475569;margin-top:2px;">${escHtml(d.trigger_event)}</div>` : ''}
-                  ${d.requested_at ? `<div style="font-size:11px;color:#64748b;margin-top:4px;">Requested ${fmtSelDate(d.requested_at)}</div>` : ''}
-                  ${d.paid_at ? `<div style="font-size:11px;color:#16a34a;margin-top:4px;">Paid ${fmtSelDate(d.paid_at)}</div>` : ''}
+                  ${d.requested_at && !isPaid ? `<div style="font-size:11px;color:#64748b;margin-top:4px;">Requested ${fmtSelDate(d.requested_at)}</div>` : ''}
+                  ${d.paid_at ? `<div style="font-size:11px;color:#16a34a;margin-top:4px;">Paid ${fmtSelDate(d.paid_at)}</div>`
+                    : (isPaid ? `<div style="font-size:11px;color:#16a34a;margin-top:4px;">Payment received</div>` : '')}
+                  ${(ccFee > 0 && d.id === feeDrawId) ? `<div style="font-size:11px;color:#64748b;margin-top:2px;">Agreed draw ${fmtMoney(d.total_amount)} + ${fmtMoney(ccFee)} credit card processing fee</div>` : ''}
                 </div>
                 <div style="background:${meta.bg};color:${meta.color};border:1px solid ${meta.color}55;font-size:11px;padding:3px 10px;border-radius:20px;font-weight:600;white-space:nowrap;">${meta.lbl}</div>
               </div>
