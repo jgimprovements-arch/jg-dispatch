@@ -1710,45 +1710,45 @@ function customerLink(project) {
   return `${CUSTOMER_PORTAL_BASE}?t=${project.customer_token}`;
 }
 
-// ─── Project Portal status pill ─────────────────────────────────────────────
-// Visual indicator showing whether the customer has been sent the portal link
-// and whether they're actively viewing it. Three states:
-//   • Active  (green) — at least one customer visit recorded
-//   • Sent    (orange) — packet/share email sent, no visits yet
-//   • Not sent (gray)  — never sent
-// Read from rebuild_projects.customer_portal_* columns (set by the
-// log_customer_portal_view RPC on visit, and by the share modal / packet-send
-// trigger on send).
-function customerPortalStatusPill(p) {
-  if (!p?.customer_token) return '';
+// ─── Project Portal button — state-aware indicator + action ─────────────────
+// Single button that conveys portal status AND opens the share modal in all
+// three states. The modal supports both resend (Send Email) and "view as
+// customer" (Open) actions regardless of state.
+//   • Send Portal (orange CTA) — never sent
+//   • Sent to Customer · Xd ago (amber) — sent, no customer visits yet
+//   • Active · Xh ago (green) — customer has opened the portal
+function customerPortalButton(p) {
+  if (!p?.customer_token) {
+    return `<button class="portal-btn portal-btn-send" id="btnShareCustomer" disabled title="No customer token on this project — portal unavailable">🔗 Project Portal</button>`;
+  }
   const sentAt = p.customer_portal_sent_at;
   const lastView = p.customer_portal_last_viewed_at;
   const views = Number(p.customer_portal_view_count || 0);
 
   let cls, label, tip;
   if (lastView) {
-    cls = 'portal-pill portal-active';
-    label = `Active &middot; ${fmtRelative(lastView)}`;
-    tip = `Customer has opened the portal ${views} time${views === 1 ? '' : 's'}. Last visit ${fmtRelative(lastView)}.`;
+    cls = 'portal-btn portal-btn-active';
+    label = `🟢 Active &middot; ${fmtRelative(lastView)}`;
+    tip = `Customer has opened the portal ${views} time${views === 1 ? '' : 's'}. Last visit ${fmtRelative(lastView)}. Click to open the portal or resend the link.`;
   } else if (sentAt) {
-    cls = 'portal-pill portal-sent';
-    label = `Sent &middot; ${fmtRelative(sentAt)}`;
-    tip = `Portal link was sent ${fmtRelative(sentAt)}. Customer hasn't opened it yet.`;
+    cls = 'portal-btn portal-btn-sent';
+    label = `✓ Sent to Customer &middot; ${fmtRelative(sentAt)}`;
+    tip = `Portal link was sent ${fmtRelative(sentAt)}. Customer hasn't opened it yet. Click to open the portal or resend.`;
   } else {
-    cls = 'portal-pill portal-unsent';
-    label = 'Portal not sent';
-    tip = 'Customer has not been sent the project portal link yet.';
+    cls = 'portal-btn portal-btn-send';
+    label = `📤 Send Portal`;
+    tip = `Send the project portal link to the customer.`;
   }
-  return `<style id="portalPillStyle">
-    .portal-pill{display:inline-flex;align-items:center;gap:6px;padding:5px 11px;border-radius:16px;font-size:11px;font-weight:700;line-height:1;white-space:nowrap;letter-spacing:.2px;}
-    .portal-pill .portal-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;}
-    .portal-active{background:rgba(22,163,74,.12);color:#15803d;border:1px solid rgba(22,163,74,.3);}
-    .portal-active .portal-dot{background:#22c55e;box-shadow:0 0 0 3px rgba(34,197,94,.18);}
-    .portal-sent{background:rgba(232,93,4,.12);color:#c2410c;border:1px solid rgba(232,93,4,.3);}
-    .portal-sent .portal-dot{background:#f97316;}
-    .portal-unsent{background:#f1f5f9;color:#64748b;border:1px solid #e2e8f0;}
-    .portal-unsent .portal-dot{background:#94a3b8;}
-  </style><span class="${cls}" title="${esc(tip)}"><span class="portal-dot"></span>${label}</span>`;
+  return `<style id="portalBtnStyle">
+    .portal-btn{display:inline-flex;align-items:center;gap:8px;padding:10px 18px;border-radius:999px;font-size:13px;font-weight:700;line-height:1;white-space:nowrap;letter-spacing:.2px;border:1px solid rgba(255,255,255,.20);cursor:pointer;transition:filter .15s ease,transform .12s ease;box-shadow:0 2px 6px rgba(0,0,0,.20);font-family:inherit;}
+    .portal-btn:hover{filter:brightness(1.10);transform:translateY(-1px);}
+    .portal-btn:active{transform:translateY(0);}
+    .portal-btn-send{background:#e85d04;color:#fff;}
+    .portal-btn-sent{background:#d97706;color:#fff;}
+    .portal-btn-active{background:#16a34a;color:#fff;}
+    .portal-btn[disabled]{opacity:.5;cursor:not-allowed;}
+    .portal-btn[disabled]:hover{filter:none;transform:none;}
+  </style><button class="${cls}" id="btnShareCustomer" title="${esc(tip)}">${label}</button>`;
 }
 
 // Build the Zapier MESSAGE_HOOK attachment payload from a URL list.
@@ -1900,6 +1900,12 @@ Thanks,
 ${pmFirst}
 JG Restoration`;
 
+  // Modal copy adapts to state: first-send vs resend, and "View as Customer"
+  // makes the Open action's purpose obvious for PMs.
+  const alreadySent = !!p.customer_portal_sent_at;
+  const modalTitle = alreadySent ? 'Resend Project Portal to Customer' : 'Send Project Portal to Customer';
+  const sendBtnLabel = alreadySent ? 'Resend Email to Customer' : 'Send Email to Customer';
+
   // Build a simple share modal — copy link or send via email through messages hook
   const html = `
     <div style="padding:8px 0;">
@@ -1907,14 +1913,14 @@ JG Restoration`;
       <div style="display:flex;gap:6px;align-items:center;margin-bottom:14px;">
         <input id="share_url" readonly value="${link}" style="flex:1;border:1px solid var(--line);border-radius:6px;padding:8px 10px;font-size:12px;font-family:monospace;background:var(--bg);">
         <button class="btn" id="share_copy">Copy</button>
-        <button class="btn" id="share_open">Open</button>
+        <button class="btn primary" id="share_open" title="Open the portal in a new tab — exactly what the customer sees, updated in real time">👁 View as Customer</button>
       </div>
       <hr style="border:none;border-top:1px solid var(--line);margin:14px 0;">
       <p style="font-size:12px;color:var(--muted);margin:0 0 10px;">Or email this link directly to ${customerEmail || 'the customer'}:</p>
       <textarea id="share_body" rows="8" style="width:100%;border:1px solid var(--line);border-radius:6px;padding:8px 10px;font-size:13px;font-family:inherit;">${body}</textarea>
       <div style="display:flex;justify-content:flex-end;gap:6px;margin-top:10px;">
         <button class="btn" id="share_close">Cancel</button>
-        <button class="btn primary" id="share_send" ${customerEmail ? '' : 'disabled title="No customer email on file"'}>Send Email to Customer</button>
+        <button class="btn primary" id="share_send" ${customerEmail ? '' : 'disabled title="No customer email on file"'}>${sendBtnLabel}</button>
       </div>
     </div>
   `;
@@ -1925,10 +1931,14 @@ JG Restoration`;
     modal = document.createElement('div');
     modal.id = 'modalShareCustomer';
     modal.className = 'modal-back';
-    modal.innerHTML = `<div class="modal"><h3>Share Project Portal with Customer <button class="close" data-close>×</button></h3><div class="modal-body" id="shareBody"></div></div>`;
+    modal.innerHTML = `<div class="modal"><h3 id="shareModalTitle">${modalTitle} <button class="close" data-close>×</button></h3><div class="modal-body" id="shareBody"></div></div>`;
     document.body.appendChild(modal);
     modal.querySelector('[data-close]').addEventListener('click', () => modal.classList.remove('on'));
     modal.addEventListener('click', e => { if (e.target === modal) modal.classList.remove('on'); });
+  } else {
+    // Update title on every open in case sent state changed
+    const t = modal.querySelector('#shareModalTitle');
+    if (t) t.childNodes[0].nodeValue = modalTitle + ' ';
   }
   modal.querySelector('#shareBody').innerHTML = html;
   modal.classList.add('on');
@@ -2741,8 +2751,7 @@ function renderDetail() {
             <button class="albi-ctrl-item" id="btnOpenInAlbi">↗ Edit in Albi</button>
           </div>
         </div>
-        ${customerPortalStatusPill(p)}
-        <button class="btn-pill-orange" id="btnShareCustomer" title="Get the project portal link">🔗 Project Portal</button>
+        ${customerPortalButton(p)}
       </div>
     </div>
 
