@@ -219,7 +219,7 @@
         <select class="filter-select" id="pmFilter" style="margin-top:6px;">
           <option value="all">All PMs</option>
         </select>
-        <input type="text" class="search" placeholder="Search job # or customer…" id="searchInput">
+        <input type="text" class="search" placeholder="Search job #, customer, address, PM…" id="searchInput">
       </div>
       <button class="new-btn" id="syncAlbiAllBtn" title="Pull all matching active jobs from Albi">⟳ Sync from Albi</button>
       <div class="project-list" id="projectList">
@@ -1496,12 +1496,33 @@ function renderProjects() {
   }
   if (state.filterPm !== 'all') items = items.filter(p => (p.albi_pm_name || '') === state.filterPm);
   if (state.search) {
-    const q = state.search.toLowerCase();
-    items = items.filter(p =>
-      (p.albi_job_number || '').toLowerCase().includes(q) ||
-      (p.customer_name || '').toLowerCase().includes(q) ||
-      (p.albi_project_id || '').toLowerCase().includes(q)
-    );
+    const q = state.search.toLowerCase().trim();
+    // Normalize: strip non-alphanumeric so dashes/spaces don't trip search.
+    // "2766" matches "KFI Properties LLC-2766-REB", "3130" matches a
+    // street number like "3130 Main St", and "kfiprop" matches a
+    // hyphenated job name.
+    const qStripped = q.replace(/[^a-z0-9]/g, '');
+    items = items.filter(p => {
+      const fields = [
+        p.albi_job_number,
+        p.customer_name,
+        p.albi_project_id,
+        p.property_address,
+        p.albi_pm_name,
+        p.customer_email,
+        p.customer_phone,
+      ];
+      for (const v of fields) {
+        if (!v) continue;
+        const s = String(v).toLowerCase();
+        if (s.includes(q)) return true;
+        // Stripped match catches "3130" against an address like "3130 Main St"
+        // and any case where the user types digits-only against a hyphenated
+        // value like "2025-3130-REB".
+        if (qStripped && s.replace(/[^a-z0-9]/g, '').includes(qStripped)) return true;
+      }
+      return false;
+    });
   }
   $('#projCount').textContent = items.length;
 
@@ -2722,8 +2743,23 @@ function renderDetail() {
       })()}
       <div class="kpi">
         <div class="label">Billed</div>
-        <div class="value">${p.actual_revenue ? '$' + Number(p.actual_revenue).toLocaleString(undefined,{maximumFractionDigits:0}) : '—'}</div>
-        <div class="sub">${p.billed_pct != null ? Number(p.billed_pct).toFixed(0) + '% complete' : ''}</div>
+        ${(() => {
+          // Derive BILLED from the SOV — sum of draws that have been
+          // requested or paid. The SOV is the source of truth for what's
+          // been billed; Albi/QB track reality after invoicing but can
+          // drift (stale invoices from voided contracts, manual edits, etc).
+          // Reconciles by definition with the SOV's REQUESTED + PAID totals.
+          const draws = state.sovDraws || [];
+          const billed = draws
+            .filter(d => d.status === 'requested' || d.status === 'paid')
+            .reduce((s, d) => s + Number(d.total_amount || d.paid_amount || 0), 0);
+          const contractTotal = state.sov ? Number(state.sov.contract_total || 0) : 0;
+          const billedPct = contractTotal > 0 ? Math.round((billed / contractTotal) * 100) : null;
+          return `
+            <div class="value">${billed > 0 ? '$' + Math.round(billed).toLocaleString() : '—'}</div>
+            <div class="sub">${billedPct != null ? billedPct + '% of contract' : ''}</div>
+          `;
+        })()}
       </div>
       <div class="kpi">
         <div class="label">Paid</div>
@@ -3128,34 +3164,38 @@ function renderTabContent() {
       });
     });
 
-    // Drag files FROM DESKTOP into the open folder view's empty area to upload
-    const folderViewArea = document.querySelector('.doc-row-list, .doc-folder-empty');
+    // Drag files FROM DESKTOP into the open folder view to upload
+    const folderViewArea = document.querySelector('.doc-folder-drop');
     if (folderViewArea && state.docFolderOpen) {
-      const cat = state.docFolderOpen;
+      const cat = folderViewArea.dataset.folderDrop || state.docFolderOpen;
+      const overlay = folderViewArea.querySelector('.doc-drop-overlay');
+      let dragDepth = 0;  // counter to handle dragenter/dragleave on child elements
+      const showOverlay = () => { if (overlay) overlay.style.display = 'flex'; };
+      const hideOverlay = () => { if (overlay) overlay.style.display = 'none'; };
       const handler = {
         enter: e => {
           if (e.dataTransfer && [...(e.dataTransfer.types || [])].includes('Files')) {
             e.preventDefault();
-            folderViewArea.classList.add('drop-target-active');
+            dragDepth++;
+            showOverlay();
           }
         },
         over: e => {
           if (e.dataTransfer && [...(e.dataTransfer.types || [])].includes('Files')) {
             e.preventDefault();
             e.dataTransfer.dropEffect = 'copy';
-            folderViewArea.classList.add('drop-target-active');
           }
         },
         leave: e => {
-          if (!folderViewArea.contains(e.relatedTarget)) {
-            folderViewArea.classList.remove('drop-target-active');
-          }
+          dragDepth = Math.max(0, dragDepth - 1);
+          if (dragDepth === 0) hideOverlay();
         },
         drop: async e => {
           if (!e.dataTransfer || !e.dataTransfer.files || !e.dataTransfer.files.length) return;
           e.preventDefault();
           e.stopPropagation();
-          folderViewArea.classList.remove('drop-target-active');
+          dragDepth = 0;
+          hideOverlay();
           const files = [...e.dataTransfer.files];
           await uploadFilesToCategory(files, cat);
         },

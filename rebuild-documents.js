@@ -448,8 +448,13 @@ function renderDocumentsTab() {
         ${isCustomerDocs ? `<button class="btn-pill-orange" id="btnRegenDocs" title="Delete and regenerate standard docs (Work Auth, Insurance Recovery, COS)">↺ Regen Docs</button>` : ''}
         <button class="btn-pill-orange" data-upload-cat="${cat}">📎 Upload to ${cat}</button>
       </div>
-      ${list.length ? `<div class="doc-card-grid">${list.map(d => renderDocRow(d)).join('')}</div>`
-                    : '<div class="empty" style="padding:30px;color:var(--muted);">No files in this folder yet.</div>'}
+      <div class="doc-folder-drop" data-folder-drop="${cat}" style="min-height:60vh;position:relative;">
+        ${list.length ? `<div class="doc-card-grid">${list.map(d => renderDocRow(d)).join('')}</div>`
+                      : '<div class="empty" style="padding:30px;color:var(--muted);text-align:center;">No files in this folder yet.<br><span style="font-size:12px;">Drag files here or use the Upload button above.</span></div>'}
+        <div class="doc-drop-overlay" style="position:absolute;inset:0;border:3px dashed var(--orange);border-radius:10px;background:rgba(232,93,4,.08);display:none;align-items:center;justify-content:center;font-size:18px;font-weight:700;color:var(--orange);pointer-events:none;z-index:5;">
+          📁 Drop to upload to ${cat}
+        </div>
+      </div>
       <input type="file" id="docFileInput" multiple style="display:none;" accept="image/*,application/pdf,.doc,.docx,.xls,.xlsx,.heic">
     `;
   }
