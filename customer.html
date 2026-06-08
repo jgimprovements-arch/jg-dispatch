@@ -1338,7 +1338,7 @@ async function render() {
   const { data: sovRow } = await sb.from('rebuild_sov')
     .select('*')
     .eq('project_id', project.id)
-    .in('status', ['customer_signed', 'active', 'complete'])
+    .not('status', 'in', '(cancelled,superseded)')
     .order('created_at', { ascending: false })
     .limit(1)
     .maybeSingle();
@@ -1350,6 +1350,14 @@ async function render() {
       .order('draw_num', { ascending: true });
     sovDrawsArr = drws || [];
   }
+
+  // Fetch QB rollup so paid/requested reconcile with the customer's actual
+  // invoice history in QuickBooks. Falls back to project.actual_revenue /
+  // paid_amount (Albi-synced fields) if no rollup row exists.
+  const { data: qbActuals } = await sb.from('project_qb_actuals')
+    .select('invoices_total, invoice_balance')
+    .eq('project_id', project.id)
+    .maybeSingle();
 
   const completedCount = phasesArr.filter(p => p.status === 'complete').length;
   const totalCount = phasesArr.length;
@@ -1380,15 +1388,38 @@ async function render() {
     waived:    { lbl: 'Waived',       color: '#64748b', bg: 'rgba(100,116,139,.10)' },
     locked:    { lbl: 'Locked',       color: '#64748b', bg: 'rgba(100,116,139,.10)' },
   };
-  const sovPaid = sovDrawsArr
-    .filter(d => d.status === 'paid')
-    .reduce((s, d) => s + Number(d.paid_amount || d.total_amount || 0), 0);
-  const sovRequested = sovDrawsArr
-    .filter(d => d.status === 'requested' || d.status === 'partial')
-    .reduce((s, d) => s + Number(d.total_amount || 0), 0);
-  const sovPending = sovDrawsArr
-    .filter(d => d.status === 'pending')
-    .reduce((s, d) => s + Number(d.total_amount || 0), 0);
+  // ─── Payment schedule totals reconcile with QuickBooks ──────────────
+  // Priority: project_qb_actuals (live rollup) > project.actual_revenue
+  // (Albi-synced field) > draw status totals (legacy).
+  // This means customer sees the same paid/requested numbers QB shows.
+  const sovContractTotal = Number(sovRow && sovRow.contract_total || 0);
+  let qbInvoiced = null, qbBalance = null;
+  if (qbActuals && qbActuals.invoices_total != null) {
+    qbInvoiced = Number(qbActuals.invoices_total);
+    qbBalance = qbActuals.invoice_balance != null ? Number(qbActuals.invoice_balance) : null;
+  } else if (project.actual_revenue != null) {
+    qbInvoiced = Number(project.actual_revenue);
+    qbBalance = project.paid_amount != null
+      ? Math.max(0, qbInvoiced - Number(project.paid_amount))
+      : qbInvoiced;
+  }
+  let sovPaid, sovRequested, sovPending;
+  if (qbInvoiced != null) {
+    const qbPaid = Math.max(0, qbInvoiced - (qbBalance || 0));
+    sovPaid = qbPaid;
+    sovRequested = qbBalance || 0;
+    sovPending = Math.max(0, sovContractTotal - qbInvoiced);
+  } else {
+    sovPaid = sovDrawsArr
+      .filter(d => d.status === 'paid')
+      .reduce((s, d) => s + Number(d.paid_amount || d.total_amount || 0), 0);
+    sovRequested = sovDrawsArr
+      .filter(d => d.status === 'requested' || d.status === 'partial')
+      .reduce((s, d) => s + Number(d.total_amount || 0), 0);
+    sovPending = sovDrawsArr
+      .filter(d => d.status === 'pending')
+      .reduce((s, d) => s + Number(d.total_amount || 0), 0);
+  }
 
   const drawsHtml = (sovRow && sovDrawsArr.length) ? `
     <div class="cust-section" id="draws">
