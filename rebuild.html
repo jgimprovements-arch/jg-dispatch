@@ -1710,6 +1710,47 @@ function customerLink(project) {
   return `${CUSTOMER_PORTAL_BASE}?t=${project.customer_token}`;
 }
 
+// ─── Project Portal status pill ─────────────────────────────────────────────
+// Visual indicator showing whether the customer has been sent the portal link
+// and whether they're actively viewing it. Three states:
+//   • Active  (green) — at least one customer visit recorded
+//   • Sent    (orange) — packet/share email sent, no visits yet
+//   • Not sent (gray)  — never sent
+// Read from rebuild_projects.customer_portal_* columns (set by the
+// log_customer_portal_view RPC on visit, and by the share modal / packet-send
+// trigger on send).
+function customerPortalStatusPill(p) {
+  if (!p?.customer_token) return '';
+  const sentAt = p.customer_portal_sent_at;
+  const lastView = p.customer_portal_last_viewed_at;
+  const views = Number(p.customer_portal_view_count || 0);
+
+  let cls, label, tip;
+  if (lastView) {
+    cls = 'portal-pill portal-active';
+    label = `Active &middot; ${fmtRelative(lastView)}`;
+    tip = `Customer has opened the portal ${views} time${views === 1 ? '' : 's'}. Last visit ${fmtRelative(lastView)}.`;
+  } else if (sentAt) {
+    cls = 'portal-pill portal-sent';
+    label = `Sent &middot; ${fmtRelative(sentAt)}`;
+    tip = `Portal link was sent ${fmtRelative(sentAt)}. Customer hasn't opened it yet.`;
+  } else {
+    cls = 'portal-pill portal-unsent';
+    label = 'Portal not sent';
+    tip = 'Customer has not been sent the project portal link yet.';
+  }
+  return `<style id="portalPillStyle">
+    .portal-pill{display:inline-flex;align-items:center;gap:6px;padding:5px 11px;border-radius:16px;font-size:11px;font-weight:700;line-height:1;white-space:nowrap;letter-spacing:.2px;}
+    .portal-pill .portal-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;}
+    .portal-active{background:rgba(22,163,74,.12);color:#15803d;border:1px solid rgba(22,163,74,.3);}
+    .portal-active .portal-dot{background:#22c55e;box-shadow:0 0 0 3px rgba(34,197,94,.18);}
+    .portal-sent{background:rgba(232,93,4,.12);color:#c2410c;border:1px solid rgba(232,93,4,.3);}
+    .portal-sent .portal-dot{background:#f97316;}
+    .portal-unsent{background:#f1f5f9;color:#64748b;border:1px solid #e2e8f0;}
+    .portal-unsent .portal-dot{background:#94a3b8;}
+  </style><span class="${cls}" title="${esc(tip)}"><span class="portal-dot"></span>${label}</span>`;
+}
+
 // Build the Zapier MESSAGE_HOOK attachment payload from a URL list.
 function attachmentHookPayload(urls) {
   const arr = (urls || []).slice(0, 4);  // hook supports up to 4 (MMS) / 5 (email)
@@ -1955,6 +1996,21 @@ async function sendCustomerScheduleEmail(project, body, link) {
   }
   logToAlbi('customer_schedule_shared', `Schedule link sent to customer ${project.customer_name} (${project.customer_email})`);
   toast('Schedule link sent');
+  // Mark portal as sent so the project header pill reflects it. COALESCE-style:
+  // only fill if not already set (preserve earliest send timestamp).
+  try {
+    if (!project.customer_portal_sent_at) {
+      await sb.from('rebuild_projects').update({
+        customer_portal_sent_at: new Date().toISOString(),
+        customer_portal_sent_by: state.pmEmail || project.albi_pm_email || fromEmail,
+      }).eq('id', project.id);
+      // Reflect locally so the next render shows the new state without a full reload.
+      if (state.activeProject && state.activeProject.id === project.id) {
+        state.activeProject.customer_portal_sent_at = new Date().toISOString();
+        state.activeProject.customer_portal_sent_by = state.pmEmail || project.albi_pm_email || fromEmail;
+      }
+    }
+  } catch (e) { console.warn('portal sent stamp failed:', e); }
   await loadMessages();
 }
 
@@ -2685,6 +2741,7 @@ function renderDetail() {
             <button class="albi-ctrl-item" id="btnOpenInAlbi">↗ Edit in Albi</button>
           </div>
         </div>
+        ${customerPortalStatusPill(p)}
         <button class="btn-pill-orange" id="btnShareCustomer" title="Get the project portal link">🔗 Project Portal</button>
       </div>
     </div>
