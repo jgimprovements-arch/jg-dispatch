@@ -31,9 +31,20 @@ const CHUNK_BATCH_SIZE = 40; // line items per estimate chunk before forcing a c
 //                                            committing anything to storage.
 export async function parseAndStoreXactPDFs(sb, projectId, estimateFile, componentsFile, opts = {}) {
   const { onProgress = () => {}, uploadedByEmail, uploadedByName, dryRun = false } = opts;
-  const apiKey = localStorage.getItem('jg_key');
+  // Key lookup order:
+  //   1. platform_settings table (key='anthropic_api_key') — single source for the whole team
+  //   2. localStorage 'jg_key' — per-browser fallback (legacy, kept for backwards compat)
+  // The platform_settings path means Admin sets the key once and every PM
+  // gets it automatically — no per-browser setup, no "set one on adjuster.html
+  // first" friction for the team.
+  let apiKey = null;
+  try {
+    const { data } = await sb.from('platform_settings').select('value').eq('key', 'anthropic_api_key').single();
+    if (data && data.value) apiKey = data.value;
+  } catch (_) { /* fall through to localStorage */ }
+  if (!apiKey) apiKey = localStorage.getItem('jg_key');
   if (!apiKey) {
-    throw new Error('No Anthropic API key found in browser storage (jg_key). Set one on adjuster.html first.');
+    throw new Error('No Anthropic API key configured. Ask an Admin to set the platform-wide key in Admin Panel → Anthropic API Key, or set a personal one on adjuster.html.');
   }
 
   // ─── DRY-RUN FAST PATH ────────────────────────────────────────────

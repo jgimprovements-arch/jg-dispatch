@@ -761,6 +761,24 @@ async function ac_render() {
   h += '<div style="font-size:12px;color:var(--muted);margin-top:3px;">Control which roles can access each platform page</div>';
   h += '</div>';
 
+  // Platform Settings card — Anthropic API key (used by WO Builder parser,
+  // adjuster rebuttal, etc.). Stored in platform_settings.value where
+  // key='anthropic_api_key'. Setting this once means PMs don\'t have to
+  // configure their own per-browser key.
+  h += '<div class="card" style="padding:14px 18px;margin-bottom:16px;background:#fffaf2;border:1px solid #ffe0b2;">';
+  h += '<div style="display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;">';
+  h += '<div>';
+  h += '<div style="font-size:13px;font-weight:700;color:var(--navy);">🔑 Anthropic API Key (Platform-Wide)</div>';
+  h += '<div style="font-size:11px;color:var(--muted);margin-top:3px;">Set once \u2014 every PM\'s WO Builder, Adjuster, and other Claude-powered features pull from here.</div>';
+  h += '<div id="anthropic-key-status" style="font-size:11px;margin-top:4px;color:var(--muted);">Loading\u2026</div>';
+  h += '</div>';
+  h += '<div style="display:flex;gap:6px;">';
+  h += '<button class="btn" onclick="ac_setAnthropicKey()" style="padding:7px 12px;font-size:12px;background:var(--navy);color:#fff;border:0;border-radius:6px;cursor:pointer;font-weight:600;">Set / Update Key</button>';
+  h += '<button class="btn" onclick="ac_clearAnthropicKey()" style="padding:7px 12px;font-size:12px;background:transparent;color:var(--muted);border:1px solid var(--muted);border-radius:6px;cursor:pointer;font-weight:600;">Clear</button>';
+  h += '</div>';
+  h += '</div>';
+  h += '</div>';
+
   // Legend
   h += '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px;">';
   ACCESS_ROLES.forEach(function(role) {
@@ -862,6 +880,92 @@ async function ac_render() {
 
   h += '</div>';
   app.innerHTML = h;
+
+  // Load the current platform-wide Anthropic key status and render
+  ac_loadAnthropicKeyStatus();
+}
+
+async function ac_loadAnthropicKeyStatus() {
+  var el = document.getElementById('anthropic-key-status');
+  if (!el) return;
+  try {
+    var r = await sbGet("/rest/v1/platform_settings?key=eq.anthropic_api_key&select=value,updated_at,updated_by");
+    if (Array.isArray(r) && r.length && r[0].value) {
+      var masked = r[0].value.length > 12
+        ? r[0].value.slice(0, 7) + '\u2026' + r[0].value.slice(-4)
+        : '••••••••';
+      var when = r[0].updated_at ? new Date(r[0].updated_at).toLocaleString() : '';
+      var who = r[0].updated_by || '';
+      el.innerHTML = '<span style="color:var(--accent-green);font-weight:600;">\u2713 Key set</span> \u00b7 <code style="font-size:10px;background:rgba(0,0,0,.04);padding:1px 4px;border-radius:3px;">' + masked + '</code>' + (when ? ' \u00b7 Updated ' + when : '') + (who ? ' by ' + who : '');
+    } else {
+      el.innerHTML = '<span style="color:#c0392b;font-weight:600;">\u26a0 No key set</span> \u00b7 PMs hitting WO Builder will see an error until this is configured.';
+    }
+  } catch (e) {
+    el.innerHTML = '<span style="color:var(--muted);">Could not load key status: ' + (e.message || e) + '</span>';
+  }
+}
+
+async function ac_setAnthropicKey() {
+  var key = prompt('Paste the Anthropic API key.\n\nThe key starts with "sk-ant-" and is stored in the platform_settings table for the whole team to use. Existing per-browser keys (localStorage jg_key) remain as fallback.');
+  if (!key) return;
+  key = String(key).trim();
+  if (!key.startsWith('sk-ant-')) {
+    if (!confirm('That doesn\'t look like an Anthropic key (should start with "sk-ant-"). Save anyway?')) return;
+  }
+  var actorEmail = (window.JG && window.JG.userEmail) || (window.currentUser && window.currentUser.email) || 'admin';
+  try {
+    // Upsert by key='anthropic_api_key'
+    var existing = await sbGet("/rest/v1/platform_settings?key=eq.anthropic_api_key&select=key");
+    var method, urlPath;
+    if (Array.isArray(existing) && existing.length) {
+      method = 'PATCH';
+      urlPath = "/rest/v1/platform_settings?key=eq.anthropic_api_key";
+    } else {
+      method = 'POST';
+      urlPath = "/rest/v1/platform_settings";
+    }
+    var body = method === 'POST'
+      ? { key: 'anthropic_api_key', value: key, updated_at: new Date().toISOString(), updated_by: actorEmail }
+      : { value: key, updated_at: new Date().toISOString(), updated_by: actorEmail };
+    var r = await fetch(SB_URL + urlPath, {
+      method: method,
+      headers: {
+        'apikey': SB_ANON,
+        'Authorization': 'Bearer ' + SB_ANON,
+        'Content-Type': 'application/json',
+        'Prefer': 'return=minimal',
+      },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) {
+      var txt = await r.text();
+      throw new Error('HTTP ' + r.status + ': ' + txt.slice(0, 200));
+    }
+    alert('\u2713 Anthropic API key saved. All PMs will pick it up on next page load.');
+    ac_loadAnthropicKeyStatus();
+  } catch (e) {
+    console.error('Set Anthropic key failed:', e);
+    alert('Save failed: ' + (e.message || e));
+  }
+}
+
+async function ac_clearAnthropicKey() {
+  if (!confirm('Clear the platform-wide Anthropic API key?\n\nPMs will fall back to their per-browser key (localStorage jg_key) if any. If they don\'t have one, WO Builder and Adjuster will throw an error until the platform key is re-set.')) return;
+  try {
+    var r = await fetch(SB_URL + "/rest/v1/platform_settings?key=eq.anthropic_api_key", {
+      method: 'DELETE',
+      headers: {
+        'apikey': SB_ANON,
+        'Authorization': 'Bearer ' + SB_ANON,
+        'Prefer': 'return=minimal',
+      },
+    });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    alert('Platform-wide key cleared.');
+    ac_loadAnthropicKeyStatus();
+  } catch (e) {
+    alert('Clear failed: ' + (e.message || e));
+  }
 }
 
 function ac_toggle(pageKey, role) {
