@@ -13,7 +13,11 @@
 //   });
 //   // result = { uploadId, summary: { rcv, cost, margin, ... }, errors: [] }
 
-const ANTHROPIC_API = 'https://api.anthropic.com/v1/messages';
+// Routes through the platform's Cloudflare Worker proxy (jg-anthropic-proxy).
+// The Anthropic API key lives as a Worker Secret on the proxy — clients
+// never have access to it. Origin-enforced auth: only platform-hosted
+// origins can call the proxy.
+const ANTHROPIC_API = 'https://jg-anthropic-proxy.josh-70f.workers.dev';
 const MODEL = 'claude-opus-4-7'; // best for structured document extraction
 const MAX_TOKENS = 16000;
 const CHUNK_BATCH_SIZE = 40; // line items per estimate chunk before forcing a continuation call
@@ -31,21 +35,12 @@ const CHUNK_BATCH_SIZE = 40; // line items per estimate chunk before forcing a c
 //                                            committing anything to storage.
 export async function parseAndStoreXactPDFs(sb, projectId, estimateFile, componentsFile, opts = {}) {
   const { onProgress = () => {}, uploadedByEmail, uploadedByName, dryRun = false } = opts;
-  // Key lookup order:
-  //   1. platform_settings table (key='anthropic_api_key') — single source for the whole team
-  //   2. localStorage 'jg_key' — per-browser fallback (legacy, kept for backwards compat)
-  // The platform_settings path means Admin sets the key once and every PM
-  // gets it automatically — no per-browser setup, no "set one on adjuster.html
-  // first" friction for the team.
-  let apiKey = null;
-  try {
-    const { data } = await sb.from('platform_settings').select('value').eq('key', 'anthropic_api_key').single();
-    if (data && data.value) apiKey = data.value;
-  } catch (_) { /* fall through to localStorage */ }
-  if (!apiKey) apiKey = localStorage.getItem('jg_key');
-  if (!apiKey) {
-    throw new Error('No Anthropic API key configured. Ask an Admin to set the platform-wide key in Admin Panel → Anthropic API Key, or set a personal one on adjuster.html.');
-  }
+  // No client-side API key — the jg-anthropic-proxy Worker holds the
+  // Anthropic API key as an encrypted secret and validates origin to
+  // ensure only the platform itself can call it. This means no per-PM
+  // setup, no key in localStorage, no key in platform_settings, no key
+  // anywhere on the client.
+  const apiKey = null;  // intentionally unused — proxy handles auth
 
   // ─── DRY-RUN FAST PATH ────────────────────────────────────────────
   // Parse PDFs via Claude API only. No Supabase reads or writes, no
@@ -397,9 +392,8 @@ async function callClaude(apiKey, pdfBase64, prompt, label) {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'x-api-key': apiKey,
-      'anthropic-version': '2023-06-01',
-      'anthropic-dangerous-direct-browser-access': 'true',
+      // No x-api-key here — the proxy worker injects it server-side
+      // before forwarding to api.anthropic.com.
     },
     body: JSON.stringify(body),
   });
