@@ -745,7 +745,11 @@ const SB_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsIn
 const sb = createClient(SB_URL, SB_ANON);
 
 const ADMIN_EMAILS = new Set(['josh@jg-restoration.com', 'jgimprovements@gmail.com']);
-const PM_EMAILS = new Set(['hannah@jg-restoration.com', 'kristina@jg-restoration.com', 'brent@jg-restoration.com', 'anthony@jg-restoration.com', 'ana@jg-restoration.com']);
+// PM_EMAILS removed 2026-06-17 — was a stale hardcoded list (hannah, kristina,
+// brent, anthony, ana) that didn't include current PMs Brandon/Chad/Paul/
+// Rylan. They were getting silently downgraded to 'field' which then filtered
+// their project list to zero jobs (no phase assignments — they're PMs, not
+// carpenters). Role now resolves from the employees.role column.
 
 const state = {
   email: null, name: null, role: null,
@@ -775,9 +779,25 @@ async function init() {
     return;
   }
 
-  state.role = ADMIN_EMAILS.has(state.email) ? 'admin'
-    : PM_EMAILS.has(state.email) ? 'pm'
-    : 'field';
+  // Resolve role from the canonical employees.role column. Falls back to
+  // 'field' only when no employee row matches (truly outside the org). Admins
+  // are still pinned via ADMIN_EMAILS so Josh and the catch-all jgimprovements
+  // inbox don't depend on a clean employee record.
+  if (ADMIN_EMAILS.has(state.email)) {
+    state.role = 'admin';
+  } else {
+    let dbRole = '';
+    try {
+      const { data: emp } = await sb.from('employees')
+        .select('role')
+        .or(`email.eq.${state.email},personal_email.eq.${state.email}`)
+        .maybeSingle();
+      dbRole = String(emp?.role || '').toLowerCase();
+    } catch (e) { console.warn('role lookup failed:', e); }
+    state.role = /admin|owner/.test(dbRole) ? 'admin'
+      : /project[ _-]?manager|\bpm\b|estimator|office/.test(dbRole) ? 'pm'
+      : 'field';
+  }
 
   $('#sideMenuName').textContent = state.name;
   $('#sideMenuRole').textContent = state.role === 'admin' ? 'Administrator' : state.role === 'pm' ? 'Project Manager' : 'Field Tech';
