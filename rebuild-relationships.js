@@ -72,6 +72,7 @@ const REL_ROLE_LABELS = {
   tech: 'Tech',
   carpenter: 'Carpenter',
   subcontractor: 'Subcontractor',
+  vendor: 'Vendor',
   estimator: 'Estimator',
   project_manager: 'Project Manager',
   office_admin: 'Office Admin',
@@ -83,8 +84,9 @@ const REL_GROUP_ORDER = [
   { key: 'Insurance', roles: ['insurance_adjuster','insurance_carrier_rep','public_adjuster'] },
   { key: 'Financial', roles: ['lender','mortgage_company','attorney'] },
   { key: 'Real Estate', roles: ['real_estate_agent'] },
+  { key: 'Trade & Supplier', roles: ['subcontractor','vendor'] },
   { key: 'JG Team', roles: ['project_manager','estimator','tech','carpenter','office_admin'] },
-  { key: 'Subs & Other', roles: ['subcontractor','other'] },
+  { key: 'Other', roles: ['other'] },
 ];
 
 function renderRelationshipsTab() {
@@ -151,6 +153,10 @@ function renderRelationshipsTab() {
               <option value="property_manager">Property Manager</option>
               <option value="mortgage_company">Mortgage Company</option>
               <option value="attorney">Attorney</option>
+            </optgroup>
+            <optgroup label="Trade & Supplier">
+              <option value="subcontractor">Subcontractor</option>
+              <option value="vendor">Vendor</option>
             </optgroup>
             <optgroup label="JG roles">
               <option value="tech">Tech</option>
