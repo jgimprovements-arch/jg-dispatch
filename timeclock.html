@@ -873,6 +873,10 @@ body {
     <span class="tab-btn-icon">⏱</span>
     <span class="tab-btn-label">Clock</span>
   </button>
+  <button class="tab-btn" id="tabbtn-projects" onclick="window.location.href='rebuild.html'" title="Open the project management app" style="display:none;">
+    <span class="tab-btn-icon">🏗</span>
+    <span class="tab-btn-label">Projects</span>
+  </button>
   <button class="tab-btn" id="tabbtn-team" onclick="switchTab('team')">
     <span class="tab-btn-icon">👥</span>
     <span class="tab-btn-label">Team</span>
@@ -1189,6 +1193,22 @@ function isAdmin() {
   return TC.user && ADMINS.includes(TC.user.email.toLowerCase());
 }
 
+// Whether the current employee should see the Projects tab (which navigates
+// to the rebuild project-management app). Admins, Owners, Project Managers,
+// Carpenters, and Office staff get it; field Technicians and other roles
+// don't — they'd just land on an app they can't usefully operate.
+function _canAccessProjectsApp() {
+  if (isAdmin()) return true;
+  var role = (TC.employee && TC.employee.role) ? String(TC.employee.role).toLowerCase() : '';
+  return /admin|owner|project[ _-]?manager|\bpm\b|carpenter|office/.test(role);
+}
+
+function updateProjectsTabVisibility() {
+  var btn = document.getElementById('tabbtn-projects');
+  if (!btn) return;
+  btn.style.display = _canAccessProjectsApp() ? '' : 'none';
+}
+
 // SUPABASE 
 async function sb(path, opts) {
   var defaults = { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' };
@@ -1220,6 +1240,20 @@ function getLocation() {
 
 // INIT -
 async function initApp(u) {
+  // SSO: mirror this user into the rebuild app's localStorage slot so the
+  // Projects tab navigation is seamless — no second login required. Both
+  // apps share the same Supabase backend and use compatible user shapes
+  // ({email, name}). Runs on every initApp call (fresh sign-in OR resume
+  // from storage), so the link stays current if the email is updated.
+  try {
+    localStorage.setItem('jg_platform_user', JSON.stringify({
+      email: u.email,
+      name: u.name || (u.email || '').split('@')[0],
+      picture: u.picture || '',
+      auth_method: u.auth_method || 'sso'
+    }));
+  } catch (e) { console.warn('platform SSO sync failed:', e); }
+
   TC.user = u;
   document.getElementById('login-screen').style.display = 'none';
   document.getElementById('app').style.display = 'block';
@@ -1291,6 +1325,12 @@ async function initApp(u) {
     var adminBtn = document.querySelector('.dd-item');
     if (adminBtn) adminBtn.style.display = 'none';
   }
+
+  // Show/hide the Projects tab. Only Admins, Owners, Project Managers,
+  // Carpenters, and Office staff need access to the rebuild app. Field techs
+  // and other roles never see the tab so they aren't routed to an app they
+  // can't usefully operate.
+  updateProjectsTabVisibility();
 
   // Show/hide Office Hours button based on role
   updateOfficeHoursVisibility();
