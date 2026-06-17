@@ -666,7 +666,14 @@ async function loadAll() {
 
   var since = ST.filterDate || new Date(Date.now() - 60 * 86400000).toISOString().split('T')[0];
   var until = ST.filterDateEnd ? ST.filterDateEnd + 'T23:59:59' : new Date().toISOString();
-  var entries = await sb('/rest/v1/time_entries?clock_in=gte.' + since + 'T00:00:00&clock_in=lte.' + until + '&order=clock_in.desc&limit=500&select=*');
+  // Pull all time entries inside the filter window. Limit raised from 500 to
+  // 10000: with ~25 active employees × ~3 punches/day × 60-day default window
+  // we routinely exceed 500, which silently dropped the OLDEST punches in
+  // the window (the query is ordered desc). Employees whose only punches in
+  // the selected pay period happened early would disappear from Timecards
+  // even though their data was in the DB. 10000 gives meaningful headroom
+  // (covers ~6 months of current activity).
+  var entries = await sb('/rest/v1/time_entries?clock_in=gte.' + since + 'T00:00:00&clock_in=lte.' + until + '&order=clock_in.desc&limit=10000&select=*');
   ST.entries = entries || [];
 
   var brks = await sb('/rest/v1/time_breaks?select=*');
@@ -3888,6 +3895,10 @@ function renderTimesheets() {
 
   // Safety: if the summary wasn't computed (e.g., no entries in period), strip the placeholder
   h = h.replace('__PAY_PERIOD_SUMMARY_PLACEHOLDER__', '');
+  // Same safety for the approval banner — the replace at line ~3650 only
+  // runs in the "has entries" branch, so when a period has no entries the
+  // placeholder literal would otherwise render as plain text in the UI.
+  h = h.replace('__APPROVAL_BANNER_PLACEHOLDER__', '');
 
   document.getElementById('tc-body').innerHTML = h;
 }
