@@ -113,7 +113,15 @@ const params = new URLSearchParams(window.location.search);
 const projectId = params.get('p');
 document.getElementById('backBtn').href = `project_detail.html?p=${projectId}`;
 
-const state = { project: null, wos: [] };
+const state = { project: null, wos: [], userEmail: null, employeeId: null, isCarpenter: false };
+
+// Initialize current user from localStorage (same key both apps write to via
+// the timeclock SSO mirror). Used to look up the carpenter's employee_id so
+// we can filter Work Orders to just the ones assigned to them.
+try {
+  const user = JSON.parse(localStorage.getItem('jg_platform_user') || 'null');
+  if (user?.email) state.userEmail = user.email.toLowerCase();
+} catch {}
 
 const WO_STATUS_META = {
   draft:            { label: 'Draft',              bg: 'rgba(120,132,160,.15)', fg: '#7884a0' },
@@ -279,13 +287,33 @@ function closeWoItemsModal() {
 
 async function init() {
   if (!projectId) return showEmpty('Missing project', 'Open from project list');
-  const [{ data: project }, { data: wos }] = await Promise.all([
+
+  // Resolve role + employee_id from the canonical employees table. Carpenters
+  // get the list filtered to only the WOs assigned to them; everyone else sees
+  // all WOs for the project.
+  const empPromise = state.userEmail
+    ? sb.from('employees')
+        .select('id, role')
+        .or(`email.eq.${state.userEmail},personal_email.eq.${state.userEmail}`)
+        .maybeSingle()
+    : Promise.resolve({ data: null });
+
+  const [{ data: project }, { data: wos }, empRes] = await Promise.all([
     sb.from('rebuild_projects').select('*').eq('id', projectId).maybeSingle(),
     sb.from('rebuild_work_orders').select('*, sub:rebuild_subs(id, company_name, primary_contact, email, phone)').eq('project_id', projectId).order('created_at', { ascending: false }),
+    empPromise,
   ]);
   if (!project) return showEmpty('Project not found', 'It may have been deleted.');
   state.project = project;
   state.wos = wos || [];
+
+  const emp = empRes?.data;
+  if (emp) {
+    state.employeeId = emp.id;
+    const role = String(emp.role || '').toLowerCase();
+    // Carpenter = role contains "Carpenter" and is NOT also admin/owner/PM/office
+    state.isCarpenter = /carpenter/.test(role) && !/admin|owner|project[ _-]?manager|\bpm\b|office/.test(role);
+  }
 
   document.getElementById('topJob').textContent = `Work Orders · ${project.albi_job_number || ''}`;
   document.getElementById('topSub').textContent = project.customer_name || '';
@@ -303,13 +331,18 @@ async function init() {
 }
 
 function render() {
-  const active = state.wos.filter(w => !['superseded','cancelled'].includes(w.status));
+  // Carpenters only see WOs assigned to them (employee_id match). Everyone
+  // else sees all WOs for the project. Cancelled/superseded always hidden.
+  const visible = state.isCarpenter
+    ? state.wos.filter(w => w.employee_id === state.employeeId)
+    : state.wos;
+  const active = visible.filter(w => !['superseded','cancelled'].includes(w.status));
   if (!active.length) {
     document.getElementById('main').innerHTML = `
       <div class="empty">
         <div class="ico">📋</div>
-        <h3>No work orders</h3>
-        <p>Create one in the full app first.</p>
+        <h3>${state.isCarpenter ? 'No work orders assigned to you' : 'No work orders'}</h3>
+        <p>${state.isCarpenter ? 'When a PM assigns you a WO it will show up here.' : 'Create one in the full app first.'}</p>
       </div>
     `;
     return;

@@ -1182,13 +1182,41 @@ function toast(msg) {
 
 async function init() {
   if (!projectId) return showEmpty('Missing project', 'Open from project list');
-  const [{ data: project }, { data: docs }] = await Promise.all([
+  // Resolve the real role + employee_id from the employees table. The
+  // hardcoded PM_EMAILS_DOC list is outdated (missing current PMs) so we
+  // can't trust it as the source of truth — fetch the canonical record.
+  const empPromise = state.userEmail
+    ? sb.from('employees')
+        .select('id, role, active')
+        .or(`email.eq.${state.userEmail},personal_email.eq.${state.userEmail}`)
+        .maybeSingle()
+    : Promise.resolve({ data: null });
+
+  const [{ data: project }, { data: docs }, empRes] = await Promise.all([
     sb.from('rebuild_projects').select('*').eq('id', projectId).maybeSingle(),
     sb.from('rebuild_documents').select('*').eq('project_id', projectId).order('uploaded_at', { ascending: false }),
+    empPromise,
   ]);
   if (!project) return showEmpty('Project not found', 'It may have been deleted.');
   state.project = project;
   state.docs = docs || [];
+
+  // Override the brittle hardcoded role detection with the DB lookup. Carpenter
+  // means a JG employee whose role contains "Carpenter" and who isn't also
+  // marked as admin/owner/PM/office (which would override).
+  const emp = empRes?.data;
+  if (emp) {
+    state.employeeId = emp.id;
+    const role = String(emp.role || '').toLowerCase();
+    if (ADMIN_EMAILS_DOC.has(state.userEmail) || /admin|owner/.test(role)) {
+      state.userRole = 'admin';
+    } else if (/project[ _-]?manager|\bpm\b|estimator|office/.test(role)) {
+      state.userRole = 'pm';
+    } else {
+      state.userRole = 'field';
+    }
+    state.isCarpenter = /carpenter/.test(role) && state.userRole === 'field';
+  }
 
   document.getElementById('topJob').textContent = `Documents · ${project.albi_job_number || ''}`;
   document.getElementById('topSub').textContent = project.customer_name || '';
@@ -1207,16 +1235,29 @@ async function init() {
 }
 
 function render() {
-  // Build category counts
-  const catCounts = { All: state.docs.length };
+  // Carpenters get a stripped-down view: Photos only. They're on-site for the
+  // build, not the paperwork — surfacing permits, financials, customer docs,
+  // etc. is noise and a small data-exposure risk. Photos still flow both ways
+  // (they upload progress shots, PMs review them).
+  const visibleCategories = state.isCarpenter ? ['Photos'] : CATEGORIES;
+
+  // Build category counts (use visibleCategories so hidden ones don't get tab pills)
+  const catCounts = { All: 0 };
   state.docs.forEach(d => {
+    if (state.isCarpenter && d.category !== 'Photos') return; // exclude from "All" count too
+    catCounts.All++;
     catCounts[d.category] = (catCounts[d.category] || 0) + 1;
   });
-  const cats = ['All', ...CATEGORIES.filter(c => catCounts[c])];
+  const cats = ['All', ...visibleCategories.filter(c => catCounts[c])];
 
   const p = state.project || {};
   const showFolderGrid = state.filter === 'All';
-  const filtered = state.filter === 'All' ? state.docs : state.docs.filter(d => d.category === state.filter);
+  // For carpenters, even the "All" view is photo-restricted, and they can't
+  // jump to a hidden folder by typing the filter directly.
+  const isVisibleCategory = c => !state.isCarpenter || c === 'Photos';
+  const filtered = state.filter === 'All'
+    ? state.docs.filter(d => isVisibleCategory(d.category))
+    : (isVisibleCategory(state.filter) ? state.docs.filter(d => d.category === state.filter) : []);
 
   // External Links section
   const extLinks = [
@@ -1269,7 +1310,7 @@ function render() {
   // Folder grid (shown when no filter applied)
   const folderGridHtml = showFolderGrid ? `
     <div class="folder-grid">
-      ${CATEGORIES.map(c => `
+      ${visibleCategories.map(c => `
         <button class="folder-card" data-folder="${esc(c)}">
           <div class="folder-icon">${CATEGORY_ICONS[c] || '📁'}</div>
           <div class="folder-name">${esc(c)}</div>
