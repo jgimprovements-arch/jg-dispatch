@@ -904,6 +904,15 @@ body {
 <!-- MY HOURS PANEL -->
 <div id="hours-panel" style="display:none;">
   <div class="body">
+    <!-- PAY PERIOD NAVIGATOR — scroll backward through past periods for personal records -->
+    <div id="period-nav" style="display:flex;align-items:center;justify-content:space-between;gap:10px;background:var(--surface);border-radius:14px;padding:10px 12px;margin-bottom:12px;box-shadow:0 2px 8px rgba(13,45,94,.06);">
+      <button id="period-prev-btn" onclick="navigatePeriod(-1)" aria-label="Previous pay period" style="background:transparent;border:1px solid var(--border);border-radius:12px;width:42px;height:42px;font-size:18px;color:var(--navy);cursor:pointer;display:flex;align-items:center;justify-content:center;font-family:inherit;font-weight:700;flex-shrink:0;">◀</button>
+      <div style="text-align:center;flex:1;min-width:0;">
+        <div id="period-nav-dates" style="font-size:14px;font-weight:700;color:var(--navy);line-height:1.2;">—</div>
+        <div id="period-nav-label" style="font-size:10px;color:var(--muted);font-weight:700;text-transform:uppercase;letter-spacing:.05em;margin-top:3px;">Current Pay Period</div>
+      </div>
+      <button id="period-next-btn" onclick="navigatePeriod(1)" aria-label="Next pay period" style="background:transparent;border:1px solid var(--border);border-radius:12px;width:42px;height:42px;font-size:18px;color:var(--navy);cursor:pointer;display:flex;align-items:center;justify-content:center;font-family:inherit;font-weight:700;flex-shrink:0;">▶</button>
+    </div>
     <div class="stats-row" id="hours-stats-row">
       <div class="stat-card"><div class="stat-val" id="hours-stat-today">0h 0m</div><div class="stat-lbl">Today</div></div>
       <div class="stat-card">
@@ -2451,15 +2460,20 @@ function _combineCentral(dateStr, timeStr) {
   return dateStr + 'T' + timeStr + ':00' + offset;
 }
 
-// Open the correction sheet to FIX an existing entry
-function openFixPunch(entryId) {
+// Open the correction sheet to FIX an existing entry. Async so we can verify
+// the entry's pay period isn't admin-approved (locked) before showing the
+// edit UI. Callers don't need to await — if locked, a toast appears and the
+// sheet never opens.
+async function openFixPunch(entryId) {
   var entry = (TC.entries || []).find(function(e){ return e.id === entryId; });
   if (!entry) {
     // Try fetching directly — might be older than what's loaded
-    sb('/rest/v1/time_entries?id=eq.' + entryId + '&select=*').then(function(rows){
-      if (rows && rows[0]) { _populateCorrectionFromEntry(rows[0]); }
-      else toast('Entry not found');
-    });
+    var rows = await sb('/rest/v1/time_entries?id=eq.' + entryId + '&select=*');
+    if (!rows || !rows[0]) { toast('Entry not found'); return; }
+    entry = rows[0];
+  }
+  if (await _isPeriodLocked(entry.clock_in)) {
+    toast('This pay period has been approved and is locked. Contact your manager.');
     return;
   }
   _populateCorrectionFromEntry(entry);
@@ -2615,6 +2629,14 @@ async function submitCorrectionRequest() {
   var requestedOut = outVal ? _combineCentral(dateStr, outVal) : null;
   if (requestedIn && requestedOut && new Date(requestedOut) <= new Date(requestedIn)) {
     toast('Clock-out must be AFTER clock-in'); return;
+  }
+
+  // Lock check: refuse to submit a request that targets an approved period.
+  // Catches the bookmarked-deep-link case and stale UI submitting against
+  // a period that was approved between page load and submit.
+  if (await _isPeriodLocked(dateStr)) {
+    toast('That pay period has been approved and is locked. Contact your manager.');
+    return;
   }
 
   var btn = document.querySelector('#correction-sheet button');
@@ -4191,8 +4213,49 @@ async function loadMyVacationHistory() {
   }
 }
 
-// Calculate current pay period given type ('weekly' | 'biweekly' | 'semimonthly') and anchor start date
-function getCurrentPayPeriod(config) {
+// Compute the pay period that contains an arbitrary date. Used to check
+// whether a given entry / date falls inside an approved (locked) period.
+function _periodForDate(dateInput) {
+  var config = TC.payPeriodConfig || { type: 'biweekly', start: '2025-01-06' };
+  var type = config.type || 'biweekly';
+  var startStr = config.start || '2025-01-06';
+  var anchor = new Date(startStr + 'T00:00:00');
+  var d = new Date(dateInput); d.setHours(0,0,0,0);
+  if (type === 'weekly' || type === 'biweekly') {
+    var days = type === 'weekly' ? 7 : 14;
+    var msSince = d - anchor;
+    var idx = Math.floor(msSince / (days * 86400000));
+    var s = new Date(anchor); s.setDate(anchor.getDate() + idx * days);
+    var e = new Date(s); e.setDate(s.getDate() + days - 1); e.setHours(23,59,59,999);
+    return { start: s, end: e };
+  }
+  var mo = d.getMonth(), yr = d.getFullYear();
+  if (d.getDate() <= 15) return { start: new Date(yr, mo, 1), end: new Date(yr, mo, 15, 23, 59, 59) };
+  return { start: new Date(yr, mo, 16), end: new Date(yr, mo+1, 0, 23, 59, 59) };
+}
+
+// Check whether the pay period containing dateInput has been admin-approved
+// for the current employee. Used as defense-in-depth: every code path that
+// could mutate an entry calls this before opening the correction sheet or
+// submitting a request. Returns false on any error so a flaky network
+// doesn't lock people out of legit edits.
+async function _isPeriodLocked(dateInput) {
+  if (!TC.employee || !TC.employee.name || !dateInput) return false;
+  var period = _periodForDate(dateInput);
+  var fmtLbl = function(d){ return (d.getMonth()+1)+'/'+d.getDate()+'/'+d.getFullYear(); };
+  var label = fmtLbl(period.start) + ' - ' + fmtLbl(period.end);
+  try {
+    var rows = await sb('/rest/v1/timecard_approvals?period_label=eq.'+encodeURIComponent(label)+'&employee_name=eq.'+encodeURIComponent(TC.employee.name)+'&status=eq.approved&select=id&limit=1');
+    return !!(rows && rows[0]);
+  } catch(e) { return false; }
+}
+
+// Calculate a pay period given type ('weekly' | 'biweekly' | 'semimonthly'),
+// anchor start date, and an optional offset (0 = current, -1 = previous,
+// -2 = two ago, etc). Offset must not be positive in practice (future periods
+// are not meaningful for hours review), but the math still works either way.
+function getCurrentPayPeriod(config, offset) {
+  offset = offset || 0;
   var type = (config && config.type) || 'biweekly';
   var startStr = (config && config.start) || '2025-01-06';
   var anchor = new Date(startStr + 'T00:00:00');
@@ -4202,17 +4265,24 @@ function getCurrentPayPeriod(config) {
     var days = type === 'weekly' ? 7 : 14;
     // How many complete periods since anchor
     var msSince = today - anchor;
-    var periodsElapsed = Math.floor(msSince / (days * 86400000));
+    var periodsElapsed = Math.floor(msSince / (days * 86400000)) + offset;
     var start = new Date(anchor); start.setDate(anchor.getDate() + periodsElapsed * days);
     var end = new Date(start); end.setDate(start.getDate() + days - 1); end.setHours(23,59,59,999);
     return { start: start, end: end };
   }
-  // Semi-monthly: 1st-15th and 16th-last day of month
+  // Semi-monthly: 1st-15th and 16th-last day of month. Index each half-month
+  // by absolute count so offset stepping works across year boundaries.
   var mo = today.getMonth(), yr = today.getFullYear();
-  if (today.getDate() <= 15) {
-    return { start: new Date(yr, mo, 1), end: new Date(yr, mo, 15, 23, 59, 59) };
+  var curHalfIdx = yr * 24 + mo * 2 + (today.getDate() <= 15 ? 0 : 1);
+  var tgt = curHalfIdx + offset;
+  var tgtYr = Math.floor(tgt / 24);
+  var rem = tgt - tgtYr * 24;
+  var tgtMo = Math.floor(rem / 2);
+  var tgtHalf = rem % 2;
+  if (tgtHalf === 0) {
+    return { start: new Date(tgtYr, tgtMo, 1), end: new Date(tgtYr, tgtMo, 15, 23, 59, 59) };
   }
-  return { start: new Date(yr, mo, 16), end: new Date(yr, mo + 1, 0, 23, 59, 59) };
+  return { start: new Date(tgtYr, tgtMo, 16), end: new Date(tgtYr, tgtMo + 1, 0, 23, 59, 59) };
 }
 
 // Load pay period config from Supabase app_settings (shared with admin)
@@ -4469,6 +4539,51 @@ function openContactSheetTC(name, phone, email, personalEmail) {
   });
 }
 
+// Navigate the My Hours pay-period view. Delta -1 = go to earlier period,
+// delta +1 = go to later period. Capped at 0 (no future) and -52 (one year
+// back — sanity limit to keep queries cheap). Re-loads My Hours with the
+// new offset.
+function navigatePeriod(delta) {
+  var cur = TC.viewingPeriodOffset || 0;
+  var next = cur + delta;
+  if (next > 0) return;          // no future periods
+  if (next < -52) return;        // cap at ~1 year back
+  TC.viewingPeriodOffset = next;
+  loadMyHours();
+}
+
+// Update the period navigator UI (dates, label, button states) based on the
+// current viewing offset. Called from inside loadMyHours after the period is
+// resolved so the displayed window matches what's actually rendered below.
+function updatePeriodNavUI(period, offset) {
+  var mos = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  var fmt = function(d) { return mos[d.getMonth()] + ' ' + d.getDate(); };
+  var dateEl = document.getElementById('period-nav-dates');
+  var lblEl  = document.getElementById('period-nav-label');
+  var prevBtn = document.getElementById('period-prev-btn');
+  var nextBtn = document.getElementById('period-next-btn');
+  if (dateEl) dateEl.textContent = fmt(period.start) + ' – ' + fmt(period.end) + ', ' + period.end.getFullYear();
+  if (lblEl) {
+    if (offset === 0)       lblEl.textContent = 'Current Pay Period';
+    else if (offset === -1) lblEl.textContent = 'Previous Pay Period';
+    else                    lblEl.textContent = Math.abs(offset) + ' Periods Ago';
+  }
+  // Next button is disabled at offset 0 (can't go to future periods).
+  // Prev button is disabled at offset -52 (sanity cap).
+  if (nextBtn) {
+    var nextDisabled = offset >= 0;
+    nextBtn.disabled = nextDisabled;
+    nextBtn.style.opacity = nextDisabled ? '.35' : '1';
+    nextBtn.style.cursor = nextDisabled ? 'not-allowed' : 'pointer';
+  }
+  if (prevBtn) {
+    var prevDisabled = offset <= -52;
+    prevBtn.disabled = prevDisabled;
+    prevBtn.style.opacity = prevDisabled ? '.35' : '1';
+    prevBtn.style.cursor = prevDisabled ? 'not-allowed' : 'pointer';
+  }
+}
+
 async function loadMyHours() {
   if (!TC.employee || !TC.employee.id) return;
   // Update PTO card in this tab
@@ -4529,10 +4644,27 @@ async function loadMyHours() {
   var fmtDate = function(iso){ var d=new Date(iso); var days=['Sun','Mon','Tue','Wed','Thu','Fri','Sat']; return days[d.getDay()]+' '+(d.getMonth()+1)+'/'+d.getDate(); };
   var fmtShort = function(d){ var mos=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']; return mos[d.getMonth()]+' '+d.getDate(); };
 
-  // Use the shared pay period config (from app_settings, loaded at boot)
-  var period = getCurrentPayPeriod(TC.payPeriodConfig);
+  // Use the shared pay period config (from app_settings, loaded at boot),
+  // honoring the user's navigation offset for past pay periods.
+  var offset = TC.viewingPeriodOffset || 0;
+  var period = getCurrentPayPeriod(TC.payPeriodConfig, offset);
+  updatePeriodNavUI(period, offset);
   var since  = period.start;
   var until  = period.end;
+
+  // Check whether this pay period's timecard has been admin-approved.
+  // Approved periods are LOCKED for the employee — no Fix buttons, no Add
+  // Missed Punch, no per-punch edits. The period_label format must match
+  // what timeclock_admin.html writes: "M/D/YYYY - M/D/YYYY".
+  var _fmtLbl = function(d){ return (d.getMonth()+1)+'/'+d.getDate()+'/'+d.getFullYear(); };
+  var periodLabelKey = _fmtLbl(period.start) + ' - ' + _fmtLbl(period.end);
+  try {
+    var apRows = await sb('/rest/v1/timecard_approvals?period_label=eq.'+encodeURIComponent(periodLabelKey)+'&employee_name=eq.'+encodeURIComponent(TC.employee.name)+'&status=eq.approved&select=*&limit=1');
+    TC.currentPeriodApproval = (apRows && apRows[0]) ? apRows[0] : null;
+  } catch (e) {
+    TC.currentPeriodApproval = null;
+  }
+  var isLocked = !!TC.currentPeriodApproval;
 
   var entries = await sb('/rest/v1/time_entries?employee_id=eq.'+TC.employee.id+'&clock_in=gte.'+since.toISOString()+'&clock_in=lte.'+until.toISOString()+'&order=clock_in.desc&limit=100&select=*') || [];
   var today = new Date(); today.setHours(0,0,0,0);
@@ -4544,6 +4676,11 @@ async function loadMyHours() {
     periodMins += m;  // all fetched entries are within the pay period window
   });
 
+  // "Today" stat is meaningless when viewing a past period — hide its card so
+  // the user sees only the period total they're inspecting.
+  var todayCard = document.querySelector('#hours-stats-row .stat-card:first-child');
+  if (todayCard) todayCard.style.display = (offset === 0) ? '' : 'none';
+
   var s1=document.getElementById('hours-stat-today'); if(s1) s1.textContent=fmtDur(todayMins);
   var s2=document.getElementById('hours-stat-week');  if(s2) s2.textContent=fmtDur(periodMins);
   var periodLabel = fmtShort(period.start) + ' – ' + fmtShort(period.end);
@@ -4551,13 +4688,31 @@ async function loadMyHours() {
 
   var el=document.getElementById('hours-entry-list');
   if (!el) return;
-  // "Add missed punch" button — for days the tech forgot to clock in
-  var addMissedBtn = '<div style="margin-bottom:10px;">' +
+
+  // Approved-period banner: prepended to the list when the timecard is locked.
+  // Tells the employee why no edit controls are visible and who approved.
+  var approvedBanner = '';
+  if (isLocked) {
+    var ap = TC.currentPeriodApproval;
+    var apDate = ap.approved_at ? new Date(ap.approved_at) : null;
+    var apDateStr = apDate ? (apDate.getMonth()+1)+'/'+apDate.getDate()+'/'+apDate.getFullYear() : '';
+    approvedBanner = '<div style="background:rgba(46,125,50,.08);border:1.5px solid #2e7d32;border-radius:12px;padding:12px 14px;margin-bottom:12px;display:flex;align-items:center;gap:12px;">' +
+        '<div style="font-size:22px;line-height:1;">🔒</div>' +
+        '<div style="flex:1;min-width:0;">' +
+          '<div style="font-size:13px;font-weight:700;color:#2e7d32;">Timecard Approved</div>' +
+          '<div style="font-size:11px;color:#1b5e20;margin-top:2px;line-height:1.4;">Approved by ' + (ap.approved_by || 'admin') + (apDateStr ? ' on ' + apDateStr : '') + '. Punches for this pay period are locked. Contact your manager if a change is needed.</div>' +
+        '</div>' +
+      '</div>';
+  }
+
+  // "Add missed punch" button — hidden when the period is locked since the
+  // tech can no longer modify it on their own.
+  var addMissedBtn = isLocked ? '' : '<div style="margin-bottom:10px;">' +
     '<button onclick="openMissedPunch()" style="width:100%;padding:11px;background:rgba(232,93,4,.06);border:1.5px dashed var(--orange);border-radius:10px;color:var(--orange);font-size:13px;font-weight:700;cursor:pointer;font-family:DM Sans,sans-serif;display:flex;align-items:center;justify-content:center;gap:6px;">' +
       '<span style="font-size:14px;">＋</span><span>Add Missed Punch</span>' +
     '</button>' +
   '</div>';
-  if (!entries.length) { el.innerHTML = addMissedBtn + '<div class="empty">No entries in this pay period ('+periodLabel+')</div>'; return; }
+  if (!entries.length) { el.innerHTML = approvedBanner + addMissedBtn + '<div class="empty">No entries in this pay period ('+periodLabel+')</div>'; return; }
 
   // Group entries by day. Show one row per day (collapsed view).
   // Click row → modal with all punches for that day.
@@ -4573,7 +4728,7 @@ async function loadMyHours() {
   // Sort days descending (newest first)
   var sortedDays = Object.keys(dayGroups).sort(function(a,b){ return b.localeCompare(a); });
 
-  el.innerHTML = addMissedBtn + sortedDays.map(function(dk){
+  el.innerHTML = approvedBanner + addMissedBtn + sortedDays.map(function(dk){
     var dayEntries = dayGroups[dk].slice().sort(function(a,b){ return new Date(a.clock_in) - new Date(b.clock_in); });
     var first = dayEntries[0];
     var lastE = dayEntries[dayEntries.length-1];
@@ -4604,9 +4759,11 @@ async function loadMyHours() {
       '</div>'+
       '<div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px;">'+
         '<div class="team-dur" style="color:'+(active?'var(--green)':'var(--navy)')+';">'+fmtDur(spanMins)+'</div>'+
-        (punchCount === 1
-          ? '<button onclick="event.stopPropagation();openFixPunch(\''+first.id+'\')" style="'+fixBtnStyle+'">'+fixBtnLabel+'</button>'
-          : '<button onclick="event.stopPropagation();openDayDetailHours(\''+dk+'\')" style="'+fixBtnStyle+'">✏️ Fix Punches</button>')+
+        (isLocked
+          ? '<span style="font-size:10px;color:#2e7d32;font-weight:700;display:inline-flex;align-items:center;gap:3px;">🔒 Locked</span>'
+          : (punchCount === 1
+              ? '<button onclick="event.stopPropagation();openFixPunch(\''+first.id+'\')" style="'+fixBtnStyle+'">'+fixBtnLabel+'</button>'
+              : '<button onclick="event.stopPropagation();openDayDetailHours(\''+dk+'\')" style="'+fixBtnStyle+'">✏️ Fix Punches</button>'))+
       '</div>'+
     '</div>';
   }).join('');
@@ -4643,7 +4800,9 @@ function openDayDetailHours(dayKey) {
         '<div style="font-size:11px;color:var(--muted);font-family:DM Mono,monospace;">'+fmtT(e.clock_in)+' - '+(act?'Active':fmtT(e.clock_out))+'</div>' +
       '</div>' +
       '<div style="font-weight:700;color:var(--navy);font-size:13px;font-family:DM Mono,monospace;">'+fmtDur(dur)+'</div>' +
-      '<button onclick="closeHoursDayModal();openFixPunch(\''+e.id+'\')" style="font-size:11px;padding:4px 10px;border-radius:6px;border:1px solid var(--orange);background:var(--orange);color:#fff;cursor:pointer;font-weight:700;font-family:DM Sans,sans-serif;">✏️ Fix</button>' +
+      (TC.currentPeriodApproval
+        ? '<span style="font-size:11px;color:#2e7d32;font-weight:700;padding:4px 10px;background:rgba(46,125,50,.08);border:1px solid #2e7d32;border-radius:6px;">🔒 Locked</span>'
+        : '<button onclick="closeHoursDayModal();openFixPunch(\''+e.id+'\')" style="font-size:11px;padding:4px 10px;border-radius:6px;border:1px solid var(--orange);background:var(--orange);color:#fff;cursor:pointer;font-weight:700;font-family:DM Sans,sans-serif;">✏️ Fix</button>') +
     '</div>';
   }).join('');
 
