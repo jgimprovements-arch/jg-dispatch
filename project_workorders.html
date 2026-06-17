@@ -137,6 +137,133 @@ function toast(msg) {
   setTimeout(() => t.classList.remove('on'), 2200);
 }
 
+// ─── Line-items modal ──────────────────────────────────────────────────────
+// Opens a sheet showing the Xact line items in this WO's trade plus any CO
+// additions linked to this WO. Items are fetched on demand from
+// wo_builder_estimate_items (filtered by upload_id + trade_category) and
+// rebuild_co_line_items (filtered by converted_to_wo_id). No grouping logic
+// here — pulls only items where trade_category matches exactly. Sub-trade
+// merges from the main app aren't honored on this page; if that becomes a
+// problem we move the query to a Postgres function.
+async function openWoItemsModal(wo) {
+  const existing = document.getElementById('woItemsModal');
+  if (existing) existing.remove();
+
+  const fmt$ = v => '$' + Number(v || 0).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2});
+  const tradeLabel = wo.trade_category || '(no trade)';
+  const subName = wo.sub?.company_name || '(unassigned)';
+
+  // Insert the shell first so we can show a loading state while fetching
+  document.body.insertAdjacentHTML('beforeend', `
+    <div id="woItemsModal" style="position:fixed;inset:0;background:rgba(13,45,94,.55);z-index:9999;display:flex;align-items:flex-end;justify-content:center;backdrop-filter:blur(2px);" onclick="if(event.target===this)closeWoItemsModal()">
+      <div style="background:var(--card);width:100%;max-width:620px;max-height:90vh;border-radius:18px 18px 0 0;display:flex;flex-direction:column;box-shadow:0 -8px 32px rgba(0,0,0,.2);">
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:14px 18px;border-bottom:1px solid var(--line);gap:12px;flex-shrink:0;">
+          <div style="min-width:0;">
+            <h3 style="margin:0;font-size:16px;color:var(--ink,#0d2d5e);">${esc(tradeLabel)} &mdash; ${esc(subName)}</h3>
+            <div style="font-size:11px;color:var(--muted);margin-top:3px;" id="woItemsCount">Loading…</div>
+          </div>
+          <button onclick="closeWoItemsModal()" style="background:transparent;border:none;font-size:22px;color:var(--muted);cursor:pointer;line-height:1;padding:0 4px;flex-shrink:0;">&times;</button>
+        </div>
+        <div id="woItemsBody" style="padding:16px 18px;overflow-y:auto;flex:1;">
+          <div style="padding:30px 20px;text-align:center;color:var(--muted);font-size:13px;">Loading line items…</div>
+        </div>
+        <div style="padding:12px 18px;border-top:1px solid var(--line);display:flex;justify-content:flex-end;flex-shrink:0;">
+          <button class="wo-action" onclick="closeWoItemsModal()">Close</button>
+        </div>
+      </div>
+    </div>
+  `);
+
+  // Fetch in parallel: the latest Xact upload for this project (to find
+  // wo_builder_estimate_items rows), and the CO line items linked to this WO.
+  let items = [], coItems = [];
+  try {
+    const uploadsRes = await sb.from('wo_builder_uploads')
+      .select('id')
+      .eq('project_id', projectId)
+      .order('created_at', { ascending: false })
+      .limit(1);
+    const uploadId = uploadsRes.data?.[0]?.id;
+    const [itemsRes, coRes] = await Promise.all([
+      uploadId
+        ? sb.from('wo_builder_estimate_items').select('*').eq('upload_id', uploadId).eq('trade_category', wo.trade_category)
+        : Promise.resolve({ data: [] }),
+      sb.from('rebuild_co_line_items').select('*').eq('converted_to_wo_id', wo.id),
+    ]);
+    items = itemsRes.data || [];
+    coItems = coRes.data || [];
+  } catch (e) {
+    document.getElementById('woItemsBody').innerHTML = '<div style="padding:20px;text-align:center;color:var(--red);font-size:13px;">Failed to load items: ' + esc(e.message) + '</div>';
+    return;
+  }
+
+  const itemRows = items.map(i => `
+    <tr>
+      <td style="padding:7px 10px;border-bottom:1px solid var(--line);font-size:12px;">${esc(i.description || '')}</td>
+      <td style="padding:7px 10px;text-align:right;border-bottom:1px solid var(--line);font-size:12px;">${i.quantity != null ? Number(i.quantity).toLocaleString() : ''}</td>
+      <td style="padding:7px 10px;border-bottom:1px solid var(--line);font-size:12px;color:var(--muted);">${esc(i.unit || '')}</td>
+      <td style="padding:7px 10px;text-align:right;border-bottom:1px solid var(--line);font-size:12px;">${fmt$(i.unit_cost)}</td>
+      <td style="padding:7px 10px;text-align:right;border-bottom:1px solid var(--line);font-size:12px;font-weight:600;">${fmt$(i.total)}</td>
+    </tr>
+  `).join('');
+
+  const coRows = coItems.map(c => `
+    <tr style="background:rgba(96,90,255,.05);">
+      <td style="padding:7px 10px;border-bottom:1px solid var(--line);font-size:12px;">
+        ${esc(c.description || '')}
+        <span style="display:inline-block;font-size:9px;font-weight:800;color:#605aff;background:rgba(96,90,255,.12);padding:2px 6px;border-radius:8px;margin-left:6px;vertical-align:1px;">CO#${c.co_number}</span>
+      </td>
+      <td style="padding:7px 10px;text-align:right;border-bottom:1px solid var(--line);font-size:12px;">${c.quantity != null ? Number(c.quantity).toLocaleString() : ''}</td>
+      <td style="padding:7px 10px;border-bottom:1px solid var(--line);font-size:12px;color:var(--muted);">${esc(c.unit || '')}</td>
+      <td style="padding:7px 10px;text-align:right;border-bottom:1px solid var(--line);font-size:12px;">${fmt$(c.unit_cost)}</td>
+      <td style="padding:7px 10px;text-align:right;border-bottom:1px solid var(--line);font-size:12px;font-weight:600;">${fmt$(c.amount_delta)}</td>
+    </tr>
+  `).join('');
+
+  const baseTotal = items.reduce((s, i) => s + Number(i.total || 0), 0);
+  const coTotal = coItems.reduce((s, c) => s + Number(c.amount_delta || 0), 0);
+  const grandTotal = baseTotal + coTotal;
+  const total = items.length + coItems.length;
+
+  document.getElementById('woItemsCount').textContent = total
+    ? `${total} line item${total === 1 ? '' : 's'}${coItems.length ? ' · ' + coItems.length + ' from change orders' : ''}`
+    : 'No line items linked';
+
+  document.getElementById('woItemsBody').innerHTML = total === 0
+    ? `<div style="padding:30px 20px;text-align:center;color:var(--muted);font-size:13px;line-height:1.6;">
+         No structured line items linked to this Work Order yet.<br>
+         <span style="font-size:11px;">Items get attached when the Xact estimate is parsed and the trade is assigned in the WO Builder.</span>
+       </div>`
+    : `<table style="width:100%;border-collapse:collapse;">
+         <thead>
+           <tr style="background:rgba(13,45,94,.04);">
+             <th style="text-align:left;padding:9px 10px;font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;">Description</th>
+             <th style="text-align:right;padding:9px 10px;font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;">Qty</th>
+             <th style="text-align:left;padding:9px 10px;font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;">Unit</th>
+             <th style="text-align:right;padding:9px 10px;font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;">Unit $</th>
+             <th style="text-align:right;padding:9px 10px;font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;">Total</th>
+           </tr>
+         </thead>
+         <tbody>${itemRows}${coRows}</tbody>
+         <tfoot>
+           <tr style="background:rgba(13,45,94,.04);font-weight:700;">
+             <td colspan="4" style="text-align:right;padding:10px;font-size:12px;">Total</td>
+             <td style="text-align:right;padding:10px;font-size:12px;color:var(--ink,#0d2d5e);">${fmt$(grandTotal)}</td>
+           </tr>
+         </tfoot>
+       </table>`
+    + (wo.scope_text ? `
+         <div style="margin-top:18px;padding-top:14px;border-top:1px solid var(--line);">
+           <div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;margin-bottom:6px;">Scope of Work (as sent to sub)</div>
+           <pre style="background:rgba(13,45,94,.04);padding:10px 12px;border-radius:8px;font-size:11px;white-space:pre-wrap;font-family:monospace;line-height:1.55;margin:0;color:var(--ink,#0d2d5e);">${esc(wo.scope_text)}</pre>
+         </div>` : '');
+}
+
+function closeWoItemsModal() {
+  const m = document.getElementById('woItemsModal');
+  if (m) m.remove();
+}
+
 async function init() {
   if (!projectId) return showEmpty('Missing project', 'Open from project list');
   const [{ data: project }, { data: wos }] = await Promise.all([
@@ -228,6 +355,8 @@ function woCard(wo) {
       ` : ''}
 
       <div class="wo-actions">
+        <button class="wo-action" data-act="view-items" data-id="${wo.id}">📋 Items</button>
+        ${['signed','converted_to_po','invoice_received'].includes(wo.status) ? `<button class="wo-action" data-act="view-signed" data-id="${wo.id}">📄 Signed Agreement</button>` : ''}
         ${wo.status === 'sent' ? `<button class="wo-action" data-act="copy-link" data-id="${wo.id}">📋 Copy Sign Link</button>` : ''}
         ${wo.status === 'sent' ? `<button class="wo-action primary" data-act="resend" data-id="${wo.id}">📧 Resend</button>` : ''}
         ${wo.status === 'signed' ? `<button class="wo-action primary" data-act="convert-to-po" data-id="${wo.id}">→ Convert to PO</button>` : ''}
@@ -242,6 +371,18 @@ function woCard(wo) {
 async function handleAction(act, woId) {
   const wo = state.wos.find(w => w.id === woId);
   if (!wo) return;
+
+  if (act === 'view-items') {
+    openWoItemsModal(wo);
+    return;
+  }
+
+  if (act === 'view-signed') {
+    if (!wo.accept_token) { toast('No signing link on this WO'); return; }
+    const url = `${location.origin}${location.pathname.replace(/[^/]*$/, '')}wo.html?t=${wo.accept_token}`;
+    window.open(url, '_blank');
+    return;
+  }
 
   if (act === 'copy-link') {
     const url = `${location.origin}${location.pathname.replace(/[^/]*$/, '')}wo.html?t=${wo.accept_token}`;
