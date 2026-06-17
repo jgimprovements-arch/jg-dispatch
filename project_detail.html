@@ -363,6 +363,32 @@
     box-shadow: 0 3px 10px rgba(13,45,94,.18);
   }
 
+  /* Clock In quick action (green theme) */
+  .clock-quick-btn {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    width: 100%;
+    background: var(--green);
+    color: #fff;
+    border: 0;
+    border-radius: 14px;
+    padding: 14px 18px;
+    text-decoration: none;
+    margin-top: 8px;
+    box-shadow: 0 6px 18px rgba(45,156,95,.22);
+    transition: transform .15s, box-shadow .15s, background .2s;
+    cursor: pointer;
+    font-family: inherit;
+    text-align: left;
+  }
+  .clock-quick-btn:active { transform: scale(.98); box-shadow: 0 3px 10px rgba(45,156,95,.22); }
+  .clock-quick-btn.on-job { background: #1e7d3f; }
+  .clock-quick-btn.other-job { background: #b06a00; box-shadow: 0 6px 18px rgba(176,106,0,.22); }
+  .clock-quick-btn.other-job:active { box-shadow: 0 3px 10px rgba(176,106,0,.22); }
+  .clock-quick-btn .pulse-dot { width: 8px; height: 8px; border-radius: 50%; background: #fff; box-shadow: 0 0 0 0 rgba(255,255,255,.6); animation: clockPulse 1.8s ease-out infinite; }
+  @keyframes clockPulse { 0% { box-shadow: 0 0 0 0 rgba(255,255,255,.55); } 70% { box-shadow: 0 0 0 10px rgba(255,255,255,0); } 100% { box-shadow: 0 0 0 0 rgba(255,255,255,0); } }
+
   /* Note bottom sheet */
   .sheet-back { position: fixed; inset: 0; background: rgba(13,45,94,.5); z-index: 100; display: none; align-items: flex-end; }
   .sheet-back.on { display: flex; }
@@ -859,6 +885,17 @@ function render(p, counts) {
       <svg class="capture-arrow" viewBox="0 0 24 24" fill="currentColor"><path d="M9 6l6 6-6 6"/></svg>
     </button>
 
+    <button class="clock-quick-btn" id="clockQuickBtn">
+      <svg class="capture-ico" viewBox="0 0 24 24" fill="currentColor">
+        <path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 18a8 8 0 1 1 0-16 8 8 0 0 1 0 16zm.5-13H11v6l5.25 3.15.75-1.23-4.5-2.67V7z"/>
+      </svg>
+      <div class="capture-text" id="clockQuickText">
+        <div class="capture-title">Clock In to This Job</div>
+        <div class="capture-sub">Punch in directly to ${esc(p.albi_job_number || 'this project')}</div>
+      </div>
+      <svg class="capture-arrow" viewBox="0 0 24 24" fill="currentColor"><path d="M9 6l6 6-6 6"/></svg>
+    </button>
+
     <div class="section-label">Project Sections</div>
     <div class="section-grid">
       <a href="project_relationships.html?p=${p.id}" class="section-btn">
@@ -1025,7 +1062,195 @@ async function saveNote() {
 // Wire after DOMContentLoaded (note: addNoteBtn is rendered async, use delegation)
 document.addEventListener('click', (e) => {
   if (e.target.closest('#addNoteBtn')) openNoteSheet();
+  if (e.target.closest('#clockQuickBtn')) handleClockTap();
 });
+
+// ═══════════════ CLOCK IN / OUT (quick action) ═══════════════
+// Mirrors the timeclock.html clockIn() / clockOut() payload exactly so the
+// time entry shows up everywhere the existing app expects it — the timeclock
+// PWA, the admin payroll page, and any project-level time rollups. job_id is
+// the Albi uniqueNumber string (matching what loadJobs() builds in
+// timeclock.html), NOT the rebuild_projects UUID.
+const _clockState = {
+  entry: null,     // active open time_entries row, if any
+  employee: null,  // current user's employees row
+};
+
+async function refreshClockButton() {
+  const btn = document.getElementById('clockQuickBtn');
+  const textEl = document.getElementById('clockQuickText');
+  const p = state.project;
+  if (!btn || !textEl || !p) return;
+
+  // Look up the employee row by current user's email. Without this we can't
+  // clock in (no employee_id) — show the button as disabled in that case.
+  if (!_clockState.employee) {
+    let userEmail = null;
+    try {
+      const u = JSON.parse(localStorage.getItem('jg_platform_user') || 'null');
+      userEmail = u?.email?.toLowerCase();
+    } catch {}
+    if (userEmail) {
+      const { data: emp } = await sb.from('employees')
+        .select('id, name, market, role')
+        .or(`email.eq.${userEmail},personal_email.eq.${userEmail}`)
+        .maybeSingle();
+      _clockState.employee = emp || null;
+    }
+  }
+
+  if (!_clockState.employee) {
+    btn.style.display = 'none';
+    return;
+  }
+
+  // Look up any currently-open time entry for this user
+  const { data: open } = await sb.from('time_entries')
+    .select('id, job_id, job_name, clock_in, project_id')
+    .eq('employee_id', _clockState.employee.id)
+    .is('clock_out', null)
+    .order('clock_in', { ascending: false })
+    .limit(1);
+  _clockState.entry = (open && open[0]) || null;
+
+  btn.classList.remove('on-job', 'other-job');
+  const thisAlbiId = String(p.albi_project_id || '');
+
+  if (_clockState.entry) {
+    const entryJobId = String(_clockState.entry.job_id || '');
+    const entryProjectId = _clockState.entry.project_id || null;
+    const isThisProject = (entryJobId && entryJobId === thisAlbiId)
+      || (entryProjectId && entryProjectId === p.id);
+    const sinceTime = new Date(_clockState.entry.clock_in).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+    if (isThisProject) {
+      btn.classList.add('on-job');
+      textEl.innerHTML = `
+        <div class="capture-title">✓ Clocked In · since ${esc(sinceTime)}</div>
+        <div class="capture-sub">Tap to clock out</div>
+      `;
+    } else {
+      btn.classList.add('other-job');
+      textEl.innerHTML = `
+        <div class="capture-title">Clocked in to ${esc(_clockState.entry.job_name || 'another job')}</div>
+        <div class="capture-sub">Tap to switch to this project</div>
+      `;
+    }
+  } else {
+    textEl.innerHTML = `
+      <div class="capture-title">Clock In to This Job</div>
+      <div class="capture-sub">Punch in directly to ${esc(p.albi_job_number || 'this project')}</div>
+    `;
+  }
+}
+
+async function handleClockTap() {
+  const p = state.project;
+  if (!p || !_clockState.employee) { toast('Employee record not found'); return; }
+  const btn = document.getElementById('clockQuickBtn');
+  if (!btn) return;
+
+  const thisAlbiId = String(p.albi_project_id || '');
+  const entry = _clockState.entry;
+
+  if (entry) {
+    const entryJobId = String(entry.job_id || '');
+    const entryProjectId = entry.project_id || null;
+    const isThisProject = (entryJobId && entryJobId === thisAlbiId)
+      || (entryProjectId && entryProjectId === p.id);
+
+    if (isThisProject) {
+      // Clock out
+      if (!confirm('Clock out of ' + (p.albi_job_number || 'this job') + '?')) return;
+      btn.style.opacity = '.6';
+      btn.style.pointerEvents = 'none';
+      const { error } = await sb.from('time_entries')
+        .update({ clock_out: new Date().toISOString(), status: 'completed' })
+        .eq('id', entry.id);
+      btn.style.opacity = '';
+      btn.style.pointerEvents = '';
+      if (error) { toast('Clock-out failed: ' + error.message); return; }
+      _clockState.entry = null;
+      toast('Clocked out');
+      refreshClockButton();
+      return;
+    }
+
+    // Already clocked in elsewhere — confirm switch (clock out + clock in)
+    const otherJob = entry.job_name || 'another job';
+    if (!confirm(`Switch from ${otherJob} to ${p.albi_job_number || 'this job'}?\n\nThis will clock you out of ${otherJob} and clock you in here.`)) return;
+    btn.style.opacity = '.6';
+    btn.style.pointerEvents = 'none';
+    const now = new Date().toISOString();
+    const { error: outErr } = await sb.from('time_entries')
+      .update({ clock_out: now, status: 'completed' })
+      .eq('id', entry.id);
+    if (outErr) { btn.style.opacity = ''; btn.style.pointerEvents = ''; toast('Switch failed: ' + outErr.message); return; }
+    _clockState.entry = null;
+    // Fall through to clock-in below
+  }
+
+  // Clock in
+  const oldOpacity = btn.style.opacity;
+  btn.style.opacity = '.6';
+  btn.style.pointerEvents = 'none';
+
+  // Best-effort geolocation — non-blocking, matches the timeclock behavior
+  let lat = null, lng = null;
+  try {
+    const pos = await new Promise((resolve, reject) => {
+      if (!navigator.geolocation) return reject(new Error('no geo'));
+      navigator.geolocation.getCurrentPosition(resolve, reject, { timeout: 5000, maximumAge: 60000 });
+    });
+    lat = pos.coords.latitude; lng = pos.coords.longitude;
+  } catch (e) { /* non-fatal, clock in without coords */ }
+
+  const payload = {
+    employee_id: _clockState.employee.id,
+    employee_name: _clockState.employee.name,
+    employee_email: (JSON.parse(localStorage.getItem('jg_platform_user') || '{}').email || '').toLowerCase() || null,
+    job_id: thisAlbiId || null,
+    job_name: p.albi_job_number || p.customer_name || null,
+    project_id: p.id, // FK to rebuild_projects so the existing project-level join works
+    market: _clockState.employee.market || (p.market === 'stevens_point' ? 'stevens_point' : 'appleton'),
+    clock_in: new Date().toISOString(),
+    clock_in_lat: lat,
+    clock_in_lng: lng,
+    status: 'active',
+  };
+
+  const { data, error } = await sb.from('time_entries').insert(payload).select();
+  btn.style.opacity = oldOpacity;
+  btn.style.pointerEvents = '';
+  if (error) {
+    // If project_id column doesn't exist on time_entries (older schema),
+    // retry without it. Keeps mobile clock-in working regardless of when
+    // that column was added.
+    if (/project_id/.test(error.message || '')) {
+      delete payload.project_id;
+      const { data: data2, error: err2 } = await sb.from('time_entries').insert(payload).select();
+      if (err2) { toast('Clock-in failed: ' + err2.message); return; }
+      _clockState.entry = data2?.[0] || null;
+    } else {
+      toast('Clock-in failed: ' + error.message);
+      return;
+    }
+  } else {
+    _clockState.entry = data?.[0] || null;
+  }
+  toast(`Clocked in · ${p.albi_job_number || 'this job'}`);
+  refreshClockButton();
+}
+
+// Kick off button state once the project is loaded. init() sets state.project
+// on the next tick, so poll until it's there then refresh once.
+(() => {
+  const waitForProject = setInterval(() => {
+    if (state && state.project) {
+      clearInterval(waitForProject);
+      refreshClockButton();
+    }
+  }, 200);
+})();
 // Note sheet itself IS in the static HTML, so these direct wires are safe
 const closeBtn = document.getElementById('closeNoteSheet');
 const cancelBtn = document.getElementById('cancelNoteSheet');
