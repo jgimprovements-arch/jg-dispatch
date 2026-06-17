@@ -2926,7 +2926,7 @@ function renderDetail() {
     <div class="tabs" id="tabs">
       <button class="${state.tab==='relationships'?'on':''}" data-tab="relationships">Relationships ${(state.relationships||[]).length ? `<span class="badge">${state.relationships.length}</span>` : ''}</button>
       <button class="${state.tab==='packet'?'on':''}" data-tab="packet">📋 Contract Packet</button>
-      <button class="${state.tab==='workorders'?'on':''}" data-tab="workorders" ${isProjectGated(p) ? 'disabled title="Locked until contract packet is sent to customer"' : ''}>Work Orders ${(overdueSelections + (state.workOrders||[]).filter(w => w.status === 'sent').length) ? `<span class="badge">${overdueSelections + (state.workOrders||[]).filter(w => w.status === 'sent').length}</span>` : ''}</button>
+      <button class="${state.tab==='workorders'?'on':''}" data-tab="workorders">Work Orders ${(overdueSelections + (state.workOrders||[]).filter(w => w.status === 'sent').length) ? `<span class="badge">${overdueSelections + (state.workOrders||[]).filter(w => w.status === 'sent').length}</span>` : ''}</button>
       <button class="${state.tab==='phases'?'on':''}" data-tab="phases" ${isProjectGated(p) ? 'disabled title="Locked until contract packet is sent to customer"' : ''}>Schedule <span class="badge">${state.phases.length}</span></button>
       <button class="${state.tab==='financials'?'on':''}" data-tab="financials">Financials ${state.qbActuals?.invoice_balance > 0 ? `<span class="badge">AR</span>` : ''}</button>
       <button class="${state.tab==='messages'?'on':''}" data-tab="messages">Messages ${(state.journalEntries||[]).filter(e => !e.deleted_at).length ? `<span class="badge">${state.journalEntries.filter(e=>!e.deleted_at).length}</span>` : ''}</button>
@@ -3049,7 +3049,26 @@ function renderTabContent() {
       </details>
     ` : '';
 
-    c.innerHTML = sovHtml + packetHtml + coCollapsed + uploadHtml + historyCollapsed;
+    // Once the SOV exists, Step 1 (Xact upload) is done — collapse it so the
+    // SOV and Packet aren't pushed below the fold. PM can still expand to
+    // re-upload an updated Xact if the estimate changes.
+    const uploadCollapsed = state.sov ? `
+      <details class="jg-collapsible" style="margin-bottom:16px;border:1px solid var(--line);border-radius:8px;background:#fff;">
+        <summary style="cursor:pointer;padding:12px 16px;font-weight:600;color:var(--navy);font-size:14px;list-style:none;display:flex;align-items:center;justify-content:space-between;gap:12px;">
+          <span>📄 Step 1: Xactimate Estimate <span style="color:var(--green);font-weight:400;font-size:12px;margin-left:6px;">✓ Uploaded — expand to re-upload</span></span>
+          <span class="jg-collapsible-chev" style="color:var(--muted);font-size:12px;">▸</span>
+        </summary>
+        <div style="padding:0 16px 12px;">${uploadHtml}</div>
+      </details>
+    ` : uploadHtml;
+
+    // Section order follows the actual workflow:
+    //   Step 1 — Xact upload (input)
+    //   Step 2 — SOV (generated from Xact)
+    //   Step 3 — Contract Packet (assembled from SOV + Xact + contract template)
+    //   Step 4 — Change Orders (post-contract, collapsed)
+    //   History (collapsed)
+    c.innerHTML = uploadCollapsed + sovHtml + packetHtml + coCollapsed + historyCollapsed;
   }
   else if (state.tab === 'relationships') c.innerHTML = renderRelationshipsTab();
   else if (state.tab === 'phases')      c.innerHTML = renderPhasesTab();
@@ -9494,6 +9513,26 @@ async function runWoBuilderParse(estimateFile, componentsFile) {
 function renderWorkOrdersTab() {
   const wos = state.workOrders || [];
   const budget = state.woBudget || null;
+
+  // ─── Pre-contract mode ────────────────────────────────────────────────────
+  // Before the contract packet is sent, expose ONLY the Selections section so
+  // PMs can collect supplier estimates and shape the budget. WO Builder,
+  // Trade Consolidation, and the Work Orders list stay hidden — those create
+  // commitments (sub-WOs, sent estimates) that shouldn't precede a signed
+  // contract. Once the packet is sent or the override expires, the gate
+  // lifts and the full tab renders.
+  if (isProjectGated(state.activeProject)) {
+    const lockedBanner = `
+      <div style="background:rgba(232,93,4,.06);border:1.5px dashed var(--orange);border-radius:14px;padding:14px 18px;margin-bottom:14px;display:flex;align-items:flex-start;gap:14px;">
+        <div style="font-size:24px;line-height:1;flex-shrink:0;">🔒</div>
+        <div style="flex:1;min-width:0;">
+          <div style="font-size:14px;font-weight:800;color:var(--orange);margin-bottom:3px;">Pre-Contract Mode &middot; Selections Open</div>
+          <div style="font-size:12px;color:var(--muted);line-height:1.5;">Create selections to gather supplier estimates and shape the budget. <b>WO Builder, Trade Consolidation, and Work Orders</b> unlock once the contract packet is sent to the customer &mdash; that protects you from sending commitments to subs before the customer has signed.</div>
+        </div>
+      </div>
+    `;
+    return lockedBanner + renderSelectionsRollup();
+  }
 
   // Section CO: Change Orders — gated on contract_signed_at, always first
   const coHtml = renderCoSection('slim');
