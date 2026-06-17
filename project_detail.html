@@ -1075,7 +1075,55 @@ document.addEventListener('click', (e) => {
 const _clockState = {
   entry: null,     // active open time_entries row, if any
   employee: null,  // current user's employees row
+  lookupEmail: null, // remembered for error reporting if lookup fails
 };
+
+function _getUserEmail() {
+  try {
+    const u = JSON.parse(localStorage.getItem('jg_platform_user') || 'null');
+    return u?.email || null; // Don't lowercase — timeclock matches raw and works.
+  } catch { return null; }
+}
+
+async function _loadEmployee() {
+  if (_clockState.employee) return _clockState.employee;
+  const rawEmail = _getUserEmail();
+  _clockState.lookupEmail = rawEmail;
+  if (!rawEmail) return null;
+
+  // Step 1 — exact email match. This is the same path timeclock.html uses
+  // (and it works for everyone there). If this hits we're done.
+  try {
+    const { data: emp } = await sb.from('employees')
+      .select('id, name, market, role')
+      .eq('email', rawEmail)
+      .maybeSingle();
+    if (emp) { _clockState.employee = emp; return emp; }
+  } catch (e) { console.warn('employee email.eq lookup failed:', e); }
+
+  // Step 2 — case-insensitive email retry. Catches admin-typed entries that
+  // ended up with different casing than the login email.
+  try {
+    const { data: emp } = await sb.from('employees')
+      .select('id, name, market, role')
+      .ilike('email', rawEmail)
+      .maybeSingle();
+    if (emp) { _clockState.employee = emp; return emp; }
+  } catch (e) { console.warn('employee email.ilike lookup failed:', e); }
+
+  // Step 3 — personal_email fallback, isolated so a missing column won't
+  // break the prior steps. Some employees use a personal Gmail for the
+  // platform but a corporate email on the employees row.
+  try {
+    const { data: emp } = await sb.from('employees')
+      .select('id, name, market, role')
+      .ilike('personal_email', rawEmail)
+      .maybeSingle();
+    if (emp) { _clockState.employee = emp; return emp; }
+  } catch (e) { /* column may not exist — non-fatal */ }
+
+  return null;
+}
 
 async function refreshClockButton() {
   const btn = document.getElementById('clockQuickBtn');
@@ -1083,36 +1131,25 @@ async function refreshClockButton() {
   const p = state.project;
   if (!btn || !textEl || !p) return;
 
-  // Look up the employee row by current user's email. Without this we can't
-  // clock in (no employee_id) — show the button as disabled in that case.
-  if (!_clockState.employee) {
-    let userEmail = null;
-    try {
-      const u = JSON.parse(localStorage.getItem('jg_platform_user') || 'null');
-      userEmail = u?.email?.toLowerCase();
-    } catch {}
-    if (userEmail) {
-      const { data: emp } = await sb.from('employees')
-        .select('id, name, market, role')
-        .or(`email.eq.${userEmail},personal_email.eq.${userEmail}`)
-        .maybeSingle();
-      _clockState.employee = emp || null;
-    }
-  }
+  await _loadEmployee();
+  // Do NOT hide the button when no employee is found. Hiding it makes the
+  // failure invisible and Josh just sees "missing button". Showing it and
+  // letting the tap explain what's wrong is far more debuggable.
+  btn.style.display = '';
 
-  if (!_clockState.employee) {
-    btn.style.display = 'none';
-    return;
+  // Look up any currently-open time entry for this user (only if we have an
+  // employee — otherwise there's nothing to query against).
+  if (_clockState.employee) {
+    const { data: open } = await sb.from('time_entries')
+      .select('id, job_id, job_name, clock_in, project_id')
+      .eq('employee_id', _clockState.employee.id)
+      .is('clock_out', null)
+      .order('clock_in', { ascending: false })
+      .limit(1);
+    _clockState.entry = (open && open[0]) || null;
+  } else {
+    _clockState.entry = null;
   }
-
-  // Look up any currently-open time entry for this user
-  const { data: open } = await sb.from('time_entries')
-    .select('id, job_id, job_name, clock_in, project_id')
-    .eq('employee_id', _clockState.employee.id)
-    .is('clock_out', null)
-    .order('clock_in', { ascending: false })
-    .limit(1);
-  _clockState.entry = (open && open[0]) || null;
 
   btn.classList.remove('on-job', 'other-job');
   const thisAlbiId = String(p.albi_project_id || '');
@@ -1146,7 +1183,18 @@ async function refreshClockButton() {
 
 async function handleClockTap() {
   const p = state.project;
-  if (!p || !_clockState.employee) { toast('Employee record not found'); return; }
+  if (!p) { toast('Project not loaded yet'); return; }
+
+  // Lazy-load the employee on tap. Init may not have finished yet, or the
+  // first lookup may have raced the page render — either way we retry here
+  // before declaring failure, with a clearer error if the row really is
+  // missing.
+  if (!_clockState.employee) await _loadEmployee();
+  if (!_clockState.employee) {
+    const tried = _clockState.lookupEmail || 'unknown';
+    toast(`No employees row for ${tried} — ask Josh to add you`);
+    return;
+  }
   const btn = document.getElementById('clockQuickBtn');
   if (!btn) return;
 
