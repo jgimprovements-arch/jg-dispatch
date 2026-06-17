@@ -139,54 +139,63 @@ function toast(msg) {
 
 // ─── Line-items modal ──────────────────────────────────────────────────────
 // Opens a sheet showing the Xact line items in this WO's trade plus any CO
-// additions linked to this WO. Items are fetched on demand from
-// wo_builder_estimate_items (filtered by upload_id + trade_category) and
-// rebuild_co_line_items (filtered by converted_to_wo_id). No grouping logic
-// here — pulls only items where trade_category matches exactly. Sub-trade
-// merges from the main app aren't honored on this page; if that becomes a
-// problem we move the query to a Postgres function.
+// additions linked to this WO. rebuild_work_orders has no trade_category
+// column — the link is wo_builder_work_orders.converted_work_order_id = wo.id,
+// and that row holds both trade_category and upload_id. Items get fetched on
+// demand; the page itself doesn't load the WO Builder budget.
 async function openWoItemsModal(wo) {
   const existing = document.getElementById('woItemsModal');
   if (existing) existing.remove();
 
   const fmt$ = v => '$' + Number(v || 0).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2});
-  const tradeLabel = wo.trade_category || '(no trade)';
   const subName = wo.sub?.company_name || '(unassigned)';
 
-  // Insert the shell first so we can show a loading state while fetching
+  // Insert the shell first with a loading state
   document.body.insertAdjacentHTML('beforeend', `
-    <div id="woItemsModal" style="position:fixed;inset:0;background:rgba(13,45,94,.55);z-index:9999;display:flex;align-items:flex-end;justify-content:center;backdrop-filter:blur(2px);" onclick="if(event.target===this)closeWoItemsModal()">
-      <div style="background:var(--card);width:100%;max-width:620px;max-height:90vh;border-radius:18px 18px 0 0;display:flex;flex-direction:column;box-shadow:0 -8px 32px rgba(0,0,0,.2);">
+    <div id="woItemsModal" style="position:fixed;inset:0;background:rgba(13,45,94,.55);z-index:9999;display:flex;align-items:flex-end;justify-content:center;backdrop-filter:blur(2px);">
+      <div id="woItemsSheet" style="background:var(--card);width:100%;max-width:620px;max-height:90vh;border-radius:18px 18px 0 0;display:flex;flex-direction:column;box-shadow:0 -8px 32px rgba(0,0,0,.2);">
         <div style="display:flex;justify-content:space-between;align-items:center;padding:14px 18px;border-bottom:1px solid var(--line);gap:12px;flex-shrink:0;">
           <div style="min-width:0;">
-            <h3 style="margin:0;font-size:16px;color:var(--ink,#0d2d5e);">${esc(tradeLabel)} &mdash; ${esc(subName)}</h3>
+            <h3 id="woItemsTitle" style="margin:0;font-size:16px;color:var(--ink,#0d2d5e);">Loading… &mdash; ${esc(subName)}</h3>
             <div style="font-size:11px;color:var(--muted);margin-top:3px;" id="woItemsCount">Loading…</div>
           </div>
-          <button onclick="closeWoItemsModal()" style="background:transparent;border:none;font-size:22px;color:var(--muted);cursor:pointer;line-height:1;padding:0 4px;flex-shrink:0;">&times;</button>
+          <button id="woItemsCloseX" type="button" style="background:transparent;border:none;font-size:22px;color:var(--muted);cursor:pointer;line-height:1;padding:0 4px;flex-shrink:0;">&times;</button>
         </div>
         <div id="woItemsBody" style="padding:16px 18px;overflow-y:auto;flex:1;">
           <div style="padding:30px 20px;text-align:center;color:var(--muted);font-size:13px;">Loading line items…</div>
         </div>
         <div style="padding:12px 18px;border-top:1px solid var(--line);display:flex;justify-content:flex-end;flex-shrink:0;">
-          <button class="wo-action" onclick="closeWoItemsModal()">Close</button>
+          <button id="woItemsCloseBtn" type="button" class="wo-action">Close</button>
         </div>
       </div>
     </div>
   `);
 
-  // Fetch in parallel: the latest Xact upload for this project (to find
-  // wo_builder_estimate_items rows), and the CO line items linked to this WO.
-  let items = [], coItems = [];
+  // Wire the close handlers via addEventListener — onclick attributes can't
+  // see functions defined inside <script type="module"> because modules don't
+  // expose to window scope.
+  const modal = document.getElementById('woItemsModal');
+  const sheet = document.getElementById('woItemsSheet');
+  modal.addEventListener('click', e => { if (e.target === modal) closeWoItemsModal(); });
+  sheet.addEventListener('click', e => e.stopPropagation()); // don't close when tapping inside
+  document.getElementById('woItemsCloseX').addEventListener('click', closeWoItemsModal);
+  document.getElementById('woItemsCloseBtn').addEventListener('click', closeWoItemsModal);
+
+  // Resolve the trade for this WO via wo_builder_work_orders. rebuild_work_orders
+  // has no trade_category column; the trade and upload_id live on the builder
+  // row that's linked back via converted_work_order_id.
+  let tradeKey = null, uploadId = null, items = [], coItems = [];
   try {
-    const uploadsRes = await sb.from('wo_builder_uploads')
-      .select('id')
-      .eq('project_id', projectId)
-      .order('created_at', { ascending: false })
+    const { data: wbWos } = await sb.from('wo_builder_work_orders')
+      .select('trade_category, upload_id')
+      .eq('converted_work_order_id', wo.id)
       .limit(1);
-    const uploadId = uploadsRes.data?.[0]?.id;
+    tradeKey = wbWos?.[0]?.trade_category || null;
+    uploadId = wbWos?.[0]?.upload_id || null;
+
     const [itemsRes, coRes] = await Promise.all([
-      uploadId
-        ? sb.from('wo_builder_estimate_items').select('*').eq('upload_id', uploadId).eq('trade_category', wo.trade_category)
+      (tradeKey && uploadId)
+        ? sb.from('wo_builder_estimate_items').select('*').eq('upload_id', uploadId).eq('trade_category', tradeKey)
         : Promise.resolve({ data: [] }),
       sb.from('rebuild_co_line_items').select('*').eq('converted_to_wo_id', wo.id),
     ]);
@@ -196,6 +205,10 @@ async function openWoItemsModal(wo) {
     document.getElementById('woItemsBody').innerHTML = '<div style="padding:20px;text-align:center;color:var(--red);font-size:13px;">Failed to load items: ' + esc(e.message) + '</div>';
     return;
   }
+
+  // Update title with resolved trade label
+  const tradeLabel = tradeKey || '(no trade assigned)';
+  document.getElementById('woItemsTitle').innerHTML = `${esc(tradeLabel)} &mdash; ${esc(subName)}`;
 
   const itemRows = items.map(i => `
     <tr>
