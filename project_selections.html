@@ -374,6 +374,9 @@ function openSheet(selId) {
 
   const actions = [];
   if (state.canSend) {
+    // Edit is the most common follow-up action — put it first
+    actions.push({ act: 'edit', label: '✏️ Edit Selection', cls: 'primary' });
+
     // Always-available
     if (approvalUrl) actions.push({ act: 'copy-customer', label: '🔗 Copy Customer Approval Link', cls: '' });
     if (installApprovalUrl) actions.push({ act: 'copy-install', label: '🔗 Copy Install Date Link', cls: '' });
@@ -450,6 +453,7 @@ function openSheet(selId) {
 
 // ─── Action handlers ───────────────────────────────────────────────────────
 async function handleSelAction(act, s, urls) {
+  if (act === 'edit')          return openEditorSheet(s);
   if (act === 'copy-customer') return copy(urls.approvalUrl, 'Customer approval link copied');
   if (act === 'copy-install')  return copy(urls.installApprovalUrl, 'Install date link copied');
   if (act === 'copy-vendor')   return copy(urls.vendorUrl, 'Vendor link copied');
@@ -556,32 +560,46 @@ async function fireHook(s, p, toEmail, toName, recipientType, subject, body) {
   } catch (e) { console.error('hook fire failed:', e); }
 }
 
-// ─── Add Selection sheet ───────────────────────────────────────────────────
-// PM/admin-only. Lets a PM stand up a new selection from the field, attach
-// product photos (camera or gallery), and have it landed in rebuild_selections
-// with status='draft' — same shape the desktop creates. The "send" buttons
-// live on the existing detail sheet, so the new selection is immediately
-// actionable from the list view.
-let _addPhotoFiles = []; // staged File objects pending save
+// ─── Add / Edit Selection sheet ────────────────────────────────────────────
+// PM/admin-only. Single sheet covers both create and edit modes — if a
+// selection is passed in, the form is pre-filled and Save runs an UPDATE
+// instead of an INSERT. Photo lists track existing URLs (removable) and
+// newly-staged File objects (uploaded on save) separately.
+let _editorNewFiles = []; // staged File objects pending upload
+let _editorExistingUrls = []; // already-uploaded photo URLs currently on the selection
+let _editorMode = 'create'; // 'create' | 'edit'
+let _editorSelectionId = null;
 
 function openAddSheet() {
-  _addPhotoFiles = [];
-  const existing = document.getElementById('selAddSheet');
-  if (existing) existing.remove();
+  openEditorSheet(null);
+}
+
+function openEditorSheet(selection) {
+  _editorMode = selection ? 'edit' : 'create';
+  _editorSelectionId = selection?.id || null;
+  _editorNewFiles = [];
+  _editorExistingUrls = Array.isArray(selection?.attachment_urls) ? [...selection.attachment_urls] : [];
+
+  // Close the detail sheet if we're transitioning into edit from it
+  document.getElementById('selSheet')?.remove();
+  document.getElementById('selAddSheet')?.remove();
 
   // Sub options for the vendor picker. Keeps the link to canonical sub
   // profile (vendor_sub_id) so the same vendor doesn't end up free-text-only
   // when it's already in the subs roster.
   const subOptions = state.subs.map(s =>
-    `<option value="${esc(s.id)}">${esc(s.company_name)}${s.primary_contact ? ' · ' + esc(s.primary_contact) : ''}</option>`
+    `<option value="${esc(s.id)}"${selection?.vendor_sub_id === s.id ? ' selected' : ''}>${esc(s.company_name)}${s.primary_contact ? ' · ' + esc(s.primary_contact) : ''}</option>`
   ).join('');
+
+  const title = _editorMode === 'edit' ? 'Edit Selection' : 'Add Selection';
+  const saveLabel = _editorMode === 'edit' ? 'Save Changes' : 'Save Selection';
 
   document.body.insertAdjacentHTML('beforeend', `
     <div id="selAddSheet" class="sheet-back">
       <div class="sheet">
         <div class="sheet-header">
           <div style="min-width:0;">
-            <h3>Add Selection</h3>
+            <h3>${title}</h3>
             <div class="sub">${esc(state.project.albi_job_number || '')} · ${esc(state.project.customer_name || '')}</div>
           </div>
           <button class="sheet-close" id="addSheetX" type="button">&times;</button>
@@ -589,7 +607,7 @@ function openAddSheet() {
         <div class="sheet-body">
           <div class="field">
             <div class="label">Category *</div>
-            <input type="text" id="addCategory" placeholder="e.g. Flooring, Cabinets, Countertops, Paint" autocomplete="off">
+            <input type="text" id="addCategory" placeholder="e.g. Flooring, Cabinets, Countertops, Paint" autocomplete="off" value="${esc(selection?.category || '')}">
           </div>
 
           <div class="field">
@@ -602,74 +620,70 @@ function openAddSheet() {
 
           <div class="field">
             <div class="label">Vendor name (if not in list)</div>
-            <input type="text" id="addVendorName" placeholder="Free-text vendor name" autocomplete="off">
+            <input type="text" id="addVendorName" placeholder="Free-text vendor name" autocomplete="off" value="${esc(selection?.vendor_name || '')}">
           </div>
 
           <div class="field">
             <div class="label">SKU / Product code</div>
-            <input type="text" id="addSku" placeholder="Optional" autocomplete="off">
+            <input type="text" id="addSku" placeholder="Optional" autocomplete="off" value="${esc(selection?.sku || '')}">
           </div>
 
           <div class="field-row-3">
             <div class="field">
               <div class="label">Qty</div>
-              <input type="number" id="addQty" step="0.01" min="0">
+              <input type="number" id="addQty" step="0.01" min="0" value="${selection?.quantity ?? ''}">
             </div>
             <div class="field">
               <div class="label">Unit</div>
-              <input type="text" id="addUnit" placeholder="SF, EA, LF">
+              <input type="text" id="addUnit" placeholder="SF, EA, LF" value="${esc(selection?.unit || '')}">
             </div>
             <div class="field">
               <div class="label">Unit $</div>
-              <input type="number" id="addUnitPrice" step="0.01" min="0">
+              <input type="number" id="addUnitPrice" step="0.01" min="0" value="${selection?.unit_price ?? ''}">
             </div>
           </div>
 
           <div class="field">
             <div class="label">Customer notes (visible to customer)</div>
-            <textarea id="addCustomerNotes" placeholder="What the customer should know"></textarea>
+            <textarea id="addCustomerNotes" placeholder="What the customer should know">${esc(selection?.customer_notes || '')}</textarea>
           </div>
 
           <div class="field">
             <div class="label">Internal notes</div>
-            <textarea id="addInternalNotes" placeholder="Only PMs see this"></textarea>
+            <textarea id="addInternalNotes" placeholder="Only PMs see this">${esc(selection?.internal_notes || '')}</textarea>
           </div>
 
           <div class="field">
             <div class="label">Photos</div>
             <div class="photo-uploader">
-              <div class="photo-grid" id="photoGrid">
-                <button type="button" class="photo-add-btn" id="photoAddBtn">
-                  <span class="ico">📷</span>
-                  <span>Take or upload</span>
-                </button>
-              </div>
+              <div class="photo-grid" id="photoGrid"></div>
               <input type="file" class="photo-input" id="photoInput" accept="image/*" multiple>
             </div>
           </div>
         </div>
         <div class="sheet-footer" style="justify-content:space-between;">
           <button class="sheet-btn" id="addSheetCancel" type="button">Cancel</button>
-          <button class="sheet-btn primary" id="addSheetSave" type="button">Save Selection</button>
+          <button class="sheet-btn primary" id="addSheetSave" type="button">${saveLabel}</button>
         </div>
       </div>
     </div>
   `);
 
+  renderPhotoThumbs();
+
   const sheet = document.getElementById('selAddSheet');
-  const close = () => { sheet.remove(); _addPhotoFiles = []; };
+  const close = () => { sheet.remove(); _editorNewFiles = []; _editorExistingUrls = []; };
   sheet.addEventListener('click', e => { if (e.target === sheet) close(); });
   document.getElementById('addSheetX').addEventListener('click', close);
   document.getElementById('addSheetCancel').addEventListener('click', close);
-  document.getElementById('addSheetSave').addEventListener('click', () => saveNewSelection(close));
+  document.getElementById('addSheetSave').addEventListener('click', () => saveSelection(close));
 
-  // Photo input wiring
+  // Photo input wiring (input element is rebuilt by renderPhotoThumbs siblings; the input itself stays)
   const photoInput = document.getElementById('photoInput');
-  document.getElementById('photoAddBtn').addEventListener('click', () => photoInput.click());
   photoInput.addEventListener('change', e => {
     const files = Array.from(e.target.files || []);
-    files.forEach(f => _addPhotoFiles.push(f));
-    e.target.value = ''; // allow re-picking same file
+    files.forEach(f => _editorNewFiles.push(f));
+    e.target.value = '';
     renderPhotoThumbs();
   });
 
@@ -685,33 +699,50 @@ function openAddSheet() {
 function renderPhotoThumbs() {
   const grid = document.getElementById('photoGrid');
   if (!grid) return;
-  // Rebuild grid: thumbs first, then the add button at the end
-  grid.innerHTML = _addPhotoFiles.map((f, idx) => {
+
+  // Existing photos (already uploaded — URLs only)
+  const existingHtml = _editorExistingUrls.map((url, idx) => `
+    <div class="photo-thumb" data-existing-idx="${idx}">
+      <img src="${esc(url)}" alt="Photo">
+      <button type="button" class="remove" data-remove-existing="${idx}" title="Remove">&times;</button>
+    </div>
+  `).join('');
+
+  // New photos (File objects, blob URLs)
+  const newHtml = _editorNewFiles.map((f, idx) => {
     const url = URL.createObjectURL(f);
     return `
-      <div class="photo-thumb" data-thumb-idx="${idx}">
-        <img src="${url}" alt="Photo ${idx + 1}">
-        <button type="button" class="remove" data-remove-idx="${idx}" title="Remove">&times;</button>
+      <div class="photo-thumb" data-new-idx="${idx}">
+        <img src="${url}" alt="Photo">
+        <button type="button" class="remove" data-remove-new="${idx}" title="Remove">&times;</button>
       </div>
     `;
-  }).join('') + `
+  }).join('');
+
+  grid.innerHTML = existingHtml + newHtml + `
     <button type="button" class="photo-add-btn" id="photoAddBtn">
       <span class="ico">📷</span>
-      <span>Add more</span>
+      <span>${(_editorExistingUrls.length + _editorNewFiles.length) ? 'Add more' : 'Take or upload'}</span>
     </button>
   `;
-  // Re-wire add button and remove buttons (innerHTML replaced everything)
+
+  // Re-wire add + remove buttons (innerHTML replaced everything inside grid)
   document.getElementById('photoAddBtn').addEventListener('click', () => document.getElementById('photoInput').click());
-  grid.querySelectorAll('[data-remove-idx]').forEach(btn => {
+  grid.querySelectorAll('[data-remove-existing]').forEach(btn => {
     btn.addEventListener('click', () => {
-      const i = parseInt(btn.dataset.removeIdx, 10);
-      _addPhotoFiles.splice(i, 1);
+      _editorExistingUrls.splice(parseInt(btn.dataset.removeExisting, 10), 1);
+      renderPhotoThumbs();
+    });
+  });
+  grid.querySelectorAll('[data-remove-new]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      _editorNewFiles.splice(parseInt(btn.dataset.removeNew, 10), 1);
       renderPhotoThumbs();
     });
   });
 }
 
-async function saveNewSelection(closeFn) {
+async function saveSelection(closeFn) {
   const category = document.getElementById('addCategory').value.trim();
   if (!category) { toast('Category is required'); return; }
 
@@ -727,24 +758,23 @@ async function saveNewSelection(closeFn) {
 
   const saveBtn = document.getElementById('addSheetSave');
   saveBtn.disabled = true;
-  saveBtn.textContent = _addPhotoFiles.length ? 'Uploading…' : 'Saving…';
+  saveBtn.textContent = _editorNewFiles.length ? 'Uploading…' : 'Saving…';
 
-  // Upload photos first so we can land their URLs on the selection row in
-  // one insert. If any individual upload fails, the others still proceed and
-  // the selection is created with whatever uploaded successfully — better
-  // than nothing for the field-PM use case.
-  const photoUrls = [];
-  for (let i = 0; i < _addPhotoFiles.length; i++) {
-    saveBtn.textContent = `Uploading ${i + 1}/${_addPhotoFiles.length}…`;
-    const file = _addPhotoFiles[i];
-    const url = await uploadSelectionPhoto(file);
-    if (url) photoUrls.push(url);
+  // Upload any new photos first; their URLs land alongside the kept-existing
+  // ones in attachment_urls. Removed existing photos drop off the array
+  // (storage objects stay — cleanup is a separate concern, intentional so a
+  // misclick doesn't permanently destroy a customer record).
+  const uploadedUrls = [];
+  for (let i = 0; i < _editorNewFiles.length; i++) {
+    saveBtn.textContent = `Uploading ${i + 1}/${_editorNewFiles.length}…`;
+    const url = await uploadSelectionPhoto(_editorNewFiles[i]);
+    if (url) uploadedUrls.push(url);
   }
-
   saveBtn.textContent = 'Saving…';
 
-  const insert = {
-    project_id: projectId,
+  const combinedUrls = [..._editorExistingUrls, ...uploadedUrls];
+
+  const payload = {
     category,
     vendor_sub_id: vendorSubId,
     vendor_name: vendorName,
@@ -755,42 +785,64 @@ async function saveNewSelection(closeFn) {
     total_price: totalPrice,
     customer_notes: customerNotes,
     internal_notes: internalNotes,
-    attachment_urls: photoUrls.length ? photoUrls : null,
-    status: 'draft',
-    created_by: state.userEmail || 'mobile-pwa',
+    attachment_urls: combinedUrls.length ? combinedUrls : null,
   };
 
-  const { data: rows, error } = await sb.from('rebuild_selections')
-    .insert(insert)
-    .select('*, vendor_sub:rebuild_subs(id, company_name, primary_contact, email, phone)');
+  let rows, error;
+  if (_editorMode === 'edit' && _editorSelectionId) {
+    ({ data: rows, error } = await sb.from('rebuild_selections')
+      .update(payload)
+      .eq('id', _editorSelectionId)
+      .select('*, vendor_sub:rebuild_subs(id, company_name, primary_contact, email, phone)'));
+  } else {
+    ({ data: rows, error } = await sb.from('rebuild_selections')
+      .insert({
+        ...payload,
+        project_id: projectId,
+        status: 'draft',
+        created_by: state.userEmail || 'mobile-pwa',
+      })
+      .select('*, vendor_sub:rebuild_subs(id, company_name, primary_contact, email, phone)'));
+  }
 
   if (error) {
     console.error(error);
     saveBtn.disabled = false;
-    saveBtn.textContent = 'Save Selection';
+    saveBtn.textContent = _editorMode === 'edit' ? 'Save Changes' : 'Save Selection';
     toast('Save failed: ' + error.message);
     return;
   }
 
-  // Audit log — matches the desktop pattern so M&A diligence shows a clean
-  // unified history regardless of which surface created the row.
+  // Audit log — separate action for create vs edit so M&A diligence can see
+  // who changed what when.
   if (rows?.[0]) {
-    await sb.from('rebuild_selections_history').insert({
+    const action = _editorMode === 'edit' ? 'edited' : 'created';
+    const detailParts = [category];
+    if (uploadedUrls.length) detailParts.push(`+${uploadedUrls.length} photo${uploadedUrls.length === 1 ? '' : 's'}`);
+    if (_editorMode === 'edit' && _editorExistingUrls.length < (rows[0].attachment_urls?.length || 0) === false) {
+      // (we removed some — note it)
+    }
+    sb.from('rebuild_selections_history').insert({
       selection_id: rows[0].id,
-      action: 'created',
+      action,
       actor: state.userEmail || 'mobile-pwa',
-      details: `Created from mobile · ${category}${photoUrls.length ? ` · ${photoUrls.length} photo${photoUrls.length === 1 ? '' : 's'}` : ''}`,
+      details: `${_editorMode === 'edit' ? 'Edited from mobile' : 'Created from mobile'} · ${detailParts.join(' · ')}`,
     }).then(({ error: histErr }) => { if (histErr) console.warn('history log failed:', histErr); });
   }
 
-  // Optimistic insert into state so the new card shows immediately without
-  // waiting for the realtime channel to fire.
+  // Optimistic state update so the change shows immediately without waiting
+  // for the realtime channel.
   if (rows?.[0]) {
-    state.selections = [rows[0], ...state.selections];
+    if (_editorMode === 'edit') {
+      const idx = state.selections.findIndex(x => x.id === rows[0].id);
+      if (idx >= 0) state.selections[idx] = rows[0];
+    } else {
+      state.selections = [rows[0], ...state.selections];
+    }
   }
   closeFn();
   render();
-  toast(`Added — ${category}`);
+  toast(_editorMode === 'edit' ? 'Selection updated' : `Added — ${category}`);
 }
 
 async function uploadSelectionPhoto(file) {
