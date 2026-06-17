@@ -9656,6 +9656,10 @@ function renderWorkOrdersTab() {
     const sm = WO_STATUS_META[active?.status] || null;
     const icon = a.type === 'carpenter' ? '👷' : '🏢';
     const typeLabel = a.type === 'carpenter' ? 'JG Carpenter' : 'Subcontractor';
+    // Whether the active WO has been signed (or progressed past it). Drives
+    // the "View Signed Agreement" button — only meaningful when there's a
+    // signature to view.
+    const activeIsSigned = active && ['signed','converted_to_po','invoice_received'].includes(active.status);
     // Selections workflow checkbox — only shown when an active WO exists
     const selCb = active
       ? `<label class="sel-cb-wrap" title="When on, sub fills in material selections via the customer-facing portal before work begins">
@@ -9683,7 +9687,9 @@ function renderWorkOrdersTab() {
             ? `<button class="btn ghost" data-wo-act="add-selection" data-wo-id="${active.id}" data-sub-id="${a.id}" title="Add a material selection to this WO">+ Selection</button>`
             : ''}
           ${active
-            ? `<button class="btn" data-wo-act="open" data-wo-id="${active.id}">${active.status === 'draft' ? '✎ Continue' : 'View'}</button>
+            ? `<button class="btn" data-wo-act="view-items" data-wo-id="${active.id}" title="View line items in this Work Order">📋 Items</button>
+               ${activeIsSigned ? `<button class="btn" data-wo-act="view-signed" data-wo-id="${active.id}" title="Open the signed agreement in a new tab">📄 Signed Agreement</button>` : ''}
+               <button class="btn" data-wo-act="open" data-wo-id="${active.id}">${active.status === 'draft' ? '✎ Continue' : 'View'}</button>
                <button class="btn ghost" data-wo-act="delete" data-wo-id="${active.id}" title="Delete this Work Order" style="color:var(--red);border-color:var(--red);">🗑</button>`
             : a.type === 'sub'
               ? `<button class="btn primary" data-wo-act="create" data-sub-id="${a.id}">+ Create WO</button>`
@@ -11002,6 +11008,126 @@ function wireFinancialsTab() {
   });
 }
 
+// ─── Line-items viewer modal ────────────────────────────────────────────────
+// Surfaces the Xact line items + any CO line items for a given Work Order, so
+// PMs can confirm what's in a WO without entering the edit modal. Items are
+// matched to the WO by trade_category (which is how the WO Builder groups
+// them). CO additions show with a CO# badge and a slightly tinted row.
+function viewWoLineItems(woId) {
+  const wo = (state.workOrders || []).find(w => w.id === woId);
+  if (!wo) { toast('Work Order not found'); return; }
+
+  const tradeKey = wo.trade_category;
+  const tradeLabel = (typeof MERGED_TRADE_GROUPS !== 'undefined' && MERGED_TRADE_GROUPS[tradeKey]?.label) || tradeKey || '(no trade)';
+
+  // Original Xact items in this trade (via mergedGroupFor so subgroups roll up
+  // to the same canonical key the WO uses).
+  const allItems = (state.woBudget && state.woBudget.items) || [];
+  const tradeItems = allItems.filter(i => {
+    if (i.is_unassigned) return false;
+    const grp = (typeof mergedGroupFor === 'function')
+      ? mergedGroupFor(i.trade_category || 'general')
+      : (i.trade_category || 'general');
+    return grp === tradeKey;
+  });
+
+  // CO additions assigned to THIS WO
+  const coItems = (state.coLineItems || []).filter(c => c.converted_to_wo_id === woId);
+
+  const fmt$ = v => '$' + Number(v || 0).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2});
+
+  const itemRows = tradeItems.map(i => `
+    <tr>
+      <td style="padding:7px 10px;border-bottom:1px solid var(--line);">${esc(i.description || '')}</td>
+      <td style="padding:7px 10px;text-align:right;border-bottom:1px solid var(--line);">${i.quantity != null ? Number(i.quantity).toLocaleString() : ''}</td>
+      <td style="padding:7px 10px;border-bottom:1px solid var(--line);">${esc(i.unit || '')}</td>
+      <td style="padding:7px 10px;text-align:right;border-bottom:1px solid var(--line);">${fmt$(i.unit_cost)}</td>
+      <td style="padding:7px 10px;text-align:right;border-bottom:1px solid var(--line);font-weight:600;">${fmt$(i.total)}</td>
+    </tr>
+  `).join('');
+
+  const coRows = coItems.map(c => `
+    <tr style="background:rgba(96,90,255,.05);">
+      <td style="padding:7px 10px;border-bottom:1px solid var(--line);">
+        ${esc(c.description || '')}
+        <span style="display:inline-block;font-size:9px;font-weight:800;color:#605aff;background:rgba(96,90,255,.12);padding:2px 6px;border-radius:8px;margin-left:6px;vertical-align:1px;">CO#${c.co_number}</span>
+      </td>
+      <td style="padding:7px 10px;text-align:right;border-bottom:1px solid var(--line);">${c.quantity != null ? Number(c.quantity).toLocaleString() : ''}</td>
+      <td style="padding:7px 10px;border-bottom:1px solid var(--line);">${esc(c.unit || '')}</td>
+      <td style="padding:7px 10px;text-align:right;border-bottom:1px solid var(--line);">${fmt$(c.unit_cost)}</td>
+      <td style="padding:7px 10px;text-align:right;border-bottom:1px solid var(--line);font-weight:600;">${fmt$(c.amount_delta)}</td>
+    </tr>
+  `).join('');
+
+  const baseTotal = tradeItems.reduce((s, i) => s + Number(i.total || 0), 0);
+  const coTotal = coItems.reduce((s, c) => s + Number(c.amount_delta || 0), 0);
+  const grandTotal = baseTotal + coTotal;
+  const itemCount = tradeItems.length + coItems.length;
+  const assigneeLabel = wo.sub_name || wo.employee_name || '(unassigned)';
+  const assigneeType = wo.sub_id ? 'sub' : wo.employee_id ? 'carpenter' : 'assignee';
+
+  const html = `
+    <div class="modal-back on" id="modalWoItems">
+      <div class="modal" style="max-width:820px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:14px 18px;border-bottom:1px solid var(--line);gap:12px;">
+          <div style="min-width:0;">
+            <h3 style="margin:0;font-size:16px;color:var(--navy);">${esc(tradeLabel)} &mdash; ${esc(assigneeLabel)}</h3>
+            <div style="font-size:11px;color:var(--muted);margin-top:3px;">${itemCount} line item${itemCount === 1 ? '' : 's'}${coItems.length ? ` &middot; ${coItems.length} from change orders` : ''}</div>
+          </div>
+          <button class="btn ghost" onclick="closeWoItemsModal()" style="flex-shrink:0;">&times;</button>
+        </div>
+        <div style="padding:16px 18px;max-height:65vh;overflow-y:auto;">
+          ${itemCount === 0 ? `
+            <div style="padding:30px 20px;text-align:center;color:var(--muted);font-size:13px;line-height:1.6;">
+              No structured line items linked to this Work Order yet.<br>
+              <span style="font-size:11px;">Items get attached automatically when the Xact estimate is parsed and the trade is assigned in the WO Builder.</span>
+            </div>
+          ` : `
+            <table style="width:100%;border-collapse:collapse;font-size:13px;">
+              <thead>
+                <tr style="background:var(--bg);">
+                  <th style="text-align:left;padding:9px 10px;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;">Description</th>
+                  <th style="text-align:right;padding:9px 10px;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;">Qty</th>
+                  <th style="text-align:left;padding:9px 10px;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;">Unit</th>
+                  <th style="text-align:right;padding:9px 10px;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;">Unit $</th>
+                  <th style="text-align:right;padding:9px 10px;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;">Total</th>
+                </tr>
+              </thead>
+              <tbody>${itemRows}${coRows}</tbody>
+              <tfoot>
+                <tr style="background:var(--bg);font-weight:700;">
+                  <td colspan="4" style="text-align:right;padding:10px 10px;">Total</td>
+                  <td style="text-align:right;padding:10px 10px;color:var(--navy);">${fmt$(grandTotal)}</td>
+                </tr>
+              </tfoot>
+            </table>
+          `}
+          ${wo.scope_text ? `
+            <div style="margin-top:20px;padding-top:16px;border-top:1px solid var(--line);">
+              <div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px;">Scope of Work (as sent to ${assigneeType})</div>
+              <pre style="background:var(--bg);padding:12px 14px;border-radius:8px;font-size:12px;white-space:pre-wrap;font-family:monospace;line-height:1.55;margin:0;color:var(--navy);">${esc(wo.scope_text)}</pre>
+            </div>
+          ` : ''}
+        </div>
+        <div style="padding:12px 18px;border-top:1px solid var(--line);display:flex;justify-content:flex-end;">
+          <button class="btn" onclick="closeWoItemsModal()">Close</button>
+        </div>
+      </div>
+    </div>
+  `;
+
+  const existing = document.getElementById('modalWoItems');
+  if (existing) existing.remove();
+  document.body.insertAdjacentHTML('beforeend', html);
+  const m = document.getElementById('modalWoItems');
+  m.addEventListener('click', e => { if (e.target === m) closeWoItemsModal(); });
+}
+
+function closeWoItemsModal() {
+  const m = document.getElementById('modalWoItems');
+  if (m) m.remove();
+}
+
 function wireWorkOrdersTab() {
   if (state.tab !== 'workorders') return;
   document.querySelectorAll('[data-wo-act]').forEach(btn => {
@@ -11011,6 +11137,14 @@ function wireWorkOrdersTab() {
       else if (act === 'open') createOrOpenWorkOrder(null, btn.dataset.woId);
       else if (act === 'open-selections') openSelectionsForWo(btn.dataset.woId);
       else if (act === 'add-selection') openNewSelectionFlow({ woId: btn.dataset.woId, subId: btn.dataset.subId });
+      else if (act === 'view-items') viewWoLineItems(btn.dataset.woId);
+      else if (act === 'view-signed') {
+        const wo = (state.workOrders || []).find(w => w.id === btn.dataset.woId);
+        if (!wo) { toast('Work Order not found'); return; }
+        if (!wo.accept_token) { toast('No signing link on this WO yet'); return; }
+        const url = `${location.origin}${location.pathname.replace(/[^/]*$/, '')}wo.html?t=${wo.accept_token}`;
+        window.open(url, '_blank');
+      }
       else if (act === 'delete') {
         const woId = btn.dataset.woId;
         const wo = state.workOrders.find(w => w.id === woId);
