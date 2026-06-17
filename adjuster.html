@@ -367,18 +367,79 @@ function extractJSON(text){
   // Find first [ and last ] for array
   const aStart=t.indexOf('[');const aEnd=t.lastIndexOf(']');
   if(aStart!==-1&&aEnd>aStart){try{return JSON.parse(t.substring(aStart,aEnd+1))}catch(e){}}
-  // Truncated response repair — try closing open brackets/braces
+  // Truncated response repair — the model hit max_tokens mid-output and we
+  // need to reconstruct valid JSON from what we got. The trickiest case is a
+  // response that ends inside an unclosed string like:
+  //   ..."description":"this is some long text that got cut off mid-
+  // The old repair only handled trailing partial key/value pairs, never the
+  // mid-string case, so the JSON.parse always failed at that quote.
   if(start!==-1){
     let chunk=t.substring(start);
-    // Remove trailing partial key/value (after last comma or colon)
+    // 1) Detect if we're inside an unclosed string by walking the chars and
+    //    tracking quote/escape state. If we end inside a string, the last
+    //    incomplete value can't be salvaged — strip back to the field that
+    //    contains it (the last `,"key":` or `{"key":`).
+    let inStr=false,esc=false;
+    for(let i=0;i<chunk.length;i++){
+      const c=chunk[i];
+      if(esc){esc=false;continue}
+      if(c==='\\'){esc=true;continue}
+      if(c==='"')inStr=!inStr;
+    }
+    if(inStr){
+      // Cut back to before the opening quote of the unclosed string. We do
+      // this by finding the last `:` (which precedes the value) and then
+      // backing up further to drop the whole "key":"unfinished" pair so we
+      // don't leave a dangling colon.
+      let lastColon=chunk.lastIndexOf(':');
+      if(lastColon!==-1){
+        // back up to the comma before this key (if any), or the opening brace
+        let before=chunk.substring(0,lastColon);
+        const lastComma=before.lastIndexOf(',');
+        const lastBrace=before.lastIndexOf('{');
+        const cut=Math.max(lastComma,lastBrace);
+        if(cut===lastBrace){
+          // We're cutting at the opening of an object — keep the `{`
+          chunk=chunk.substring(0,cut+1);
+        }else{
+          chunk=chunk.substring(0,cut);
+        }
+      }
+    }
+    // 2) Remove any trailing partial key/value (after last comma)
     chunk=chunk.replace(/,\s*"[^"]*"?\s*:?\s*[^,\}\]]*$/,'');
-    // Count open vs close braces/brackets and append missing closers
-    let ob=0,cb=0,osb=0,csb=0;
-    for(let i=0;i<chunk.length;i++){if(chunk[i]==='{')ob++;if(chunk[i]==='}')cb++;if(chunk[i]==='[')osb++;if(chunk[i]===']')csb++;}
+    chunk=chunk.replace(/,\s*[^,\}\]]*$/,'');
+    // 3) If we ended on a comma or colon, drop it
+    chunk=chunk.replace(/[,:]\s*$/,'');
+    // 4) Count open vs close braces/brackets and append missing closers
+    let ob=0,cb=0,osb=0,csb=0,inStr2=false,esc2=false;
+    for(let i=0;i<chunk.length;i++){
+      const c=chunk[i];
+      if(esc2){esc2=false;continue}
+      if(c==='\\'){esc2=true;continue}
+      if(c==='"'){inStr2=!inStr2;continue}
+      if(inStr2)continue;
+      if(c==='{')ob++;if(c==='}')cb++;if(c==='[')osb++;if(c===']')csb++;
+    }
     chunk+=']'.repeat(Math.max(0,osb-csb))+('}'.repeat(Math.max(0,ob-cb)));
-    try{return JSON.parse(chunk)}catch(e){}
+    try{
+      const parsed=JSON.parse(chunk);
+      // Tag the result so the caller can warn the user it was repaired from
+      // a truncated response and may be missing items.
+      if(typeof parsed==='object'&&parsed!==null)parsed.__truncated=true;
+      return parsed;
+    }catch(e){}
   }
-  throw new Error('Could not parse AI response as JSON. Response started with: '+t.substring(0,100))
+  // Final error — include start AND end of the response so we can see where
+  // the cutoff actually happened. The original "started with" version only
+  // showed the prefix, which is useless for diagnosing truncation.
+  const tailStart=Math.max(0,t.length-200);
+  throw new Error(
+    'Could not parse AI response as JSON. '
+    +'Response was '+t.length+' chars. '
+    +'START: '+t.substring(0,120)
+    +(t.length>320?' ... END: '+t.substring(tailStart):'')
+  );
 }
 function sc(s){return{HIGH:'#E53935',MEDIUM:'#FB8C00',LOW:'#1E88E5'}[s]||'#708194'}
 function gc(g){return{A:'#43A047',B:'#66BB6A',C:'#FB8C00',D:'#EF6C00',F:'#E53935'}[g]||'#708194'}
@@ -514,6 +575,12 @@ async function runPass1(){
     S.prog='Parsing...';draw();
     const d=await r.json();const t=d.content.filter(b=>b.type==='text').map(b=>b.text).join('');
     const a=extractJSON(t);
+    // Warn the user when the model hit the output cap — the repaired JSON
+    // is structurally valid but probably missing items from the tail end.
+    if(d.stop_reason==='max_tokens'||a.__truncated){
+      S.err='Warning: AI response was truncated at the model output limit. Some disputed items may be missing — review the rebuttal carefully and re-run if needed.';
+    }
+    delete a.__truncated;
     a.gaps=(a.gaps||[]).map((g,i)=>({...g,id:g.id||'GAP-'+String(i+1).padStart(3,'0')}));
     S.result=a;S.phase='review';S.prog='';
   }catch(e){S.err=e.message;S.prog=''}
@@ -539,6 +606,10 @@ async function runPass2(){
     S.prog='Parsing...';draw();
     const d=await r.json();const t=d.content.filter(b=>b.type==='text').map(b=>b.text).join('');
     const rc=extractJSON(t);
+    if(d.stop_reason==='max_tokens'||rc.__truncated){
+      S.err='Warning: AI verification response was truncated. Review the recheck output carefully.';
+    }
+    delete rc.__truncated;
     S.recheckResult=rc;
     S.phase=((rc.score?.grade==='A'||rc.score?.grade==='B')?'signoff':'recheck_result');
     S.prog='';
@@ -575,7 +646,12 @@ async function generateRebuild(){
         messages:[{role:'user',content:rebEncContent}]})});
     if(!r.ok){const er=await r.json().catch(()=>null);throw new Error(er?.error?.message||'API error '+r.status)}
     const d=await r.json();const t=d.content.filter(b=>b.type==='text').map(b=>b.text).join('');
-    S.rebuildResult=extractJSON(t);
+    const rb=extractJSON(t);
+    if(d.stop_reason==='max_tokens'||rb.__truncated){
+      console.warn('Rebuild estimate truncated at model output limit — some line items may be missing.');
+    }
+    delete rb.__truncated;
+    S.rebuildResult=rb;
   }catch(e){console.error('Rebuild generation failed:',e.message);S.rebuildResult={error:e.message}}
   S.rebuildBusy=false;S.albiProg='';draw()
 }
