@@ -104,6 +104,63 @@
 
   .toast { position: fixed; bottom: calc(var(--safe-bottom) + 20px); left: 50%; transform: translateX(-50%); background: var(--navy); color: #fff; padding: 10px 20px; border-radius: 999px; font-size: 13px; font-weight: 600; box-shadow: 0 4px 16px rgba(13,45,94,.3); z-index: 10001; opacity: 0; transition: opacity .2s; pointer-events: none; }
   .toast.on { opacity: 1; }
+
+  /* Floating Add button (PM only) */
+  .fab {
+    position: fixed; right: 18px; bottom: calc(var(--safe-bottom) + 22px);
+    background: var(--orange); color: #fff;
+    border: none; border-radius: 999px;
+    padding: 13px 20px;
+    font-size: 14px; font-weight: 800;
+    box-shadow: 0 6px 20px rgba(232,93,4,.4);
+    cursor: pointer;
+    z-index: 200;
+    display: inline-flex; align-items: center; gap: 6px;
+    font-family: inherit;
+    transition: transform .12s, box-shadow .12s;
+  }
+  .fab:active { transform: scale(.96); box-shadow: 0 3px 10px rgba(232,93,4,.4); }
+  .fab svg { width: 18px; height: 18px; }
+
+  /* Form fields in sheet */
+  .field { display: block; margin-bottom: 13px; }
+  .field > .label { font-size: 11px; font-weight: 800; color: var(--muted); text-transform: uppercase; letter-spacing: .4px; margin-bottom: 5px; }
+  .field input[type="text"], .field input[type="number"], .field input[type="date"], .field textarea, .field select {
+    width: 100%; padding: 11px 12px;
+    border: 1px solid var(--line); border-radius: 10px;
+    font-size: 15px; background: var(--card); color: var(--text);
+    font-family: inherit;
+  }
+  .field textarea { resize: vertical; min-height: 64px; }
+  .field-row { display: grid; grid-template-columns: 2fr 1fr; gap: 10px; }
+  .field-row-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
+
+  /* Photo uploader */
+  .photo-uploader { display: flex; flex-direction: column; gap: 10px; }
+  .photo-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .photo-thumb { position: relative; aspect-ratio: 1; border-radius: 10px; overflow: hidden; background: var(--bg); border: 1px solid var(--line); }
+  .photo-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .photo-thumb .remove { position: absolute; top: 4px; right: 4px; background: rgba(0,0,0,.65); color: #fff; border: none; width: 22px; height: 22px; border-radius: 50%; font-size: 14px; line-height: 1; cursor: pointer; display: flex; align-items: center; justify-content: center; padding: 0; }
+  .photo-thumb .uploading-overlay { position: absolute; inset: 0; background: rgba(13,45,94,.6); color: #fff; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; }
+  .photo-add-btn {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    aspect-ratio: 1; border-radius: 10px;
+    background: rgba(232,93,4,.06);
+    border: 2px dashed rgba(232,93,4,.4);
+    color: var(--orange);
+    font-size: 11px; font-weight: 700;
+    cursor: pointer;
+    gap: 4px;
+    font-family: inherit;
+  }
+  .photo-add-btn:active { background: rgba(232,93,4,.12); }
+  .photo-add-btn .ico { font-size: 22px; }
+  .photo-input { display: none; }
+
+  /* Photos in detail sheet (read-only) */
+  .photo-strip { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 6px; }
+  .photo-strip a { aspect-ratio: 1; border-radius: 10px; overflow: hidden; background: var(--bg); border: 1px solid var(--line); display: block; }
+  .photo-strip img { width: 100%; height: 100%; object-fit: cover; }
 </style>
 </head>
 <body>
@@ -119,6 +176,11 @@
 <main id="main">
   <div class="empty"><p>Loading…</p></div>
 </main>
+
+<button class="fab" id="addSelFab" style="display:none;" type="button">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+  Add Selection
+</button>
 
 <div class="toast" id="toast"></div>
 
@@ -137,7 +199,7 @@ const ADMIN_EMAILS = new Set(['josh@jg-restoration.com','jgimprovements@gmail.co
 const params = new URLSearchParams(window.location.search);
 const projectId = params.get('p');
 
-const state = { project: null, selections: [], userEmail: null, canSend: false };
+const state = { project: null, selections: [], subs: [], userEmail: null, canSend: false };
 
 try {
   const u = JSON.parse(localStorage.getItem('jg_platform_user') || 'null');
@@ -192,15 +254,17 @@ async function init() {
         .maybeSingle()
     : Promise.resolve({ data: null });
 
-  const [{ data: project }, { data: selections }, empRes] = await Promise.all([
+  const [{ data: project }, { data: selections }, { data: subs }, empRes] = await Promise.all([
     sb.from('rebuild_projects').select('*').eq('id', projectId).maybeSingle(),
     sb.from('rebuild_selections').select('*, vendor_sub:rebuild_subs(id, company_name, primary_contact, email, phone)').eq('project_id', projectId).order('created_at', { ascending: false }),
+    sb.from('rebuild_subs').select('id, company_name, primary_contact, email, phone').eq('active', true).order('company_name'),
     empPromise,
   ]);
 
   if (!project) return showEmpty('Project not found', 'It may have been deleted.');
   state.project = project;
   state.selections = selections || [];
+  state.subs = subs || [];
 
   const emp = empRes?.data;
   if (emp) {
@@ -228,6 +292,13 @@ async function init() {
 }
 
 function render() {
+  // FAB visibility tracks role
+  const fab = document.getElementById('addSelFab');
+  if (fab) {
+    fab.style.display = state.canSend ? '' : 'none';
+    fab.onclick = openAddSheet;
+  }
+
   const sels = (state.selections || []).filter(s => s.status !== 'cancelled' || state.canSend);
 
   if (!sels.length) {
@@ -236,7 +307,7 @@ function render() {
         <div class="ico">🎨</div>
         <h3>No selections yet</h3>
         <p>${state.canSend
-          ? 'Create selections from the desktop app — Work Orders tab → + Selection on a sub row.'
+          ? 'Tap the orange <b>+ Add Selection</b> button to create one.'
           : 'When your PM creates selections for finishes and materials, they\'ll appear here.'}</p>
       </div>
     `;
@@ -342,6 +413,13 @@ function openSheet(selId) {
             ${s.customer_notes ? `<dt>Customer Notes</dt><dd>${esc(s.customer_notes)}</dd>` : ''}
             ${s.internal_notes && state.canSend ? `<dt>Internal Notes</dt><dd>${esc(s.internal_notes)}</dd>` : ''}
           </dl>
+
+          ${(s.attachment_urls && s.attachment_urls.length) ? `
+            <div class="sheet-section-label">Photos</div>
+            <div class="photo-strip">
+              ${s.attachment_urls.map(url => `<a href="${esc(url)}" target="_blank" rel="noopener"><img src="${esc(url)}" alt="Selection photo" loading="lazy"></a>`).join('')}
+            </div>
+          ` : ''}
 
           ${actions.length ? `
             <div class="sheet-section-label">Actions</div>
@@ -476,6 +554,260 @@ async function fireHook(s, p, toEmail, toName, recipientType, subject, body) {
     });
     if (msgData?.[0]) await sb.from('rebuild_messages').update({ status: 'sent' }).eq('id', msgData[0].id);
   } catch (e) { console.error('hook fire failed:', e); }
+}
+
+// ─── Add Selection sheet ───────────────────────────────────────────────────
+// PM/admin-only. Lets a PM stand up a new selection from the field, attach
+// product photos (camera or gallery), and have it landed in rebuild_selections
+// with status='draft' — same shape the desktop creates. The "send" buttons
+// live on the existing detail sheet, so the new selection is immediately
+// actionable from the list view.
+let _addPhotoFiles = []; // staged File objects pending save
+
+function openAddSheet() {
+  _addPhotoFiles = [];
+  const existing = document.getElementById('selAddSheet');
+  if (existing) existing.remove();
+
+  // Sub options for the vendor picker. Keeps the link to canonical sub
+  // profile (vendor_sub_id) so the same vendor doesn't end up free-text-only
+  // when it's already in the subs roster.
+  const subOptions = state.subs.map(s =>
+    `<option value="${esc(s.id)}">${esc(s.company_name)}${s.primary_contact ? ' · ' + esc(s.primary_contact) : ''}</option>`
+  ).join('');
+
+  document.body.insertAdjacentHTML('beforeend', `
+    <div id="selAddSheet" class="sheet-back">
+      <div class="sheet">
+        <div class="sheet-header">
+          <div style="min-width:0;">
+            <h3>Add Selection</h3>
+            <div class="sub">${esc(state.project.albi_job_number || '')} · ${esc(state.project.customer_name || '')}</div>
+          </div>
+          <button class="sheet-close" id="addSheetX" type="button">&times;</button>
+        </div>
+        <div class="sheet-body">
+          <div class="field">
+            <div class="label">Category *</div>
+            <input type="text" id="addCategory" placeholder="e.g. Flooring, Cabinets, Countertops, Paint" autocomplete="off">
+          </div>
+
+          <div class="field">
+            <div class="label">Vendor</div>
+            <select id="addVendorSub">
+              <option value="">— Pick from subs, or type below —</option>
+              ${subOptions}
+            </select>
+          </div>
+
+          <div class="field">
+            <div class="label">Vendor name (if not in list)</div>
+            <input type="text" id="addVendorName" placeholder="Free-text vendor name" autocomplete="off">
+          </div>
+
+          <div class="field">
+            <div class="label">SKU / Product code</div>
+            <input type="text" id="addSku" placeholder="Optional" autocomplete="off">
+          </div>
+
+          <div class="field-row-3">
+            <div class="field">
+              <div class="label">Qty</div>
+              <input type="number" id="addQty" step="0.01" min="0">
+            </div>
+            <div class="field">
+              <div class="label">Unit</div>
+              <input type="text" id="addUnit" placeholder="SF, EA, LF">
+            </div>
+            <div class="field">
+              <div class="label">Unit $</div>
+              <input type="number" id="addUnitPrice" step="0.01" min="0">
+            </div>
+          </div>
+
+          <div class="field">
+            <div class="label">Customer notes (visible to customer)</div>
+            <textarea id="addCustomerNotes" placeholder="What the customer should know"></textarea>
+          </div>
+
+          <div class="field">
+            <div class="label">Internal notes</div>
+            <textarea id="addInternalNotes" placeholder="Only PMs see this"></textarea>
+          </div>
+
+          <div class="field">
+            <div class="label">Photos</div>
+            <div class="photo-uploader">
+              <div class="photo-grid" id="photoGrid">
+                <button type="button" class="photo-add-btn" id="photoAddBtn">
+                  <span class="ico">📷</span>
+                  <span>Take or upload</span>
+                </button>
+              </div>
+              <input type="file" class="photo-input" id="photoInput" accept="image/*" multiple>
+            </div>
+          </div>
+        </div>
+        <div class="sheet-footer" style="justify-content:space-between;">
+          <button class="sheet-btn" id="addSheetCancel" type="button">Cancel</button>
+          <button class="sheet-btn primary" id="addSheetSave" type="button">Save Selection</button>
+        </div>
+      </div>
+    </div>
+  `);
+
+  const sheet = document.getElementById('selAddSheet');
+  const close = () => { sheet.remove(); _addPhotoFiles = []; };
+  sheet.addEventListener('click', e => { if (e.target === sheet) close(); });
+  document.getElementById('addSheetX').addEventListener('click', close);
+  document.getElementById('addSheetCancel').addEventListener('click', close);
+  document.getElementById('addSheetSave').addEventListener('click', () => saveNewSelection(close));
+
+  // Photo input wiring
+  const photoInput = document.getElementById('photoInput');
+  document.getElementById('photoAddBtn').addEventListener('click', () => photoInput.click());
+  photoInput.addEventListener('change', e => {
+    const files = Array.from(e.target.files || []);
+    files.forEach(f => _addPhotoFiles.push(f));
+    e.target.value = ''; // allow re-picking same file
+    renderPhotoThumbs();
+  });
+
+  // Mutual-exclusion hint between vendor dropdown and free-text field — if a
+  // sub is picked, clear the free-text vendor name and vice versa, so we
+  // don't store both and have ambiguity later.
+  const vendorSel = document.getElementById('addVendorSub');
+  const vendorName = document.getElementById('addVendorName');
+  vendorSel.addEventListener('change', () => { if (vendorSel.value) vendorName.value = ''; });
+  vendorName.addEventListener('input', () => { if (vendorName.value) vendorSel.value = ''; });
+}
+
+function renderPhotoThumbs() {
+  const grid = document.getElementById('photoGrid');
+  if (!grid) return;
+  // Rebuild grid: thumbs first, then the add button at the end
+  grid.innerHTML = _addPhotoFiles.map((f, idx) => {
+    const url = URL.createObjectURL(f);
+    return `
+      <div class="photo-thumb" data-thumb-idx="${idx}">
+        <img src="${url}" alt="Photo ${idx + 1}">
+        <button type="button" class="remove" data-remove-idx="${idx}" title="Remove">&times;</button>
+      </div>
+    `;
+  }).join('') + `
+    <button type="button" class="photo-add-btn" id="photoAddBtn">
+      <span class="ico">📷</span>
+      <span>Add more</span>
+    </button>
+  `;
+  // Re-wire add button and remove buttons (innerHTML replaced everything)
+  document.getElementById('photoAddBtn').addEventListener('click', () => document.getElementById('photoInput').click());
+  grid.querySelectorAll('[data-remove-idx]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const i = parseInt(btn.dataset.removeIdx, 10);
+      _addPhotoFiles.splice(i, 1);
+      renderPhotoThumbs();
+    });
+  });
+}
+
+async function saveNewSelection(closeFn) {
+  const category = document.getElementById('addCategory').value.trim();
+  if (!category) { toast('Category is required'); return; }
+
+  const vendorSubId = document.getElementById('addVendorSub').value || null;
+  const vendorName  = document.getElementById('addVendorName').value.trim() || null;
+  const sku         = document.getElementById('addSku').value.trim() || null;
+  const qty         = parseFloat(document.getElementById('addQty').value) || null;
+  const unit        = document.getElementById('addUnit').value.trim() || null;
+  const unitPrice   = parseFloat(document.getElementById('addUnitPrice').value) || null;
+  const totalPrice  = (qty && unitPrice) ? +(qty * unitPrice).toFixed(2) : null;
+  const customerNotes = document.getElementById('addCustomerNotes').value.trim() || null;
+  const internalNotes = document.getElementById('addInternalNotes').value.trim() || null;
+
+  const saveBtn = document.getElementById('addSheetSave');
+  saveBtn.disabled = true;
+  saveBtn.textContent = _addPhotoFiles.length ? 'Uploading…' : 'Saving…';
+
+  // Upload photos first so we can land their URLs on the selection row in
+  // one insert. If any individual upload fails, the others still proceed and
+  // the selection is created with whatever uploaded successfully — better
+  // than nothing for the field-PM use case.
+  const photoUrls = [];
+  for (let i = 0; i < _addPhotoFiles.length; i++) {
+    saveBtn.textContent = `Uploading ${i + 1}/${_addPhotoFiles.length}…`;
+    const file = _addPhotoFiles[i];
+    const url = await uploadSelectionPhoto(file);
+    if (url) photoUrls.push(url);
+  }
+
+  saveBtn.textContent = 'Saving…';
+
+  const insert = {
+    project_id: projectId,
+    category,
+    vendor_sub_id: vendorSubId,
+    vendor_name: vendorName,
+    sku,
+    quantity: qty,
+    unit,
+    unit_price: unitPrice,
+    total_price: totalPrice,
+    customer_notes: customerNotes,
+    internal_notes: internalNotes,
+    attachment_urls: photoUrls.length ? photoUrls : null,
+    status: 'draft',
+    created_by: state.userEmail || 'mobile-pwa',
+  };
+
+  const { data: rows, error } = await sb.from('rebuild_selections')
+    .insert(insert)
+    .select('*, vendor_sub:rebuild_subs(id, company_name, primary_contact, email, phone)');
+
+  if (error) {
+    console.error(error);
+    saveBtn.disabled = false;
+    saveBtn.textContent = 'Save Selection';
+    toast('Save failed: ' + error.message);
+    return;
+  }
+
+  // Audit log — matches the desktop pattern so M&A diligence shows a clean
+  // unified history regardless of which surface created the row.
+  if (rows?.[0]) {
+    await sb.from('rebuild_selections_history').insert({
+      selection_id: rows[0].id,
+      action: 'created',
+      actor: state.userEmail || 'mobile-pwa',
+      details: `Created from mobile · ${category}${photoUrls.length ? ` · ${photoUrls.length} photo${photoUrls.length === 1 ? '' : 's'}` : ''}`,
+    }).then(({ error: histErr }) => { if (histErr) console.warn('history log failed:', histErr); });
+  }
+
+  // Optimistic insert into state so the new card shows immediately without
+  // waiting for the realtime channel to fire.
+  if (rows?.[0]) {
+    state.selections = [rows[0], ...state.selections];
+  }
+  closeFn();
+  render();
+  toast(`Added — ${category}`);
+}
+
+async function uploadSelectionPhoto(file) {
+  try {
+    const safe = (file.name || 'photo').replace(/[^a-zA-Z0-9._-]/g, '_');
+    const path = `projects/${projectId}/selections/${Date.now()}-${safe}`;
+    const { error: upErr } = await sb.storage.from('rebuild-documents').upload(path, file, {
+      contentType: file.type || 'image/jpeg',
+      upsert: false,
+    });
+    if (upErr) { console.error('photo upload:', upErr); return null; }
+    const { data: urlData } = sb.storage.from('rebuild-documents').getPublicUrl(path);
+    return urlData.publicUrl;
+  } catch (e) {
+    console.error('photo upload exception:', e);
+    return null;
+  }
 }
 
 init();
