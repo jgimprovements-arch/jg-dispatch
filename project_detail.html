@@ -1125,6 +1125,42 @@ async function _loadEmployee() {
   return null;
 }
 
+function _setClockButtonOnJob(sinceISO) {
+  const btn = document.getElementById('clockQuickBtn');
+  const textEl = document.getElementById('clockQuickText');
+  if (!btn || !textEl) return;
+  const sinceTime = new Date(sinceISO).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+  btn.classList.remove('other-job');
+  btn.classList.add('on-job');
+  textEl.innerHTML = `
+    <div class="capture-title">✓ Clocked In · since ${esc(sinceTime)}</div>
+    <div class="capture-sub">Tap to clock out</div>
+  `;
+}
+
+function _setClockButtonOtherJob(jobName) {
+  const btn = document.getElementById('clockQuickBtn');
+  const textEl = document.getElementById('clockQuickText');
+  if (!btn || !textEl) return;
+  btn.classList.remove('on-job');
+  btn.classList.add('other-job');
+  textEl.innerHTML = `
+    <div class="capture-title">Clocked in to ${esc(jobName || 'another job')}</div>
+    <div class="capture-sub">Tap to switch to this project</div>
+  `;
+}
+
+function _setClockButtonIdle(p) {
+  const btn = document.getElementById('clockQuickBtn');
+  const textEl = document.getElementById('clockQuickText');
+  if (!btn || !textEl) return;
+  btn.classList.remove('on-job', 'other-job');
+  textEl.innerHTML = `
+    <div class="capture-title">Clock In to This Job</div>
+    <div class="capture-sub">Punch in directly to ${esc(p.albi_job_number || 'this project')}</div>
+  `;
+}
+
 async function refreshClockButton() {
   const btn = document.getElementById('clockQuickBtn');
   const textEl = document.getElementById('clockQuickText');
@@ -1132,16 +1168,15 @@ async function refreshClockButton() {
   if (!btn || !textEl || !p) return;
 
   await _loadEmployee();
-  // Do NOT hide the button when no employee is found. Hiding it makes the
-  // failure invisible and Josh just sees "missing button". Showing it and
-  // letting the tap explain what's wrong is far more debuggable.
   btn.style.display = '';
 
-  // Look up any currently-open time entry for this user (only if we have an
-  // employee — otherwise there's nothing to query against).
+  // Pull any currently-open time entry for this user. Intentionally do NOT
+  // select project_id — older schemas don't have that column, and PostgREST
+  // 400s the whole query when a selected column doesn't exist. Match
+  // by job_id (Albi uniqueNumber) which IS guaranteed to exist.
   if (_clockState.employee) {
     const { data: open } = await sb.from('time_entries')
-      .select('id, job_id, job_name, clock_in, project_id')
+      .select('id, job_id, job_name, clock_in')
       .eq('employee_id', _clockState.employee.id)
       .is('clock_out', null)
       .order('clock_in', { ascending: false })
@@ -1151,33 +1186,30 @@ async function refreshClockButton() {
     _clockState.entry = null;
   }
 
-  btn.classList.remove('on-job', 'other-job');
-  const thisAlbiId = String(p.albi_project_id || '');
+  if (!_clockState.entry) {
+    _setClockButtonIdle(p);
+    return;
+  }
 
-  if (_clockState.entry) {
-    const entryJobId = String(_clockState.entry.job_id || '');
-    const entryProjectId = _clockState.entry.project_id || null;
-    const isThisProject = (entryJobId && entryJobId === thisAlbiId)
-      || (entryProjectId && entryProjectId === p.id);
-    const sinceTime = new Date(_clockState.entry.clock_in).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
-    if (isThisProject) {
-      btn.classList.add('on-job');
-      textEl.innerHTML = `
-        <div class="capture-title">✓ Clocked In · since ${esc(sinceTime)}</div>
-        <div class="capture-sub">Tap to clock out</div>
-      `;
-    } else {
-      btn.classList.add('other-job');
-      textEl.innerHTML = `
-        <div class="capture-title">Clocked in to ${esc(_clockState.entry.job_name || 'another job')}</div>
-        <div class="capture-sub">Tap to switch to this project</div>
-      `;
-    }
+  // Decide if the open entry is for THIS project. job_id is the Albi
+  // uniqueNumber stored as a string — compare both as strings to dodge
+  // number/string equality traps.
+  const thisAlbiId = String(p.albi_project_id || '').trim();
+  const entryJobId = String(_clockState.entry.job_id || '').trim();
+  const entryJobName = String(_clockState.entry.job_name || '').trim();
+  const thisJobName = String(p.albi_job_number || '').trim();
+
+  // Match by job_id first (most reliable), fall back to job_name match for
+  // projects where albi_project_id might be missing but the human-readable
+  // job number still matches what we'd have written on insert.
+  const isThisProject =
+       (thisAlbiId && entryJobId === thisAlbiId)
+    || (thisJobName && entryJobName === thisJobName);
+
+  if (isThisProject) {
+    _setClockButtonOnJob(_clockState.entry.clock_in);
   } else {
-    textEl.innerHTML = `
-      <div class="capture-title">Clock In to This Job</div>
-      <div class="capture-sub">Punch in directly to ${esc(p.albi_job_number || 'this project')}</div>
-    `;
+    _setClockButtonOtherJob(_clockState.entry.job_name);
   }
 }
 
@@ -1219,6 +1251,7 @@ async function handleClockTap() {
       btn.style.pointerEvents = '';
       if (error) { toast('Clock-out failed: ' + error.message); return; }
       _clockState.entry = null;
+      _setClockButtonIdle(p);  // paint immediately, don't wait for re-query
       toast('Clocked out');
       refreshClockButton();
       return;
@@ -1285,6 +1318,13 @@ async function handleClockTap() {
     }
   } else {
     _clockState.entry = data?.[0] || null;
+  }
+  // Paint on-job state IMMEDIATELY using the freshly-inserted row, before
+  // calling refreshClockButton. This guarantees the button updates even if
+  // the re-query later fails or matches don't line up (e.g., when
+  // p.albi_project_id is null on this project).
+  if (_clockState.entry?.clock_in) {
+    _setClockButtonOnJob(_clockState.entry.clock_in);
   }
   toast(`Clocked in · ${p.albi_job_number || 'this job'}`);
   refreshClockButton();
