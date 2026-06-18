@@ -496,6 +496,126 @@ body {
 .c-meta { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; font-family: 'DM Mono', monospace; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .c-meta .sep { opacity: .4; margin: 0 5px; }
 .c-chev { color: #c0c5ce; font-size: 18px; flex-shrink: 0; }
+
+/* ─── Payroll cutoff reminder modal ───────────────────────────────────
+   Fires on pay-period-end day for hourly employees. Modal blocks ALL
+   interaction with the rest of the page until acknowledged so the message
+   can't be missed by a tap-through-everything user. Red gradient + pulsing
+   border + warning icon makes it visually impossible to ignore. */
+.payroll-alert-back {
+  position: fixed; inset: 0;
+  background: rgba(13, 45, 94, .82);
+  z-index: 100000;
+  display: flex; align-items: center; justify-content: center;
+  padding: 20px;
+  backdrop-filter: blur(4px);
+  animation: payroll-fadein .25s ease-out;
+}
+@keyframes payroll-fadein { from { opacity: 0; } to { opacity: 1; } }
+.payroll-alert {
+  width: 100%; max-width: 480px;
+  background: #fff;
+  border-radius: 18px;
+  overflow: hidden;
+  box-shadow: 0 18px 50px rgba(0,0,0,.4);
+  animation: payroll-bounce .45s cubic-bezier(.34,1.56,.64,1);
+  position: relative;
+}
+@keyframes payroll-bounce { from { transform: scale(.7); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+.payroll-alert::before {
+  content: '';
+  position: absolute; inset: 0;
+  border-radius: 18px;
+  border: 4px solid #e53935;
+  pointer-events: none;
+  animation: payroll-pulse 1.4s ease-in-out infinite;
+}
+@keyframes payroll-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(229, 57, 53, .55); }
+  50%      { box-shadow: 0 0 0 18px rgba(229, 57, 53, 0); }
+}
+.payroll-alert-header {
+  background: linear-gradient(135deg, #e53935, #c62828);
+  color: #fff;
+  padding: 28px 20px 22px;
+  text-align: center;
+}
+.payroll-alert-icon {
+  font-size: 56px;
+  display: block;
+  margin-bottom: 8px;
+  animation: payroll-shake .9s ease-in-out infinite;
+}
+@keyframes payroll-shake {
+  0%, 100% { transform: rotate(0deg); }
+  20% { transform: rotate(-8deg); }
+  40% { transform: rotate(8deg); }
+  60% { transform: rotate(-5deg); }
+  80% { transform: rotate(5deg); }
+}
+.payroll-alert-title {
+  font-size: 22px; font-weight: 800;
+  letter-spacing: -.4px;
+  margin: 0;
+  text-transform: uppercase;
+}
+.payroll-alert-sub {
+  font-size: 13px;
+  opacity: .92;
+  margin-top: 4px;
+  font-weight: 600;
+}
+.payroll-alert-body {
+  padding: 22px 24px 24px;
+  text-align: center;
+  color: var(--text);
+}
+.payroll-alert-body p {
+  margin: 0 0 14px;
+  font-size: 15px;
+  line-height: 1.55;
+}
+.payroll-alert-body p.lead {
+  font-weight: 700;
+  font-size: 16px;
+  color: #c62828;
+}
+.payroll-alert-period {
+  display: inline-block;
+  margin: 6px 0 14px;
+  padding: 8px 14px;
+  background: rgba(229, 57, 53, .08);
+  color: #c62828;
+  border-radius: 8px;
+  font-weight: 700;
+  font-size: 14px;
+  font-family: 'DM Mono', monospace;
+}
+.payroll-alert-btn {
+  display: block;
+  width: 100%;
+  padding: 16px;
+  background: linear-gradient(135deg, #e53935, #c62828);
+  color: #fff;
+  border: 0;
+  border-radius: 12px;
+  font-size: 16px;
+  font-weight: 800;
+  letter-spacing: .3px;
+  cursor: pointer;
+  font-family: inherit;
+  text-transform: uppercase;
+  transition: transform .12s, box-shadow .12s;
+  box-shadow: 0 4px 14px rgba(229, 57, 53, .35);
+}
+.payroll-alert-btn:active {
+  transform: scale(.97);
+  box-shadow: 0 2px 8px rgba(229, 57, 53, .35);
+}
+.payroll-alert-btn:disabled {
+  opacity: .6;
+  cursor: wait;
+}
 </style>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
@@ -1340,6 +1460,12 @@ async function initApp(u) {
   await loadAll();
   await loadPayPeriodConfig();  // Pull pay period from app_settings (shared with admin)
 
+  // Fire the payroll cutoff reminder for hourly employees on the last day of
+  // the pay period. Runs early so the modal blocks the screen before they
+  // start interacting with anything else — they MUST acknowledge before
+  // continuing. Salaried employees are skipped (their hours auto-fill).
+  await maybeShowPayrollCutoffReminder();
+
   // Salary employees: auto-fill 8hr entries for weekdays in current pay period
   if (TC.employee && TC.employee.pay_type === 'salary') {
     await salaryBackfill();
@@ -1367,6 +1493,118 @@ async function initApp(u) {
       try { window.history.replaceState({}, '', window.location.pathname); } catch(e) {}
     }
   } catch(e) { console.warn('Deep-link handling failed:', e); }
+}
+
+// ── PAYROLL CUTOFF REMINDER ──────────────────────────────────────────────
+// Shows a blocking modal on the last day of the pay period for hourly
+// employees. They must tap "I Understand" to dismiss, and that ack writes
+// a row to payroll_reminder_acks (unique per employee+period) so we can
+// prove they were notified before their punches locked. The modal is
+// idempotent — if they already acknowledged this period, it won't show
+// again on subsequent page loads or device switches.
+async function maybeShowPayrollCutoffReminder() {
+  try {
+    if (!TC.employee || !TC.employee.id) return;
+    // Skip salaried employees — their hours are auto-filled, no punches to
+    // correct, no reason to hassle them with this alert.
+    if (TC.employee.pay_type === 'salary') return;
+    if (!TC.payPeriodConfig) return;
+
+    var period = _periodForDate(new Date());
+    if (!period) return;
+
+    var today = new Date(); today.setHours(0,0,0,0);
+    var endDay = new Date(period.end); endDay.setHours(0,0,0,0);
+    // Only fire on the actual last day. Same-day compare via YMD strings to
+    // dodge timezone offset issues that bit us in earlier date logic.
+    function ymd(d) { return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
+    if (ymd(today) !== ymd(endDay)) return;
+
+    var label = fmtDate(period.start) + ' - ' + fmtDate(period.end);
+
+    // Check if already acknowledged this period
+    var existing = await fetch(
+      TC.SB_URL + '/rest/v1/payroll_reminder_acks?employee_id=eq.' + TC.employee.id +
+      '&pay_period_label=eq.' + encodeURIComponent(label) + '&select=id&limit=1',
+      { headers: TC.HDR }
+    ).then(function(r){ return r.json(); }).catch(function(){ return []; });
+    if (Array.isArray(existing) && existing.length > 0) return; // already acked
+
+    _showPayrollCutoffModal(label, ymd(endDay));
+  } catch (e) {
+    console.warn('Payroll reminder check failed:', e);
+  }
+}
+
+function fmtDate(d) {
+  var dt = new Date(d);
+  return (dt.getMonth()+1) + '/' + dt.getDate() + '/' + dt.getFullYear();
+}
+
+function _showPayrollCutoffModal(periodLabel, periodEndYMD) {
+  // Build and insert the modal. It's added late (not pre-rendered in the
+  // HTML) so it only exists in the DOM when actually needed.
+  var existing = document.getElementById('payrollAlertBack');
+  if (existing) existing.remove();
+
+  var html =
+    '<div id="payrollAlertBack" class="payroll-alert-back">' +
+      '<div class="payroll-alert" role="dialog" aria-modal="true" aria-labelledby="paTitle">' +
+        '<div class="payroll-alert-header">' +
+          '<span class="payroll-alert-icon">⚠️</span>' +
+          '<div class="payroll-alert-title" id="paTitle">Payroll Cutoff Today</div>' +
+          '<div class="payroll-alert-sub">Action required before midnight</div>' +
+        '</div>' +
+        '<div class="payroll-alert-body">' +
+          '<p class="lead">Today is the LAST DAY to correct your punches for this pay period.</p>' +
+          '<div class="payroll-alert-period">' + periodLabel + '</div>' +
+          '<p>Review your time entries on the <b>Hours</b> tab. If anything is missing, wrong, or needs a note, submit a correction request <b>before midnight tonight</b>.</p>' +
+          '<p style="font-size:13px;color:#7884a0">After midnight this period locks and you <b>will not be paid</b> for hours that aren\'t in the system.</p>' +
+          '<button id="payrollAlertBtn" class="payroll-alert-btn">I Understand — Review My Hours</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  document.body.insertAdjacentHTML('beforeend', html);
+  document.body.style.overflow = 'hidden'; // lock page scroll while modal is up
+
+  document.getElementById('payrollAlertBtn').addEventListener('click', function() {
+    _acknowledgePayrollReminder(periodLabel, periodEndYMD);
+  });
+}
+
+async function _acknowledgePayrollReminder(periodLabel, periodEndYMD) {
+  var btn = document.getElementById('payrollAlertBtn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+
+  try {
+    // Log the acknowledgment. Unique constraint on (employee_id, pay_period_label)
+    // means a re-submit on the same period quietly no-ops at the DB layer —
+    // good defense against rapid double-taps.
+    await fetch(TC.SB_URL + '/rest/v1/payroll_reminder_acks', {
+      method: 'POST',
+      headers: Object.assign({}, TC.HDR, { 'Content-Type': 'application/json', 'Prefer': 'return=minimal,resolution=ignore-duplicates' }),
+      body: JSON.stringify({
+        employee_id: TC.employee.id,
+        employee_name: TC.employee.name,
+        pay_period_label: periodLabel,
+        pay_period_end: periodEndYMD,
+        acknowledged_via: 'timeclock',
+        user_agent: (navigator.userAgent || '').substring(0, 240),
+      }),
+    });
+  } catch (e) {
+    console.warn('Failed to log payroll reminder ack — closing modal anyway so user is not stuck:', e);
+  }
+
+  var back = document.getElementById('payrollAlertBack');
+  if (back) back.remove();
+  document.body.style.overflow = '';
+
+  // Drop them onto the Hours tab so they can immediately review punches.
+  // The CTA promised "Review My Hours" — deliver on it.
+  if (typeof switchTab === 'function') {
+    try { switchTab('hours'); } catch (e) { /* tab may not exist on all builds */ }
+  }
 }
 
 // ── SALARY AUTO-FILL ─────────────────────────────────────────────────────
