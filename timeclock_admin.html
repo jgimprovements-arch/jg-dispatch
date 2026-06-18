@@ -3979,41 +3979,53 @@ function _buildCutoffAckPanel(selPeriodLabel, periods) {
   var statusBg, statusLabel, statusColor;
   if (isCutoffToday) {
     statusBg = '#fff4e1'; statusColor = '#b87900';
-    statusLabel = 'Cutoff is TODAY · ' + pending.length + ' hourly employee' + (pending.length === 1 ? '' : 's') + ' have not acknowledged yet';
+    statusLabel = 'Cutoff is TODAY · ' + pending.length + '/' + hourly.length + ' not acknowledged yet';
   } else if (isPastCutoff) {
     statusBg = pending.length ? '#fde8e8' : '#e6f7ec';
     statusColor = pending.length ? '#c62828' : '#1e7d3f';
     statusLabel = pending.length
-      ? pending.length + ' employee' + (pending.length === 1 ? '' : 's') + ' did NOT acknowledge before this period locked'
-      : 'All hourly employees acknowledged the cutoff for this period ✓';
+      ? pending.length + ' did NOT acknowledge before period locked'
+      : 'All hourly employees acknowledged ✓';
   } else {
     statusBg = '#f0f4fb'; statusColor = '#0d2d5e';
-    statusLabel = 'Cutoff is ' + fmtD(period.end) + ' · ' + acked.length + '/' + hourly.length + ' acknowledged so far';
+    statusLabel = 'Cutoff ' + fmtD(period.end) + ' · ' + acked.length + '/' + hourly.length + ' acknowledged';
   }
+
+  // Default-collapsed body. The header carries the status, so when collapsed
+  // an admin still sees the actionable count at a glance — clicking expands
+  // the per-employee detail. On cutoff day with pending holdouts the panel
+  // auto-expands since that IS the action moment.
+  var bodyId = 'cutoff-ack-body-' + Math.random().toString(36).substring(2, 9);
+  var defaultOpen = isCutoffToday && pending.length > 0;
+  var bodyStyle = defaultOpen ? '' : 'display:none;';
+  var chevron = defaultOpen ? '▼' : '▶';
 
   var html = '';
   html += '<div class="card" style="margin-bottom:14px;border-left:4px solid ' + statusColor + ';">';
-  html += '<div class="card-hdr"><div class="card-title">Payroll Cutoff Notifications — ' + selPeriodLabel + '</div></div>';
-  html += '<div style="padding:14px 16px;background:' + statusBg + ';color:' + statusColor + ';font-weight:700;font-size:13px;">' + statusLabel + '</div>';
-  html += '<div style="padding:12px 16px;display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:8px;">';
+  html += '<div style="display:flex;align-items:center;cursor:pointer;padding:10px 14px;background:' + statusBg + ';color:' + statusColor + ';" '
+        + 'onclick="var b=document.getElementById(\'' + bodyId + '\');var c=document.getElementById(\'' + bodyId + '-chev\');'
+        + 'if(b.style.display===\'none\'){b.style.display=\'block\';c.textContent=\'▼\';}else{b.style.display=\'none\';c.textContent=\'▶\';}">';
+  html += '<span id="' + bodyId + '-chev" style="margin-right:8px;font-size:10px;">' + chevron + '</span>';
+  html += '<span style="font-weight:700;font-size:12px;flex:1;">Payroll Cutoff · ' + statusLabel + '</span>';
+  html += '<span style="font-size:11px;opacity:.75;">' + selPeriodLabel + '</span>';
+  html += '</div>';
+  html += '<div id="' + bodyId + '" style="' + bodyStyle + 'padding:8px 12px;display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:6px;">';
 
-  // Pending first (the actionable list)
+  // Pending first (the actionable list). Compact: small icon, single line of
+  // text, no separate "NOT ACKNOWLEDGED" line — the red icon carries the
+  // status, no need to repeat it.
   pending.forEach(function(e){
-    html += '<div style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:#fff;border:1px solid #e3e7f0;border-radius:8px;">';
-    html += '<span style="font-size:18px;color:#c62828;">⚠️</span>';
-    html += '<div style="flex:1;min-width:0;">';
-    html += '<div style="font-size:13px;font-weight:700;color:#1a2540;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + (e.name || '—') + '</div>';
-    html += '<div style="font-size:10px;color:#c62828;font-weight:600;text-transform:uppercase;letter-spacing:.3px;">Not acknowledged</div>';
-    html += '</div></div>';
+    html += '<div title="Not acknowledged" style="display:flex;align-items:center;gap:6px;padding:5px 8px;background:#fef1f1;border:1px solid #f5cccc;border-radius:6px;font-size:12px;">';
+    html += '<span style="color:#c62828;flex-shrink:0;">⚠</span>';
+    html += '<span style="font-weight:600;color:#1a2540;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + (e.name || '—') + '</span>';
+    html += '</div>';
   });
   acked.forEach(function(r){
     var when = r.ack.acknowledged_at ? new Date(r.ack.acknowledged_at).toLocaleString('en-US', { month: 'numeric', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '';
-    html += '<div style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:#f6fbf8;border:1px solid #cfe8d6;border-radius:8px;">';
-    html += '<span style="font-size:18px;color:#1e7d3f;">✓</span>';
-    html += '<div style="flex:1;min-width:0;">';
-    html += '<div style="font-size:13px;font-weight:700;color:#1a2540;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + (r.emp.name || '—') + '</div>';
-    html += '<div style="font-size:10px;color:#7884a0;font-family:\'DM Mono\',monospace;">' + when + '</div>';
-    html += '</div></div>';
+    html += '<div title="Acknowledged ' + when + '" style="display:flex;align-items:center;gap:6px;padding:5px 8px;background:#f3faf5;border:1px solid #cfe8d6;border-radius:6px;font-size:12px;">';
+    html += '<span style="color:#1e7d3f;flex-shrink:0;">✓</span>';
+    html += '<span style="font-weight:600;color:#1a2540;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + (r.emp.name || '—') + '</span>';
+    html += '</div>';
   });
 
   html += '</div></div>';
