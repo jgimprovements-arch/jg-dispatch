@@ -1163,24 +1163,36 @@ async function runAdjusterAnalysis(){
     const d=await r.json();
     const t=d.content.filter(b=>b.type==='text').map(b=>b.text).join('');
     S.adjResult=extractJSON(t);
-    // Truncation can be signaled three ways and ALL need a banner:
-    //   1. The Anthropic API returns stop_reason='max_tokens' (clean cutoff)
-    //   2. Our extractJSON ran the repair path and tagged the result (mid-
-    //      string cutoff that we patched up)
-    //   3. The parsed object has zero disputed_items — this means the model
-    //      hit the limit BEFORE writing the items array, which is the most
-    //      common reason the page would render empty
     const truncatedAPI = d.stop_reason==='max_tokens';
     const truncatedParse = !!S.adjResult.__truncated;
     delete S.adjResult.__truncated;
+    // Schema-name fallback — if the model called the items array something
+    // other than disputed_items (we've seen it use `items`, `disputes`,
+    // `line_items`, `disputed`), pull from the first one that has rows so a
+    // schema drift doesn't silently render empty.
+    if (!Array.isArray(S.adjResult.disputed_items) || !S.adjResult.disputed_items.length) {
+      const altKeys = ['items','disputes','line_items','disputed','findings','rebuttal_items'];
+      for (const k of altKeys) {
+        if (Array.isArray(S.adjResult[k]) && S.adjResult[k].length) {
+          console.warn(`Model returned items under '${k}' instead of 'disputed_items' — normalizing.`);
+          S.adjResult.disputed_items = S.adjResult[k];
+          break;
+        }
+      }
+    }
     S.adjResult.disputed_items=(S.adjResult.disputed_items||[]).map((d,i)=>({...d,id:d.id||'DISP-'+String(i+1).padStart(3,'0')}));
+
+    // Diagnostic logging — full response goes to console so we can inspect
+    // what the model actually returned without needing the user to paste it.
+    console.log('AI response stop_reason:', d.stop_reason, '| length:', t.length, '| top-level keys:', Object.keys(S.adjResult));
+    console.log('AI response preview (first 500 / last 500):\n--- START ---\n', t.substring(0, 500), '\n... [' + Math.max(0, t.length - 1000) + ' chars omitted] ...\n', t.substring(Math.max(0, t.length - 500)), '\n--- END ---');
+
     if (truncatedAPI || truncatedParse) {
       S.err = 'Warning: AI response was truncated at the model output limit ('+S.adjResult.disputed_items.length+' disputed items recovered). Re-run if you need a complete analysis — the model usually produces a complete set on retry.';
     } else if (!S.adjResult.disputed_items.length) {
-      // Parsed cleanly but no items — either the model genuinely found nothing
-      // to dispute (rare) or the prompt didn't trigger the analysis path
-      // correctly. Surface the response length so we can tell which.
-      S.err = 'AI returned no disputed items. Response was '+t.length+' chars. This usually means the adjuster\'s estimate was too short to analyze or the documents didn\'t load — verify uploads and re-run.';
+      const keys = Object.keys(S.adjResult).join(', ') || '(none)';
+      const preview = t.substring(0, 240).replace(/\s+/g, ' ');
+      S.err = 'AI returned no disputed items. Response was '+t.length+' chars. Top-level keys: '+keys+'. Preview: '+preview+'… (full response in browser console — F12 → Console tab)';
     }
     S.phase='adj_review';S.prog='';
   }catch(e){S.err=e.message;S.prog=''}
