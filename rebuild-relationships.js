@@ -62,6 +62,7 @@ async function loadRelationships() {
 const REL_ROLE_LABELS = {
   customer: 'Customer',
   insurance_adjuster: 'Insurance Adjuster',
+  insurance_carrier: 'Insurance Company',
   insurance_carrier_rep: 'Insurance Carrier Rep',
   public_adjuster: 'Public Adjuster',
   real_estate_agent: 'Real Estate Agent',
@@ -81,7 +82,7 @@ const REL_ROLE_LABELS = {
 
 const REL_GROUP_ORDER = [
   { key: 'Customer & Property', roles: ['customer','property_manager'] },
-  { key: 'Insurance', roles: ['insurance_adjuster','insurance_carrier_rep','public_adjuster'] },
+  { key: 'Insurance', roles: ['insurance_carrier','insurance_adjuster','insurance_carrier_rep','public_adjuster'] },
   { key: 'Financial', roles: ['lender','mortgage_company','attorney'] },
   { key: 'Real Estate', roles: ['real_estate_agent'] },
   { key: 'Trade & Supplier', roles: ['subcontractor','vendor'] },
@@ -125,6 +126,26 @@ function renderRelationshipsTab() {
         email: p.albi_pm_email || null,
         phone: null,
         company: 'JG Restoration',
+        is_primary: false,
+      });
+    }
+
+    // Insurance carrier (the organization itself) — from `insurance_carrier`
+    // text column. Albi treats the carrier as a separate entity from the
+    // adjuster (one is the company, the other is the person handling the
+    // claim). We mirror that distinction so the relationships tab matches
+    // what the PM sees in Albi. Falls back to no contact info since
+    // rebuild_projects doesn't currently store carrier phone/address.
+    if (p.insurance_carrier) {
+      pushSynth({
+        id: '_synth_carrier',
+        _synth: true,
+        source: 'albi',
+        role: 'insurance_carrier',
+        display_name: p.insurance_carrier,
+        email: null,
+        phone: p.insurance_carrier_phone || null,   // safe even if column doesn't exist
+        company: p.insurance_carrier,
         is_primary: false,
       });
     }
@@ -218,6 +239,7 @@ function renderRelationshipsTab() {
             <optgroup label="Albi roles">
               <option value="customer">Customer</option>
               <option value="insurance_adjuster">Insurance Adjuster</option>
+              <option value="insurance_carrier">Insurance Company</option>
               <option value="insurance_carrier_rep">Insurance Carrier Rep</option>
               <option value="public_adjuster">Public Adjuster</option>
               <option value="real_estate_agent">Real Estate Agent</option>
