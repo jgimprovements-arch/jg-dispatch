@@ -106,9 +106,6 @@ async function loadRelationships() {
   if (relRes.error) { console.warn('loadRelationships', relRes.error); state.relationships = []; }
   else { state.relationships = relRes.data || []; }
 
-  // Silently tolerate missing albi-contacts table — it doesn't exist until
-  // the migration runs, and we don't want every project page to throw a
-  // console error in the meantime.
   if (albiRes.error) {
     if (!/does not exist|relation .* does not exist/i.test(albiRes.error.message || '')) {
       console.warn('loadAlbiContacts', albiRes.error);
@@ -116,6 +113,71 @@ async function loadRelationships() {
     state.albiContacts = [];
   } else {
     state.albiContacts = albiRes.data || [];
+  }
+
+  // Fire-and-forget background sync from Albi. Self-throttled to once per
+  // hour per project via localStorage — multiple loadRelationships() calls
+  // in the same session won't trigger duplicate Albi hits. The function
+  // refreshes state.albiContacts + re-renders if it fetches new data.
+  syncAlbiContactsForActiveProject().catch(e => console.warn('Albi sync error:', e));
+}
+
+// ─── Albi auto-sync (background, throttled) ─────────────────────────────
+// Runs after loadRelationships. If contacts for this project haven't been
+// synced in the last hour, fire jg-albi-contact-sync, update state, and
+// trigger a re-render. Throttle key is per-project so opening different
+// projects doesn't gate each other.
+async function syncAlbiContactsForActiveProject() {
+  if (!state.activeProjectId) return;
+  const cacheKey = 'jg_albi_contact_sync_' + state.activeProjectId;
+  const lastSync = parseInt(localStorage.getItem(cacheKey) || '0', 10);
+  const oneHour = 60 * 60 * 1000;
+  if (Date.now() - lastSync < oneHour) return;
+  // Stamp immediately to prevent concurrent loadRelationships() calls from
+  // racing into a duplicate sync (the "double-fire" problem).
+  localStorage.setItem(cacheKey, String(Date.now()));
+
+  let key;
+  try {
+    key = (typeof getMailerKey === 'function') ? await getMailerKey() : null;
+  } catch (e) { key = null; }
+  if (!key) {
+    localStorage.removeItem(cacheKey);
+    console.warn('Skipping Albi sync — no MAILER_API_KEY available');
+    return;
+  }
+
+  try {
+    const r = await fetch('https://jg-albi-contact-sync.josh-70f.workers.dev/sync', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': key },
+      body: JSON.stringify({ project_id: state.activeProjectId }),
+    });
+    const result = await r.json();
+    if (!result.ok) {
+      console.warn('Albi sync returned error:', result.error);
+      localStorage.removeItem(cacheKey); // clear so user can retry sooner
+      return;
+    }
+    console.log(`Albi contacts synced: ${result.synced} synced, ${result.pruned} pruned`);
+
+    // Re-fetch the contacts table to pick up the fresh rows
+    if (state.activeProjectId === result.project_id) {
+      const { data } = await sb.from('rebuild_project_albi_contacts')
+        .select('*')
+        .eq('project_id', state.activeProjectId)
+        .order('relationship_type, display_name');
+      state.albiContacts = data || [];
+      // Trigger a re-render if the relationships tab is showing. renderDetail
+      // is the host app's main re-render function — defined in rebuild.html
+      // and exposed via window because all modules share global scope.
+      if (state.tab === 'relationships' && typeof renderDetail === 'function') {
+        renderDetail();
+      }
+    }
+  } catch (e) {
+    console.warn('Albi sync exception:', e);
+    localStorage.removeItem(cacheKey);
   }
 }
 
