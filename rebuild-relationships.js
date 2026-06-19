@@ -349,7 +349,6 @@ function renderRelationshipsTab() {
   });
 
   const groupsHtml = REL_GROUP_ORDER
-    .concat([{ key: 'Other', roles: [] }])
     .filter(g => (byGroup[g.key] || []).length > 0)
     .map(g => `
       <div class="rel-group">
