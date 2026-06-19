@@ -90,7 +90,79 @@ const REL_GROUP_ORDER = [
 ];
 
 function renderRelationshipsTab() {
-  const rels = state.relationships || [];
+  const rels = (state.relationships || []).slice();
+
+  // ── Synthesize virtual cards from Albi-synced project fields ──────────
+  // The PM and insurance adjuster aren't stored in rebuild_project_relationships
+  // by default — they live as columns on rebuild_projects from the Albi sync.
+  // Rendering them as virtual cards keeps the Relationships tab a single
+  // source of truth ("everyone connected to this job") instead of forcing
+  // the user to look at the header AND the tab to see the full picture.
+  // Dedupe rule: if a real relationship already has the same email, the
+  // real one wins (user-added context takes precedence over auto-sync).
+  if (state.project) {
+    const p = state.project;
+    const existingEmails = new Set(rels.map(r => (r.email || '').toLowerCase()).filter(Boolean));
+
+    function pushSynth(synth) {
+      if (!synth.display_name) return;
+      const em = (synth.email || '').toLowerCase();
+      if (em && existingEmails.has(em)) return; // user has a real row already
+      rels.push(synth);
+      if (em) existingEmails.add(em);
+    }
+
+    // Project Manager — `albi_pm_name` / `albi_pm_email`. Almost always set
+    // post-Albi-sync. Without this card a PM can navigate to a job and not
+    // see themselves listed, which is jarring.
+    if (p.albi_pm_name || p.albi_pm_email) {
+      pushSynth({
+        id: '_synth_pm',
+        _synth: true,
+        source: 'albi',
+        role: 'project_manager',
+        display_name: p.albi_pm_name || p.albi_pm_email,
+        email: p.albi_pm_email || null,
+        phone: null,
+        company: 'JG Restoration',
+        is_primary: false,
+      });
+    }
+
+    // Insurance adjuster — `insurance_adjuster_name` / `_email` / `_phone`
+    if (p.insurance_adjuster_name || p.insurance_adjuster_email) {
+      pushSynth({
+        id: '_synth_adjuster',
+        _synth: true,
+        source: 'albi',
+        role: 'insurance_adjuster',
+        display_name: p.insurance_adjuster_name || p.insurance_adjuster_email,
+        email: p.insurance_adjuster_email || null,
+        phone: p.insurance_adjuster_phone || null,
+        company: p.insurance_carrier || null,
+        is_primary: false,
+      });
+    }
+
+    // Customer secondary contact — `customer_email_secondary` if present
+    // and the primary customer email isn't the same value. Best guess on
+    // the name since Albi typically stores it as one field. Uses 'customer'
+    // role so it groups with the primary customer card.
+    if (p.customer_email_secondary && p.customer_email_secondary !== p.customer_email) {
+      pushSynth({
+        id: '_synth_customer_secondary',
+        _synth: true,
+        source: 'albi',
+        role: 'customer',
+        display_name: p.customer_email_secondary,
+        email: p.customer_email_secondary,
+        phone: null,
+        company: null,
+        is_primary: false,
+      });
+    }
+  }
+
   // Group rels
   const byGroup = {};
   REL_GROUP_ORDER.forEach(g => byGroup[g.key] = []);
@@ -273,7 +345,9 @@ function relCardDesktop(r) {
         ${phoneBtn}
         ${smsBtn}
         ${emailBtn}
-        <button class="rel-action-btn rel-edit-btn" data-rel-edit="${esc(r.id)}"><span style="margin-right:4px;">✎</span>Edit</button>
+        ${r._synth
+          ? `<span class="rel-action-btn disabled" title="Synced from Albi — edit in Albi to change">From Albi</span>`
+          : `<button class="rel-action-btn rel-edit-btn" data-rel-edit="${esc(r.id)}"><span style="margin-right:4px;">✎</span>Edit</button>`}
       </div>
     </div>
   `;
