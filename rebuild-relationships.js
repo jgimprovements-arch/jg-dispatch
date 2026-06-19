@@ -68,13 +68,15 @@
     if (/customer|insured|homeowner/.test(r)) return 'customer';
     if (/public\s*adjuster/.test(r)) return 'public_adjuster';
     if (/adjuster/.test(r)) return 'insurance_adjuster';
+    if (/insurance\s*agent|agent/.test(r)) return 'insurance_agent';
     if (/carrier\s*rep|representative/.test(r)) return 'insurance_carrier_rep';
     if (/insurance|carrier/.test(r)) return 'insurance_carrier';
     if (/lender|mortgage|bank/.test(r)) return 'mortgage_company';
     if (/attorney|lawyer/.test(r)) return 'attorney';
-    if (/real\s*estate|realtor|agent/.test(r)) return 'real_estate_agent';
+    if (/real\s*estate|realtor/.test(r)) return 'real_estate_agent';
     if (/property\s*manage/.test(r)) return 'property_manager';
     if (/project\s*manage|\bpm\b/.test(r)) return 'project_manager';
+    if (/sales/.test(r)) return 'sales_person';
     if (/estimator/.test(r)) return 'estimator';
     if (/subcontractor|\bsub\b/.test(r)) return 'subcontractor';
     if (/vendor|supplier/.test(r)) return 'vendor';
@@ -189,6 +191,8 @@ const REL_ROLE_LABELS = {
   insurance_carrier: 'Insurance Company',
   insurance_carrier_rep: 'Insurance Carrier Rep',
   public_adjuster: 'Public Adjuster',
+  insurance_agent: 'Insurance Agent',
+  sales_person: 'Sales Person',
   real_estate_agent: 'Real Estate Agent',
   lender: 'Lender',
   property_manager: 'Property Manager',
@@ -206,11 +210,11 @@ const REL_ROLE_LABELS = {
 
 const REL_GROUP_ORDER = [
   { key: 'Customer & Property', roles: ['customer','property_manager'] },
-  { key: 'Insurance', roles: ['insurance_carrier','insurance_adjuster','insurance_carrier_rep','public_adjuster'] },
+  { key: 'Insurance', roles: ['insurance_carrier','insurance_adjuster','insurance_carrier_rep','insurance_agent','public_adjuster'] },
   { key: 'Financial', roles: ['lender','mortgage_company','attorney'] },
   { key: 'Real Estate', roles: ['real_estate_agent'] },
   { key: 'Trade & Supplier', roles: ['subcontractor','vendor'] },
-  { key: 'JG Team', roles: ['project_manager','estimator','tech','carpenter','office_admin'] },
+  { key: 'JG Team', roles: ['project_manager','sales_person','estimator','tech','carpenter','office_admin'] },
   { key: 'Other', roles: ['other'] },
 ];
 
