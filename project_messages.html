@@ -217,6 +217,11 @@ function toast(msg) {
   setTimeout(() => t.classList.remove('on'), 2000);
 }
 
+// Hide server-generated document-upload notifications (Zapier writes these
+// when photos/docs get pushed to Albi). The Documents tab is the right
+// place to see them; the Messages view should be conversation threads only.
+const _isDocAutoMessage = m => !!(m && m.body && /^Document uploaded from JG Platform/.test(m.body));
+
 async function init() {
   if (!projectId) return showEmpty('Missing project', 'Open from project list');
   const [{ data: project }, { data: messages }, { data: subs }] = await Promise.all([
@@ -226,7 +231,7 @@ async function init() {
   ]);
   if (!project) return showEmpty('Project not found', 'It may have been deleted.');
   state.project = project;
-  state.messages = messages || [];
+  state.messages = (messages || []).filter(m => !_isDocAutoMessage(m));
   state.subs = subs || [];
 
   document.getElementById('topJob').textContent = `Messages · ${project.albi_job_number || ''}`;
@@ -240,7 +245,7 @@ async function init() {
     .on('postgres_changes', { event: '*', schema: 'public', table: 'rebuild_messages', filter: `project_id=eq.${projectId}` },
         async () => {
           const { data } = await sb.from('rebuild_messages').select('*').eq('project_id', projectId).order('created_at', { ascending: false }).limit(50);
-          state.messages = data || [];
+          state.messages = (data || []).filter(m => !_isDocAutoMessage(m));
           render();
         })
     .subscribe();

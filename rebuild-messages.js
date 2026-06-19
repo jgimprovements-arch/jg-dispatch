@@ -17,13 +17,21 @@
 // Loaded AFTER rebuild-utils.js (toast, esc, usd, etc.)
 // ════════════════════════════════════════════════════════════════════════════
 
+// Document-upload notifications get generated server-side by Zapier when a
+// PM uploads photos/docs (the body always begins "Document uploaded from
+// JG Platform under category: …"). They exist in rebuild_messages because
+// they're real outbound emails, but they're noise in the conversation
+// thread — hide from the Messages view. Documents tab still shows them
+// via rebuild_documents, which is the right home for them.
+const _isDocAutoMessage = m => !!(m && m.body && /^Document uploaded from JG Platform/.test(m.body));
+
 async function loadMessages() {
   if (!sb) { state.messages = []; return; }
   const { data } = await sb.from('rebuild_messages')
     .select('*, recipient_sub:rebuild_subs(id, company_name, primary_contact), attachments:rebuild_message_attachments(id, file_name, file_size, mime_type, public_url)')
     .eq('project_id', state.activeProjectId)
     .order('created_at', { ascending: false }).limit(200);
-  state.messages = data || [];
+  state.messages = (data || []).filter(m => !_isDocAutoMessage(m));
 }
 
 function renderMessagesTab() {
