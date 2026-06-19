@@ -526,8 +526,11 @@ function toast(msg) {
 const ROLE_LABELS = {
   customer: 'Customer',
   insurance_adjuster: 'Insurance Adjuster',
+  insurance_carrier: 'Insurance Company',
   insurance_carrier_rep: 'Insurance Carrier Rep',
+  insurance_agent: 'Insurance Agent',
   public_adjuster: 'Public Adjuster',
+  sales_person: 'Sales Person',
   real_estate_agent: 'Real Estate Agent',
   lender: 'Lender',
   property_manager: 'Property Manager',
@@ -546,18 +549,51 @@ const ROLE_LABELS = {
 // Group order
 const GROUP_ORDER = [
   { key: 'Customer & Property', roles: ['customer','property_manager'] },
-  { key: 'Insurance', roles: ['insurance_adjuster','insurance_carrier_rep','public_adjuster'] },
+  { key: 'Insurance', roles: ['insurance_carrier','insurance_adjuster','insurance_carrier_rep','insurance_agent','public_adjuster'] },
   { key: 'Financial', roles: ['lender','mortgage_company','attorney'] },
   { key: 'Real Estate', roles: ['real_estate_agent'] },
   { key: 'Trade & Supplier', roles: ['subcontractor','vendor'] },
-  { key: 'JG Team', roles: ['project_manager','estimator','tech','carpenter','office_admin'] },
+  { key: 'JG Team', roles: ['project_manager','sales_person','estimator','tech','carpenter','office_admin'] },
   { key: 'Other', roles: ['other'] },
 ];
+
+// Albi → local role mapper. Albi uses its own taxonomy; map each label to
+// the closest local role key so contacts land in the right group. Permissive —
+// anything we don't recognize falls through to 'other'.
+function _mapAlbiRoleToLocal(albiRelationshipType, albiContactType) {
+  const r = String(albiRelationshipType || '').toLowerCase().trim();
+  const t = String(albiContactType || '').toLowerCase().trim();
+  if (t === 'organization') {
+    if (/insurance/.test(r) || /carrier/.test(r)) return 'insurance_carrier';
+    if (/mortgage/.test(r) || /bank/.test(r) || /lender/.test(r)) return 'mortgage_company';
+    if (/attorney|law/.test(r)) return 'attorney';
+    if (/property\s*manage/.test(r)) return 'property_manager';
+  }
+  if (/customer|insured|homeowner/.test(r)) return 'customer';
+  if (/public\s*adjuster/.test(r)) return 'public_adjuster';
+  if (/adjuster/.test(r)) return 'insurance_adjuster';
+  if (/insurance\s*agent|\bagent\b/.test(r)) return 'insurance_agent';
+  if (/carrier\s*rep|representative/.test(r)) return 'insurance_carrier_rep';
+  if (/insurance|carrier/.test(r)) return 'insurance_carrier';
+  if (/lender|mortgage|bank/.test(r)) return 'mortgage_company';
+  if (/attorney|lawyer/.test(r)) return 'attorney';
+  if (/real\s*estate|realtor/.test(r)) return 'real_estate_agent';
+  if (/property\s*manage/.test(r)) return 'property_manager';
+  if (/project\s*manage|\bpm\b/.test(r)) return 'project_manager';
+  if (/sales/.test(r)) return 'sales_person';
+  if (/estimator/.test(r)) return 'estimator';
+  if (/subcontractor|\bsub\b/.test(r)) return 'subcontractor';
+  if (/vendor|supplier/.test(r)) return 'vendor';
+  if (/carpenter/.test(r)) return 'carpenter';
+  if (/tech/.test(r)) return 'tech';
+  if (/office|admin/.test(r)) return 'office_admin';
+  return 'other';
+}
 
 async function init() {
   if (!projectId) { showError('Missing project ID.'); return; }
   const { data: project, error } = await sb.from('rebuild_projects')
-    .select('id, albi_project_id, albi_job_number, customer_name, property_address')
+    .select('*')
     .eq('id', projectId).maybeSingle();
   if (error || !project) { showError('Project not found.'); return; }
   state.project = project;
@@ -567,26 +603,103 @@ async function init() {
   render();
   wire();
 
-  // Realtime sync
+  // Realtime sync — listen on both the manual relationships table AND the
+  // Albi mirror so a desktop sync update appears here without manual reload.
   sb.channel('rel_' + projectId)
     .on('postgres_changes', { event: '*', schema: 'public', table: 'rebuild_project_relationships', filter: `project_id=eq.${projectId}` },
+      async () => { await loadRelationships(); render(); })
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'rebuild_project_albi_contacts', filter: `project_id=eq.${projectId}` },
       async () => { await loadRelationships(); render(); })
     .subscribe();
 }
 
 async function loadRelationships() {
-  const { data, error } = await sb.from('rebuild_project_relationships')
-    .select('*')
-    .eq('project_id', projectId)
-    .is('deleted_at', null)
-    .order('is_primary', { ascending: false })
-    .order('display_name');
-  if (error) { console.error(error); state.relationships = []; return; }
-  state.relationships = data || [];
+  // Two parallel reads: hand-edited rows and Albi-synced contact mirror.
+  // Either can be empty. Render merges and dedupes them.
+  const [relRes, albiRes] = await Promise.all([
+    sb.from('rebuild_project_relationships')
+      .select('*')
+      .eq('project_id', projectId)
+      .is('deleted_at', null)
+      .order('is_primary', { ascending: false })
+      .order('display_name'),
+    sb.from('rebuild_project_albi_contacts')
+      .select('*')
+      .eq('project_id', projectId)
+      .order('relationship_type, display_name'),
+  ]);
+  if (relRes.error) { console.error(relRes.error); state.relationships = []; }
+  else { state.relationships = relRes.data || []; }
+
+  // Silently tolerate missing albi-contacts table (e.g. on fresh dev clones
+  // where the migration hasn't run).
+  if (albiRes.error) {
+    if (!/does not exist|relation .* does not exist/i.test(albiRes.error.message || '')) {
+      console.warn('loadAlbiContacts', albiRes.error);
+    }
+    state.albiContacts = [];
+  } else {
+    state.albiContacts = albiRes.data || [];
+  }
 }
 
 function render() {
-  if (!state.relationships.length) {
+  // Build the merged display list: manual relationships + Albi-mirror
+  // contacts + fallback project-column synths. Dedupe by email and by
+  // name+role so the same person never shows twice.
+  const rels = (state.relationships || []).slice();
+  const existingEmails = new Set(rels.map(r => (r.email || '').toLowerCase()).filter(Boolean));
+  const existingNameRole = new Set(rels.map(r => (r.display_name || '').toLowerCase() + '|' + (r.role || '')).filter(s => s.length > 1));
+
+  function pushSynth(synth) {
+    if (!synth.display_name) return;
+    const em = (synth.email || '').toLowerCase();
+    if (em && existingEmails.has(em)) return;
+    const nr = (synth.display_name || '').toLowerCase() + '|' + synth.role;
+    if (existingNameRole.has(nr)) return;
+    rels.push(synth);
+    if (em) existingEmails.add(em);
+    existingNameRole.add(nr);
+  }
+
+  // Tier 2 — Albi contact mirror table
+  (state.albiContacts || []).forEach(c => {
+    pushSynth({
+      id: '_synth_albi_' + c.id,
+      _synth: true,
+      source: 'albi',
+      role: _mapAlbiRoleToLocal(c.relationship_type, c.contact_type),
+      display_name: c.display_name || c.full_name || c.company_name,
+      email: c.email || null,
+      phone: c.phone || null,
+      company: c.company_name || null,
+      is_primary: !!c.is_primary,
+    });
+  });
+
+  // Tier 3 — fallback synths from rebuild_projects columns. These cover any
+  // contact we have a column for but no Albi mirror row for yet.
+  if (state.project) {
+    const p = state.project;
+    if (p.albi_pm_name || p.albi_pm_email) {
+      pushSynth({ id: '_synth_pm', _synth: true, source: 'albi', role: 'project_manager',
+        display_name: p.albi_pm_name || p.albi_pm_email, email: p.albi_pm_email || null,
+        phone: null, company: 'JG Restoration', is_primary: false });
+    }
+    if (p.insurance_carrier) {
+      pushSynth({ id: '_synth_carrier', _synth: true, source: 'albi', role: 'insurance_carrier',
+        display_name: p.insurance_carrier, email: null, phone: p.insurance_carrier_phone || null,
+        company: p.insurance_carrier, is_primary: false });
+    }
+    if (p.insurance_adjuster_name || p.insurance_adjuster_email) {
+      pushSynth({ id: '_synth_adjuster', _synth: true, source: 'albi', role: 'insurance_adjuster',
+        display_name: p.insurance_adjuster_name || p.insurance_adjuster_email,
+        email: p.insurance_adjuster_email || null, phone: p.insurance_adjuster_phone || null,
+        company: p.insurance_carrier || null, is_primary: false });
+    }
+  }
+
+  if (!rels.length) {
     $('#main').innerHTML = `
       <div class="empty-block">
         <div class="ico">👥</div>
@@ -599,16 +712,14 @@ function render() {
   // Bucket by group
   const byGroup = {};
   GROUP_ORDER.forEach(g => byGroup[g.key] = []);
-  byGroup.Other = [];
 
-  state.relationships.forEach(r => {
+  rels.forEach(r => {
     const matched = GROUP_ORDER.find(g => g.roles.includes(r.role));
     if (matched) byGroup[matched.key].push(r);
     else byGroup.Other.push(r);
   });
 
   const sections = GROUP_ORDER
-    .concat([{ key: 'Other', roles: [] }])
     .filter(g => (byGroup[g.key] || []).length > 0)
     .map(g => `
       <div class="group-section">
@@ -623,7 +734,15 @@ function render() {
     el.addEventListener('click', (e) => {
       // Don't open edit sheet when an action button (a tel:, mailto:) was tapped
       if (e.target.closest('.rel-action-btn')) return;
-      openEditSheet(el.dataset.edit);
+      const id = el.dataset.edit;
+      // Synth cards (Albi-sourced or project-column synths) aren't real DB
+      // rows — they live in memory only. Block edits so users don't try to
+      // save changes against a non-existent record.
+      if (id && id.startsWith('_synth_')) {
+        toast('From Albi — edit in Albi to change');
+        return;
+      }
+      openEditSheet(id);
     });
   });
 }
