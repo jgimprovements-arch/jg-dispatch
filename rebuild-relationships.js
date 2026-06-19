@@ -44,17 +44,79 @@
 (function () {
   'use strict';
 
+  // ─── Albi → local role mapper ───────────────────────────────────────
+  // Albi uses its own taxonomy for contact relationships and types. Map
+  // each Albi label to the closest local role key so the contact lands in
+  // the right group (Customer & Property, Insurance, Financial, etc.). The
+  // map is permissive — anything we don't recognize falls through to
+  // 'other' and lands in the catch-all group rather than getting dropped.
+  function _mapAlbiRoleToLocal(albiRelationshipType, albiContactType) {
+    const r = String(albiRelationshipType || '').toLowerCase().trim();
+    const t = String(albiContactType || '').toLowerCase().trim();
+
+    // Organizations get role-specific mappings — an "Insurance Company"
+    // organization becomes insurance_carrier, a "Mortgage Company" becomes
+    // mortgage_company, etc. Falls back to inferring from the role label.
+    if (t === 'organization') {
+      if (/insurance/.test(r) || /carrier/.test(r)) return 'insurance_carrier';
+      if (/mortgage/.test(r) || /bank/.test(r) || /lender/.test(r)) return 'mortgage_company';
+      if (/attorney|law/.test(r)) return 'attorney';
+      if (/property\s*manage/.test(r)) return 'property_manager';
+      // Default organization → use role-string match below
+    }
+
+    if (/customer|insured|homeowner/.test(r)) return 'customer';
+    if (/public\s*adjuster/.test(r)) return 'public_adjuster';
+    if (/adjuster/.test(r)) return 'insurance_adjuster';
+    if (/carrier\s*rep|representative/.test(r)) return 'insurance_carrier_rep';
+    if (/insurance|carrier/.test(r)) return 'insurance_carrier';
+    if (/lender|mortgage|bank/.test(r)) return 'mortgage_company';
+    if (/attorney|lawyer/.test(r)) return 'attorney';
+    if (/real\s*estate|realtor|agent/.test(r)) return 'real_estate_agent';
+    if (/property\s*manage/.test(r)) return 'property_manager';
+    if (/project\s*manage|\bpm\b/.test(r)) return 'project_manager';
+    if (/estimator/.test(r)) return 'estimator';
+    if (/subcontractor|\bsub\b/.test(r)) return 'subcontractor';
+    if (/vendor|supplier/.test(r)) return 'vendor';
+    if (/carpenter/.test(r)) return 'carpenter';
+    if (/tech/.test(r)) return 'tech';
+    if (/office|admin/.test(r)) return 'office_admin';
+    return 'other';
+  }
+
   // ─── Clump A: data loader (was at L1997 in pre-extraction file) ─────────────
 async function loadRelationships() {
-  if (!sb || !state.activeProjectId) { state.relationships = []; return; }
-  const { data, error } = await sb.from('rebuild_project_relationships')
-    .select('*')
-    .eq('project_id', state.activeProjectId)
-    .is('deleted_at', null)
-    .order('is_primary', { ascending: false })
-    .order('display_name');
-  if (error) { console.warn('loadRelationships', error); state.relationships = []; return; }
-  state.relationships = data || [];
+  if (!sb || !state.activeProjectId) { state.relationships = []; state.albiContacts = []; return; }
+  // Two parallel reads: hand-edited relationships (rebuild_project_relationships)
+  // and the Albi-synced contact mirror (rebuild_project_albi_contacts). Either
+  // can be empty. The render function dedupes them by email/name before
+  // displaying, so users see one unified list per project.
+  const [relRes, albiRes] = await Promise.all([
+    sb.from('rebuild_project_relationships')
+      .select('*')
+      .eq('project_id', state.activeProjectId)
+      .is('deleted_at', null)
+      .order('is_primary', { ascending: false })
+      .order('display_name'),
+    sb.from('rebuild_project_albi_contacts')
+      .select('*')
+      .eq('project_id', state.activeProjectId)
+      .order('relationship_type, display_name'),
+  ]);
+  if (relRes.error) { console.warn('loadRelationships', relRes.error); state.relationships = []; }
+  else { state.relationships = relRes.data || []; }
+
+  // Silently tolerate missing albi-contacts table — it doesn't exist until
+  // the migration runs, and we don't want every project page to throw a
+  // console error in the meantime.
+  if (albiRes.error) {
+    if (!/does not exist|relation .* does not exist/i.test(albiRes.error.message || '')) {
+      console.warn('loadAlbiContacts', albiRes.error);
+    }
+    state.albiContacts = [];
+  } else {
+    state.albiContacts = albiRes.data || [];
+  }
 }
 
   // ─── Clump B: main module (was at L2579 in pre-extraction file) ─────────────
@@ -93,26 +155,52 @@ const REL_GROUP_ORDER = [
 function renderRelationshipsTab() {
   const rels = (state.relationships || []).slice();
 
-  // ── Synthesize virtual cards from Albi-synced project fields ──────────
-  // The PM and insurance adjuster aren't stored in rebuild_project_relationships
-  // by default — they live as columns on rebuild_projects from the Albi sync.
-  // Rendering them as virtual cards keeps the Relationships tab a single
-  // source of truth ("everyone connected to this job") instead of forcing
-  // the user to look at the header AND the tab to see the full picture.
-  // Dedupe rule: if a real relationship already has the same email, the
-  // real one wins (user-added context takes precedence over auto-sync).
+  // ── Synthesize virtual cards from Albi sources ────────────────────────
+  // Priority order for dedupe (by email):
+  //   1. Hand-added relationships (already in `rels`) — user-edited wins
+  //   2. rebuild_project_albi_contacts rows — the Albi mirror table
+  //   3. Fallback synths from rebuild_projects column fields (PM, adjuster,
+  //      carrier, customer secondary). These exist for projects synced
+  //      BEFORE the full contact mirror was populated, and as a backstop
+  //      for any contact type Albi knows about that doesn't yet have its
+  //      own column in the mirror.
+  const existingEmails = new Set(rels.map(r => (r.email || '').toLowerCase()).filter(Boolean));
+  const existingNameRole = new Set(rels.map(r => (r.display_name || '').toLowerCase() + '|' + (r.role || '')).filter(s => s.length > 1));
+
+  function pushSynth(synth) {
+    if (!synth.display_name) return;
+    const em = (synth.email || '').toLowerCase();
+    if (em && existingEmails.has(em)) return;
+    const nr = (synth.display_name || '').toLowerCase() + '|' + synth.role;
+    if (existingNameRole.has(nr)) return;
+    rels.push(synth);
+    if (em) existingEmails.add(em);
+    existingNameRole.add(nr);
+  }
+
+  // Tier 2 — Albi contact mirror. These come from the rebuild_project_albi_contacts
+  // table, populated by the Albi sync. Each row is one contact from Albi's
+  // project contact list (customer, organization, adjuster, lender, etc.).
+  (state.albiContacts || []).forEach(c => {
+    pushSynth({
+      id: '_synth_albi_' + c.id,
+      _synth: true,
+      source: 'albi',
+      role: _mapAlbiRoleToLocal(c.relationship_type, c.contact_type),
+      display_name: c.display_name || c.full_name || c.company_name,
+      email: c.email || null,
+      phone: c.phone || null,
+      company: c.company_name || null,
+      is_primary: !!c.is_primary,
+    });
+  });
+
+  // Tier 3 — fallback synths from rebuild_projects column fields. Only
+  // surfaces a card if no Albi-mirror row already covered the same person,
+  // which makes the column-based synths a safe backstop without
+  // duplicating data once the mirror is populated.
   if (state.project) {
     const p = state.project;
-    const existingEmails = new Set(rels.map(r => (r.email || '').toLowerCase()).filter(Boolean));
-
-    function pushSynth(synth) {
-      if (!synth.display_name) return;
-      const em = (synth.email || '').toLowerCase();
-      if (em && existingEmails.has(em)) return; // user has a real row already
-      rels.push(synth);
-      if (em) existingEmails.add(em);
-    }
-
     // Project Manager — `albi_pm_name` / `albi_pm_email`. Almost always set
     // post-Albi-sync. Without this card a PM can navigate to a job and not
     // see themselves listed, which is jarring.
