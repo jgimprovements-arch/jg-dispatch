@@ -47,6 +47,7 @@ async function loadNotifications() {
         install_changes_requested: 'selections',
         journal_mention: 'journal',
         customer_journal: 'journal',
+        customer_message: 'messages',
         todo_assigned: 'todos',
         todo_completed: 'todos',
         wo_signed: 'workorders',
