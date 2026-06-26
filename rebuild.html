@@ -10224,6 +10224,7 @@ function openWoEditModal(woId) {
         ${wo.status === 'sent' ? `<button class="btn ghost" data-wo-modal-act="resend">📧 Resend</button>` : ''}
         ${wo.status === 'signed' ? `<button class="btn primary" data-wo-modal-act="convert-to-po">→ Convert to PO</button>` : ''}
         ${wo.status === 'converted_to_po' ? `<button class="btn ghost" data-wo-modal-act="resend-po">📧 Resend PO to Sub</button>` : ''}
+        ${(wo.status === 'signed' || wo.status === 'converted_to_po' || wo.status === 'invoice_received') ? `<button class="btn ghost" data-wo-modal-act="send-breakdown" title="Email the line-item breakdown to the sub. No re-sign needed — captures current items, sends an FYI email.">📋 Send Breakdown</button>` : ''}
         ${wo.status === 'signed' || wo.status === 'converted_to_po' || wo.status === 'invoice_received' ? `<button class="btn ghost" data-wo-modal-act="unsign">↺ Unsign &amp; Revise</button>` : ''}
         ${wo.status === 'signed' || wo.status === 'converted_to_po' || wo.status === 'invoice_received' ? `<button class="btn ghost" data-wo-modal-act="new-version">⚡ New Version</button>` : ''}
       </div>
@@ -10326,6 +10327,15 @@ async function handleWoModalAction(act, wo, woUrl) {
     const subName = wo.sub?.company_name || (wo.employee_id ? ((state.employees || []).find(e => e.id === wo.employee_id)?.name) : '') || '';
     const tradeLabel = MERGED_TRADE_GROUPS?.[wo.trade_category]?.label || wo.trade_category || '';
     generateWorkOrderPdf({ ...wo, sub_company: subName, trade_label: tradeLabel });
+    return;
+  }
+  if (act === 'send-breakdown') {
+    // For already-signed WOs that pre-date the line-items snapshot feature,
+    // OR for any WO where the PM wants the sub to have a fresh breakdown
+    // without forcing a re-sign. Captures the current items into the
+    // snapshot column and fires an FYI email with a link back to the
+    // SIGNED view of wo.html — which now renders the line-items table.
+    await sendBreakdownToSub(wo, woUrl);
     return;
   }
   if (act === 'cancel') {
@@ -10576,6 +10586,95 @@ async function sendPoToSub(wo) {
       mode: 'no-cors',
     });
   } catch (e) { console.error('PO email send failed:', e); }
+}
+
+// Send line-items breakdown to a sub WITHOUT requiring a re-sign. Useful
+// for already-signed WOs where the PM wants the contractor to have the
+// detailed scope breakdown. Captures current items into the snapshot
+// column so the sub's existing signed link (wo.html?t=…) suddenly shows
+// a line-items table on its signed view. Then fires an FYI email with
+// that same link so the sub knows to revisit.
+//
+// Caveat: snapshots are computed from CURRENT items, not from what was
+// in the system at the time of original signing. If items have changed
+// since, the sub gets the latest version. This is intentional — for a
+// PM-initiated breakdown, the most current accurate scope is what matters.
+async function sendBreakdownToSub(wo, woUrl) {
+  const sub = wo.sub || state.subs.find(s => s.id === wo.sub_id);
+  const toEmail = wo.sent_to_email || sub?.email;
+  if (!toEmail) { toast('No email on file for this sub'); return; }
+  const p = state.activeProject;
+
+  // 1. Compute and save the snapshot
+  let snapshot;
+  try {
+    snapshot = _computeWoLineItemsSnapshot(wo);
+  } catch (e) {
+    console.error('Snapshot computation failed:', e);
+    toast('Could not compute line items — check the WO has assigned trade items');
+    return;
+  }
+  if (!snapshot || !snapshot.length) {
+    toast('No line items found for this WO — assign items in the WO Builder first');
+    return;
+  }
+
+  const { error: updateErr } = await sb.from('rebuild_work_orders')
+    .update({ line_items_snapshot: snapshot })
+    .eq('id', wo.id);
+  if (updateErr) {
+    toast('Save failed: ' + updateErr.message);
+    return;
+  }
+  wo.line_items_snapshot = snapshot;
+
+  // 2. Build a short FYI email — clearly marked as no-action-needed so the
+  // sub doesn't think this is a new contract to sign.
+  const subName = sub?.primary_contact || sub?.company_name || 'there';
+  const total = wo.total_amount ? '$' + Number(wo.total_amount).toLocaleString() : '';
+  const itemCount = snapshot.length;
+
+  const body = buildBrandedEmail({
+    preheader: `Detailed scope breakdown for your signed Work Order ${wo.wo_number || ''} on ${p.albi_job_number || ''}`,
+    headline: `Scope Breakdown — ${p.albi_job_number || 'Project'}`,
+    intro: `Hi ${subName}, here's the detailed line-item breakdown for the Work Order you signed${total ? ' (total ' + total + ')' : ''}. <b>No action needed</b> — this is for your records and reference.`,
+    bodyHtml: `<p style="margin:0 0 12px;font-size:14px;color:#1a2540;line-height:1.5;">Click below to view the ${itemCount} line item${itemCount === 1 ? '' : 's'} included in this WO. You can keep this page bookmarked for future reference.</p>`,
+    ctaLabel: 'View Line-Item Breakdown',
+    ctaUrl: woUrl,
+  });
+
+  // 3. Send via the platform mailer (same path as other WO emails)
+  try {
+    await sendViaPlatformMailer({
+      to: toEmail,
+      subject: `Scope Breakdown — ${p.albi_job_number || 'Project'} · WO ${wo.wo_number || ''}`,
+      html: body,
+      from_name: p.albi_pm_name || 'JG Restoration',
+      from_email: 'info@jg-restoration.com',
+    });
+  } catch (e) {
+    toast('Email failed: ' + (e.message || 'unknown'));
+    return;
+  }
+
+  // 4. Log to messages so it shows in the project thread
+  await sb.from('rebuild_messages').insert({
+    project_id: state.activeProjectId,
+    direction: 'outbound', channel: 'email', status: 'sent',
+    subject: `Scope Breakdown — WO ${wo.wo_number || ''}`,
+    body: `Sent line-item breakdown to ${sub?.company_name || toEmail} for signed WO. No re-sign required — informational only.`,
+    recipient_type: 'subcontractor',
+    recipient_name: sub?.company_name || '',
+    recipient_email: toEmail,
+    sent_by_name: state.pmName,
+    sent_by_email: state.pmEmail,
+  });
+
+  // 5. Log to Albi timeline so the project history reflects this outreach
+  logToAlbi('wo_breakdown_sent', `Sent detailed line-items breakdown to ${sub?.company_name || toEmail} for signed WO ${wo.wo_number || ''} (${itemCount} items)`);
+
+  toast(`Breakdown sent to ${sub?.company_name || toEmail}`);
+  document.getElementById('modalWoEdit')?.classList.remove('on');
 }
 
 async function sendWorkOrderToSub(wo, woUrl) {
