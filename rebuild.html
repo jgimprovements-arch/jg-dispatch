@@ -5626,8 +5626,18 @@ async function createTodo() {
     } catch (e) { console.warn('todo notif insert failed', e); }
   }
 
-  // Albi timeline note
-  logToAlbi('todo_created', `To-Do created — assigned to ${assigneeName}: ${title}${due ? ' (due ' + fmtDate(due) + ')' : ''}`);
+  // Albi timeline note — include the FULL context (body/details, task type,
+  // priority) so an Albi-only viewer can act on the to-do without having to
+  // open the platform. Without the body, Albi just sees the one-line title
+  // and loses the actual instructions the PM typed.
+  let albiNote = `To-Do created — assigned to ${assigneeName}: ${title}`;
+  const tags = [];
+  if (taskType) tags.push(taskType);
+  if (priority && priority !== 'normal') tags.push(priority.toUpperCase());
+  if (tags.length) albiNote += ` [${tags.join(' · ')}]`;
+  if (due) albiNote += ` (due ${fmtDate(due)})`;
+  if (body) albiNote += `\n\n${body}`;
+  logToAlbi('todo_created', albiNote);
 
   // Reset composer
   $('#todoTitle').value = '';
@@ -5654,6 +5664,14 @@ async function toggleTodoDone(id) {
     todo_id: id, action: isDone ? 'reopened' : 'completed', actor: state.pmEmail,
     details: isDone ? 'Reopened' : `Completed by ${state.pmName || state.pmEmail}`,
   });
+  // Albi timeline note — mirrors what the platform shows. Completing a
+  // to-do is a notable project event; reopening usually means rework needed.
+  // Both deserve a row in Albi's notes so an Albi-only viewer sees activity.
+  if (isDone) {
+    logToAlbi('todo_reopened', `To-Do reopened: ${t.title}`);
+  } else {
+    logToAlbi('todo_completed', `To-Do completed by ${state.pmName || state.pmEmail}: ${t.title}`);
+  }
   // Notify creator that it's done (if creator != completer)
   if (!isDone && t.created_by_email && t.created_by_email.toLowerCase() !== (state.pmEmail || '').toLowerCase()) {
     try {
@@ -5682,10 +5700,14 @@ async function startTodo(id) {
 
 async function deleteTodo(id) {
   if (!confirm('Delete this to-do?')) return;
+  // Capture the title BEFORE the delete so we can log it (the row is gone
+  // after, and the Albi note needs the title for context).
+  const t = state.todos.find(x => x.id === id);
   await sb.from('rebuild_todo_history').insert({
     todo_id: id, action: 'deleted', actor: state.pmEmail, details: 'Deleted',
   });
   await sb.from('rebuild_todos').delete().eq('id', id);
+  if (t) logToAlbi('todo_deleted', `To-Do deleted: ${t.title}`);
   await loadTodos();
   if (state.tab === 'todos') renderDetail();
 }
@@ -5768,6 +5790,16 @@ function openTodoEditModal(id) {
       todo_id: id, action: reassigned ? 'reassigned' : 'edited', actor: state.pmEmail,
       details: reassigned ? `Reassigned to ${aName}` : 'Edited',
     });
+    // Albi timeline note — same full-context approach as create, so an
+    // edit that changes scope/details is visible in Albi instead of just
+    // a one-line "edited" without anything actionable.
+    if (reassigned) {
+      logToAlbi('todo_reassigned', `To-Do reassigned to ${aName}: ${title}${updates.body ? '\n\n' + updates.body : ''}`);
+    } else {
+      let editNote = `To-Do edited — ${title}`;
+      if (updates.body) editNote += `\n\n${updates.body}`;
+      logToAlbi('todo_edited', editNote);
+    }
     if (reassigned && aEmail.toLowerCase() !== (state.pmEmail || '').toLowerCase()) {
       try {
         await sb.from('rebuild_notifications').insert({
