@@ -10589,6 +10589,24 @@ async function sendWorkOrderToSub(wo, woUrl) {
     return;
   }
 
+  // ─── Freeze the line-items breakdown to the WO row ────────────────
+  // The sub-facing review page (wo.html) reads this snapshot to show what
+  // they're signing for. Snapshotting here (vs querying live in wo.html)
+  // means later PM edits to the underlying items can't silently change
+  // what the sub already agreed to — diligence-friendly immutability.
+  try {
+    const snapshot = _computeWoLineItemsSnapshot(wo);
+    if (snapshot && snapshot.length) {
+      await sb.from('rebuild_work_orders')
+        .update({ line_items_snapshot: snapshot })
+        .eq('id', wo.id);
+      wo.line_items_snapshot = snapshot;
+    }
+  } catch (e) {
+    // Soft-fail — don't block the WO send if snapshot prep blows up
+    console.warn('Line items snapshot failed:', e);
+  }
+
   const sub = wo.sub || state.subs.find(s => s.id === wo.sub_id);
   // Prefer override email entered in modal, fall back to sub profile email
   const toEmail = wo.sent_to_email || sub?.email;
@@ -11077,6 +11095,50 @@ function wireFinancialsTab() {
 // PMs can confirm what's in a WO without entering the edit modal. Items are
 // matched to the WO by trade_category (which is how the WO Builder groups
 // them). CO additions show with a CO# badge and a slightly tinted row.
+
+// Shared helper: returns the flat line-items array for a WO, used by both
+// the in-app viewer modal AND the snapshot-on-send pipeline. Keeping one
+// computation path prevents wo.html from showing items the PM doesn't see.
+function _computeWoLineItemsSnapshot(wo) {
+  if (!wo) return [];
+  const wbWo = ((state.woBudget && state.woBudget.wos) || []).find(w => w.converted_work_order_id === wo.id);
+  const tradeKey = wbWo?.trade_category;
+  if (!tradeKey) return [];
+
+  const allItems = (state.woBudget && state.woBudget.items) || [];
+  const tradeItems = allItems.filter(i => {
+    if (i.is_unassigned) return false;
+    const grp = (typeof mergedGroupFor === 'function')
+      ? mergedGroupFor(i.trade_category || 'general')
+      : (i.trade_category || 'general');
+    return grp === tradeKey;
+  });
+  const coItems = (state.coLineItems || []).filter(c => c.converted_to_wo_id === wo.id);
+
+  const out = [];
+  for (const i of tradeItems) {
+    out.push({
+      description: i.description || '',
+      qty: i.quantity != null ? Number(i.quantity) : null,
+      unit: i.unit || null,
+      total: Number(i.total || 0),
+      is_co: false,
+    });
+  }
+  for (const c of coItems) {
+    out.push({
+      description: c.description || '',
+      qty: c.qty != null ? Number(c.qty) : null,
+      unit: c.unit || null,
+      total: Number(c.new_amount || c.delta_amount || 0),
+      is_co: true,
+      co_number: c.co_number || null,
+      co_description: c.co_description || null,
+    });
+  }
+  return out;
+}
+
 function viewWoLineItems(woId) {
   const wo = (state.workOrders || []).find(w => w.id === woId);
   if (!wo) { toast('Work Order not found'); return; }

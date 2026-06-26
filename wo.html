@@ -263,6 +263,50 @@ async function render() {
   wireAcceptance(wo);
 }
 
+// Line-items table — surfaces the frozen breakdown PMs captured at WO send
+// time. Falls back to nothing when no snapshot exists (older WOs, or new
+// ones with no items assigned). Sub sees scope items, qty, unit, and the
+// per-item dollar — so they understand how the WO total breaks down.
+function renderLineItemsTable(wo) {
+  const items = Array.isArray(wo.line_items_snapshot) ? wo.line_items_snapshot : [];
+  if (!items.length) return '';
+
+  const rows = items.map(it => {
+    const isCo = !!it.is_co;
+    const coTag = isCo
+      ? `<span style="background:#fff4e1;color:#b87900;border-radius:4px;padding:1px 6px;font-size:11px;font-weight:700;margin-left:6px;">CO${it.co_number ? ' ' + it.co_number : ''}</span>`
+      : '';
+    const qty = (it.qty != null && !Number.isNaN(it.qty))
+      ? Number(it.qty).toLocaleString(undefined, { maximumFractionDigits: 2 })
+      : '';
+    return `
+      <tr>
+        <td style="padding:8px 10px;border-bottom:1px solid var(--line);font-size:13px;">${esc(it.description || '')}${coTag}</td>
+        <td style="padding:8px 10px;border-bottom:1px solid var(--line);text-align:right;font-size:13px;color:var(--muted);font-family:'DM Mono',monospace;">${qty}</td>
+        <td style="padding:8px 10px;border-bottom:1px solid var(--line);font-size:13px;color:var(--muted);">${esc(it.unit || '')}</td>
+        <td style="padding:8px 10px;border-bottom:1px solid var(--line);text-align:right;font-size:13px;font-weight:600;font-family:'DM Mono',monospace;">${fmtMoney(it.total)}</td>
+      </tr>
+    `;
+  }).join('');
+
+  return `
+    <h3>Line Items</h3>
+    <div style="overflow-x:auto;margin-bottom:14px;">
+      <table style="width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);border-radius:6px;overflow:hidden;">
+        <thead>
+          <tr style="background:#f4f6fb;">
+            <th style="padding:8px 10px;text-align:left;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.3px;">Description</th>
+            <th style="padding:8px 10px;text-align:right;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.3px;">Qty</th>
+            <th style="padding:8px 10px;text-align:left;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.3px;">Unit</th>
+            <th style="padding:8px 10px;text-align:right;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.3px;">Amount</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+  `;
+}
+
 function renderForAcceptance(wo) {
   const p = wo.project || {};
   const s = wo.sub || {};
@@ -296,6 +340,7 @@ function renderForAcceptance(wo) {
       </div>
       <h3>Scope of Work</h3>
       <div class="scope-text">${esc(wo.scope_text || '(no scope provided — contact your PM)')}</div>
+      ${renderLineItemsTable(wo)}
       <h3>Payment Terms</h3>
       <div class="scope-text">${esc(wo.payment_terms || 'Net 30 from invoice receipt.')}</div>
     </div>
@@ -357,6 +402,12 @@ function renderSigned(wo) {
       </div>
       <p style="color:var(--muted);font-size:12px;">A copy of this signed work order has been saved to your project file. If you need a copy emailed, contact your PM${p.albi_pm_name ? ' (' + esc(p.albi_pm_name) + ')' : ''}.</p>
     </div>
+    ${(Array.isArray(wo.line_items_snapshot) && wo.line_items_snapshot.length) ? `
+    <div class="card">
+      <h2>Signed Scope — Line Items</h2>
+      <p style="color:var(--muted);font-size:13px;margin-top:0;">This is the breakdown you signed for. Keep this page bookmarked for reference.</p>
+      ${renderLineItemsTable(wo)}
+    </div>` : ''}
   `;
 }
 
