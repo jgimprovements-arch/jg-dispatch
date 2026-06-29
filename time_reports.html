@@ -700,22 +700,25 @@ async function loadJobsList() {
       }
     }
 
-    // 2) Pull time_entries to get hours/tech-count per job. Filter to
-    // approved/locked entries only so the job-list badges match payroll.
-    // employee_name is required by _isEntryApproved → add to SELECT.
+    // 2) Pull time_entries to get hours/tech-count per job. We track BOTH
+    // approved (locked) hours AND pending (unapproved) hours separately
+    // so PMs can see total labor burn vs locked payroll burn — critical
+    // for profit-margin tracking on active jobs. employee_name is required
+    // by _isEntryApproved → add to SELECT.
     const all = [];
     let from = 0;
     const PAGE = 1000;
     for (let i = 0; i < 50; i++) {
       const rows = await sb('/rest/v1/time_entries?job_id=not.is.null&select=job_id,job_name,employee_id,employee_name,duration_minutes,clock_in,clock_out&order=clock_in.desc&limit=' + PAGE + '&offset=' + from);
       if (!rows || !rows.length) break;
-      const approved = rows.filter(_isEntryApproved);
-      all.push(...approved);
+      // Tag each row so downstream aggregation can split approved vs pending
+      rows.forEach(r => { r._approved = _isEntryApproved(r); });
+      all.push(...rows);
       if (rows.length < PAGE) break;
       from += PAGE;
     }
 
-    // 3) Aggregate hours by job_id
+    // 3) Aggregate hours by job_id — split into approved/pending buckets
     const hoursByJob = {};
     all.forEach(r => {
       const jid = String(r.job_id);
@@ -723,6 +726,8 @@ async function loadJobsList() {
       if (!hoursByJob[jid]) {
         hoursByJob[jid] = {
           total_minutes: 0,
+          approved_minutes: 0,
+          pending_minutes: 0,
           techs: new Set(),
           last_activity: r.clock_in,
           job_name_from_entries: r.job_name || ''
@@ -737,6 +742,8 @@ async function loadJobsList() {
         }
       }
       hoursByJob[jid].total_minutes += mins;
+      if (r._approved) hoursByJob[jid].approved_minutes += mins;
+      else hoursByJob[jid].pending_minutes += mins;
       if (r.employee_id) hoursByJob[jid].techs.add(r.employee_id);
     });
 
@@ -746,7 +753,7 @@ async function loadJobsList() {
     const merged = {};
     Object.keys(albiJobs).forEach(jid => {
       const a = albiJobs[jid];
-      const h = hoursByJob[jid] || { total_minutes: 0, techs: new Set(), last_activity: null };
+      const h = hoursByJob[jid] || { total_minutes: 0, approved_minutes: 0, pending_minutes: 0, techs: new Set(), last_activity: null };
       merged[jid] = {
         job_id: jid,
         job_name: a.job_name,
@@ -754,6 +761,8 @@ async function loadJobsList() {
         status: a.status,
         project_type: a.project_type,
         total_minutes: h.total_minutes,
+        approved_minutes: h.approved_minutes,
+        pending_minutes: h.pending_minutes,
         tech_count: h.techs.size,
         last_activity: h.last_activity || a.createdAt,
         from_albi: true
@@ -769,6 +778,8 @@ async function loadJobsList() {
         status: '',
         project_type: '',
         total_minutes: h.total_minutes,
+        approved_minutes: h.approved_minutes,
+        pending_minutes: h.pending_minutes,
         tech_count: h.techs.size,
         last_activity: h.last_activity,
         from_albi: false
@@ -806,9 +817,22 @@ function renderJobsList() {
     STATE.filteredJobs.slice(0, 200).map(j => {
       const sel = STATE.selectedJob && STATE.selectedJob.job_id === j.job_id ? ' selected' : '';
       const hasHours = j.total_minutes > 0;
-      const stats = hasHours
-        ? fmtDecimalHours(j.total_minutes) + ' hrs · ' + j.tech_count + ' tech' + (j.tech_count !== 1 ? 's' : '')
-        : '<span style="color:var(--muted);font-weight:500;">No hours yet</span>';
+      // Stats layout: total bold, then a sub-line with approved/pending
+      // breakdown. Color codes the pending count amber when > 0 so jobs
+      // with un-approved drift jump out visually on the picker.
+      let stats;
+      if (hasHours) {
+        const totalLine = '<div style="font-weight:700;font-size:13px;color:var(--navy);">' + fmtDecimalHours(j.total_minutes) + ' hrs · ' + j.tech_count + ' tech' + (j.tech_count !== 1 ? 's' : '') + '</div>';
+        const approvedH = fmtDecimalHours(j.approved_minutes || 0);
+        const pendingH = j.pending_minutes > 0 ? fmtDecimalHours(j.pending_minutes) : null;
+        const subParts = [
+          '<span style="color:#1e7d3f;">🔒 ' + approvedH + ' approved</span>'
+        ];
+        if (pendingH) subParts.push('<span style="color:#b87900;">⏳ ' + pendingH + ' pending</span>');
+        stats = totalLine + '<div style="font-size:11px;margin-top:2px;">' + subParts.join(' · ') + '</div>';
+      } else {
+        stats = '<span style="color:var(--muted);font-weight:500;">No hours yet</span>';
+      }
       // Build a meta line: market · status · type (if known)
       const metaParts = [];
       if (j.market) metaParts.push(escapeHtml(j.market));
@@ -926,11 +950,10 @@ async function runReport() {
 
     const entries = await sb(url);
     const allEntries = Array.isArray(entries) ? entries : [];
-    // Filter to approved/locked entries only. Without this, the report
-    // could show hours the customer has been told NOT to expect on their
-    // invoice (entries still in correction-review).
-    STATE.entries = allEntries.filter(_isEntryApproved);
-    STATE.entriesExcluded = allEntries.length - STATE.entries.length;
+    // Tag each entry with approved/pending status — both buckets appear
+    // in the report so PMs can compare locked payroll vs total burn.
+    allEntries.forEach(e => { e._approved = _isEntryApproved(e); });
+    STATE.entries = allEntries;
     renderReport();
     loadingEl.style.display = 'none';
     reportSection.style.display = 'block';
@@ -974,10 +997,9 @@ async function runAllJobsReport() {
       if (STATE.toDate)   url += '&clock_in=lte.' + STATE.toDate + 'T23:59:59';
       const rows = await sb(url);
       if (!Array.isArray(rows) || rows.length === 0) break;
-      // Filter to approved/locked entries; unapproved get excluded so
-      // company-wide reports tie back to payroll.
-      const approved = rows.filter(_isEntryApproved);
-      allEntries = allEntries.concat(approved);
+      // Tag each entry; render layer splits approved vs pending
+      rows.forEach(e => { e._approved = _isEntryApproved(e); });
+      allEntries = allEntries.concat(rows);
       if (rows.length < PAGE) break;
       from += PAGE;
       if (from > 50000) {
@@ -1115,17 +1137,16 @@ function renderReport() {
   } else {
     metaText += '  ·  All Time';
   }
-  // Lock badge — make it visually unmistakable that this number reflects
-  // approved/locked timesheets only, with the unapproved count if any.
-  metaText += '  ·  🔒 Approved hours only';
-  if (STATE.entriesExcluded > 0) {
-    metaText += '  ·  ' + STATE.entriesExcluded + ' unapproved excluded';
-  }
+  // Lock badge — replaced with approved/pending breakdown
   document.getElementById('rpt-job-meta').textContent = metaText;
 
-  // Summary stats
+  // Summary stats — track approved vs pending separately so PMs see both
+  // the locked-payroll total AND the in-flight labor (which they need to
+  // forecast margin without waiting for the next approval cycle).
   const entries = STATE.entries;
   let totalMins = 0;
+  let approvedMins = 0;
+  let pendingMins = 0;
   const techMap = {};
   let firstDate = null, lastDate = null;
   let entriesWithGps = 0;
@@ -1140,16 +1161,22 @@ function renderReport() {
       }
     }
     totalMins += mins;
+    if (e._approved) approvedMins += mins;
+    else pendingMins += mins;
     const techKey = e.employee_id || e.employee_name;
     if (!techMap[techKey]) {
       techMap[techKey] = {
         name: e.employee_name || '(unknown)',
         market: e.market || '',
         total_minutes: 0,
+        approved_minutes: 0,
+        pending_minutes: 0,
         entry_count: 0
       };
     }
     techMap[techKey].total_minutes += mins;
+    if (e._approved) techMap[techKey].approved_minutes += mins;
+    else techMap[techKey].pending_minutes += mins;
     techMap[techKey].entry_count += 1;
 
     if (e.clock_in) {
@@ -1162,8 +1189,11 @@ function renderReport() {
 
   const techs = Object.values(techMap).sort((a, b) => b.total_minutes - a.total_minutes);
 
-  // Render summary
+  // Render summary — two prominent hour stats (approved + pending) so the
+  // PM sees the split at a glance. Total computed implicitly = sum of both.
   const summary = [
+    { label: '🔒 Approved Hours', val: fmtDecimalHours(approvedMins), color: '#1e7d3f' },
+    { label: '⏳ Pending Hours', val: fmtDecimalHours(pendingMins), color: pendingMins > 0 ? '#b87900' : 'inherit' },
     { label: 'Total Hours', val: fmtDecimalHours(totalMins) },
     { label: 'Total Entries', val: entries.length },
     { label: 'Techs', val: techs.length },
@@ -1174,7 +1204,7 @@ function renderReport() {
   document.getElementById('rpt-summary').innerHTML = summary.map(s =>
     '<div class="summary-stat">' +
       '<div class="summary-stat-label">' + s.label + '</div>' +
-      '<div class="summary-stat-val">' + s.val + '</div>' +
+      '<div class="summary-stat-val"' + (s.color ? ' style="color:' + s.color + ';"' : '') + '>' + s.val + '</div>' +
     '</div>'
   ).join('');
 
@@ -1186,19 +1216,26 @@ function renderReport() {
     return;
   }
 
-  // Per-tech summary first, then full entry list
+  // Per-tech summary first, then full entry list. Each tech row shows the
+  // approved + pending split so a PM can immediately see "Steve has 6 hrs
+  // pending — chase down the approval before payday."
   const techSummary = '<div class="tech-summary">' +
     '<div class="tech-summary-title">Hours by Technician</div>' +
-    techs.map(t =>
-      '<div class="tech-summary-row">' +
+    techs.map(t => {
+      const approvedStr = '<span style="color:#1e7d3f;">🔒 ' + fmtDecimalHours(t.approved_minutes || 0) + '</span>';
+      const pendingStr = t.pending_minutes > 0
+        ? ' <span style="color:#b87900;">⏳ ' + fmtDecimalHours(t.pending_minutes) + '</span>'
+        : '';
+      return '<div class="tech-summary-row">' +
         '<span class="tech-summary-name">' + escapeHtml(t.name) +
           (t.market ? ' <span style="font-size:10px;color:var(--muted);">· ' + escapeHtml(t.market) + '</span>' : '') +
         '</span>' +
         '<span class="tech-summary-hours">' + fmtDecimalHours(t.total_minutes) + ' hrs ' +
           '<span style="font-size:10px;color:var(--muted);font-weight:400;">(' + t.entry_count + ' entries)</span>' +
+          '<div style="font-size:11px;font-weight:600;margin-top:2px;">' + approvedStr + pendingStr + '</div>' +
         '</span>' +
-      '</div>'
-    ).join('') +
+      '</div>';
+    }).join('') +
     '</div>';
 
   const entryRows = entries.map(e => {
