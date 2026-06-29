@@ -7052,9 +7052,33 @@ function renderReports() {
   var fmtDur = function(mins){ return Math.floor(mins/60)+'h '+(mins%60)+'m'; };
   var durMins = function(e){ var out=e.clock_out?new Date(e.clock_out):new Date(); return Math.floor((out-new Date(e.clock_in))/60000); };
 
+  // ─── Filter entries to approved/locked timesheets only ────────────────
+  // Reports should reflect what's actually been paid (or about to be paid),
+  // not raw punch data that may include un-reviewed entries, edits in
+  // flight, or pending corrections. An entry is "approved" when there's
+  // a timecard_approvals row for (period_label, employee_name) with
+  // status='approved'. Defaulting the report to approved-only matches how
+  // payroll-driven analytics should behave; the toggle lets admins switch
+  // to "all entries" for forensic / pre-approval review.
+  if (typeof ST.reportApprovedOnly === 'undefined') ST.reportApprovedOnly = true;
+
+  function _isEntryApproved(e) {
+    if (!e || !e.clock_in) return false;
+    var label = periodLabelFor(e.clock_in);
+    if (!label) return false;
+    var ap = ST.approvals && ST.approvals[label + '|' + e.employee_name];
+    return !!(ap && ap.status === 'approved');
+  }
+
+  var allEntries = ST.entries || [];
+  var sourceEntries = ST.reportApprovedOnly
+    ? allEntries.filter(_isEntryApproved)
+    : allEntries.slice();
+  var excludedCount = allEntries.length - sourceEntries.length;
+
   // ═══ COMPUTE SHARED DATA ══════════════════════════════════════════════
   var byEmp = {};
-  ST.entries.forEach(function(e) {
+  sourceEntries.forEach(function(e) {
     if (!byEmp[e.employee_name]) byEmp[e.employee_name] = { mins: 0, days: new Set(), ot: 0 };
     var m = e.duration_minutes || durMins(e);
     byEmp[e.employee_name].mins += m;
@@ -7071,9 +7095,27 @@ function renderReports() {
 
   var h = '';
 
+  // ─── DATA SOURCE BANNER ─────────────────────────────────────────────────
+  // Make it unmistakable which dataset is driving these numbers. Without
+  // this banner, an admin or auditor could read a report total and assume
+  // it's everything, when it's actually filtered down to approved entries.
+  var bannerBg = ST.reportApprovedOnly ? '#e6f7ec' : '#fff4e1';
+  var bannerColor = ST.reportApprovedOnly ? '#1e7d3f' : '#b87900';
+  var bannerIcon = ST.reportApprovedOnly ? '🔒' : '⚠️';
+  var bannerText = ST.reportApprovedOnly
+    ? 'Showing <b>approved/locked timesheets only</b> · ' + sourceEntries.length + ' of ' + allEntries.length + ' entries included'
+    : 'Showing <b>ALL entries</b> (incl. unapproved/pending) · ' + sourceEntries.length + ' entries · use this for forensic review only';
+  h += '<div style="display:flex;align-items:center;gap:10px;padding:10px 14px;background:' + bannerBg + ';color:' + bannerColor + ';border-radius:8px;margin-bottom:14px;font-size:13px;">';
+  h += '<span style="font-size:16px;">' + bannerIcon + '</span>';
+  h += '<span style="flex:1;">' + bannerText + (excludedCount > 0 && ST.reportApprovedOnly ? ' · <span style="opacity:.75;">' + excludedCount + ' unapproved excluded</span>' : '') + '</span>';
+  h += '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12px;font-weight:600;">';
+  h += '<input type="checkbox" ' + (ST.reportApprovedOnly ? 'checked' : '') + ' onchange="ST.reportApprovedOnly=this.checked;renderReports();" style="cursor:pointer;"> Approved only';
+  h += '</label>';
+  h += '</div>';
+
   // ─── HEADER BAR ────────────────────────────────────────────────────────
   h += '<div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;align-items:center;">';
-  h += '<div style="font-size:13px;color:var(--muted);"><strong style="color:var(--navy);">Reports</strong> · '+Object.keys(byEmp).length+' employees · '+ST.entries.length+' entries · window: '+(ST.filterDate||'last 60 days')+' to '+(ST.filterDateEnd||'today')+'</div>';
+  h += '<div style="font-size:13px;color:var(--muted);"><strong style="color:var(--navy);">Reports</strong> · '+Object.keys(byEmp).length+' employees · '+sourceEntries.length+' entries · window: '+(ST.filterDate||'last 60 days')+' to '+(ST.filterDateEnd||'today')+'</div>';
   h += '<button class="btn btn-sm" onclick="openLaborBurdenSettings()" style="margin-left:auto;background:var(--surface);color:var(--muted);" title="Configure labor burden rate">⚙️ Burden: $'+getLaborBurdenRate()+'/hr</button>';
   h += '</div>';
 
@@ -7083,7 +7125,7 @@ function renderReports() {
   h += '<div class="stat-card" style="border-left:3px solid var(--orange);"><div class="stat-val" style="color:var(--orange);">'+fmtMoney(burdenTotal)+'</div><div class="stat-lbl">Labor Cost (@ $'+getLaborBurdenRate()+'/hr)</div></div>';
   h += '<div class="stat-card"><div class="stat-val" style="color:var(--red);">'+totalOT.toFixed(1)+'h</div><div class="stat-lbl">Overtime Hours</div></div>';
   h += '<div class="stat-card"><div class="stat-val">'+Object.keys(byEmp).length+'</div><div class="stat-lbl">Employees</div></div>';
-  h += '<div class="stat-card"><div class="stat-val">'+ST.entries.length+'</div><div class="stat-lbl">Total Entries</div></div>';
+  h += '<div class="stat-card"><div class="stat-val">'+sourceEntries.length+'</div><div class="stat-lbl">Total Entries</div></div>';
   h += '</div>';
 
   // ═══ SECTION 1: ESSENTIALS ════════════════════════════════════════════
@@ -7177,7 +7219,7 @@ function _rptLaborByMarket(byEmp) {
   });
 
   var byMarket = {};
-  ST.entries.forEach(function(e) {
+  sourceEntries.forEach(function(e) {
     var mkt = empMarket[e.employee_name] || 'Unassigned';
     if (!byMarket[mkt]) byMarket[mkt] = { mins: 0, entries: 0, techs: new Set() };
     byMarket[mkt].mins += e.duration_minutes || durMins(e);
@@ -7232,7 +7274,7 @@ function _rptLaborByJobType() {
 
   var byType = {};
   var untaggedMins = 0;
-  ST.entries.forEach(function(e) {
+  sourceEntries.forEach(function(e) {
     var mins = e.duration_minutes || durMins(e);
     if (e.job_id && jobTypeMap[e.job_id]) {
       var type = jobTypeMap[e.job_id];
@@ -7357,7 +7399,7 @@ function _rptOTTrend() {
   var weekMap = {};  // weekStart ISO date → { totalMins, regMins, otMins, empCount }
   var empWeekMap = {};  // "weekStart|emp" → mins
 
-  ST.entries.forEach(function(e) {
+  sourceEntries.forEach(function(e) {
     if (!e.clock_in) return;
     var inDate = new Date(e.clock_in);
     var weekStart = new Date(inDate);
@@ -7554,7 +7596,7 @@ function _renderJobSearchResults() {
   // Match by job_id OR job_name (defensive — older entries may have name without id)
   var jobIdStr = String(ST.jobSearchId||'');
   var jobNameStr = (ST.jobSearchName||'').toLowerCase();
-  var matched = ST.entries.filter(function(e) {
+  var matched = sourceEntries.filter(function(e) {
     if (!e.clock_in) return false;
     if (e.job_id && String(e.job_id) === jobIdStr) return true;
     if (e.job_name && e.job_name.toLowerCase() === jobNameStr) return true;
