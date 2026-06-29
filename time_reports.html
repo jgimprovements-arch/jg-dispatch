@@ -610,22 +610,37 @@ async function loadApprovalIndex() {
   }
 }
 
-// Compute pay periods up to `count` periods from a start date.
-// Matches the same logic used by timeclock + timeclock_admin so labels
-// generated here align with what gets approved over there.
+// Compute pay periods — EXACT port of timeclock_admin.html's getPayPeriods
+// to guarantee identical labels (anything different = lookup mismatch =
+// zero approved). Key correctness points:
+//   - `T00:00:00` forces local midnight (else UTC parse shifts day in
+//     negative-UTC timezones, e.g., Jan 6 → Jan 5 in Central time)
+//   - Increment via `start.getDate() + i * days` instead of cursor mutation
+//     so DST transitions don't drift period boundaries
+//   - Supports semimonthly (1-15 / 16-end) when type is null/other
 function _getPayPeriods(type, startStr, count) {
   const periods = [];
-  let cursor = new Date(startStr); cursor.setHours(0,0,0,0);
-  const days = (type === 'weekly') ? 7 : 14;
+  const start = new Date(startStr + 'T00:00:00');
+  const today = new Date();
+  const days = type === 'weekly' ? 7 : type === 'biweekly' ? 14 : null;
   for (let i = 0; i < count; i++) {
-    const start = new Date(cursor);
-    const end = new Date(cursor); end.setDate(end.getDate() + days - 1); end.setHours(23,59,59,999);
-    const fmt = d => (d.getMonth()+1) + '/' + d.getDate() + '/' + d.getFullYear();
-    periods.push({ start, end, label: fmt(start) + ' - ' + fmt(end) });
-    cursor.setDate(cursor.getDate() + days);
+    let s, e;
+    if (days) {
+      s = new Date(start); s.setDate(start.getDate() + i * days);
+      e = new Date(s); e.setDate(s.getDate() + days - 1);
+    } else {
+      let mo = start.getMonth() + Math.floor(i / 2);
+      const yr = start.getFullYear() + Math.floor(mo / 12); mo = mo % 12;
+      if (i % 2 === 0) { s = new Date(yr, mo, 1); e = new Date(yr, mo, 15); }
+      else              { s = new Date(yr, mo, 16); e = new Date(yr, mo + 1, 0); }
+    }
+    periods.push({ start: s, end: e, label: _fmtD(s) + ' - ' + _fmtD(e) });
+    if (s > today && periods.length > 3) break;
   }
   return periods;
 }
+
+function _fmtD(d) { return (d.getMonth() + 1) + '/' + d.getDate() + '/' + d.getFullYear(); }
 
 function _periodLabelFor(dateInput) {
   if (!dateInput || !_payPeriodConfig) return null;
