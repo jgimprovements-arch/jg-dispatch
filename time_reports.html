@@ -578,6 +578,70 @@ function checkExistingAuth() {
   return false;
 }
 
+// ─── Approval / lock filter ────────────────────────────────────────────
+// Time reports MUST reflect approved/locked timesheets only. Raw punch
+// data includes corrections-in-flight, unreviewed entries, and pending
+// edits — none of that should drive customer-facing job reports or
+// billing audits. We load pay-period config + the timecard_approvals
+// table at startup, then route every time_entries result through
+// _isEntryApproved() before computing totals. Unapproved entries are
+// excluded entirely (no toggle here — this report is too downstream
+// from payroll for "show all" to be safe; admins who need the raw
+// data should use timeclock_admin.html → Reports → toggle).
+let _payPeriodConfig = null;
+let _approvalIndex = {}; // keyed by "periodLabel|employeeName" → status
+
+async function loadApprovalIndex() {
+  try {
+    // 1) Pay period config (used to compute period label per entry)
+    const cfgRows = await sb('/rest/v1/app_settings?id=eq.pay_period_config&select=value&limit=1');
+    if (cfgRows && cfgRows[0]) {
+      _payPeriodConfig = { type: cfgRows[0].value.type, start: cfgRows[0].value.start };
+    } else {
+      _payPeriodConfig = { type: 'biweekly', start: '2025-01-06' };
+    }
+    // 2) Approvals (most recent 5000 should cover any reasonable report)
+    const aps = await sb('/rest/v1/timecard_approvals?select=period_label,employee_name,status&order=approved_at.desc&limit=5000');
+    _approvalIndex = {};
+    (aps || []).forEach(a => { _approvalIndex[a.period_label + '|' + a.employee_name] = a.status; });
+  } catch (e) {
+    console.warn('Approval index load failed; reports will show no data:', e);
+    _approvalIndex = {};
+  }
+}
+
+// Compute pay periods up to `count` periods from a start date.
+// Matches the same logic used by timeclock + timeclock_admin so labels
+// generated here align with what gets approved over there.
+function _getPayPeriods(type, startStr, count) {
+  const periods = [];
+  let cursor = new Date(startStr); cursor.setHours(0,0,0,0);
+  const days = (type === 'weekly') ? 7 : 14;
+  for (let i = 0; i < count; i++) {
+    const start = new Date(cursor);
+    const end = new Date(cursor); end.setDate(end.getDate() + days - 1); end.setHours(23,59,59,999);
+    const fmt = d => (d.getMonth()+1) + '/' + d.getDate() + '/' + d.getFullYear();
+    periods.push({ start, end, label: fmt(start) + ' - ' + fmt(end) });
+    cursor.setDate(cursor.getDate() + days);
+  }
+  return periods;
+}
+
+function _periodLabelFor(dateInput) {
+  if (!dateInput || !_payPeriodConfig) return null;
+  const d = new Date(dateInput); d.setHours(0,0,0,0);
+  const periods = _getPayPeriods(_payPeriodConfig.type, _payPeriodConfig.start, 200);
+  const match = periods.find(p => d >= p.start && d <= p.end);
+  return match ? match.label : null;
+}
+
+function _isEntryApproved(e) {
+  if (!e || !e.clock_in || !e.employee_name) return false;
+  const label = _periodLabelFor(e.clock_in);
+  if (!label) return false;
+  return _approvalIndex[label + '|' + e.employee_name] === 'approved';
+}
+
 async function initApp() {
   document.getElementById('login-screen').classList.add('hide');
   document.getElementById('app-header').style.display = 'flex';
@@ -585,6 +649,8 @@ async function initApp() {
   document.getElementById('user-label').textContent = STATE.user.name;
   // Kick off logo preload in the background — PDF export will use the cached version
   loadLogoDataUrl();
+  // Load approval index BEFORE jobs list so the job badges reflect approved hours
+  await loadApprovalIndex();
   await loadJobsList();
 }
 
@@ -634,14 +700,17 @@ async function loadJobsList() {
       }
     }
 
-    // 2) Pull time_entries to get hours/tech-count per job
+    // 2) Pull time_entries to get hours/tech-count per job. Filter to
+    // approved/locked entries only so the job-list badges match payroll.
+    // employee_name is required by _isEntryApproved → add to SELECT.
     const all = [];
     let from = 0;
     const PAGE = 1000;
     for (let i = 0; i < 50; i++) {
-      const rows = await sb('/rest/v1/time_entries?job_id=not.is.null&select=job_id,job_name,employee_id,duration_minutes,clock_in,clock_out&order=clock_in.desc&limit=' + PAGE + '&offset=' + from);
+      const rows = await sb('/rest/v1/time_entries?job_id=not.is.null&select=job_id,job_name,employee_id,employee_name,duration_minutes,clock_in,clock_out&order=clock_in.desc&limit=' + PAGE + '&offset=' + from);
       if (!rows || !rows.length) break;
-      all.push(...rows);
+      const approved = rows.filter(_isEntryApproved);
+      all.push(...approved);
       if (rows.length < PAGE) break;
       from += PAGE;
     }
@@ -856,7 +925,12 @@ async function runReport() {
     if (STATE.toDate)   url += '&clock_in=lte.' + STATE.toDate + 'T23:59:59';
 
     const entries = await sb(url);
-    STATE.entries = Array.isArray(entries) ? entries : [];
+    const allEntries = Array.isArray(entries) ? entries : [];
+    // Filter to approved/locked entries only. Without this, the report
+    // could show hours the customer has been told NOT to expect on their
+    // invoice (entries still in correction-review).
+    STATE.entries = allEntries.filter(_isEntryApproved);
+    STATE.entriesExcluded = allEntries.length - STATE.entries.length;
     renderReport();
     loadingEl.style.display = 'none';
     reportSection.style.display = 'block';
@@ -900,7 +974,10 @@ async function runAllJobsReport() {
       if (STATE.toDate)   url += '&clock_in=lte.' + STATE.toDate + 'T23:59:59';
       const rows = await sb(url);
       if (!Array.isArray(rows) || rows.length === 0) break;
-      allEntries = allEntries.concat(rows);
+      // Filter to approved/locked entries; unapproved get excluded so
+      // company-wide reports tie back to payroll.
+      const approved = rows.filter(_isEntryApproved);
+      allEntries = allEntries.concat(approved);
       if (rows.length < PAGE) break;
       from += PAGE;
       if (from > 50000) {
@@ -1037,6 +1114,12 @@ function renderReport() {
                 ' – ' + (STATE.toDate ? fmtDate(STATE.toDate + 'T00:00:00') : 'Today');
   } else {
     metaText += '  ·  All Time';
+  }
+  // Lock badge — make it visually unmistakable that this number reflects
+  // approved/locked timesheets only, with the unapproved count if any.
+  metaText += '  ·  🔒 Approved hours only';
+  if (STATE.entriesExcluded > 0) {
+    metaText += '  ·  ' + STATE.entriesExcluded + ' unapproved excluded';
   }
   document.getElementById('rpt-job-meta').textContent = metaText;
 
