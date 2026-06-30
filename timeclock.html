@@ -2744,11 +2744,32 @@ function _combineCentral(dateStr, timeStr) {
 // edit UI. Callers don't need to await — if locked, a toast appears and the
 // sheet never opens.
 async function openFixPunch(entryId) {
+  // Look in every cache that could have this entry. Order matters:
+  // 1) TC.entries — today's entries only (loaded fresh on app open)
+  // 2) TC._hoursEntries — the full current pay period (loaded when My
+  //    Hours screen renders). This is the one that holds older entries
+  //    in the current period and is the primary fix for "edit doesn't
+  //    work on days before yesterday."
+  // 3) DB fetch — last resort, for entries that aren't cached at all
+  //    (rare; e.g., opened via deep link from outside the app).
   var entry = (TC.entries || []).find(function(e){ return e.id === entryId; });
   if (!entry) {
-    // Try fetching directly — might be older than what's loaded
-    var rows = await sb('/rest/v1/time_entries?id=eq.' + entryId + '&select=*');
-    if (!rows || !rows[0]) { toast('Entry not found'); return; }
+    entry = (TC._hoursEntries || []).find(function(e){ return e.id === entryId; });
+  }
+  if (!entry) {
+    // Scope the fetch by employee_id too — defends against any RLS edge
+    // case where a bare id query might fail. Tech can only ever edit
+    // their own entries anyway, so this filter is correct.
+    var url = '/rest/v1/time_entries?id=eq.' + entryId + '&select=*';
+    if (TC.employee && TC.employee.id) {
+      url += '&employee_id=eq.' + TC.employee.id;
+    }
+    var rows = await sb(url);
+    if (!rows || !rows[0]) {
+      console.warn('openFixPunch: entry not found', { entryId: entryId, hadTcEntries: (TC.entries||[]).length, hadHoursEntries: (TC._hoursEntries||[]).length });
+      toast('Entry not found — try reloading the page');
+      return;
+    }
     entry = rows[0];
   }
   if (await _isPeriodLocked(entry.clock_in)) {
