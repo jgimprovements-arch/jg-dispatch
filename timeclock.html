@@ -960,7 +960,7 @@ body {
       <textarea id="corr-note" rows="2" placeholder="Why is this correction needed?" style="width:100%;padding:10px 12px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;font-family:DM Sans,sans-serif;outline:none;resize:none;box-sizing:border-box;"></textarea>
     </div>
 
-    <button onclick="submitCorrectionRequest()" style="width:100%;padding:15px;background:var(--orange);border:none;border-radius:12px;color:#fff;font-size:15px;font-weight:700;cursor:pointer;font-family:DM Sans,sans-serif;margin-bottom:8px;">Submit Correction Request</button>
+    <button onclick="submitCorrectionRequest()" style="width:100%;padding:15px;background:var(--orange);border:none;border-radius:12px;color:#fff;font-size:15px;font-weight:700;cursor:pointer;font-family:DM Sans,sans-serif;margin-bottom:8px;">Save Changes</button>
     <button onclick="closeCorrectionSheet()" style="width:100%;padding:12px;background:transparent;border:1.5px solid var(--border);border-radius:12px;font-size:14px;font-weight:600;color:var(--muted);cursor:pointer;font-family:DM Sans,sans-serif;">Cancel</button>
   </div>
 </div>
@@ -2786,11 +2786,13 @@ function _populateCorrectionFromEntry(e) {
   _corrJobName = e.job_name || null;
   _corrOriginalDate = _isoToDateInput(e.clock_in);
 
-  // Title and subtitle
+  // Title and subtitle — direct-apply language. The edit takes effect
+  // immediately; no admin approval needed. Admins see the change in the
+  // timecard with an "edited by tech" indicator.
   var title = document.getElementById('corr-sheet-title');
   var sub = document.getElementById('corr-sheet-sub');
-  if (title) title.textContent = '✏️ Request Time Correction';
-  if (sub) sub.textContent = 'Adjust the clock times or job. Your manager will review and approve.';
+  if (title) title.textContent = '✏️ Edit Punch';
+  if (sub) sub.textContent = 'Fix the clock times or job. Your manager will be notified of the change.';
 
   var info = document.getElementById('corr-entry-info');
   if (info) info.innerHTML = '<strong>Date:</strong> ' + _corrOriginalDate + '<br><strong>Current:</strong> ' + _isoToTimeInput(e.clock_in) + (e.clock_out ? ' → ' + _isoToTimeInput(e.clock_out) : ' → still active');
@@ -2828,7 +2830,7 @@ function openMissedPunch() {
   var title = document.getElementById('corr-sheet-title');
   var sub = document.getElementById('corr-sheet-sub');
   if (title) title.textContent = '＋ Add Missed Punch';
-  if (sub) sub.textContent = 'Submit a missed punch for admin approval. Be specific about which job and times.';
+  if (sub) sub.textContent = 'Add a punch you forgot to record. Will be saved immediately — your manager is notified.';
 
   var info = document.getElementById('corr-entry-info');
   if (info) info.innerHTML = '<strong>New entry</strong> — pick the date, times, and job for the punch you missed.';
@@ -2931,52 +2933,161 @@ async function submitCorrectionRequest() {
     toast('Clock-out must be AFTER clock-in'); return;
   }
 
-  // Lock check: refuse to submit a request that targets an approved period.
-  // Catches the bookmarked-deep-link case and stale UI submitting against
-  // a period that was approved between page load and submit.
+  // Lock check: refuse to apply against an approved period. Catches the
+  // bookmarked-deep-link case and stale UI submitting against a period
+  // that was approved between page load and submit.
   if (await _isPeriodLocked(dateStr)) {
     toast('That pay period has been approved and is locked. Contact your manager.');
     return;
   }
 
   var btn = document.querySelector('#correction-sheet button');
-  if (btn) { btn.textContent = 'Submitting...'; btn.disabled = true; }
+  if (btn) { btn.textContent = 'Saving...'; btn.disabled = true; }
 
+  // ═══ SELF-APPLIED EDIT FLOW ═══════════════════════════════════════════
+  // Tech changes now apply directly to time_entries — no admin-approval
+  // gate. The platform records an audit row in time_corrections (with
+  // the BEFORE values captured) so admin can see exactly what changed
+  // and roll back if needed. Two paths:
+  //   - edit: UPDATE existing time_entries row + log original_* in audit
+  //   - missed punch: INSERT new time_entries row + log audit entry
+  // Both end with a refresh so the tech sees the change immediately.
   try {
-    var payload = {
-      entry_id: _corrEntryId,                  // null for missed-punch
-      employee_name: TC.employee.name,
-      employee_email: TC.user ? TC.user.email : '',
-      correction_type: _corrIsNewEntry ? 'missed_punch' : 'edit',
-      is_new_entry: _corrIsNewEntry,
-      requested_clock_in:  requestedIn,
-      requested_clock_out: requestedOut,
-      requested_job_id:    _corrJobId,
-      requested_job_name:  _corrJobName,
-      notes: note || null,
-      status: 'pending'
-    };
-    var r = await fetch(SB_URL + '/rest/v1/time_corrections', {
+    var auditPayload;
+    var entryIdForAudit;
+    var nowIso = new Date().toISOString();
+
+    if (_corrIsNewEntry) {
+      // ── Missed punch: insert a brand-new time_entries row ─────────────
+      var durMins = (requestedIn && requestedOut)
+        ? Math.floor((new Date(requestedOut) - new Date(requestedIn)) / 60000)
+        : null;
+      var newEntry = {
+        employee_id: TC.employee.id,
+        employee_name: TC.employee.name,
+        clock_in: requestedIn,
+        clock_out: requestedOut,
+        duration_minutes: durMins,
+        job_id: _corrJobId,
+        job_name: _corrJobName,
+        notes: note ? ('[Self-added missed punch] ' + note) : '[Self-added missed punch]',
+        status: 'complete',
+        last_edited_by: TC.user ? TC.user.email : TC.employee.name,
+        last_edited_at: nowIso,
+        edit_count: 0
+      };
+      var insR = await fetch(SB_URL + '/rest/v1/time_entries', {
+        method: 'POST',
+        headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=representation' },
+        body: JSON.stringify(newEntry)
+      });
+      if (!insR.ok) {
+        var errText = ''; try { errText = await insR.text(); } catch(e){}
+        console.error('missed-punch insert failed', insR.status, errText);
+        toast('Error ' + insR.status + ' — ' + (errText.substring(0,80) || 'unknown'));
+        if (btn) { btn.textContent = 'Save Changes'; btn.disabled = false; }
+        return;
+      }
+      var insRows = await insR.json();
+      entryIdForAudit = (insRows && insRows[0]) ? insRows[0].id : null;
+      auditPayload = {
+        entry_id: entryIdForAudit,
+        employee_name: TC.employee.name,
+        employee_email: TC.user ? TC.user.email : '',
+        correction_type: 'missed_punch',
+        is_new_entry: true,
+        requested_clock_in: requestedIn,
+        requested_clock_out: requestedOut,
+        requested_job_id: _corrJobId,
+        requested_job_name: _corrJobName,
+        notes: note || null,
+        status: 'applied',
+        is_self_applied: true,
+        applied_at: nowIso
+      };
+    } else {
+      // ── Edit existing entry: fetch current state, then update ─────────
+      var beforeRows = await sb('/rest/v1/time_entries?id=eq.' + _corrEntryId + '&select=clock_in,clock_out,job_id,job_name,edit_count');
+      var before = (beforeRows && beforeRows[0]) || {};
+      var nextEditCount = (before.edit_count || 0) + 1;
+
+      var updates = {
+        last_edited_by: TC.user ? TC.user.email : TC.employee.name,
+        last_edited_at: nowIso,
+        edit_count: nextEditCount
+      };
+      if (requestedIn)  updates.clock_in  = requestedIn;
+      if (requestedOut) updates.clock_out = requestedOut;
+      if (_corrJobId !== null) { updates.job_id = _corrJobId; updates.job_name = _corrJobName; }
+      // Recompute duration if either time changed
+      var finalIn  = updates.clock_in  || before.clock_in;
+      var finalOut = updates.clock_out || before.clock_out;
+      if (finalIn && finalOut) {
+        updates.duration_minutes = Math.floor((new Date(finalOut) - new Date(finalIn)) / 60000);
+      }
+
+      var updR = await fetch(SB_URL + '/rest/v1/time_entries?id=eq.' + _corrEntryId, {
+        method: 'PATCH',
+        headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
+        body: JSON.stringify(updates)
+      });
+      if (!updR.ok) {
+        var errText2 = ''; try { errText2 = await updR.text(); } catch(e){}
+        console.error('entry update failed', updR.status, errText2);
+        toast('Error ' + updR.status + ' — ' + (errText2.substring(0,80) || 'unknown'));
+        if (btn) { btn.textContent = 'Save Changes'; btn.disabled = false; }
+        return;
+      }
+      entryIdForAudit = _corrEntryId;
+      auditPayload = {
+        entry_id: _corrEntryId,
+        employee_name: TC.employee.name,
+        employee_email: TC.user ? TC.user.email : '',
+        correction_type: 'edit',
+        is_new_entry: false,
+        // BEFORE snapshot — what the entry looked like prior to this edit
+        original_clock_in:  before.clock_in  || null,
+        original_clock_out: before.clock_out || null,
+        original_job_id:    before.job_id    || null,
+        original_job_name:  before.job_name  || null,
+        // AFTER values — what the tech wanted (may equal original for
+        // unchanged fields; rendering shows the diff)
+        requested_clock_in:  requestedIn  || before.clock_in,
+        requested_clock_out: requestedOut || before.clock_out,
+        requested_job_id:    (_corrJobId !== null) ? _corrJobId   : before.job_id,
+        requested_job_name:  (_corrJobId !== null) ? _corrJobName : before.job_name,
+        notes: note || null,
+        status: 'applied',
+        is_self_applied: true,
+        applied_at: nowIso
+      };
+    }
+
+    // Fire-and-forget audit row. Failure here doesn't block the user —
+    // the time_entries change already succeeded, and admin can still see
+    // the edit via the last_edited_* columns on the row itself.
+    fetch(SB_URL + '/rest/v1/time_corrections', {
       method: 'POST',
       headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
-      body: JSON.stringify(payload)
-    });
-    if (!r.ok) {
-      var errText = '';
-      try { errText = await r.text(); } catch(e) {}
-      console.error('correction request failed', r.status, errText);
-      toast('Error ' + r.status + ' — ' + (errText.substring(0,80) || 'unknown'));
-      if (btn) { btn.textContent = 'Submit Correction Request'; btn.disabled = false; }
-      return;
-    }
+      body: JSON.stringify(auditPayload)
+    }).catch(function(e){ console.warn('audit-row insert failed (non-fatal)', e); });
+
     closeCorrectionSheet();
-    toast('✓ Submitted — your manager will review it');
+    toast(_corrIsNewEntry ? '✓ Missed punch added' : '✓ Punch updated');
+
+    // Reload entries so the tech sees the change reflected immediately
+    if (typeof renderHours === 'function') {
+      try { await renderHours(); } catch(e) { console.warn('renderHours reload failed', e); }
+    }
+    if (typeof loadAll === 'function') {
+      try { await loadAll(); } catch(e) { console.warn('loadAll reload failed', e); }
+    }
   } catch(err) {
-    console.error('correction request error', err);
+    console.error('self-applied edit error', err);
     toast('Network error — check connection and try again');
   }
 
-  if (btn) { btn.textContent = 'Submit Correction Request'; btn.disabled = false; }
+  if (btn) { btn.textContent = 'Save Changes'; btn.disabled = false; }
 }
 
 // ── ON-CALL APP VIEW ──────────────────────────────────────────────────────
