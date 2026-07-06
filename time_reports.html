@@ -657,51 +657,183 @@ function _isEntryApproved(e) {
   return _approvalIndex[label + '|' + e.employee_name] === 'approved';
 }
 
-// ─── Lunch break auto-deduction ────────────────────────────────────────
-// Time reports report "billable hours" — hours we can invoice against.
-// Insurance/customers pay for productive labor, not unpaid meal breaks.
-// Per-entry rule: any single continuous punch above threshold gets a
-// standard lunch deduction subtracted. If the tech punched out for
-// lunch (two entries), each is naturally under threshold → no
-// deduction needed (lunch already excluded via the punch-out).
-let _lunchConfig = { enabled: true, threshold_minutes: 360, deduction_minutes: 30 };
+// ─── DAY-BASED BILLABLE ALGORITHM ─────────────────────────────────────
+// Ports timeclock_admin.html's dayMetrics + billableMins so time reports
+// match payroll PDFs EXACTLY. Rules:
+//   1. Effective start = clock_in, or 7:30 AM if earlier (unless
+//      approved_early flag is set on the entry)
+//   2. Day span = first effective start → last clock_out
+//   3. Manual breaks summed from time_breaks table (entry_id → duration)
+//   4. Auto-break: if day span > 6.5h AND manual breaks < 30m, add auto
+//      break to reach 30m total (i.e. auto = 30 − manual, floored at 0)
+//   5. Day billable = span − total breaks
+//   6. Each entry gets its PROPORTIONAL SHARE of day billable based on
+//      its raw actual duration vs the day's total raw actuals
+// This is the same math used to generate PDF timecards + payroll archive
+// snapshots. Report numbers will now tie exactly to payroll.
 
-async function loadLunchConfig() {
-  try {
-    const rows = await sb('/rest/v1/app_settings?id=eq.lunch_deduction_config&select=value&limit=1');
-    if (rows && rows[0] && rows[0].value) {
-      _lunchConfig = {
-        enabled: rows[0].value.enabled !== false,
-        threshold_minutes: rows[0].value.threshold_minutes || 360,
-        deduction_minutes: rows[0].value.deduction_minutes || 30,
-      };
+const _dayKey = iso => {
+  const d = new Date(iso);
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+};
+
+function _billableStart(clockInISO, approvedEarly) {
+  if (approvedEarly) return clockInISO;
+  const dt = new Date(clockInISO);
+  const cutoff = new Date(dt); cutoff.setHours(7, 30, 0, 0);
+  return dt < cutoff ? cutoff.toISOString() : clockInISO;
+}
+
+function _computeDayMetrics(dayEntries, breaksByEntryId) {
+  const ents = (dayEntries || []).slice().sort((a, b) => new Date(a.clock_in) - new Date(b.clock_in));
+  if (!ents.length) return { spanMins: 0, billableMins: 0 };
+
+  const firstIn = ents[0].clock_in;
+  const anyEarly = ents.some(e => e.approved_early);
+
+  const closedEnts = ents.filter(e => e.clock_out);
+  const lastOut = closedEnts.length
+    ? closedEnts.reduce((latest, e) => new Date(e.clock_out) > new Date(latest.clock_out) ? e : latest).clock_out
+    : new Date().toISOString();
+  const hasOpen = ents.some(e => !e.clock_out);
+
+  const bStart = new Date(_billableStart(firstIn, anyEarly));
+  const bEnd = hasOpen ? new Date() : new Date(lastOut);
+  const spanMins = Math.max(0, Math.floor((bEnd - bStart) / 60000));
+
+  let manualBreakMins = 0;
+  ents.forEach(e => {
+    const list = breaksByEntryId[e.id] || [];
+    list.forEach(b => { manualBreakMins += (b.duration_minutes || 0); });
+  });
+
+  let autoBreakMins = 0;
+  if (spanMins > 390 && manualBreakMins < 30) autoBreakMins = 30 - manualBreakMins;
+
+  const billableMins = Math.max(0, spanMins - manualBreakMins - autoBreakMins);
+  return { spanMins, billableMins };
+}
+
+// Attach `_billable` (proportional share of day billable) + `_punched`
+// (raw actual, post 7:30-clamp) to every entry in the array. Groups by
+// (employee_name, day) — so all day-mates need to be in `entries`. If
+// day-mates are missing (e.g., report filtered by job while tech worked
+// on another job same day), the share numerator will be off and the
+// billable share won't sum correctly to payroll. Callers must ensure
+// full day context is present before calling.
+function _attachBillableToEntries(entries, breaks) {
+  const breaksByEntry = {};
+  (breaks || []).forEach(b => {
+    if (!breaksByEntry[b.entry_id]) breaksByEntry[b.entry_id] = [];
+    breaksByEntry[b.entry_id].push(b);
+  });
+
+  const dayGroups = {};
+  entries.forEach(e => {
+    if (!e || !e.clock_in || !e.employee_name) return;
+    const key = e.employee_name + '|' + _dayKey(e.clock_in);
+    if (!dayGroups[key]) dayGroups[key] = [];
+    dayGroups[key].push(e);
+  });
+
+  Object.keys(dayGroups).forEach(key => {
+    const dayEnts = dayGroups[key];
+    const dm = _computeDayMetrics(dayEnts, breaksByEntry);
+
+    const actuals = dayEnts.map(e => {
+      const bStart = new Date(_billableStart(e.clock_in, e.approved_early));
+      const bEnd = e.clock_out ? new Date(e.clock_out) : new Date();
+      return Math.max(0, Math.floor((bEnd - bStart) / 60000));
+    });
+    const sumActual = actuals.reduce((s, m) => s + m, 0);
+
+    if (dm.billableMins <= 0 || sumActual === 0) {
+      dayEnts.forEach((e, i) => { e._punched = actuals[i] || 0; e._billable = 0; });
+      return;
     }
-  } catch (e) {
-    console.warn('Lunch config load failed, using defaults:', e);
-  }
+
+    dayEnts.forEach((e, i) => {
+      e._punched = actuals[i];
+      e._billable = Math.floor(dm.billableMins * (actuals[i] / sumActual));
+    });
+  });
 }
 
-// Convert punched minutes → billable minutes by applying the lunch rule.
-// Callers can use this on entry.duration_minutes OR any raw minutes value.
-function _billableMinutes(punchedMinutes) {
-  const m = Number(punchedMinutes) || 0;
-  if (!_lunchConfig.enabled) return m;
-  if (m > _lunchConfig.threshold_minutes) {
-    return Math.max(0, m - _lunchConfig.deduction_minutes);
-  }
-  return m;
-}
-
-// Compute an entry's punched AND billable minutes in one pass. Returns
-// { punched, billable, lunchDeducted } so the caller can show a diff.
+// Prefer the day-based share if attached; fall back to raw duration only
+// as a safety net (should never happen — every load path attaches).
 function _entryMinutes(e) {
-  let mins = parseFloat(e.duration_minutes);
+  if (e && typeof e._billable === 'number' && typeof e._punched === 'number') {
+    return { punched: e._punched, billable: e._billable, lunchDeducted: Math.max(0, e._punched - e._billable) };
+  }
+  let mins = parseFloat(e && e.duration_minutes);
   if (isNaN(mins) || mins <= 0) {
-    if (e.clock_in && e.clock_out) mins = (new Date(e.clock_out) - new Date(e.clock_in)) / 60000;
+    if (e && e.clock_in && e.clock_out) mins = (new Date(e.clock_out) - new Date(e.clock_in)) / 60000;
     else mins = 0;
   }
-  const billable = _billableMinutes(mins);
-  return { punched: mins, billable: billable, lunchDeducted: mins - billable };
+  return { punched: mins, billable: mins, lunchDeducted: 0 };
+}
+
+// Load time_breaks in the date range affecting these entries. Restricting
+// by employee_name + range keeps the response small when we're only
+// looking at a single job's entries.
+async function _loadBreaksForEntries(entries) {
+  if (!entries || !entries.length) return [];
+  const ids = entries.map(e => e.id).filter(Boolean);
+  if (!ids.length) return [];
+  // PostgREST IN filter — chunk into batches so URL stays under limit
+  const CHUNK = 100;
+  const allBreaks = [];
+  for (let i = 0; i < ids.length; i += CHUNK) {
+    const chunk = ids.slice(i, i + CHUNK);
+    const url = '/rest/v1/time_breaks?entry_id=in.(' + chunk.join(',') + ')&select=*';
+    const rows = await sb(url);
+    if (rows && rows.length) allBreaks.push(...rows);
+  }
+  return allBreaks;
+}
+
+// For single-job reports, we need to load ALL entries for the affected
+// (employee, day) combos — including entries on OTHER jobs — so the
+// day-mate context is complete. Without this, a tech who split their
+// day across jobs would have wrong billable shares. Returns the merged
+// entries array (primary + supplemental day-mates).
+async function _loadDayMatesForPrimary(primaryEntries) {
+  if (!primaryEntries || !primaryEntries.length) return primaryEntries || [];
+  const empDayKeys = new Set();
+  const empNames = new Set();
+  let minDate = null, maxDate = null;
+  primaryEntries.forEach(e => {
+    if (!e.employee_name || !e.clock_in) return;
+    empNames.add(e.employee_name);
+    empDayKeys.add(e.employee_name + '|' + _dayKey(e.clock_in));
+    const d = new Date(e.clock_in);
+    if (!minDate || d < minDate) minDate = d;
+    if (!maxDate || d > maxDate) maxDate = d;
+  });
+  if (!empNames.size || !minDate) return primaryEntries;
+
+  const startISO = new Date(minDate); startISO.setHours(0, 0, 0, 0);
+  const endISO = new Date(maxDate); endISO.setHours(23, 59, 59, 999);
+  const empList = Array.from(empNames).map(n => '"' + n.replace(/"/g, '\\"') + '"').join(',');
+  const url = '/rest/v1/time_entries?employee_name=in.(' + encodeURIComponent(empList) + ')' +
+              '&clock_in=gte.' + startISO.toISOString() +
+              '&clock_in=lte.' + endISO.toISOString() +
+              '&select=*';
+  const dayMates = await sb(url) || [];
+
+  // Only keep day-mates that match a primary (employee, day) combo — filters
+  // out unrelated days that fall inside the min-max range.
+  const supplemental = dayMates.filter(e => {
+    if (!e.employee_name || !e.clock_in) return false;
+    const key = e.employee_name + '|' + _dayKey(e.clock_in);
+    return empDayKeys.has(key);
+  });
+
+  // Merge: primary + non-duplicate supplemental (dedup by id)
+  const primaryIds = new Set(primaryEntries.map(e => e.id));
+  const merged = primaryEntries.slice();
+  supplemental.forEach(e => { if (!primaryIds.has(e.id)) merged.push(e); });
+  return merged;
 }
 
 async function initApp() {
@@ -711,8 +843,7 @@ async function initApp() {
   document.getElementById('user-label').textContent = STATE.user.name;
   // Kick off logo preload in the background — PDF export will use the cached version
   loadLogoDataUrl();
-  // Load approval index AND lunch config BEFORE jobs list so badges reflect the correct math
-  await Promise.all([loadApprovalIndex(), loadLunchConfig()]);
+  await loadApprovalIndex();
   await loadJobsList();
 }
 
@@ -762,23 +893,24 @@ async function loadJobsList() {
       }
     }
 
-    // 2) Pull time_entries to get hours/tech-count per job. We track BOTH
-    // approved (locked) hours AND pending (unapproved) hours separately
-    // so PMs can see total labor burn vs locked payroll burn — critical
-    // for profit-margin tracking on active jobs. employee_name is required
-    // by _isEntryApproved → add to SELECT.
+    // 2) Pull time_entries to get hours/tech-count per job. Load ALL
+    // entries in the window so day-mate context is complete for the
+    // day-based billable algorithm. Tag with approval state, then attach
+    // proportional-share billable minutes (matches payroll PDFs).
     const all = [];
     let from = 0;
     const PAGE = 1000;
     for (let i = 0; i < 50; i++) {
-      const rows = await sb('/rest/v1/time_entries?job_id=not.is.null&select=job_id,job_name,employee_id,employee_name,duration_minutes,clock_in,clock_out&order=clock_in.desc&limit=' + PAGE + '&offset=' + from);
+      const rows = await sb('/rest/v1/time_entries?job_id=not.is.null&select=id,job_id,job_name,employee_id,employee_name,duration_minutes,clock_in,clock_out,approved_early&order=clock_in.desc&limit=' + PAGE + '&offset=' + from);
       if (!rows || !rows.length) break;
-      // Tag each row so downstream aggregation can split approved vs pending
       rows.forEach(r => { r._approved = _isEntryApproved(r); });
       all.push(...rows);
       if (rows.length < PAGE) break;
       from += PAGE;
     }
+    // Load manual breaks + attach day-based billable minutes to every entry
+    const breaks = await _loadBreaksForEntries(all);
+    _attachBillableToEntries(all, breaks);
 
     // 3) Aggregate hours by job_id — split into approved/pending buckets
     //    and use BILLABLE minutes (lunch deducted per-entry) so badges
@@ -1005,12 +1137,20 @@ async function runReport() {
     if (STATE.fromDate) url += '&clock_in=gte.' + STATE.fromDate + 'T00:00:00';
     if (STATE.toDate)   url += '&clock_in=lte.' + STATE.toDate + 'T23:59:59';
 
-    const entries = await sb(url);
-    const allEntries = Array.isArray(entries) ? entries : [];
-    // Tag each entry with approved/pending status — both buckets appear
-    // in the report so PMs can compare locked payroll vs total burn.
-    allEntries.forEach(e => { e._approved = _isEntryApproved(e); });
-    STATE.entries = allEntries;
+    const primary = await sb(url);
+    const primaryEntries = Array.isArray(primary) ? primary : [];
+    primaryEntries.forEach(e => { e._approved = _isEntryApproved(e); });
+
+    // For accurate proportional-share billable, we need ALL entries for the
+    // affected (employee, day) combos — even ones on OTHER jobs. Without
+    // this, a tech splitting a day across jobs would have wrong shares.
+    // Merged array feeds _attachBillableToEntries; STATE.entries stays
+    // as the primary set (what the report actually displays).
+    const merged = await _loadDayMatesForPrimary(primaryEntries);
+    const breaks = await _loadBreaksForEntries(merged);
+    _attachBillableToEntries(merged, breaks);
+
+    STATE.entries = primaryEntries;
     renderReport();
     loadingEl.style.display = 'none';
     reportSection.style.display = 'block';
@@ -1054,7 +1194,6 @@ async function runAllJobsReport() {
       if (STATE.toDate)   url += '&clock_in=lte.' + STATE.toDate + 'T23:59:59';
       const rows = await sb(url);
       if (!Array.isArray(rows) || rows.length === 0) break;
-      // Tag each entry; render layer splits approved vs pending
       rows.forEach(e => { e._approved = _isEntryApproved(e); });
       allEntries = allEntries.concat(rows);
       if (rows.length < PAGE) break;
@@ -1064,6 +1203,10 @@ async function runAllJobsReport() {
         break;
       }
     }
+    // Day-mates all in memory (we loaded the entire range) — just need
+    // manual breaks. Attach billable shares.
+    const breaks = await _loadBreaksForEntries(allEntries);
+    _attachBillableToEntries(allEntries, breaks);
     STATE.entries = allEntries;
     renderAllJobsReport();
     loadingEl.style.display = 'none';
