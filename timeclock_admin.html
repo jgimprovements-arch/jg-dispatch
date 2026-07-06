@@ -8718,38 +8718,63 @@ function openAddEmployee() {
 }
 
 async function sendInviteFromModal() {
-  // Pull values from the open modal form
-  var name   = (document.getElementById('emp-name')   || {}).value || '';
-  var email  = (document.getElementById('emp-email')  || {}).value || '';
+  // Two-step: FIRST persist the full employee record to Supabase (all 20+
+  // form fields, same as the standalone Save path), THEN fire the worker's
+  // invite action. Previously this only sent 5 fields to the worker and
+  // skipped the DB write entirely, which meant either the invite failed
+  // (employee not found for magic-link lookup) OR succeeded but lost every
+  // field except the 5 the invite worker knew about (personal_email, phone,
+  // PTO, birthday, start date, etc. all silently dropped).
+  var email = ((document.getElementById('emp-email') || {}).value || '').trim().toLowerCase();
+  var name  = ((document.getElementById('emp-name')  || {}).value || '').trim();
+  if (!name || !email) { toast('Name and email are required'); return; }
+
+  var btn = document.querySelector('#tc-modal .btn-orange');
+  if (btn) { btn.textContent = 'Saving...'; btn.disabled = true; }
+
+  // Step 1 — save the employee record. skipUiSideEffects prevents
+  // saveEmployee from closing the modal / showing the welcome popup /
+  // reloading, so we can chain the invite call afterward.
+  var saveOk = await saveEmployee({ skipUiSideEffects: true });
+  if (!saveOk) {
+    if (btn) { btn.textContent = '✉️ Save & Send Invite Email'; btn.disabled = false; }
+    return; // toast was already fired by saveEmployee
+  }
+
+  // Step 2 — fire the invite worker. Pull the role/market/rate from the
+  // same form fields the DB write just used, so the worker's magic-link
+  // email matches the record.
+  if (btn) btn.textContent = 'Sending invite...';
   var role   = (document.getElementById('emp-role')   || {}).value || 'Technician';
   var market = normalizeMarket((document.getElementById('emp-market') || {}).value || 'Appleton');
   var rate   = (document.getElementById('emp-rate')   || {}).value || '0';
-  if (!name.trim() || !email.trim()) { toast('Name and email are required'); return; }
-
-  var btn = document.querySelector('#tc-modal .btn-orange');
-  if (btn) { btn.textContent = 'Sending...'; btn.disabled = true; }
 
   try {
     var r = await fetch('https://jg-albi-proxy.josh-70f.workers.dev', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'invite', email: email.trim().toLowerCase(), name: name.trim(), role: role||'Technician', market: market||'Appleton', hourly_rate: parseFloat(rate)||0 })
+      body: JSON.stringify({ action: 'invite', email: email, name: name, role: role || 'Technician', market: market || 'Appleton', hourly_rate: parseFloat(rate) || 0 })
     });
     var data = await r.json().catch(function(){ return { error: 'Request failed' }; });
     if (r.ok && data.success) {
-      toast('✓ Invite sent to ' + email);
+      toast('✓ Employee saved and invite sent to ' + email);
       closeModal();
       await loadAll();
     } else {
+      // Employee already saved — surface the invite-specific failure
+      // clearly so admin knows they can retry the invite from the file
+      // screen without re-entering everything.
       var errMsg = data.error || data.message || ('HTTP ' + r.status);
-      toast('Invite failed: ' + errMsg);
-      console.error('Invite error:', data);
-      if (btn) { btn.textContent = '✉️ Save & Send Invite Email'; btn.disabled = false; }
+      toast('Employee saved, but invite failed: ' + errMsg + ' — retry from their file');
+      console.error('Invite error after save:', data);
+      closeModal();
+      await loadAll();
     }
   } catch(e) {
-    toast('Error: ' + e.message);
-    console.error('Invite exception:', e);
-    if (btn) { btn.textContent = '✉️ Save & Send Invite Email'; btn.disabled = false; }
+    toast('Employee saved, but invite failed: ' + e.message + ' — retry from their file');
+    console.error('Invite exception after save:', e);
+    closeModal();
+    await loadAll();
   }
 }
 
@@ -10910,12 +10935,17 @@ function buildEmpForm(emp) {
     '</div>';
 }
 
-async function saveEmployee() {
+async function saveEmployee(opts) {
+  // opts.skipUiSideEffects (bool) — when true, don't close the modal,
+  // don't show the welcome popup, don't reload; used by
+  // sendInviteFromModal so it can chain the invite call afterward.
+  // Returns true/false so the caller knows whether to proceed.
+  var skipUi = !!(opts && opts.skipUiSideEffects);
   var personalEmail = ((document.getElementById('emp-personal-email')||{}).value || '').trim().toLowerCase();
   // Validate: if provided, must look like an email
   if (personalEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(personalEmail)) {
     alert('Personal email doesn\'t look right. Example: their.name@gmail.com');
-    return;
+    return false;
   }
   var data = {
     name: document.getElementById('emp-name').value.trim(),
@@ -10942,7 +10972,7 @@ async function saveEmployee() {
     albi_salesperson_name: ((document.getElementById('emp-albi-sales-name')||{}).value || '').trim() || null,
     paychex_id: (((document.getElementById('emp-paychex-id')||{}).value) || ((document.getElementById('emp-paychex-id-sal')||{}).value) || '').trim() || null
   };
-  if (!data.name || !data.email) { toast('Name and email are required'); return; }
+  if (!data.name || !data.email) { toast('Name and email are required'); return false; }
   var saveHeaders = {'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json'};
   var saveResult;
   if (ST.editEmp) {
@@ -10951,26 +10981,35 @@ async function saveEmployee() {
       // Fallback: try with only core columns in case new columns not yet in DB
       var coreData = { name: data.name, email: data.email, role: data.role, market: data.market, hourly_rate: data.hourly_rate, active: data.active };
       saveResult = await fetch(SB_URL+'/rest/v1/employees?id=eq.'+ST.editEmp, {method:'PATCH', headers:saveHeaders, body:JSON.stringify(coreData)});
-      toast('⚠ Saved basic info — run SQL migration to enable all fields');
+      if (!skipUi) toast('⚠ Saved basic info — run SQL migration to enable all fields');
     } else {
-      toast('✓ Employee updated');
+      if (!skipUi) toast('✓ Employee updated');
     }
   } else {
     saveResult = await fetch(SB_URL+'/rest/v1/employees', {method:'POST', headers:{...saveHeaders,'Prefer':'return=minimal'}, body:JSON.stringify(data)});
     if (!saveResult.ok) {
       var coreData2 = { name: data.name, email: data.email, role: data.role, market: data.market, hourly_rate: data.hourly_rate, active: data.active };
-      await fetch(SB_URL+'/rest/v1/employees', {method:'POST', headers:{...saveHeaders,'Prefer':'return=minimal'}, body:JSON.stringify(coreData2)});
-      toast('⚠ Saved basic info — run SQL migration to enable all fields');
+      var fbResult = await fetch(SB_URL+'/rest/v1/employees', {method:'POST', headers:{...saveHeaders,'Prefer':'return=minimal'}, body:JSON.stringify(coreData2)});
+      if (!fbResult.ok) {
+        toast('Save failed: HTTP ' + fbResult.status);
+        return false;
+      }
+      if (!skipUi) toast('⚠ Saved basic info — run SQL migration to enable all fields');
     }
     ST.editEmp = null;
-    await loadAll();
-    closeModal();
-    showWelcomeMessage(data.name, data.email);
-    return;
+    if (!skipUi) {
+      await loadAll();
+      closeModal();
+      showWelcomeMessage(data.name, data.email);
+    }
+    return true;
   }
   ST.editEmp = null;
-  closeModal();
-  await loadAll();
+  if (!skipUi) {
+    closeModal();
+    await loadAll();
+  }
+  return true;
 }
 
 
