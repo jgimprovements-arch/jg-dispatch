@@ -1614,20 +1614,23 @@ async function exportPDF() {
     y += 8;
 
     // ── SUMMARY ──
+    // Use the SAME billable algorithm as the on-screen report — day-based
+    // (7:30 clamp, punch-gap lunch, auto-break fallback). Prevents PDF
+    // exports from over-reporting hours vs what PMs see in the app.
     let totalMins = 0;
+    let punchedMins = 0;
     const techMap = {};
     STATE.entries.forEach(e => {
-      let mins = parseFloat(e.duration_minutes);
-      if (isNaN(mins) || mins <= 0) {
-        if (e.clock_in && e.clock_out) mins = (new Date(e.clock_out) - new Date(e.clock_in)) / 60000;
-        else mins = 0;
-      }
-      totalMins += mins;
+      const em = _entryMinutes(e);
+      totalMins += em.billable;
+      punchedMins += em.punched;
       const k = e.employee_id || e.employee_name;
-      if (!techMap[k]) techMap[k] = { name: e.employee_name || '(unknown)', market: e.market || '', mins: 0, count: 0 };
-      techMap[k].mins += mins;
+      if (!techMap[k]) techMap[k] = { name: e.employee_name || '(unknown)', market: e.market || '', mins: 0, punched: 0, count: 0 };
+      techMap[k].mins += em.billable;
+      techMap[k].punched += em.punched;
       techMap[k].count += 1;
     });
+    const lunchDeducted = punchedMins - totalMins;
     const techs = Object.values(techMap).sort((a, b) => b.mins - a.mins);
 
     // Summary box
@@ -1636,7 +1639,7 @@ async function exportPDF() {
     doc.setTextColor(...navy);
     doc.setFontSize(8);
     doc.setFont('helvetica', 'bold');
-    doc.text('TOTAL HOURS', 18, y + 6);
+    doc.text('BILLABLE HOURS', 18, y + 6);
     doc.text('TOTAL ENTRIES', 60, y + 6);
     doc.text('TECHNICIANS', 102, y + 6);
     doc.text('JOB STATUS', 144, y + 6);
@@ -1647,6 +1650,16 @@ async function exportPDF() {
     doc.text(String(techs.length), 102, y + 14);
     const openCount = STATE.entries.filter(e => !e.clock_out).length;
     doc.text(openCount > 0 ? openCount + ' OPEN' : 'CLOSED', 144, y + 14);
+
+    // Under-total footnote for transparency: show punched + lunch delta
+    // so anyone reading the PDF (customer, auditor, buyer) knows exactly
+    // what was deducted. Prevents "why doesn't this match my spreadsheet?"
+    if (lunchDeducted > 0) {
+      doc.setFontSize(7);
+      doc.setFont('helvetica', 'normal');
+      doc.setTextColor(120, 120, 120);
+      doc.text(fmtDecimalHours(punchedMins) + 'h punched (–' + fmtDecimalHours(lunchDeducted) + 'h lunch)', 18, y + 19);
+    }
     y += 28;
 
     // ── HOURS BY TECHNICIAN ──
@@ -1686,21 +1699,23 @@ async function exportPDF() {
 
     const sortedEntries = [...STATE.entries].sort((a,b) => new Date(a.clock_in) - new Date(b.clock_in));
     const rows = sortedEntries.map(e => {
-      let mins = parseFloat(e.duration_minutes);
-      if (isNaN(mins) || mins <= 0) {
-        if (e.clock_in && e.clock_out) mins = (new Date(e.clock_out) - new Date(e.clock_in)) / 60000;
-        else mins = 0;
-      }
+      const em = _entryMinutes(e);
       const isOpen = !e.clock_out;
       const gps = (e.clock_in_lat && e.clock_in_lng) ? 'Y' : 'N';
       const inT = e.clock_in ? new Date(e.clock_in).toLocaleTimeString('en-US', { hour:'numeric', minute:'2-digit' }) : '—';
       const outT = isOpen ? 'OPEN' : (e.clock_out ? new Date(e.clock_out).toLocaleTimeString('en-US', { hour:'numeric', minute:'2-digit' }) : '—');
+      // Hours cell = billable. Include a small "(-Xh lunch)" annotation when
+      // a deduction fired so the PDF row explains why billable < punched.
+      let hoursCell;
+      if (isOpen) hoursCell = '—';
+      else if (em.lunchDeducted > 0) hoursCell = fmtDecimalHours(em.billable) + '  (-' + fmtDecimalHours(em.lunchDeducted) + ' lunch)';
+      else hoursCell = fmtDecimalHours(em.billable);
       return [
         e.employee_name || '—',
         e.clock_in ? fmtDate(e.clock_in) : '—',
         inT,
         outT,
-        isOpen ? '—' : fmtDecimalHours(mins),
+        hoursCell,
         gps,
         e.notes || ''
       ];
