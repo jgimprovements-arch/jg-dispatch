@@ -410,18 +410,42 @@ function dayMetrics(dayEntries, allBreaks) {
   // Span = first in → last out
   var spanMins = Math.max(0, Math.floor((bEnd - bStart) / 60000));
 
-  // Sum existing breaks across all entries in the day
+  // Sum existing breaks across all entries in the day (manually recorded
+  // in time_breaks — rare, but authoritative if present).
   var entryIds = ents.map(function(e){ return e.id; });
   var dayBreaks = (allBreaks||[]).filter(function(b){ return entryIds.indexOf(b.entry_id) !== -1; });
   var manualBreakMins = dayBreaks.reduce(function(s,b){ return s+(b.duration_minutes||0); }, 0);
 
-  // Auto-break rule: if day span > 6.5h AND existing break < 30m, add auto-break
-  // up to 30m. If existing break is already >= 30m, no auto-break.
-  var autoBreakMins = 0;
-  if (spanMins > 390 && manualBreakMins < 30) {
-    autoBreakMins = 30 - manualBreakMins;
+  // ─── PHYSICAL PUNCH-GAP DETECTION ────────────────────────────────────
+  // When a tech clocks out and back in on the same day, the gap between
+  // clock-out and next clock-in IS their actual break time. Physical
+  // punches beat assumed times — if they take a 45-min lunch, they get
+  // 45 min deducted, not 30. If they take 15 min, they get 15. Only gaps
+  // >= 15 min count (prevents micro-gaps like "closed WO / back to work"
+  // from being counted). Cap total gap deduction at spanMins so we never
+  // go negative.
+  var punchGapMins = 0;
+  for (var i = 1; i < ents.length; i++) {
+    var prevOut = ents[i-1].clock_out;
+    var currIn  = ents[i].clock_in;
+    if (!prevOut || !currIn) continue;
+    var gap = Math.floor((new Date(currIn) - new Date(prevOut)) / 60000);
+    if (gap >= 15) punchGapMins += gap;
   }
-  var totalBreakMins = manualBreakMins + autoBreakMins;
+  punchGapMins = Math.min(punchGapMins, spanMins);
+
+  // ─── AUTO-BREAK FALLBACK ─────────────────────────────────────────────
+  // If physical punches OR manual breaks total >= 30 min, we trust that
+  // and skip auto-break entirely. Auto-break only fires when the tech
+  // didn't punch out AND there's no manual break recorded, on a long
+  // day (> 6.5h span). This closes the "forgot to punch out" case
+  // without double-counting real physical breaks.
+  var evidencedBreakMins = manualBreakMins + punchGapMins;
+  var autoBreakMins = 0;
+  if (spanMins > 390 && evidencedBreakMins < 30) {
+    autoBreakMins = 30 - evidencedBreakMins;
+  }
+  var totalBreakMins = evidencedBreakMins + autoBreakMins;
   var billableMins = Math.max(0, spanMins - totalBreakMins);
 
   // Actual = same as span for the daily row (span - any time clocked out)
@@ -433,6 +457,7 @@ function dayMetrics(dayEntries, allBreaks) {
     billableMins: billableMins,
     manualBreakMins: manualBreakMins,
     autoBreakMins: autoBreakMins,
+    punchGapMins: punchGapMins,
     totalBreakMins: totalBreakMins,
     firstIn: firstIn,
     lastOut: lastOut,
@@ -563,6 +588,8 @@ async function sb(path, opts) {
 }
 
 // ── APP SETTINGS (labor burden rate, etc.) ────────────────────────────────
+// Note: the day-based lunch rule lives in dayMetrics() (span > 6.5h → auto
+// 30m break). No config knob here — that behavior is the payroll standard.
 var _appSettings = {
   labor_burden_rate: 40  // default $40/hr; overridden from Supabase on load
 };
@@ -573,13 +600,10 @@ async function loadAppSettings() {
     if (rows && rows.length) {
       rows.forEach(function(r) {
         if (r.id && r.value != null) {
-          // pay_period_config is an object; labor_burden_rate and similar are numbers
           if (r.id === 'pay_period_config' && typeof r.value === 'object') {
             _appSettings[r.id] = r.value;
-            // Hydrate ST.payPeriod from DB
             if (r.value.type && r.value.start) {
               ST.payPeriod = { type: r.value.type, start: r.value.start };
-              // Mirror to localStorage for offline resilience
               try { localStorage.setItem('jg_pay_period', JSON.stringify(ST.payPeriod)); } catch(e){}
             }
           } else {
@@ -590,6 +614,26 @@ async function loadAppSettings() {
     }
   } catch(e) { console.warn('loadAppSettings failed:', e); }
   return _appSettings;
+}
+
+// ── LUNCH DEDUCTION HELPERS ───────────────────────────────────────────────
+// Wrappers around the existing day-based billableMins() so report
+// aggregations align with what payroll PDFs and archives use. The
+// underlying rule (day-span minus manual breaks minus auto-30m if day
+// > 6.5h) lives in dayMetrics() — don't reinvent it here.
+function _entryMinutes(e) {
+  var mins = parseFloat(e && e.duration_minutes);
+  if (isNaN(mins) || mins <= 0) {
+    if (e && e.clock_in && e.clock_out) mins = Math.floor((new Date(e.clock_out) - new Date(e.clock_in)) / 60000);
+    else mins = 0;
+  }
+  // Delegate to the existing day-based billable calculation. It looks up
+  // the day-mates via ST.entries and applies the auto-break rule. Result:
+  // one source of truth for "billable" across admin reports + payroll PDFs.
+  var billable;
+  try { billable = (typeof billableMins === 'function') ? billableMins(e, ST.breaks || []) : mins; }
+  catch(err) { billable = mins; }
+  return { punched: mins, billable: billable, lunchDeducted: Math.max(0, mins - billable) };
 }
 
 // Save pay period to Supabase app_settings so tech timeclock can read the same config
@@ -7077,11 +7121,19 @@ function renderReports() {
   var excludedCount = allEntries.length - sourceEntries.length;
 
   // ═══ COMPUTE SHARED DATA ══════════════════════════════════════════════
+  // Aggregation now uses BILLABLE hours (lunch auto-deducted per-entry).
+  // Same rule as time_reports.html — invoiceable vs punched — so admin
+  // reports and PM reports agree. Labor Cost + OT are computed from
+  // billable minutes so payroll burden and margin math are consistent.
   var byEmp = {};
+  var totalPunchedMins = 0;
   sourceEntries.forEach(function(e) {
-    if (!byEmp[e.employee_name]) byEmp[e.employee_name] = { mins: 0, days: new Set(), ot: 0 };
-    var m = e.duration_minutes || durMins(e);
-    byEmp[e.employee_name].mins += m;
+    if (!byEmp[e.employee_name]) byEmp[e.employee_name] = { mins: 0, punched: 0, lunch: 0, days: new Set(), ot: 0 };
+    var em = _entryMinutes(e);
+    byEmp[e.employee_name].mins    += em.billable;
+    byEmp[e.employee_name].punched += em.punched;
+    byEmp[e.employee_name].lunch   += em.lunchDeducted;
+    totalPunchedMins += em.punched;
     byEmp[e.employee_name].days.add(e.clock_in.split('T')[0]);
   });
   Object.values(byEmp).forEach(function(d){
@@ -7090,6 +7142,7 @@ function renderReports() {
   });
 
   var totalMins = Object.values(byEmp).reduce(function(s,d){return s+d.mins;},0);
+  var totalLunchMins = Object.values(byEmp).reduce(function(s,d){return s+d.lunch;},0);
   var totalOT = Object.values(byEmp).reduce(function(s,d){return s+d.ot;},0);
   var burdenTotal = laborBurdenCost(totalMins);
 
@@ -7120,8 +7173,12 @@ function renderReports() {
   h += '</div>';
 
   // ─── AT-A-GLANCE STAT STRIP (always visible) ──────────────────────────
+  // Total = billable (lunch already deducted). Punched shown as a
+  // sanity-check card with the lunch delta so admins can see the gap
+  // and diligence-story the discipline: "we auto-deduct meal breaks."
   h += '<div class="stat-grid">';
-  h += '<div class="stat-card"><div class="stat-val">'+fmtDur(totalMins)+'</div><div class="stat-lbl">Total Hours</div></div>';
+  h += '<div class="stat-card"><div class="stat-val">'+fmtDur(totalMins)+'</div><div class="stat-lbl">Billable Hours</div></div>';
+  h += '<div class="stat-card"><div class="stat-val" style="color:var(--muted);">'+fmtDur(totalPunchedMins)+'</div><div class="stat-lbl">Punched Hours' + (totalLunchMins > 0 ? ' <span style="font-size:9px;">(–'+fmtDur(totalLunchMins)+' lunch)</span>' : '') + '</div></div>';
   h += '<div class="stat-card" style="border-left:3px solid var(--orange);"><div class="stat-val" style="color:var(--orange);">'+fmtMoney(burdenTotal)+'</div><div class="stat-lbl">Labor Cost (@ $'+getLaborBurdenRate()+'/hr)</div></div>';
   h += '<div class="stat-card"><div class="stat-val" style="color:var(--red);">'+totalOT.toFixed(1)+'h</div><div class="stat-lbl">Overtime Hours</div></div>';
   h += '<div class="stat-card"><div class="stat-val">'+Object.keys(byEmp).length+'</div><div class="stat-lbl">Employees</div></div>';
@@ -7222,7 +7279,7 @@ function _rptLaborByMarket(byEmp) {
   sourceEntries.forEach(function(e) {
     var mkt = empMarket[e.employee_name] || 'Unassigned';
     if (!byMarket[mkt]) byMarket[mkt] = { mins: 0, entries: 0, techs: new Set() };
-    byMarket[mkt].mins += e.duration_minutes || durMins(e);
+    byMarket[mkt].mins += _entryMinutes(e).billable;
     byMarket[mkt].entries++;
     byMarket[mkt].techs.add(e.employee_name);
   });
@@ -7275,7 +7332,7 @@ function _rptLaborByJobType() {
   var byType = {};
   var untaggedMins = 0;
   sourceEntries.forEach(function(e) {
-    var mins = e.duration_minutes || durMins(e);
+    var mins = _entryMinutes(e).billable;
     if (e.job_id && jobTypeMap[e.job_id]) {
       var type = jobTypeMap[e.job_id];
       if (!byType[type]) byType[type] = { mins: 0, entries: 0 };
@@ -7408,7 +7465,7 @@ function _rptOTTrend() {
     var wsKey = weekStart.toISOString().split('T')[0];
     var empKey = wsKey + '|' + e.employee_name;
     if (!empWeekMap[empKey]) empWeekMap[empKey] = 0;
-    empWeekMap[empKey] += e.duration_minutes || durMins(e);
+    empWeekMap[empKey] += _entryMinutes(e).billable;
   });
 
   // Now sum per week, tracking OT (hours > 40h per employee per week)
@@ -7608,12 +7665,12 @@ function _renderJobSearchResults() {
   }
 
   // Summary stats
-  var totalMins = matched.reduce(function(s,e){ return s + (e.duration_minutes || durMins(e)); }, 0);
+  var totalMins = matched.reduce(function(s,e){ return s + (_entryMinutes(e).billable); }, 0);
   var byTech = {};
   var dateSet = new Set();
   matched.forEach(function(e) {
     if (!byTech[e.employee_name]) byTech[e.employee_name] = { mins: 0, count: 0 };
-    var m = e.duration_minutes || durMins(e);
+    var m = _entryMinutes(e).billable;
     byTech[e.employee_name].mins += m;
     byTech[e.employee_name].count++;
     dateSet.add(e.clock_in.split('T')[0]);
@@ -7653,7 +7710,7 @@ function _renderJobSearchResults() {
   h += '<table class="tc-table" style="margin:0;">';
   h += '<thead><tr><th>Date</th><th>Tech</th><th>Clock In</th><th>Clock Out</th><th>Duration</th><th>Notes</th></tr></thead><tbody>';
   matched.forEach(function(e) {
-    var m = e.duration_minutes || durMins(e);
+    var m = _entryMinutes(e).billable;
     h += '<tr>';
     h += '<td style="font-size:12px;white-space:nowrap;">'+fmtDate(e.clock_in)+'</td>';
     h += '<td><strong style="color:var(--navy);">'+e.employee_name+'</strong></td>';

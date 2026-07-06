@@ -686,7 +686,7 @@ function _billableStart(clockInISO, approvedEarly) {
 
 function _computeDayMetrics(dayEntries, breaksByEntryId) {
   const ents = (dayEntries || []).slice().sort((a, b) => new Date(a.clock_in) - new Date(b.clock_in));
-  if (!ents.length) return { spanMins: 0, billableMins: 0 };
+  if (!ents.length) return { spanMins: 0, billableMins: 0, punchGapMins: 0, autoBreakMins: 0 };
 
   const firstIn = ents[0].clock_in;
   const anyEarly = ents.some(e => e.approved_early);
@@ -701,17 +701,36 @@ function _computeDayMetrics(dayEntries, breaksByEntryId) {
   const bEnd = hasOpen ? new Date() : new Date(lastOut);
   const spanMins = Math.max(0, Math.floor((bEnd - bStart) / 60000));
 
+  // Manual breaks from time_breaks table
   let manualBreakMins = 0;
   ents.forEach(e => {
     const list = breaksByEntryId[e.id] || [];
     list.forEach(b => { manualBreakMins += (b.duration_minutes || 0); });
   });
 
-  let autoBreakMins = 0;
-  if (spanMins > 390 && manualBreakMins < 30) autoBreakMins = 30 - manualBreakMins;
+  // ─── PHYSICAL PUNCH-GAP DETECTION ────────────────────────────────────
+  // Real gaps between clock-out and next clock-in ARE the tech's actual
+  // break time. Physical punches beat 30-min assumptions — 45-min lunch
+  // gets 45 deducted, 15-min gap gets 15. Under 15 min = micro-gap,
+  // doesn't count (prevents "quick task switch" from being penalized).
+  let punchGapMins = 0;
+  for (let i = 1; i < ents.length; i++) {
+    const prevOut = ents[i-1].clock_out;
+    const currIn  = ents[i].clock_in;
+    if (!prevOut || !currIn) continue;
+    const gap = Math.floor((new Date(currIn) - new Date(prevOut)) / 60000);
+    if (gap >= 15) punchGapMins += gap;
+  }
+  punchGapMins = Math.min(punchGapMins, spanMins);
 
-  const billableMins = Math.max(0, spanMins - manualBreakMins - autoBreakMins);
-  return { spanMins, billableMins };
+  // Auto-break only fires as a fallback when there's no physical evidence
+  // of a break (no manual record, no punch-out gap) on a long day.
+  const evidencedBreakMins = manualBreakMins + punchGapMins;
+  let autoBreakMins = 0;
+  if (spanMins > 390 && evidencedBreakMins < 30) autoBreakMins = 30 - evidencedBreakMins;
+
+  const billableMins = Math.max(0, spanMins - evidencedBreakMins - autoBreakMins);
+  return { spanMins, billableMins, punchGapMins, autoBreakMins };
 }
 
 // Attach `_billable` (proportional share of day billable) + `_punched`
