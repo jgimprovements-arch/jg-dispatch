@@ -657,6 +657,53 @@ function _isEntryApproved(e) {
   return _approvalIndex[label + '|' + e.employee_name] === 'approved';
 }
 
+// ─── Lunch break auto-deduction ────────────────────────────────────────
+// Time reports report "billable hours" — hours we can invoice against.
+// Insurance/customers pay for productive labor, not unpaid meal breaks.
+// Per-entry rule: any single continuous punch above threshold gets a
+// standard lunch deduction subtracted. If the tech punched out for
+// lunch (two entries), each is naturally under threshold → no
+// deduction needed (lunch already excluded via the punch-out).
+let _lunchConfig = { enabled: true, threshold_minutes: 360, deduction_minutes: 30 };
+
+async function loadLunchConfig() {
+  try {
+    const rows = await sb('/rest/v1/app_settings?id=eq.lunch_deduction_config&select=value&limit=1');
+    if (rows && rows[0] && rows[0].value) {
+      _lunchConfig = {
+        enabled: rows[0].value.enabled !== false,
+        threshold_minutes: rows[0].value.threshold_minutes || 360,
+        deduction_minutes: rows[0].value.deduction_minutes || 30,
+      };
+    }
+  } catch (e) {
+    console.warn('Lunch config load failed, using defaults:', e);
+  }
+}
+
+// Convert punched minutes → billable minutes by applying the lunch rule.
+// Callers can use this on entry.duration_minutes OR any raw minutes value.
+function _billableMinutes(punchedMinutes) {
+  const m = Number(punchedMinutes) || 0;
+  if (!_lunchConfig.enabled) return m;
+  if (m > _lunchConfig.threshold_minutes) {
+    return Math.max(0, m - _lunchConfig.deduction_minutes);
+  }
+  return m;
+}
+
+// Compute an entry's punched AND billable minutes in one pass. Returns
+// { punched, billable, lunchDeducted } so the caller can show a diff.
+function _entryMinutes(e) {
+  let mins = parseFloat(e.duration_minutes);
+  if (isNaN(mins) || mins <= 0) {
+    if (e.clock_in && e.clock_out) mins = (new Date(e.clock_out) - new Date(e.clock_in)) / 60000;
+    else mins = 0;
+  }
+  const billable = _billableMinutes(mins);
+  return { punched: mins, billable: billable, lunchDeducted: mins - billable };
+}
+
 async function initApp() {
   document.getElementById('login-screen').classList.add('hide');
   document.getElementById('app-header').style.display = 'flex';
@@ -664,8 +711,8 @@ async function initApp() {
   document.getElementById('user-label').textContent = STATE.user.name;
   // Kick off logo preload in the background — PDF export will use the cached version
   loadLogoDataUrl();
-  // Load approval index BEFORE jobs list so the job badges reflect approved hours
-  await loadApprovalIndex();
+  // Load approval index AND lunch config BEFORE jobs list so badges reflect the correct math
+  await Promise.all([loadApprovalIndex(), loadLunchConfig()]);
   await loadJobsList();
 }
 
@@ -734,6 +781,8 @@ async function loadJobsList() {
     }
 
     // 3) Aggregate hours by job_id — split into approved/pending buckets
+    //    and use BILLABLE minutes (lunch deducted per-entry) so badges
+    //    reflect what we can actually invoice, not raw punched hours.
     const hoursByJob = {};
     all.forEach(r => {
       const jid = String(r.job_id);
@@ -748,17 +797,10 @@ async function loadJobsList() {
           job_name_from_entries: r.job_name || ''
         };
       }
-      let mins = parseFloat(r.duration_minutes);
-      if (isNaN(mins) || mins <= 0) {
-        if (r.clock_in && r.clock_out) {
-          mins = (new Date(r.clock_out) - new Date(r.clock_in)) / 60000;
-        } else {
-          mins = 0;
-        }
-      }
-      hoursByJob[jid].total_minutes += mins;
-      if (r._approved) hoursByJob[jid].approved_minutes += mins;
-      else hoursByJob[jid].pending_minutes += mins;
+      const em = _entryMinutes(r);
+      hoursByJob[jid].total_minutes += em.billable;
+      if (r._approved) hoursByJob[jid].approved_minutes += em.billable;
+      else hoursByJob[jid].pending_minutes += em.billable;
       if (r.employee_id) hoursByJob[jid].techs.add(r.employee_id);
     });
 
@@ -1049,17 +1091,17 @@ function renderAllJobsReport() {
   metaText += '  ·  ' + entries.length.toLocaleString() + ' entries';
   document.getElementById('rpt-job-meta').textContent = metaText;
 
-  // Aggregate
+  // Aggregate. Use BILLABLE minutes (lunch auto-deducted) so All Jobs
+  // report reflects invoiceable hours, consistent with per-job report.
   let totalMins = 0;
+  let punchedMins = 0;
   const jobMap = {};   // job_id -> { name, total_minutes, entry_count, techs:{name:minutes} }
   const techMap = {};  // tech key -> { name, market, total_minutes, entry_count, jobs:Set }
 
   entries.forEach(e => {
-    let mins = parseFloat(e.duration_minutes);
-    if (isNaN(mins) || mins <= 0) {
-      if (e.clock_in && e.clock_out) mins = (new Date(e.clock_out) - new Date(e.clock_in)) / 60000;
-      else mins = 0;
-    }
+    const em = _entryMinutes(e);
+    const mins = em.billable;
+    punchedMins += em.punched;
     totalMins += mins;
 
     const jid = String(e.job_id);
@@ -1083,9 +1125,12 @@ function renderAllJobsReport() {
   const jobs = Object.values(jobMap).sort((a,b) => b.total_minutes - a.total_minutes);
   const techs = Object.values(techMap).sort((a,b) => b.total_minutes - a.total_minutes);
 
-  // Summary cards
+  // Summary cards — show billable prominently; punched shown as a
+  // sanity-check second card so PMs can see the lunch delta at a glance.
+  const lunchDelta = punchedMins - totalMins;
   document.getElementById('rpt-summary').innerHTML =
-    '<div class="summary-card"><div class="summary-value">' + fmtDecimalHours(totalMins) + '</div><div class="summary-label">Total Hours</div></div>' +
+    '<div class="summary-card"><div class="summary-value">' + fmtDecimalHours(totalMins) + '</div><div class="summary-label">Billable Hours</div></div>' +
+    '<div class="summary-card"><div class="summary-value">' + fmtDecimalHours(punchedMins) + '</div><div class="summary-label">Punched Hours' + (lunchDelta > 0 ? ' <span style="font-size:9px;color:var(--muted);">(–' + fmtDecimalHours(lunchDelta) + ' lunch)</span>' : '') + '</div></div>' +
     '<div class="summary-card"><div class="summary-value">' + jobs.length + '</div><div class="summary-label">Jobs</div></div>' +
     '<div class="summary-card"><div class="summary-value">' + techs.length + '</div><div class="summary-label">Technicians</div></div>' +
     '<div class="summary-card"><div class="summary-value">' + entries.length.toLocaleString() + '</div><div class="summary-label">Entries</div></div>';
@@ -1156,10 +1201,12 @@ function renderReport() {
   document.getElementById('rpt-job-meta').textContent = metaText;
 
   // Summary stats — track approved vs pending separately so PMs see both
-  // the locked-payroll total AND the in-flight labor (which they need to
-  // forecast margin without waiting for the next approval cycle).
+  // the locked-payroll total AND the in-flight labor. All hours reported
+  // are BILLABLE (lunch auto-deducted from any single punch above the
+  // threshold) — matches what we can invoice to insurance / customer.
   const entries = STATE.entries;
-  let totalMins = 0;
+  let punchedMins = 0;
+  let billableMins = 0;
   let approvedMins = 0;
   let pendingMins = 0;
   const techMap = {};
@@ -1167,17 +1214,11 @@ function renderReport() {
   let entriesWithGps = 0;
 
   entries.forEach(e => {
-    let mins = parseFloat(e.duration_minutes);
-    if (isNaN(mins) || mins <= 0) {
-      if (e.clock_in && e.clock_out) {
-        mins = (new Date(e.clock_out) - new Date(e.clock_in)) / 60000;
-      } else {
-        mins = 0;
-      }
-    }
-    totalMins += mins;
-    if (e._approved) approvedMins += mins;
-    else pendingMins += mins;
+    const em = _entryMinutes(e);
+    punchedMins += em.punched;
+    billableMins += em.billable;
+    if (e._approved) approvedMins += em.billable;
+    else pendingMins += em.billable;
     const techKey = e.employee_id || e.employee_name;
     if (!techMap[techKey]) {
       techMap[techKey] = {
@@ -1189,9 +1230,9 @@ function renderReport() {
         entry_count: 0
       };
     }
-    techMap[techKey].total_minutes += mins;
-    if (e._approved) techMap[techKey].approved_minutes += mins;
-    else techMap[techKey].pending_minutes += mins;
+    techMap[techKey].total_minutes += em.billable;
+    if (e._approved) techMap[techKey].approved_minutes += em.billable;
+    else techMap[techKey].pending_minutes += em.billable;
     techMap[techKey].entry_count += 1;
 
     if (e.clock_in) {
@@ -1202,14 +1243,16 @@ function renderReport() {
     if (e.clock_in_lat && e.clock_in_lng) entriesWithGps += 1;
   });
 
+  const lunchDeducted = punchedMins - billableMins;
   const techs = Object.values(techMap).sort((a, b) => b.total_minutes - a.total_minutes);
 
-  // Render summary — two prominent hour stats (approved + pending) so the
-  // PM sees the split at a glance. Total computed implicitly = sum of both.
+  // Render summary — Approved/Pending both use BILLABLE hours. Punched
+  // hours shown as a sanity-check so PMs can see the lunch delta.
   const summary = [
     { label: '🔒 Approved Hours', val: fmtDecimalHours(approvedMins), color: '#1e7d3f' },
     { label: '⏳ Pending Hours', val: fmtDecimalHours(pendingMins), color: pendingMins > 0 ? '#b87900' : 'inherit' },
-    { label: 'Total Hours', val: fmtDecimalHours(totalMins) },
+    { label: 'Billable Hours', val: fmtDecimalHours(billableMins) },
+    { label: 'Punched Hours', val: fmtDecimalHours(punchedMins) + (lunchDeducted > 0 ? ' <span style="font-size:10px;color:var(--muted);font-weight:400;">(–' + fmtDecimalHours(lunchDeducted) + ' lunch)</span>' : '') },
     { label: 'Total Entries', val: entries.length },
     { label: 'Techs', val: techs.length },
     { label: 'First Activity', val: firstDate ? fmtDate(firstDate) : '—' },
@@ -1254,23 +1297,26 @@ function renderReport() {
     '</div>';
 
   const entryRows = entries.map(e => {
-    let mins = parseFloat(e.duration_minutes);
-    if (isNaN(mins) || mins <= 0) {
-      if (e.clock_in && e.clock_out) mins = (new Date(e.clock_out) - new Date(e.clock_in)) / 60000;
-      else mins = 0;
-    }
+    const em = _entryMinutes(e);
     const isOpen = !e.clock_out;
     const gpsIn = (e.clock_in_lat && e.clock_in_lng) ? '<span class="gps-yes">●</span>' : '<span class="gps-no">○</span>';
     const gpsOut = (e.clock_out_lat && e.clock_out_lng) ? '<span class="gps-yes">●</span>' : '<span class="gps-no">○</span>';
-    // Tint pending rows amber so the PM can scan the table and immediately
-    // see "these entries haven't been approved by Lisa/Josh yet" without
-    // doing the math. Left border + soft background = clear-but-not-jarring.
     const rowStyle = e._approved
       ? ''
       : ' style="background:#fff8eb;border-left:3px solid #b87900;"';
     const lockBadge = e._approved
       ? '<span style="display:inline-block;font-size:10px;font-weight:700;color:#1e7d3f;background:#e6f7ec;border-radius:3px;padding:2px 6px;letter-spacing:.3px;">🔒 APPROVED</span>'
       : '<span style="display:inline-block;font-size:10px;font-weight:700;color:#b87900;background:#fff4e1;border-radius:3px;padding:2px 6px;letter-spacing:.3px;">⏳ PENDING</span>';
+    // Per-row hours cell — show billable prominently. If a lunch was
+    // deducted on this row (single punch > threshold), show the punched
+    // hours as a strikethrough sub-line with the "–0.5 lunch" note so
+    // the PM can see exactly where the reduction came from.
+    const hoursCell = isOpen
+      ? '—'
+      : (em.lunchDeducted > 0
+          ? '<div>' + fmtDecimalHours(em.billable) + 'h</div>' +
+            '<div style="font-size:10px;color:var(--muted);font-weight:400;line-height:1.2;"><s>' + fmtDecimalHours(em.punched) + 'h</s> –' + fmtDecimalHours(em.lunchDeducted) + ' lunch</div>'
+          : fmtDecimalHours(em.billable) + 'h');
     return '<tr' + rowStyle + '>' +
       '<td>' +
         '<div class="tech-name">' + escapeHtml(e.employee_name || '—') + '</div>' +
@@ -1279,7 +1325,7 @@ function renderReport() {
       '<td>' + fmtDate(e.clock_in) + '</td>' +
       '<td>' + fmtTime(e.clock_in) + ' ' + gpsIn + '</td>' +
       '<td>' + (isOpen ? '<span style="color:var(--yellow);font-weight:700;">OPEN</span>' : (fmtTime(e.clock_out) + ' ' + gpsOut)) + '</td>' +
-      '<td class="duration-cell">' + (isOpen ? '—' : fmtDecimalHours(mins) + 'h') + '</td>' +
+      '<td class="duration-cell">' + hoursCell + '</td>' +
       '<td>' + lockBadge + '<div style="font-size:10px;color:var(--muted);margin-top:2px;">' + escapeHtml(e.status || 'active') + '</div></td>' +
       '<td class="notes-cell">' + escapeHtml(e.notes || '') + '</td>' +
     '</tr>';
