@@ -4780,7 +4780,33 @@ var _archiveFilter = { employee: 'All', year: 'All', search: '' };
 // State for the preview panel
 var _commPreviewData = null;  // cached Albi closed jobs with salesperson
 var _commPreviewLoading = false;
-var _commPreviewFilter = { days: 30 };  // lookback window
+// Filter state — supports either preset lookback or explicit from/to range.
+// mode='preset' uses `days` (last N days from today); mode='custom' uses
+// `from` and `to` as YYYY-MM-DD strings. Kept in module scope so the
+// user's choice persists across renderCommissions calls within a session.
+var _commPreviewFilter = { mode: 'preset', days: 30, from: '', to: '' };
+
+// Handles dropdown selection. Value shapes: "preset:N" or "custom".
+// Custom mode reveals the from/to date inputs and defaults the range to
+// last 30 days if not previously set — gives the user a starting anchor
+// rather than empty inputs that show zero results.
+function _commPreviewSetMode(v) {
+  if (v === 'custom') {
+    _commPreviewFilter.mode = 'custom';
+    if (!_commPreviewFilter.from || !_commPreviewFilter.to) {
+      var today = new Date();
+      var thirtyAgo = new Date(); thirtyAgo.setDate(thirtyAgo.getDate() - 30);
+      var fmt = function(d) { return d.toISOString().split('T')[0]; };
+      if (!_commPreviewFilter.from) _commPreviewFilter.from = fmt(thirtyAgo);
+      if (!_commPreviewFilter.to) _commPreviewFilter.to = fmt(today);
+    }
+  } else {
+    _commPreviewFilter.mode = 'preset';
+    _commPreviewFilter.days = parseInt(v.split(':')[1]) || 30;
+  }
+  _commPreviewData = null;
+  renderCommissions();
+}
 
 // Build the preview HTML block. Called from renderCommissions.
 function _renderCommissionPreview(isAdminUser, myName, canEdit) {
@@ -4791,12 +4817,25 @@ function _renderCommissionPreview(isAdminUser, myName, canEdit) {
   h += '<div class="card-title" style="color:var(--orange);">🔮 Upcoming Pay — Closed Jobs from Albi</div>';
   h += '<div style="font-size:10px;color:var(--muted);margin-top:2px;font-weight:500;">Only showing: <strong style="color:var(--navy);">closed</strong> + <strong style="color:var(--navy);">actual revenue posted</strong> + <strong style="color:var(--navy);">sales rep assigned</strong></div>';
   h += '</div>';
-  h += '<div style="display:flex;gap:8px;align-items:center;">';
-  h += '<select class="form-select" onchange="_commPreviewFilter.days=parseInt(this.value);_commPreviewData=null;renderCommissions();" style="font-size:12px;padding:6px 10px;">';
+  h += '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">';
+  // Preset lookback dropdown — adds a "Custom range" option that reveals
+  // two date inputs below. Switching back to a preset hides them again.
+  h += '<select class="form-select" onchange="_commPreviewSetMode(this.value)" style="font-size:12px;padding:6px 10px;">';
   [7, 14, 30, 60, 90].forEach(function(d){
-    h += '<option value="'+d+'"'+(_commPreviewFilter.days===d?' selected':'')+'>Last '+d+' days</option>';
+    var selected = (_commPreviewFilter.mode === 'preset' && _commPreviewFilter.days === d) ? ' selected' : '';
+    h += '<option value="preset:'+d+'"'+selected+'>Last '+d+' days</option>';
   });
+  var customSel = _commPreviewFilter.mode === 'custom' ? ' selected' : '';
+  h += '<option value="custom"'+customSel+'>Custom range…</option>';
   h += '</select>';
+  // From/To pickers — only visible in custom mode
+  var customDisplay = _commPreviewFilter.mode === 'custom' ? '' : 'display:none;';
+  h += '<div id="comm-preview-custom" style="display:flex;gap:6px;align-items:center;font-size:12px;'+customDisplay+'">';
+  h += '<span style="color:var(--muted);">From</span>';
+  h += '<input type="date" class="form-input" style="font-size:12px;padding:5px 8px;width:auto;" value="'+(_commPreviewFilter.from || '')+'" onchange="_commPreviewFilter.from=this.value;_commPreviewData=null;renderCommissions();">';
+  h += '<span style="color:var(--muted);">to</span>';
+  h += '<input type="date" class="form-input" style="font-size:12px;padding:5px 8px;width:auto;" value="'+(_commPreviewFilter.to || '')+'" onchange="_commPreviewFilter.to=this.value;_commPreviewData=null;renderCommissions();">';
+  h += '</div>';
   h += '<button class="btn btn-sm" onclick="_loadCommPreview(true)">↻ Refresh</button>';
   h += '</div>';
   h += '</div>';
@@ -4815,9 +4854,18 @@ function _renderCommissionPreview(isAdminUser, myName, canEdit) {
     return h;
   }
 
-  // Filter to lookback window + map Albi salesPerson to JG employees
-  var cutoff = new Date();
-  cutoff.setDate(cutoff.getDate() - _commPreviewFilter.days);
+  // Filter to lookback window OR custom from/to range + map Albi
+  // salesPerson to JG employees. Custom mode uses local-midnight parsing
+  // (T00:00:00) so a from-date of 6/1 catches jobs closed on 6/1.
+  var rangeStart = null, rangeEnd = null;
+  if (_commPreviewFilter.mode === 'custom' && _commPreviewFilter.from && _commPreviewFilter.to) {
+    rangeStart = new Date(_commPreviewFilter.from + 'T00:00:00');
+    rangeEnd   = new Date(_commPreviewFilter.to   + 'T23:59:59');
+  } else {
+    rangeEnd   = new Date();
+    rangeStart = new Date();
+    rangeStart.setDate(rangeStart.getDate() - (_commPreviewFilter.days || 30));
+  }
 
   var eligible = _commPreviewData.filter(function(j) {
     if (!j.closedBoolean) return false;           // must be marked closed in Albi
@@ -4826,7 +4874,7 @@ function _renderCommissionPreview(isAdminUser, myName, canEdit) {
     if (!(actual > 0)) return false;              // must have ACTUAL revenue posted (not estimate)
     var d = j.closedDate ? new Date(j.closedDate) : null;
     if (!d || isNaN(d.getTime())) return false;
-    return d >= cutoff;
+    return d >= rangeStart && d <= rangeEnd;
   });
 
   // Map to JG employees — match on albi_salesperson_name OR employee name
@@ -4840,6 +4888,38 @@ function _renderCommissionPreview(isAdminUser, myName, canEdit) {
       matchedEmployee: matched || null,
       alreadyConverted: (ST.commissions || []).some(function(c) { return c.job_id === j.id; })
     });
+  });
+
+  // Filter to actual sales reps only. An employee counts as a sales rep
+  // if ANY of these are true: role contains "sales", they have a
+  // default_commission_rate set, OR their albi_salesperson_name is
+  // explicitly populated (opt-in signal). This excludes owners, admins,
+  // PMs, and technicians who happen to be named on Albi jobs from
+  // showing up in the commission preview. Josh Greil and similar
+  // non-sales employees are filtered out at the match layer AND the
+  // "unrecognized rep name" warning layer — so their jobs vanish
+  // silently, they don't become data-quality noise.
+  function _isSalesRep(emp) {
+    if (!emp) return false;
+    var isSalesRole = /sales/i.test(String(emp.role || ''));
+    var hasRate = parseFloat(emp.default_commission_rate || 0) > 0;
+    var hasAlbiSalesName = !!(emp.albi_salesperson_name && String(emp.albi_salesperson_name).trim());
+    return isSalesRole || hasRate || hasAlbiSalesName;
+  }
+
+  eligible = eligible.filter(function(j) {
+    // Matched — only include if the matched employee is actually a sales rep
+    if (j.matchedEmployee) return _isSalesRep(j.matchedEmployee);
+    // Unmatched — but if Albi's rep name is one of our known non-sales
+    // employees, drop it silently rather than surfacing as a data quality
+    // warning. Only TRULY unknown names should trigger the red warning.
+    var albiLower = (j.salesPerson || '').trim().toLowerCase();
+    var jgKnown = (ST.employees || []).find(function(e) {
+      var n = (e.albi_salesperson_name || e.name || '').trim().toLowerCase();
+      return n && n === albiLower;
+    });
+    if (jgKnown && !_isSalesRep(jgKnown)) return false;
+    return true;
   });
 
   // Separate matched (actionable) from unmatched (warnings)
@@ -4856,7 +4936,10 @@ function _renderCommissionPreview(isAdminUser, myName, canEdit) {
   if (!matched.length && !unmatched.length) {
     h += '<div class="card-body">';
     h += '<div style="text-align:center;padding:24px;color:var(--muted);font-size:12px;">';
-    h += 'No closed Albi jobs with <strong>actual revenue</strong> and a salesperson assignment in the last ' + _commPreviewFilter.days + ' days';
+    var rangeDesc = _commPreviewFilter.mode === 'custom'
+      ? ('between ' + (_commPreviewFilter.from || '?') + ' and ' + (_commPreviewFilter.to || '?'))
+      : ('in the last ' + (_commPreviewFilter.days || 30) + ' days');
+    h += 'No closed Albi jobs with <strong>actual revenue</strong> and a salesperson assignment ' + rangeDesc;
     if (!isAdminUser) h += ' attributed to you';
     h += '.<br><span style="font-size:11px;margin-top:6px;display:block;color:var(--muted);">Commission preview requires: <code style="background:rgba(13,45,94,.05);padding:1px 6px;border-radius:3px;">closedBoolean = true</code>, <code style="background:rgba(13,45,94,.05);padding:1px 6px;border-radius:3px;">actualRevenue > 0</code>, and <code style="background:rgba(13,45,94,.05);padding:1px 6px;border-radius:3px;">salesPerson</code> populated in Albi.</span>';
     h += '</div></div></div>';
