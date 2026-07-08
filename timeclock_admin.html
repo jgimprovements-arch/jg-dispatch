@@ -511,6 +511,26 @@ function jgCheckAuth() {
 
 var ADMIN_EMAILS = ['josh@jg-restoration.com','jgimprovements@gmail.com'];
 
+// ── ROLE HELPER ──────────────────────────────────────────────────────
+// Employees can hold multiple roles simultaneously (e.g. Project Manager
+// + Sales for a hybrid PM/rep). Storage: comma-separated string in the
+// `role` column. This helper handles both the legacy single-value form
+// AND the new comma-separated form transparently, so old employees
+// without an update still work.
+function _empHasRole(emp, role) {
+  if (!emp || !emp.role || !role) return false;
+  var target = String(role).trim().toLowerCase();
+  return String(emp.role).split(',')
+    .map(function(r){ return r.trim().toLowerCase(); })
+    .filter(Boolean)
+    .indexOf(target) !== -1;
+}
+
+function _empHasAnyRole(emp, rolesArray) {
+  if (!emp || !rolesArray || !rolesArray.length) return false;
+  return rolesArray.some(function(r){ return _empHasRole(emp, r); });
+}
+
 function isAdmin() {
   try {
     var u = JSON.parse(localStorage.getItem('jg_platform_user') || 'null');
@@ -518,7 +538,7 @@ function isAdmin() {
     var email = (u.email || '').toLowerCase();
     if (ADMIN_EMAILS.includes(email)) return true;
     var emp = ST.employees.find(function(e){ return e.email === email; });
-    return emp && emp.role === 'Admin';
+    return _empHasRole(emp, 'Admin');
   } catch(e) { return false; }
 }
 
@@ -529,7 +549,7 @@ function canViewMaps() {
     if (isAdmin()) return true;
     var email = (u.email || '').toLowerCase();
     var emp = ST.employees.find(function(e){ return e.email === email; });
-    return emp && ['Admin','Office','Project Manager'].includes(emp.role);
+    return _empHasAnyRole(emp, ['Admin','Office','Project Manager']);
   } catch(e) { return false; }
 }
 
@@ -542,7 +562,7 @@ function canApproveSwap() {
     if (isAdmin()) return true;
     var email = (u.email || '').toLowerCase();
     var emp = ST.employees.find(function(e){ return e.email === email; });
-    return emp && ['Admin','Office','Project Manager'].includes(emp.role);
+    return _empHasAnyRole(emp, ['Admin','Office','Project Manager']);
   } catch(e) { return false; }
 }
 
@@ -556,8 +576,8 @@ function isSwapOnlyPM() {
     var email = (u.email || '').toLowerCase();
     var emp = ST.employees.find(function(e){ return e.email === email; });
     if (!emp) return false;
-    if (emp.role === 'Office' || emp.role === 'Admin') return false;
-    return emp.role === 'Project Manager';
+    if (_empHasAnyRole(emp, ['Office','Admin'])) return false;
+    return _empHasRole(emp, 'Project Manager');
   } catch(e) { return false; }
 }
 
@@ -6475,12 +6495,12 @@ const ACCESS_PAGES = [
   ['recon',          '🏗️ Recon Estimate',    'recon.html'],
   ['intelligence',   '🧠 Adjuster Intel',    'intelligence.html']
 ];
-const ACCESS_ROLES = ['Technician','Carpenter','Project Manager','Estimator','Office','Admin'];
+const ACCESS_ROLES = ['Technician','Carpenter','Project Manager','Estimator','Sales','Office','Admin'];
 const ACCESS_DEFAULTS = {
   dispatch:       ['Project Manager','Estimator','Office','Admin'],
   sales:          ['Project Manager','Estimator','Office','Admin'],
   sales_admin:    ['Admin'],
-  timeclock:      ['Technician','Carpenter','Project Manager','Estimator','Office','Admin'],
+  timeclock:      ['Technician','Carpenter','Project Manager','Estimator','Sales','Office','Admin'],
   timeclock_admin:['Project Manager','Office','Admin'],
   qa:             ['Project Manager','Estimator','Office','Admin'],
   adjuster:       ['Project Manager','Estimator','Office','Admin'],
@@ -6496,7 +6516,7 @@ const TAB_ACCESS_PAGES = [
   ['tab_commissions_edit', '✏️ Commissions — Edit/Approve', 'Who can add, approve, mark paid, or delete commission entries']
 ];
 const TAB_ACCESS_DEFAULTS = {
-  tab_commissions:      ['Technician','Carpenter','Project Manager','Estimator','Office','Admin'],  // everyone sees their own
+  tab_commissions:      ['Technician','Carpenter','Project Manager','Estimator','Sales','Office','Admin'],  // everyone sees their own
   tab_commissions_edit: ['Office','Admin']  // only Office + Admin can edit/approve
 };
 
@@ -7857,7 +7877,7 @@ function openQuickInvite() {
   body += '<div class="form-row">';
   body += '<div><label class="form-label">Full Name *</label><input type="text" id="qi-name" class="form-input" placeholder="Firstname Lastname" autofocus></div>';
   body += '<div><label class="form-label">Role *</label><select id="qi-role" class="form-select">';
-  ['Technician','Carpenter','Project Manager','Estimator','Office','Admin'].forEach(function(r){ body += '<option value="'+r+'">'+r+'</option>'; });
+  ['Technician','Carpenter','Project Manager','Estimator','Sales','Office','Admin'].forEach(function(r){ body += '<option value="'+r+'">'+r+'</option>'; });
   body += '</select></div></div>';
 
   body += '<div class="form-row">';
@@ -8001,7 +8021,7 @@ function openInviteEmployee() {
   body += '<div class="form-row">';
   body += '<div><label class="form-label">Full Name *</label><input type="text" id="inv-name" class="form-input" placeholder="Firstname Lastname" autofocus></div>';
   body += '<div><label class="form-label">Role *</label><select id="inv-role" class="form-select">';
-  ['Technician','Carpenter','Project Manager','Estimator','Office','Admin'].forEach(function(r){
+  ['Technician','Carpenter','Project Manager','Estimator','Sales','Office','Admin'].forEach(function(r){
     body += '<option value="'+r+'">'+r+'</option>';
   });
   body += '</select></div></div>';
@@ -8862,7 +8882,16 @@ async function sendInviteFromModal() {
   // same form fields the DB write just used, so the worker's magic-link
   // email matches the record.
   if (btn) btn.textContent = 'Sending invite...';
-  var role   = (document.getElementById('emp-role')   || {}).value || 'Technician';
+  // Roles now come from a checkbox group; collect all checked and join.
+  // Falls back to 'Technician' if nothing is checked (shouldn't happen
+  // in practice — save validates at least name/email, and role checkbox
+  // has a sensible default in the form UI).
+  var role = (function(){
+    var boxes = document.querySelectorAll('#emp-role .emp-role-cb');
+    var picked = [];
+    boxes.forEach(function(cb){ if (cb.checked) picked.push(cb.value); });
+    return picked.join(', ') || 'Technician';
+  })();
   var market = normalizeMarket((document.getElementById('emp-market') || {}).value || 'Appleton');
   var rate   = (document.getElementById('emp-rate')   || {}).value || '0';
 
@@ -10965,7 +10994,7 @@ function calcDailyRate() {
 }
 
 function buildEmpForm(emp) {
-  var roles = ['Technician','Carpenter','Project Manager','Estimator','Office','Admin'];
+  var roles = ['Technician','Carpenter','Project Manager','Estimator','Sales','Office','Admin'];
   return '<div class="form-row">' +
     '<div><label class="form-label">Full Name</label><input class="form-input" id="emp-name" type="text" value="'+(emp.name||'')+'"></div>' +
     '<div><label class="form-label">Sign-In Email</label><input class="form-input" id="emp-email" type="text" value="'+(emp.email||'')+'" placeholder="anything@gmail.com or @jg-restoration.com"></div>' +
@@ -10974,7 +11003,7 @@ function buildEmpForm(emp) {
     '<div><label class="form-label">Backup Sign-In Email <span style="font-size:10px;color:var(--muted);font-weight:400;">(optional — can be any email)</span></label><input class="form-input" id="emp-personal-email" type="text" value="'+(emp.personal_email||'')+'" placeholder="their other address"></div>' +
     '</div>' +
     '<div class="form-row">' +
-    '<div><label class="form-label">Role</label><select class="form-select" id="emp-role">'+roles.map(function(r){return '<option value="'+r+'"'+(emp.role===r?' selected':'')+'>'+r+'</option>';}).join('')+'</select></div>' +
+    '<div><label class="form-label">Roles <span style="font-size:10px;color:var(--muted);font-weight:400;">(select all that apply)</span></label><div id="emp-role" style="display:flex;flex-wrap:wrap;gap:8px;padding:8px 10px;border:1.5px solid var(--border);border-radius:8px;background:#fff;">'+roles.map(function(r){var checked=_empHasRole(emp,r)?' checked':'';return '<label style="display:inline-flex;align-items:center;gap:5px;padding:4px 8px;background:rgba(13,45,94,.04);border-radius:6px;cursor:pointer;font-size:13px;"><input type="checkbox" class="emp-role-cb" value="'+r+'"'+checked+' style="cursor:pointer;">'+r+'</label>';}).join('')+'</div></div>' +
     '<div><label class="form-label">Phone</label><input class="form-input" id="emp-phone" type="tel" value="'+(emp.phone||'')+'"></div>' +
     '<div><label class="form-label">Birthday</label><input class="form-input" id="emp-birthday" type="date" value="'+(emp.birthday||'')+'"></div>' +
     '<div><label class="form-label">Start Date</label><input class="form-input" id="emp-start-date" type="date" value="'+(emp.start_date||'')+'" onchange="calcAflac();calcSixMonth();"></div>' +
@@ -11068,7 +11097,14 @@ async function saveEmployee(opts) {
     name: document.getElementById('emp-name').value.trim(),
     email: document.getElementById('emp-email').value.trim().toLowerCase(),
     personal_email: personalEmail || null,
-    role:             document.getElementById('emp-role').value,
+    role:             (function(){
+      // Roles now come from a checkbox group. Join checked values with
+      // ", " for storage; _empHasRole splits on comma when reading.
+      var boxes = document.querySelectorAll('#emp-role .emp-role-cb');
+      var picked = [];
+      boxes.forEach(function(cb){ if (cb.checked) picked.push(cb.value); });
+      return picked.join(', ');
+    })(),
     phone:            (document.getElementById('emp-phone')      ||{}).value || null,
     birthday:         (document.getElementById('emp-birthday')   ||{}).value || null,
     start_date:       (document.getElementById('emp-start-date') ||{}).value || null,
@@ -11915,7 +11951,7 @@ async function renderInvite() {
   h += '<div class="card-body">';
   h += '<p style="font-size:13px;color:var(--muted);margin-bottom:16px;line-height:1.5;">Employee receives an email with a secure link to set their password and access the time clock.</p>';
 
-  var roles = ['Technician','Carpenter','Project Manager','Estimator','Office','Admin'];
+  var roles = ['Technician','Carpenter','Project Manager','Estimator','Sales','Office','Admin'];
   h += '<div class="form-row">';
   h += '<div><label class="form-label">Full Name *</label><input class="form-input" id="inv-name" type="text" placeholder="Jane Smith"></div>';
   h += '<div><label class="form-label">Personal Email *</label><input class="form-input" id="inv-email" type="email" placeholder="jane@gmail.com"></div>';
