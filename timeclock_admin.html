@@ -5233,7 +5233,11 @@ function openCommissionModal(editId) {
   body += '</div>';
 
   // ── Punch picker — ties this commission to a specific time entry ──
-  body += '<div><label class="form-label">Tied to Punch *</label>';
+  // Salaried employees (sales reps, etc.) don't punch a clock, so this
+  // field is auto-hidden for them. Hourly employees still see it and
+  // it's still required — punch-tied commissions are important audit
+  // trail for hourly-with-bonus arrangements.
+  body += '<div id="comm-punch-row"><label class="form-label" id="comm-punch-label">Tied to Punch *</label>';
   body += '<select class="form-select" id="comm-entry-id"><option value="">-- Select employee & date first --</option></select>';
   body += '<div style="font-size:11px;color:var(--muted);margin-top:3px;">The specific punch this commission was earned on. Picking a job below will auto-select the matching punch.</div>';
   body += '</div>';
@@ -5277,13 +5281,37 @@ function _commTypeChanged() {
   if (wrap) wrap.style.display = type === 'commission' ? 'block' : 'none';
 }
 
+// Returns true when the given employee is salaried (no clock punches).
+// Sales reps and other salary-basis employees earn commissions without
+// a tied time_entries row — the punch field should be hidden entirely
+// for them and the save validation shouldn't require it.
+function _commEmpIsSalaried(empName) {
+  if (!empName) return false;
+  var e = (ST.employees || []).find(function(x){ return x.name === empName; });
+  return !!(e && String(e.pay_type || '').toLowerCase() === 'salary');
+}
+
 // Populate the punch picker based on the chosen employee + earned date.
 // Each option is a real time_entries row from that employee on that day.
 function _commLoadPunches(preselectEntryId) {
   var sel = document.getElementById('comm-entry-id');
+  var row = document.getElementById('comm-punch-row');
+  var label = document.getElementById('comm-punch-label');
   if (!sel) return;
   var empName = (document.getElementById('comm-emp')||{}).value;
   var dateStr = (document.getElementById('comm-date')||{}).value;
+
+  // Salaried employees don't punch — hide the whole punch row so the modal
+  // doesn't visually or logically block the save. Also clear any selected
+  // value so it doesn't linger from a prior employee choice.
+  if (_commEmpIsSalaried(empName)) {
+    if (row) row.style.display = 'none';
+    sel.innerHTML = '<option value=""></option>';
+    return;
+  }
+  if (row) row.style.display = '';
+  if (label) label.textContent = 'Tied to Punch *';
+
   if (!empName || !dateStr) {
     sel.innerHTML = '<option value="">-- Select employee & date first --</option>';
     return;
@@ -5301,9 +5329,9 @@ function _commLoadPunches(preselectEntryId) {
   var fmtT = function(iso){ if(!iso)return '?'; var d=new Date(iso),h=d.getHours()%12||12,m=d.getMinutes(),ap=d.getHours()>=12?'PM':'AM'; return h+':'+(m<10?'0':'')+m+ap; };
   var html = '<option value="">-- Select a punch --</option>';
   punches.forEach(function(e){
-    var label = fmtT(e.clock_in) + ' → ' + (e.clock_out ? fmtT(e.clock_out) : 'active') + '  •  ' + (e.job_name || 'No job');
+    var lab = fmtT(e.clock_in) + ' → ' + (e.clock_out ? fmtT(e.clock_out) : 'active') + '  •  ' + (e.job_name || 'No job');
     var presel = (preselectEntryId && e.id === preselectEntryId) ? ' selected' : '';
-    html += '<option value="'+e.id+'"'+presel+'>'+label+'</option>';
+    html += '<option value="'+e.id+'"'+presel+'>'+lab+'</option>';
   });
   sel.innerHTML = html;
 }
@@ -5373,7 +5401,13 @@ async function saveCommission(existingId) {
   if (!empName) { alert('Select an employee'); return; }
   if (!earnedDate) { alert('Enter an earned date'); return; }
   if (!amount || amount <= 0) { alert('Enter a positive amount'); return; }
-  if (!entryId) { alert('Select which punch this commission is tied to.\n\nPick the employee and earned date first, then choose the punch (or pick a job in the calculator to auto-select it).'); return; }
+  // Punch tying is only required for hourly employees. Salaried employees
+  // (sales reps, etc.) earn commissions without a corresponding clock
+  // punch — requiring one would block every commission entry for them.
+  if (!_commEmpIsSalaried(empName) && !entryId) {
+    alert('Select which punch this commission is tied to.\n\nPick the employee and earned date first, then choose the punch (or pick a job in the calculator to auto-select it).');
+    return;
+  }
 
   var emp = ST.employees.find(function(e){ return e.name === empName; });
   var payload = {
