@@ -5384,14 +5384,23 @@ function _commTypeChanged() {
   if (wrap) wrap.style.display = type === 'commission' ? 'block' : 'none';
 }
 
-// Returns true when the given employee is salaried (no clock punches).
-// Sales reps and other salary-basis employees earn commissions without
-// a tied time_entries row — the punch field should be hidden entirely
-// for them and the save validation shouldn't require it.
+// Returns true when the given employee should NOT require a tied punch
+// on their commission entries. Two cases:
+//   1. Salaried employees — no punches exist for them
+//   2. Sales reps (role contains "sales") — they earn commissions on
+//      closed jobs, not on time-tracked workdays, so tying to a punch
+//      is meaningless even if they DO have a base-hourly component
+// Any hybrid (Sales role + hourly pay_type) also qualifies because sales
+// commissions still aren't punch-tied even if the person clocks in.
 function _commEmpIsSalaried(empName) {
   if (!empName) return false;
   var e = (ST.employees || []).find(function(x){ return x.name === empName; });
-  return !!(e && String(e.pay_type || '').toLowerCase() === 'salary');
+  if (!e) return false;
+  var isSalary = String(e.pay_type || '').toLowerCase() === 'salary';
+  var isSalesRole = (typeof _empHasRole === 'function')
+    ? _empHasRole(e, 'Sales')
+    : /sales/i.test(String(e.role || ''));
+  return isSalary || isSalesRole;
 }
 
 // Populate the punch picker based on the chosen employee + earned date.
