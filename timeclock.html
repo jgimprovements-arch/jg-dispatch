@@ -1919,12 +1919,64 @@ async function loadSchedule() {
   var marketEl = document.getElementById('schedule-market');
   if (!el) return;
 
+  // Multi-role helper — local to timeclock (no import from admin). Reads
+  // the same comma-separated `role` column and splits on commas so
+  // hybrid roles ("Carpenter, Technician") match correctly.
+  function _empHasRoleLocal(emp, role) {
+    if (!emp || !emp.role || !role) return false;
+    var target = String(role).trim().toLowerCase();
+    return String(emp.role).split(',')
+      .map(function(r){ return r.trim().toLowerCase(); })
+      .filter(Boolean)
+      .indexOf(target) !== -1;
+  }
+
   try {
     if (!TC.employee || !TC.employee.id) {
       el.innerHTML = '<div class="empty" style="padding:16px 0;">No schedule data</div>';
       return;
     }
     var techId = TC.employee.id;
+
+    // ─── CARPENTER SHORTCUT ─────────────────────────────────────────
+    // Carpenters aren't dispatched via dispatch_assignments_v2 (that
+    // table is for the field-tech dispatch board). They work reconstruction
+    // jobs and need to see every active job so they can pick the right
+    // one to clock into. Bypass the assignment filter and render TC.jobs
+    // directly. If they hold OTHER roles too (Carpenter + Technician),
+    // the multi-role helper still detects Carpenter → they get the full
+    // list, which is the more permissive/correct outcome.
+    if (_empHasRoleLocal(TC.employee, 'Carpenter')) {
+      var allJobs = (TC.jobs || []).slice();
+      if (!allJobs.length) {
+        el.innerHTML = '<div class="empty" style="padding:16px 0;">Loading jobs from Albi...</div>';
+        return;
+      }
+      if (marketEl) {
+        var m = TC.employee.market || '';
+        marketEl.textContent = m === 'stevens_point' ? 'Stevens Point' : m === 'appleton' ? 'Appleton' : '';
+      }
+      var activeJobId = TC.activeEntry ? TC.activeEntry.job_id : null;
+      el.innerHTML = allJobs.slice(0, 200).map(function(j){
+        var isActive = j.id === activeJobId;
+        var isCurrent = j.id === TC.selectedJobId;
+        var dotClass = isActive ? 'active' : '';
+        var cardClass = isActive ? 'active-job' : '';
+        var action = isActive ? '● Active' : (isCurrent ? '✓ Selected' : 'Tap to clock in');
+        var esc = function(s){ return String(s||'').replace(/'/g,'&#39;'); };
+        return '<div class="schedule-job ' + cardClass + '" onclick="selectJob(\'' + esc(j.id) + '\',\'' + esc(j.name) + '\',\'\')">' +
+          '<div class="schedule-job-dot ' + dotClass + '"></div>' +
+          '<div class="schedule-job-info">' +
+            '<div class="schedule-job-name">' + esc(j.name) + '</div>' +
+          '</div>' +
+          '<div class="schedule-job-action">' + action + '</div>' +
+        '</div>';
+      }).join('');
+      if (allJobs.length > 200) {
+        el.innerHTML += '<div style="padding:8px 14px;font-size:11px;color:var(--muted);text-align:center;">Showing 200 of ' + allJobs.length + ' — use search to find more</div>';
+      }
+      return;
+    }
 
     // Fetch today's assignments (or unscheduled "today" rows) for this tech
     var todayISO = new Date().toISOString().split('T')[0];
