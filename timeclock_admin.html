@@ -566,8 +566,9 @@ function canApproveSwap() {
   } catch(e) { return false; }
 }
 
-// True if current user is a PM (but NOT Admin/Office).
-// Used to restrict PMs to only the Swaps tab on this page.
+// True if current user is a PM (but NOT Admin/Office/Payroll).
+// Used to restrict pure PMs to only the Swaps tab. Payroll-role
+// PMs escape this so they can access Timesheets, Reports, etc.
 function isSwapOnlyPM() {
   try {
     if (isAdmin()) return false;
@@ -576,7 +577,7 @@ function isSwapOnlyPM() {
     var email = (u.email || '').toLowerCase();
     var emp = ST.employees.find(function(e){ return e.email === email; });
     if (!emp) return false;
-    if (_empHasAnyRole(emp, ['Office','Admin'])) return false;
+    if (_empHasAnyRole(emp, ['Office','Admin','Payroll'])) return false;
     return _empHasRole(emp, 'Project Manager');
   } catch(e) { return false; }
 }
@@ -866,10 +867,19 @@ function showTab(tab, el) {
     return;
   }
 
-  var adminOnly = ['employees', 'reports', 'archive', 'timeoff'];
+  // Truly admin-only tabs: employees, activity, access. Reports, Time
+  // Off, and Archive are payroll-tier — Hannah (PM + Payroll role) can
+  // reach them. Old list gated everything to Admin; that meant giving
+  // Payroll users admin, defeating the purpose of the tier.
+  var adminOnly = ['employees'];
+  var payrollTier = ['reports', 'archive', 'timeoff'];
   var mapTabs = ['routes'];
   if (adminOnly.includes(tab) && !isAdmin()) {
     toast('Admin access required');
+    return;
+  }
+  if (payrollTier.includes(tab) && !canReviewTimecards()) {
+    toast('Payroll, Office, or Admin access required');
     return;
   }
   if (mapTabs.includes(tab) && !canViewMaps()) {
@@ -986,22 +996,30 @@ function render() {
   var swapsTab    = document.getElementById('tab-swaps');
   var tsTab       = document.getElementById('tab-timesheets');
   var archTab     = document.getElementById('tab-archive');
+  // Tab visibility. `canReviewTimecards()` returns true for Admin,
+  // Office, or anyone with the Payroll role — the middle tier used to
+  // give PMs like Hannah timecard access without full admin rights.
+  // Employees/Access/Activity remain admin-only. Reports, Time Off,
+  // Timesheets, and Archive open up to Payroll so they can actually
+  // do payroll work.
+  var canPayroll = canReviewTimecards();
   if (empTab)      empTab.style.display      = (isAdmin() && !pmOnly) ? '' : 'none';
-  if (rptTab)      rptTab.style.display      = (isAdmin() && !pmOnly) ? '' : 'none';
+  if (rptTab)      rptTab.style.display      = (canPayroll && !pmOnly) ? '' : 'none';
   if (routeTab)    routeTab.style.display    = (canViewMaps() && !pmOnly) ? '' : 'none';
   if (activityTab) activityTab.style.display = (isAdmin() && !pmOnly) ? '' : 'none';
   if (commTab)     commTab.style.display     = (_canViewCommissionsTab() && !pmOnly) ? '' : 'none';
-  if (timeoffTab)  timeoffTab.style.display  = (isAdmin() && !pmOnly) ? '' : 'none';
-  if (tsTab)       tsTab.style.display       = pmOnly ? 'none' : '';
-  if (archTab)     archTab.style.display     = (isAdmin() && !pmOnly) ? '' : 'none';
+  if (timeoffTab)  timeoffTab.style.display  = (canPayroll && !pmOnly) ? '' : 'none';
+  if (tsTab)       tsTab.style.display       = (canPayroll && !pmOnly) ? '' : (pmOnly ? 'none' : '');
+  if (archTab)     archTab.style.display     = (canPayroll && !pmOnly) ? '' : 'none';
   if (swapsTab)    swapsTab.style.display    = canApproveSwap() ? '' : 'none';
   var liveTab = document.getElementById('tab-live');
   if (liveTab) liveTab.style.display = 'none';
   var accessTab = document.getElementById('tab-access');
   if (accessTab) accessTab.style.display = (isAdmin() && !pmOnly) ? '' : 'none';
 
-  // If a PM landed on this page and the default tab (timesheets) isn't their tab,
-  // bounce them to Swaps immediately
+  // If a PM-ONLY landed on this page (no Payroll role, no Office/Admin),
+  // bounce them to Swaps immediately. But if they have Payroll role,
+  // they land on Timesheets (their primary work surface).
   if (pmOnly && ST.tab !== 'swaps') {
     ST.tab = 'swaps';
     if (swapsTab) {
@@ -1012,12 +1030,12 @@ function render() {
 
   if (ST.tab === 'timesheets') renderTimesheets();
   else if (ST.tab === 'employees') { if (isAdmin()) renderEmployees(); }
-  else if (ST.tab === 'reports')   { if (isAdmin()) renderReports(); }
+  else if (ST.tab === 'reports')   { if (canReviewTimecards()) renderReports(); }
   else if (ST.tab === 'routes')   renderRoutes();
   else if (ST.tab === 'commissions') { if (_canViewCommissionsTab()) renderCommissions(); else { ST.tab = 'timesheets'; renderTimesheets(); } }
-  else if (ST.tab === 'timeoff')  { if (isAdmin()) renderTimeOff(); }
+  else if (ST.tab === 'timeoff')  { if (canReviewTimecards()) renderTimeOff(); }
   else if (ST.tab === 'swaps')    { if (canApproveSwap()) renderSwaps(); }
-  else if (ST.tab === 'archive')  { if (isAdmin()) renderArchive(); }
+  else if (ST.tab === 'archive')  { if (canReviewTimecards()) renderArchive(); }
   else if (ST.tab === 'activity') { if (isAdmin()) renderActivity(); }
   else if (ST.tab === 'access')   { if (isAdmin()) renderAccess(); }
 
@@ -2594,7 +2612,7 @@ function getApprovedBy() {
 }
 
 async function approveTimecard(periodLabel, empName) {
-  if (!isAdmin()) { toast('Admin access required'); return; }
+  if (!canReviewTimecards()) { toast('Payroll, Office, or Admin access required'); return; }
   var key = getApprovalKey(periodLabel, empName);
   var existing = ST.approvals[key];
   var nowIso = new Date().toISOString();
@@ -2687,7 +2705,7 @@ async function approveAllTimecards(periodLabel, empNames) {
 }
 
 async function unlockTimecard(periodLabel, empName) {
-  if (!isAdmin()) { toast('Admin access required'); return; }
+  if (!canReviewTimecards()) { toast('Payroll, Office, or Admin access required'); return; }
   if (!confirm('Unlock ' + empName + "'s timecard for " + periodLabel + '? This reopens entries for edit.')) return;
   var key = getApprovalKey(periodLabel, empName);
   var existing = ST.approvals[key];
@@ -6504,13 +6522,13 @@ const ACCESS_PAGES = [
   ['recon',          '🏗️ Recon Estimate',    'recon.html'],
   ['intelligence',   '🧠 Adjuster Intel',    'intelligence.html']
 ];
-const ACCESS_ROLES = ['Technician','Carpenter','Project Manager','Estimator','Sales','Office','Admin'];
+const ACCESS_ROLES = ['Technician','Carpenter','Project Manager','Estimator','Sales','Payroll','Office','Admin'];
 const ACCESS_DEFAULTS = {
   dispatch:       ['Project Manager','Estimator','Office','Admin'],
   sales:          ['Project Manager','Estimator','Office','Admin'],
   sales_admin:    ['Admin'],
-  timeclock:      ['Technician','Carpenter','Project Manager','Estimator','Sales','Office','Admin'],
-  timeclock_admin:['Project Manager','Office','Admin'],
+  timeclock:      ['Technician','Carpenter','Project Manager','Estimator','Sales','Payroll','Office','Admin'],
+  timeclock_admin:['Project Manager','Payroll','Office','Admin'],
   qa:             ['Project Manager','Estimator','Office','Admin'],
   adjuster:       ['Project Manager','Estimator','Office','Admin'],
   recon:          ['Project Manager','Estimator','Admin'],
@@ -6525,7 +6543,7 @@ const TAB_ACCESS_PAGES = [
   ['tab_commissions_edit', '✏️ Commissions — Edit/Approve', 'Who can add, approve, mark paid, or delete commission entries']
 ];
 const TAB_ACCESS_DEFAULTS = {
-  tab_commissions:      ['Technician','Carpenter','Project Manager','Estimator','Sales','Office','Admin'],  // everyone sees their own
+  tab_commissions:      ['Technician','Carpenter','Project Manager','Estimator','Sales','Payroll','Office','Admin'],  // everyone sees their own
   tab_commissions_edit: ['Office','Admin']  // only Office + Admin can edit/approve
 };
 
@@ -6537,22 +6555,51 @@ function getAccessSettings() {
   } catch(e) { return merged; }
 }
 
-// Get the current user's role (returns e.g. "Admin", "Office", "Technician", etc.)
-function _getCurrentUserRole() {
+// Return an array of roles for the current user (multi-role aware).
+// Handles the legacy single-string form AND the newer comma-separated
+// form so employees who have and haven't been re-saved both work.
+function _getCurrentUserRoles() {
   try {
     var u = JSON.parse(localStorage.getItem('jg_platform_user') || '{}');
     var emp = ST.employees && ST.employees.find(function(e){ return e.email === u.email; });
-    return emp ? (emp.role || 'Technician') : null;
-  } catch(e) { return null; }
+    if (!emp || !emp.role) return [];
+    return String(emp.role).split(',').map(function(r){ return r.trim(); }).filter(Boolean);
+  } catch(e) { return []; }
 }
 
-// Check if the current user has a given access key (page or tab)
+// Kept for back-compat with any legacy caller; returns FIRST role only.
+// New code should use _getCurrentUserRoles() (plural) instead.
+function _getCurrentUserRole() {
+  var roles = _getCurrentUserRoles();
+  return roles[0] || null;
+}
+
+// Check if the current user has a given access key (page or tab).
+// Multi-role-aware: if ANY of their roles matches the allowed list, grant.
 function _userHasAccess(key) {
-  var role = _getCurrentUserRole();
-  if (!role) return false;
+  var userRoles = _getCurrentUserRoles();
+  if (!userRoles.length) return false;
   var settings = getAccessSettings();
   var allowed = settings[key] || TAB_ACCESS_DEFAULTS[key] || ACCESS_DEFAULTS[key] || [];
-  return allowed.indexOf(role) !== -1;
+  return userRoles.some(function(r){ return allowed.indexOf(r) !== -1; });
+}
+
+// Timecard/payroll-review access tier — sits between Admin/Office and PM.
+// Admins have it implicitly. Office has it. Anyone explicitly given the
+// "Payroll" role has it (this is the Hannah case: PM + Payroll gets timecard
+// access without full admin rights). Wire this into timecard-related gates
+// instead of raw isAdmin() so that Payroll-role users can approve timecards,
+// see reports, and manage time off without getting employee-management or
+// access-control rights.
+function canReviewTimecards() {
+  if (isAdmin()) return true;
+  try {
+    var u = JSON.parse(localStorage.getItem('jg_platform_user') || 'null');
+    if (!u) return false;
+    var email = (u.email || '').toLowerCase();
+    var emp = ST.employees.find(function(e){ return e.email === email; });
+    return _empHasAnyRole(emp, ['Office','Payroll']);
+  } catch(e) { return false; }
 }
 
 function saveAccessSettings(settings) {
@@ -7886,7 +7933,7 @@ function openQuickInvite() {
   body += '<div class="form-row">';
   body += '<div><label class="form-label">Full Name *</label><input type="text" id="qi-name" class="form-input" placeholder="Firstname Lastname" autofocus></div>';
   body += '<div><label class="form-label">Role *</label><select id="qi-role" class="form-select">';
-  ['Technician','Carpenter','Project Manager','Estimator','Sales','Office','Admin'].forEach(function(r){ body += '<option value="'+r+'">'+r+'</option>'; });
+  ['Technician','Carpenter','Project Manager','Estimator','Sales','Payroll','Office','Admin'].forEach(function(r){ body += '<option value="'+r+'">'+r+'</option>'; });
   body += '</select></div></div>';
 
   body += '<div class="form-row">';
@@ -8030,7 +8077,7 @@ function openInviteEmployee() {
   body += '<div class="form-row">';
   body += '<div><label class="form-label">Full Name *</label><input type="text" id="inv-name" class="form-input" placeholder="Firstname Lastname" autofocus></div>';
   body += '<div><label class="form-label">Role *</label><select id="inv-role" class="form-select">';
-  ['Technician','Carpenter','Project Manager','Estimator','Sales','Office','Admin'].forEach(function(r){
+  ['Technician','Carpenter','Project Manager','Estimator','Sales','Payroll','Office','Admin'].forEach(function(r){
     body += '<option value="'+r+'">'+r+'</option>';
   });
   body += '</select></div></div>';
@@ -11003,7 +11050,7 @@ function calcDailyRate() {
 }
 
 function buildEmpForm(emp) {
-  var roles = ['Technician','Carpenter','Project Manager','Estimator','Sales','Office','Admin'];
+  var roles = ['Technician','Carpenter','Project Manager','Estimator','Sales','Payroll','Office','Admin'];
   return '<div class="form-row">' +
     '<div><label class="form-label">Full Name</label><input class="form-input" id="emp-name" type="text" value="'+(emp.name||'')+'"></div>' +
     '<div><label class="form-label">Sign-In Email</label><input class="form-input" id="emp-email" type="text" value="'+(emp.email||'')+'" placeholder="anything@gmail.com or @jg-restoration.com"></div>' +
@@ -11960,7 +12007,7 @@ async function renderInvite() {
   h += '<div class="card-body">';
   h += '<p style="font-size:13px;color:var(--muted);margin-bottom:16px;line-height:1.5;">Employee receives an email with a secure link to set their password and access the time clock.</p>';
 
-  var roles = ['Technician','Carpenter','Project Manager','Estimator','Sales','Office','Admin'];
+  var roles = ['Technician','Carpenter','Project Manager','Estimator','Sales','Payroll','Office','Admin'];
   h += '<div class="form-row">';
   h += '<div><label class="form-label">Full Name *</label><input class="form-input" id="inv-name" type="text" placeholder="Jane Smith"></div>';
   h += '<div><label class="form-label">Personal Email *</label><input class="form-input" id="inv-email" type="email" placeholder="jane@gmail.com"></div>';
