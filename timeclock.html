@@ -5321,13 +5321,30 @@ function _handleNotificationDeepLink() {
       return;
     }
     if (params.entry) {
-      var entry = TC.entries.find(function(e){ return e.id === params.entry; });
+      // Robust entry lookup — check TC.entries (today's), then
+      // TC._hoursEntries (current pay period), then DB. Auto-clocked
+      // entries and yesterday's punches live in _hoursEntries after
+      // My Hours has loaded, and older entries need the DB fallback.
+      var entry = TC.entries.find(function(e){ return e.id === params.entry; })
+               || (TC._hoursEntries || []).find(function(e){ return e.id === params.entry; });
       if (entry) {
         _openSingleEntryModal([entry], { mode: params.action === 'correct' ? 'correct' : 'view' });
-      } else if (attempts < 12) {
-        return setTimeout(tryOpen, 250);
       } else {
-        toast('Entry not found — it may have been deleted');
+        // DB fallback — scope by employee_id to defend against RLS edge cases
+        var url = '/rest/v1/time_entries?id=eq.' + params.entry + '&select=*';
+        if (TC.employee && TC.employee.id) url += '&employee_id=eq.' + TC.employee.id;
+        sb(url).then(function(rows){
+          if (rows && rows[0]) {
+            _openSingleEntryModal([rows[0]], { mode: params.action === 'correct' ? 'correct' : 'view' });
+          } else if (attempts < 12) {
+            setTimeout(tryOpen, 250);
+          } else {
+            toast('Entry not found — it may have been deleted');
+          }
+        }).catch(function(){
+          if (attempts < 12) setTimeout(tryOpen, 250);
+          else toast('Entry not found — it may have been deleted');
+        });
       }
     } else if (params.verify) {
       // All entries from last 14 days, not self_verified, not active
@@ -5461,13 +5478,17 @@ function _closeSingleEntryModal() {
 }
 
 function _handleSingleFixPunch(entryId) {
-  var entry = TC.entries.find(function(e){ return e.id === entryId; });
-  if (!entry) { toast('Entry not found'); return; }
-  // Close the single-entry modal and open the correction request flow
+  // Delegate entry lookup to openFixPunch — it already handles the full
+  // resolution chain (TC.entries → TC._hoursEntries → DB fallback). This
+  // wrapper used to look only in TC.entries, which fails for auto-clocked
+  // entries from yesterday or earlier since those load into
+  // _hoursEntries but not TC.entries.
   _closeSingleEntryModal();
   setTimeout(function(){
     if (typeof openFixPunch === 'function') {
-      openFixPunch(entry.id);
+      openFixPunch(entryId);
+    } else {
+      toast('Fix Punch unavailable — reload the page');
     }
   }, 200);
 }
