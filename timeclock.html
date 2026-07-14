@@ -2290,13 +2290,20 @@ function selectMorningMeeting() {
   openJobSheet('', 'Morning Meeting', TC.clockedIn && TC.activeEntry);
 }
 
-// Show/hide the Office Hours button based on role
+// Show/hide the Office Hours button based on role. Roles are stored
+// comma-separated (e.g. "Office, Admin"), so split and check for any
+// overlap with the allowed set — a plain indexOf on the whole string
+// hides the button for every multi-role user.
 function updateOfficeHoursVisibility() {
   var wrap = document.getElementById('office-hours-option');
   if (!wrap || !TC.employee) return;
-  var role = TC.employee.role || 'Technician';
-  var allowed = ['Office','Admin','Sales'];
-  wrap.style.display = allowed.indexOf(role) !== -1 ? 'block' : 'none';
+  var allowed = ['office','admin','sales'];
+  var ok = String(TC.employee.role || 'Technician')
+    .split(',')
+    .map(function(r){ return r.trim().toLowerCase(); })
+    .filter(Boolean)
+    .some(function(r){ return allowed.indexOf(r) !== -1; });
+  wrap.style.display = ok ? 'block' : 'none';
 }
 
 function openJobSheet(id, name, isSwitching) {
@@ -2362,13 +2369,24 @@ function setJobMarket(market) {
 
 function filterJobs() { renderJobs(); }
 
+// Whether this role may clock in without picking a job (office-type staff).
+// Roles are comma-separated ("Office, Admin") — split and check overlap.
+function _roleJobOptional(role) {
+  var allowed = ['office','admin','project manager','sales','estimator'];
+  return String(role || 'Technician')
+    .split(',')
+    .map(function(r){ return r.trim().toLowerCase(); })
+    .filter(Boolean)
+    .some(function(r){ return allowed.indexOf(r) !== -1; });
+}
+
 async function handleMainBtn() {
   if (TC.clockedIn) {
     await clockOut();
   } else {
     // Check if office staff can clock in without a job
     var role = TC.employee ? (TC.employee.role || 'Technician') : 'Technician';
-    var jobOptional = ['Office','Admin','Project Manager','Sales','Estimator'].indexOf(role) !== -1;
+    var jobOptional = _roleJobOptional(role);
     if (!TC.selectedJobId && !jobOptional) {
       toast('Select a job first to clock in');
       // Scroll to job selector
@@ -2539,7 +2557,7 @@ async function _confirmOnCall(status) {
 async function clockIn() {
   if (!TC.employee || !TC.employee.id) { toast('Employee record not found'); return; }
   var role = TC.employee.role || 'Technician';
-  var jobOptional = ['Office','Admin','Project Manager','Sales','Estimator'].indexOf(role) !== -1;
+  var jobOptional = _roleJobOptional(role);
   // Morning Meeting is a non-job clock-in available to ALL employees (including techs)
   // for use when the schedule isn't ready first thing in the morning.
   var isMorningMeeting = TC.selectedJobName === 'Morning Meeting';
@@ -3413,9 +3431,15 @@ function showSwapButtonIfTech() {
   var role = TC.employee ? TC.employee.role : '';
   var wrap = document.getElementById('oc-swap-btn-wrap');
   var myWrap = document.getElementById('oc-myswaps-wrap');
-  var allowed = ['Technician', 'Project Manager', 'Admin'];
-  // Default-show for people without a role set (legacy/new hires)
-  var canSwap = !role || allowed.indexOf(role) !== -1;
+  var allowed = ['technician', 'project manager', 'admin'];
+  // Default-show for people without a role set (legacy/new hires).
+  // Roles are comma-separated ("Office, Admin") — split and check overlap
+  // so multi-role users aren't wrongly hidden.
+  var canSwap = !role || String(role)
+    .split(',')
+    .map(function(r){ return r.trim().toLowerCase(); })
+    .filter(Boolean)
+    .some(function(r){ return allowed.indexOf(r) !== -1; });
   if (wrap) wrap.style.display = canSwap ? 'block' : 'none';
   if (myWrap) myWrap.style.display = canSwap ? 'block' : 'none';
   if (canSwap && typeof loadMySwapRequests === 'function') loadMySwapRequests();
