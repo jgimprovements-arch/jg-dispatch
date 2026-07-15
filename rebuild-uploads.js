@@ -1,8 +1,8 @@
 // rebuild-uploads.js
 // Document upload pipeline:
-//   - Persistent upload queue with crash recovery (localStorage)
+//   - Durable upload queue with real crash recovery (IndexedDB blobs + localStorage metadata)
 //   - Photo capture flow (camera + multi-file selection)
-//   - HEIC → JPEG conversion (lazy-loaded heic2any)
+//   - HEIC → JPEG conversion (lazy-loaded heic2any, non-fatal on failure)
 //   - EXIF geotag + capture timestamp extraction
 //   - Per-tile progress / retry / repick / remove UI
 //   - Supabase Storage upload + rebuild_documents row insert
@@ -48,7 +48,7 @@ async function convertHeicIfNeeded(file) {
   if (!isHeic) return file;
 
   try {
-    const heic2any = await loadHeic2Any();
+    const heic2any = await getHeic2Any();
     if (typeof heic2any !== 'function') {
       throw new Error('heic2any did not load — check network');
     }
@@ -60,10 +60,32 @@ async function convertHeicIfNeeded(file) {
     const newName = file.name.replace(/\.(heic|heif)$/i, '.jpg');
     return new File([jpgBlob], newName, { type: 'image/jpeg', lastModified: file.lastModified });
   } catch (err) {
-    console.error('HEIC conversion FAILED for', file.name, err);
-    // Throw so the queue item shows the error instead of silently uploading an unviewable HEIC
-    throw new Error('HEIC conversion failed: ' + (err.message || err));
+    // NEVER throw here. This used to reject, which meant a field tech on a weak
+    // signal (heic2any is a ~700KB CDN fetch) lost the photo entirely. Saving an
+    // unconverted HEIC is a supported state — the Documents grid already renders
+    // a "Legacy HEIC — click to download/convert" tile for it. An unviewable
+    // thumbnail is recoverable; a lost photo is not.
+    console.warn('HEIC conversion failed — uploading original instead:', file.name, err);
+    return file;
   }
+}
+
+// heic2any loader wrapper.
+// Guards a latent bug in window.loadHeic2Any(): if the script tag loads but does
+// not set window.heic2any, the loader caches a promise that resolves undefined
+// forever, permanently breaking HEIC for the rest of the session. Clearing the
+// cached promise lets a later attempt actually retry the fetch.
+async function getHeic2Any() {
+  if (typeof window.heic2any === 'function') return window.heic2any;
+  if (window._heic2anyLoader) {
+    try {
+      const fn = await window._heic2anyLoader;
+      if (typeof fn === 'function') return fn;
+    } catch (e) { /* fall through and retry below */ }
+    window._heic2anyLoader = null;
+  }
+  if (typeof window.loadHeic2Any !== 'function') return null;
+  return await window.loadHeic2Any();
 }
 
 // Run async tasks in parallel batches of `concurrency` size.
@@ -86,29 +108,162 @@ async function runParallel(items, concurrency, taskFn) {
 // ========== Upload queue with progress tiles, auto-retry, and crash recovery ==========
 
 const UPLOAD_QUEUE_KEY = 'jg_upload_queue_v1';
-const MAX_AUTO_RETRIES = 3;
-const UPLOAD_CONCURRENCY = 5;
+// Field uploads run on cellular from inside buildings. 3 tries with 1s/2s/4s of
+// backoff gave a photo ~7 seconds to succeed before it was abandoned forever.
+const MAX_AUTO_RETRIES = 6;
+const RETRY_BACKOFF_CAP_MS = 30000;
+// 5 concurrent full-resolution photos held in memory is what invites the mobile
+// OS to reclaim the tab (and with it, the whole queue). 2 is plenty on cellular.
+const UPLOAD_CONCURRENCY = 2;
+const QUEUE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 
-function loadUploadQueue() {
+// ──── Durable blob store (IndexedDB) ────────────────────────────────────────
+// localStorage cannot serialize a File/Blob. The previous "crash recovery" only
+// restored queue *metadata*; the bytes lived in an in-memory Map that died with
+// the tab. On a phone — app backgrounded, incoming call, OS memory reclaim —
+// every queued photo came back as 'File lost'. IndexedDB is the only browser
+// store that persists Blobs, so bytes are written here the moment a file is
+// picked (before conversion or upload) and deleted only once Supabase confirms.
+const IDB_NAME = 'jg_uploads';
+const IDB_STORE = 'files';
+let _idbPromise = null;
+
+function idbOpen() {
+  if (_idbPromise) return _idbPromise;
+  _idbPromise = new Promise((resolve, reject) => {
+    if (!window.indexedDB) return reject(new Error('IndexedDB unavailable'));
+    const req = indexedDB.open(IDB_NAME, 1);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(IDB_STORE)) db.createObjectStore(IDB_STORE);
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error || new Error('IndexedDB open failed'));
+  }).catch(err => { _idbPromise = null; throw err; });
+  return _idbPromise;
+}
+
+function idbPutFile(id, file) {
+  return idbOpen().then(db => new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE, 'readwrite');
+    tx.objectStore(IDB_STORE).put(file, id);
+    tx.oncomplete = () => resolve(true);
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+  }));
+}
+
+function idbGetFile(id) {
+  return idbOpen().then(db => new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE, 'readonly');
+    const req = tx.objectStore(IDB_STORE).get(id);
+    req.onsuccess = () => resolve(req.result || null);
+    req.onerror = () => reject(req.error);
+  }));
+}
+
+function idbDeleteFile(id) {
+  return idbOpen().then(db => new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE, 'readwrite');
+    tx.objectStore(IDB_STORE).delete(id);
+    tx.oncomplete = () => resolve(true);
+    tx.onerror = () => reject(tx.error);
+  })).catch(() => false);
+}
+
+// Write bytes to both the fast in-memory Map and durable IndexedDB.
+// Returns false when only the memory copy exists (private mode / quota), so the
+// caller can warn that a crash would still lose the file.
+async function stashFile(id, file) {
+  if (!state.uploadQueueFiles) state.uploadQueueFiles = new Map();
+  state.uploadQueueFiles.set(id, file);
+  try {
+    await idbPutFile(id, file);
+    return true;
+  } catch (e) {
+    console.warn('IndexedDB stash failed — memory-only, will not survive a reload:', e);
+    return false;
+  }
+}
+
+async function recallFile(id) {
+  const mem = state.uploadQueueFiles?.get(id);
+  if (mem) return mem;
+  try {
+    const f = await idbGetFile(id);
+    if (f) {
+      if (!state.uploadQueueFiles) state.uploadQueueFiles = new Map();
+      state.uploadQueueFiles.set(id, f);
+    }
+    return f;
+  } catch (e) {
+    return null;
+  }
+}
+
+async function dropFile(id) {
+  state.uploadQueueFiles?.delete(id);
+  await idbDeleteFile(id);
+}
+
+// Remove stored blobs no longer referenced by the queue so the store cannot
+// grow without bound.
+async function pruneOrphanBlobs() {
+  try {
+    const db = await idbOpen();
+    const keys = await new Promise((resolve, reject) => {
+      const tx = db.transaction(IDB_STORE, 'readonly');
+      const req = tx.objectStore(IDB_STORE).getAllKeys();
+      req.onsuccess = () => resolve(req.result || []);
+      req.onerror = () => reject(req.error);
+    });
+    const live = new Set((state.uploadQueue || []).map(q => q.id));
+    for (const k of keys) {
+      if (!live.has(k)) await idbDeleteFile(k);
+    }
+  } catch (e) { /* non-fatal */ }
+}
+
+async function loadUploadQueue() {
   try {
     const raw = localStorage.getItem(UPLOAD_QUEUE_KEY);
     state.uploadQueue = raw ? JSON.parse(raw) : [];
   } catch (e) { state.uploadQueue = []; }
-  // Clean entries that are 'done' (no need to surface those) or older than 24h
-  const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+  // Clean entries that are 'done' (no need to surface those) or aged out.
+  const cutoff = Date.now() - QUEUE_RETENTION_MS;
   state.uploadQueue = (state.uploadQueue || []).filter(q =>
     q.status !== 'done' && (q.createdAt || 0) > cutoff
   );
-  // Mark in-flight items as 'failed' on load — they were killed by page close.
-  // We have no File for them so user must re-pick.
-  state.uploadQueue.forEach(q => {
-    if (q.status === 'queued' || q.status === 'converting' || q.status === 'uploading') {
+
+  // Re-hydrate. Anything interrupted mid-flight is resumable as long as its
+  // bytes are still in IndexedDB — which is the whole point of stashing them at
+  // pick time. Only mark an item lost when the blob is genuinely gone (e.g. it
+  // was queued by an older build that never persisted bytes at all).
+  for (const q of state.uploadQueue) {
+    const wasInFlight = q.status === 'queued' || q.status === 'converting' || q.status === 'uploading';
+    const wasLost = q.status === 'failed' && q.lost;
+    if (!wasInFlight && !wasLost) continue;
+
+    const f = await recallFile(q.id);
+    if (f) {
+      q.status = 'queued';
+      q.attempts = 0;
+      q.lastError = null;
+      q.lost = false;
+      if (f.name && f.name !== q.filename) q.filename = f.name;
+    } else if (wasInFlight) {
       q.status = 'failed';
-      q.lastError = 'Page closed mid-upload — file must be re-picked';
+      q.lastError = 'File no longer available — please re-pick';
       q.lost = true;
     }
-  });
+  }
+
   saveUploadQueue();
+  renderUploadTiles();
+  await pruneOrphanBlobs();
+  // Resume automatically. A tech who reopens the app on the truck should not
+  // have to know to press anything for yesterday's photos to finish uploading.
+  runQueue();
 }
 
 function saveUploadQueue() {
@@ -127,7 +282,7 @@ function updateQueueItem(id, patch) {
 
 function removeQueueItem(id) {
   state.uploadQueue = state.uploadQueue.filter(q => q.id !== id);
-  if (state.uploadQueueFiles) state.uploadQueueFiles.delete(id);
+  dropFile(id);
   saveUploadQueue();
   renderUploadTiles();
 }
@@ -171,7 +326,7 @@ function renderUploadTiles() {
             queued: 'Queued',
             converting: 'Converting…',
             uploading: `Uploading… ${q.attempts > 0 ? '(retry ' + q.attempts + ')' : ''}`,
-            failed: q.lost ? 'File lost' : 'Failed',
+            failed: q.lost ? 'Needs re-pick' : 'Failed — will retry',
           }[q.status] || q.status;
           const cls = `upload-tile upload-tile-${q.status}`;
           const ext = (q.filename.split('.').pop() || '').toLowerCase();
@@ -226,8 +381,7 @@ function repickQueueItem(id) {
   inp.addEventListener('change', async (e) => {
     const file = e.target.files?.[0];
     if (!file) { inp.remove(); return; }
-    if (!state.uploadQueueFiles) state.uploadQueueFiles = new Map();
-    state.uploadQueueFiles.set(id, file);
+    await stashFile(id, file);
     item.filename = file.name;
     item.size = file.size;
     item.status = 'queued';
@@ -270,46 +424,53 @@ async function retryQueueItem(id) {
 async function processQueueItem(id) {
   const item = state.uploadQueue.find(q => q.id === id);
   if (!item) return;
-  if (!state.uploadQueueFiles) state.uploadQueueFiles = new Map();
-  let file = state.uploadQueueFiles.get(id);
+  let file = await recallFile(id);
   if (!file) {
-    updateQueueItem(id, { status: 'failed', lost: true, lastError: 'File not available' });
+    updateQueueItem(id, { status: 'failed', lost: true, lastError: 'File no longer available — please re-pick' });
     return;
   }
 
   while (true) {
     try {
-      // HEIC conversion if needed
-      const isHeic = /\.(heic|heif)$/i.test(file.name || '');
+      // HEIC → JPEG for thumbnail support. convertHeicIfNeeded never throws; if
+      // it cannot convert (CDN unreachable in the field) it returns the original
+      // and we upload the HEIC as-is rather than lose the photo.
+      const isHeic = /\.(heic|heif)$/i.test(file.name || '') || /heic|heif/i.test(file.type || '');
       if (isHeic) {
         updateQueueItem(id, { status: 'converting' });
-        file = await convertHeicIfNeeded(file);
-        state.uploadQueueFiles.set(id, file);
-        updateQueueItem(id, { filename: file.name });
+        const converted = await convertHeicIfNeeded(file);
+        if (converted !== file) {
+          file = converted;
+          await stashFile(id, file);
+          updateQueueItem(id, { filename: file.name, heicFallback: false });
+        } else {
+          updateQueueItem(id, { heicFallback: true });
+        }
       }
 
-      // Upload
+      // Upload — always to the project this item was queued against, never to
+      // whatever project happens to be open now.
       updateQueueItem(id, { status: 'uploading' });
-      const doc = await uploadDocument(file, item.category, /* skipPush */ true);
+      const doc = await uploadDocument(file, item.category, /* skipPush */ true, item.projectId);
       if (!doc) throw new Error('Upload returned no document');
 
-      // Success
+      // Success — only now is it safe to discard the bytes.
       updateQueueItem(id, { status: 'done', documentId: doc.id });
-      // Background-push to Albi (non-blocking)
       pushDocumentToAlbi(doc);
-      // Drop the File from memory now that it's safely uploaded
-      state.uploadQueueFiles.delete(id);
+      await dropFile(id);
       return;
     } catch (err) {
       const msg = err?.message || String(err);
       const currentAttempts = (state.uploadQueue.find(q => q.id === id)?.attempts) || 0;
       if (currentAttempts < MAX_AUTO_RETRIES) {
-        // Backoff: 1s, 2s, 4s
-        const wait = 1000 * Math.pow(2, currentAttempts);
+        // Exponential backoff capped at 30s: 1s, 2s, 4s, 8s, 16s, 30s.
+        const wait = Math.min(RETRY_BACKOFF_CAP_MS, 1000 * Math.pow(2, currentAttempts));
         updateQueueItem(id, { attempts: currentAttempts + 1, lastError: msg + ' — retrying' });
         await new Promise(r => setTimeout(r, wait));
         continue;
       }
+      // Give up for now, but the bytes stay in IndexedDB — reopening the app or
+      // regaining signal will retry rather than force a re-pick.
       updateQueueItem(id, { status: 'failed', lastError: msg });
       return;
     }
@@ -323,7 +484,10 @@ async function runQueue() {
   _queueRunning = true;
   try {
     while (true) {
-      const queued = state.uploadQueue.filter(q => q.status === 'queued' && q.projectId === state.activeProjectId);
+      // Drain every queued item, not just the open project's. Each upload now
+      // carries its own projectId, so a PM switching jobs no longer strands
+      // in-flight photos (previously they simply stopped uploading).
+      const queued = state.uploadQueue.filter(q => q.status === 'queued');
       if (!queued.length) break;
       const batch = queued.slice(0, UPLOAD_CONCURRENCY);
       await Promise.all(batch.map(q => processQueueItem(q.id)));
@@ -341,31 +505,47 @@ async function uploadFilesToCategory(files, category) {
   if (!files || !files.length) return;
   if (!state.uploadQueueFiles) state.uploadQueueFiles = new Map();
 
-  // Add each file to the queue
+  const projectId = state.activeProjectId;
+  let volatile = 0;
+
   for (const f of files) {
     const id = (crypto.randomUUID ? crypto.randomUUID() : `q_${Date.now()}_${Math.random().toString(36).slice(2)}`);
+    // Persist bytes BEFORE the item is queued. If the tab is killed one second
+    // later — backgrounded, phone locked, OS reclaim — the photo is still on
+    // disk and resumes on next open. This is the fix for photos vanishing in
+    // the field.
+    const durable = await stashFile(id, f);
+    if (!durable) volatile++;
     state.uploadQueue.push({
       id,
-      projectId: state.activeProjectId,
+      projectId,
       category,
       filename: f.name,
       size: f.size,
       status: 'queued',
       attempts: 0,
       lastError: null,
+      durable,
       createdAt: Date.now(),
     });
-    state.uploadQueueFiles.set(id, f);
+    saveUploadQueue();
+    renderUploadTiles();
   }
-  saveUploadQueue();
-  renderUploadTiles();
+
+  if (volatile) {
+    toast(`⚠ ${volatile} file(s) could not be saved for offline retry — keep this tab open until upload finishes`);
+  }
   runQueue();
 }
 
-async function uploadDocument(file, category, skipPush) {
-  if (!sb || !state.activeProjectId) throw new Error('No active project / Supabase client');
+async function uploadDocument(file, category, skipPush, projectId) {
+  // projectId is explicit so a queued upload always lands on the job it was
+  // taken for. Previously this read state.activeProjectId at upload time, so a
+  // PM switching projects mid-flight could file photos onto the wrong job.
+  const pid = projectId || state.activeProjectId;
+  if (!sb || !pid) throw new Error('No active project / Supabase client');
   const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
-  const path = `projects/${state.activeProjectId}/${Date.now()}-${safeName}`;
+  const path = `projects/${pid}/${Date.now()}-${safeName}`;
 
   // Force a real MIME type — iOS often gives empty file.type, which causes the browser
   // to store octet-stream and serve as a download instead of displaying inline.
@@ -384,29 +564,44 @@ async function uploadDocument(file, category, skipPush) {
 
   // Photos category — enrich with EXIF / GPS / auto-stage / auto-phase
   let photoFields = {};
-  if (category === 'Photos' && /^image\//i.test(file.type || '')) {
-    const exif = await extractExifBasics(file);
+  // Test detectedType, not file.type — iOS frequently reports an empty type,
+  // which previously skipped EXIF/GPS enrichment entirely for iPhone photos.
+  if (category === 'Photos' && /^image\//i.test(detectedType || '')) {
+    // Metadata is a nice-to-have; it must never be able to fail an upload.
+    let exif = {};
+    try {
+      exif = (await extractExifBasics(file)) || {};
+    } catch (e) {
+      console.warn('EXIF read failed — continuing without it:', e);
+    }
     let lat = exif.lat, lng = exif.lng, acc = exif.accuracy;
     if (lat == null || lng == null) {
-      const live = await getCurrentLocation();
-      if (live) { lat = live.lat; lng = live.lng; acc = live.accuracy; }
+      try {
+        const live = await getCurrentLocation();
+        if (live) { lat = live.lat; lng = live.lng; acc = live.accuracy; }
+      } catch (e) { /* geolocation denied/unavailable — non-fatal */ }
     }
-    const phaseId = defaultPhaseIdForProject();
-    const phaseName = phaseId ? state.phases.find(p => p.id === phaseId)?.phase_name : null;
     photoFields = {
-      stage: defaultStageForProject(),
-      phase_id: phaseId,
-      phase_name: phaseName,
       taken_at: exif.takenAt || new Date().toISOString(),
       latitude: lat,
       longitude: lng,
       gps_accuracy_meters: acc,
       device_label: navigator.userAgent.slice(0, 200),
     };
+    // stage/phase derive from state.phases, which only holds the *open*
+    // project's phases. Stamping them on a background upload for a different
+    // job would attribute the photo to the wrong phase, so leave them null and
+    // let the PM set them rather than record something false.
+    if (pid === state.activeProjectId) {
+      const phaseId = defaultPhaseIdForProject();
+      photoFields.stage = defaultStageForProject();
+      photoFields.phase_id = phaseId;
+      photoFields.phase_name = phaseId ? state.phases.find(p => p.id === phaseId)?.phase_name : null;
+    }
   }
 
   const { data: inserted, error: insErr } = await sb.from('rebuild_documents').insert({
-    project_id: state.activeProjectId,
+    project_id: pid,
     category,
     filename: file.name,
     file_url: fileUrl,
@@ -585,3 +780,24 @@ function openDocPickerModal(onPick) {
 
   modal.classList.add('on');
 }
+
+// ──── Auto-resume triggers ──────────────────────────────────────────────────
+// Field uploads die because the phone loses signal or the OS suspends the tab.
+// Bytes now survive in IndexedDB, so the only thing needed is a nudge to drain
+// the queue again the moment conditions improve. A tech should never have to
+// know to press "Retry".
+window.addEventListener('online', () => {
+  if ((state.uploadQueue || []).some(q => q.status === 'queued' || (q.status === 'failed' && !q.lost))) {
+    // Reset backoff-exhausted items now that we know the network is back.
+    (state.uploadQueue || []).forEach(q => {
+      if (q.status === 'failed' && !q.lost) { q.status = 'queued'; q.attempts = 0; q.lastError = null; }
+    });
+    saveUploadQueue();
+    renderUploadTiles();
+    runQueue();
+  }
+});
+
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) runQueue();
+});
