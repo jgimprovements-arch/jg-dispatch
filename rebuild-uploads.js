@@ -545,7 +545,15 @@ async function uploadDocument(file, category, skipPush, projectId) {
   const pid = projectId || state.activeProjectId;
   if (!sb || !pid) throw new Error('No active project / Supabase client');
   const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
-  const path = `projects/${pid}/${Date.now()}-${safeName}`;
+  // Storage path must be unique per file. It used to be `${Date.now()}-${name}`,
+  // but Date.now() is millisecond-precision and uploads run concurrently, so two
+  // photos picked together — especially any sharing a filename (e.g. two
+  // "image.jpg" off the same phone) — could resolve to the SAME path. With
+  // upsert:false the second upload then fails, and some photos silently never
+  // landed (14 picked, fewer shown). A random token guarantees uniqueness even
+  // within the same millisecond.
+  const uniq = (crypto.randomUUID ? crypto.randomUUID().slice(0, 8) : Math.random().toString(36).slice(2, 10));
+  const path = `projects/${pid}/${Date.now()}-${uniq}-${safeName}`;
 
   // Force a real MIME type — iOS often gives empty file.type, which causes the browser
   // to store octet-stream and serve as a download instead of displaying inline.
@@ -553,11 +561,23 @@ async function uploadDocument(file, category, skipPush, projectId) {
     ? file.type
     : mimeFromFilename(file.name);
 
-  const { error: upErr } = await sb.storage.from('rebuild-documents').upload(path, file, {
+  let { error: upErr } = await sb.storage.from('rebuild-documents').upload(path, file, {
     contentType: detectedType,
     upsert: false,
   });
+  if (upErr && /exist|dupl|409/i.test(upErr.message || '')) {
+    // Extremely unlikely now that the path carries a random token, but if a
+    // path ever does collide, re-roll it once rather than losing the photo.
+    const path2 = `projects/${pid}/${Date.now()}-${(crypto.randomUUID ? crypto.randomUUID().slice(0,8) : Math.random().toString(36).slice(2,10))}-${safeName}`;
+    const retry = await sb.storage.from('rebuild-documents').upload(path2, file, { contentType: detectedType, upsert: false });
+    if (!retry.error) { upErr = null; return await _finishUpload(sb, pid, path2, file, category, detectedType, skipPush); }
+  }
   if (upErr) throw new Error(upErr.message);
+
+  return await _finishUpload(sb, pid, path, file, category, detectedType, skipPush);
+}
+
+async function _finishUpload(sb, pid, path, file, category, detectedType, skipPush) {
 
   const { data: urlData } = sb.storage.from('rebuild-documents').getPublicUrl(path);
   const fileUrl = urlData.publicUrl;

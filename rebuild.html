@@ -340,12 +340,28 @@ if (!window.supabase || !window.supabase.createClient) {
   window.loadHeic2Any = function () {
     if (window.heic2any) return Promise.resolve(window.heic2any);
     if (window._heic2anyLoader) return window._heic2anyLoader;
+    // Load order matters: jsdelivr is blocked by Edge Tracking Prevention and
+    // many ad-blockers, which silently leaves photos stored as unconvertible
+    // HEIC. Try unpkg first, fall back to jsdelivr, so a single blocked CDN
+    // can't disable HEIC conversion.
+    var SOURCES = [
+      'https://unpkg.com/heic2any@0.0.4/dist/heic2any.min.js',
+      'https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js'
+    ];
     window._heic2anyLoader = new Promise((resolve, reject) => {
-      const s = document.createElement('script');
-      s.src = 'https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js';
-      s.onload = () => resolve(window.heic2any);
-      s.onerror = () => { window._heic2anyLoader = null; reject(new Error('heic2any failed to load')); };
-      document.head.appendChild(s);
+      var i = 0;
+      function tryNext() {
+        if (i >= SOURCES.length) {
+          window._heic2anyLoader = null;
+          return reject(new Error('heic2any failed to load from all CDNs'));
+        }
+        const s = document.createElement('script');
+        s.src = SOURCES[i++];
+        s.onload = () => resolve(window.heic2any);
+        s.onerror = () => { s.remove(); tryNext(); };
+        document.head.appendChild(s);
+      }
+      tryNext();
     });
     return window._heic2anyLoader;
   };
@@ -3544,6 +3560,8 @@ function renderTabContent() {
     }
     // Render PDF thumbnails (first page) into PDF tiles
     $$('[data-pdf-thumb]').forEach(el => renderPdfThumbnail(el));
+    // Convert & swap in stored HEIC thumbnails (browsers can't decode HEIC natively)
+    if (typeof _resolveHeicThumbs === 'function') { _resolveHeicThumbs(document); }
     // Lightbox triggers — image thumbs in folder list and recent strip
     $$('[data-lightbox-doc]').forEach(el => el.addEventListener('click', e => {
       e.preventDefault();
@@ -13104,9 +13122,9 @@ function setupRealtime() {
 <script src="rebuild-packet.js?v=2026.05.26-r1"></script>
 <script src="rebuild-co.js?v=2026.05.27-co-bucket-r7"></script>
 <script src="rebuild-messages.js?v=2026.05.24-r1"></script>
-<script src="rebuild-documents.js?v=2026.06.08-r1"></script>
+<script src="rebuild-documents.js?v=2026.07.16-r3"></script>
 <script src="rebuild-relationships.js?v=2026.06.17-r1"></script>
 <script src="rebuild-notifications.js?v=2026.05.24-r5"></script>
-<script src="rebuild-uploads.js?v=2026.07.15-r1"></script>
+<script src="rebuild-uploads.js?v=2026.07.16-r3"></script>
 </body>
 </html>

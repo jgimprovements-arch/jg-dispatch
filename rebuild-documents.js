@@ -503,9 +503,46 @@ function renderDocumentsTab() {
   `;
 }
 
+// ─── HEIC DISPLAY FALLBACK ─────────────────────────────────────────────────
+// Browsers can't decode HEIC, so a stored .heic photo renders as a blank <img>.
+// This converts the stored file to a displayable JPEG on demand (cached per URL)
+// and swaps it into any <img data-heic-src> once ready. Photos taken on Android
+// upload as HEIC when the CDN-based converter is blocked at capture time, so
+// without this they're invisible in the grid even though they're safely stored.
+window._heicUrlCache = window._heicUrlCache || {};
+async function _resolveHeicThumbs(root) {
+  var imgs = (root || document).querySelectorAll('img[data-heic-src]:not([data-heic-done])');
+  if (!imgs.length) return;
+  var heic2any;
+  try { heic2any = await window.loadHeic2Any(); }
+  catch (e) { return; }               // CDN blocked — leave the 📷 placeholder
+  if (typeof heic2any !== 'function') return;
+
+  for (var i = 0; i < imgs.length; i++) {
+    (function(img){
+      var src = img.getAttribute('data-heic-src');
+      img.setAttribute('data-heic-done', '1');
+      if (window._heicUrlCache[src]) { img.src = window._heicUrlCache[src]; return; }
+      fetch(src)
+        .then(function(r){ return r.blob(); })
+        .then(function(b){ return heic2any({ blob: b, toType: 'image/jpeg', quality: 0.7 }); })
+        .then(function(out){
+          var jpg = Array.isArray(out) ? out[0] : out;
+          var url = URL.createObjectURL(jpg);
+          window._heicUrlCache[src] = url;
+          img.src = url;
+        })
+        .catch(function(){ /* keep placeholder on failure */ });
+    })(imgs[i]);
+  }
+}
+window._resolveHeicThumbs = _resolveHeicThumbs;
+
 function renderDocRow(d) {
   const sizeKb = d.file_size_bytes ? (d.file_size_bytes / 1024).toFixed(0) + ' KB' : '';
-  const isImage = /\.(jpg|jpeg|png|gif|webp|heic)$/i.test(d.filename);
+  const isRealImage = /\.(jpg|jpeg|png|gif|webp)$/i.test(d.filename);
+  const isHeic = /\.(heic|heif)$/i.test(d.filename);
+  const isImage = isRealImage || isHeic;
   const isPdf = /\.pdf$/i.test(d.filename);
   const isPhoto = d.category === 'Photos' && isImage;
   const albiBadge = d.push_status === 'sent'
@@ -515,11 +552,13 @@ function renderDocRow(d) {
     : d.push_status === 'skipped'
     ? '<span class="albi-badge skipped" title="Skipped">— Albi</span>'
     : '<span class="albi-badge pending" title="Pending Albi push">⏳ Albi</span>';
-  const thumb = isImage
+  const thumb = isRealImage
     ? `<img src="${d.file_url}" class="doc-thumb" loading="lazy" alt="" data-lightbox-doc="${d.id}" draggable="false">`
-    : isPdf
-      ? `<a href="${d.file_url}" target="_blank" class="doc-thumb doc-thumb-pdf" title="Open PDF" data-pdf-thumb="${d.file_url}" data-doc-id="${d.id}"><span class="doc-thumb-pdf-fallback">PDF</span></a>`
-      : `<div class="doc-thumb doc-thumb-file">📄</div>`;
+    : isHeic
+      ? `<img data-heic-src="${d.file_url}" class="doc-thumb doc-thumb-heic" loading="lazy" alt="Loading HEIC…" data-lightbox-doc="${d.id}" draggable="false" src="data:image/svg+xml;utf8,${encodeURIComponent('<svg xmlns=\'http://www.w3.org/2000/svg\' width=\'80\' height=\'80\'><rect width=\'80\' height=\'80\' fill=\'%23eef1f6\'/><text x=\'50%\' y=\'46%\' font-size=\'28\' text-anchor=\'middle\'>📷</text><text x=\'50%\' y=\'70%\' font-size=\'11\' font-weight=\'700\' fill=\'%237884a0\' text-anchor=\'middle\'>HEIC</text></svg>')}">`
+      : isPdf
+        ? `<a href="${d.file_url}" target="_blank" class="doc-thumb doc-thumb-pdf" title="Open PDF" data-pdf-thumb="${d.file_url}" data-doc-id="${d.id}"><span class="doc-thumb-pdf-fallback">PDF</span></a>`
+        : `<div class="doc-thumb doc-thumb-file">📄</div>`;
 
   // Photo enrichment line — only shown for Photos category with image files
   let photoLine = '';
