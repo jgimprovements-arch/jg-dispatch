@@ -32,6 +32,93 @@ async function loadMessages() {
     .eq('project_id', state.activeProjectId)
     .order('created_at', { ascending: false }).limit(200);
   state.messages = (data || []).filter(m => !_isDocAutoMessage(m));
+  // Mirror inbound email/SMS attachments into the Documents tab. The comment
+  // atop this file claims Documents "still shows them via rebuild_documents,"
+  // but nothing ever wrote them there — a subcontractor PDF emailed in was
+  // stranded in the message thread, out of the Documents tab, the Albi push,
+  // and the customer/diligence record. Non-blocking so it never delays render.
+  try { _mirrorInboundAttachmentsToDocuments(data || []); } catch (e) { console.warn('[msg-mirror] skipped:', e); }
+}
+
+// Copy inbound-message attachments into rebuild_documents if not already there.
+// Idempotent: dedupes on file_url (the attachment's public_url), so opening a
+// thread repeatedly never creates duplicates. Only mirrors INBOUND messages —
+// outbound files were generated/attached from the platform and already live in
+// Documents (or shouldn't be re-filed). Best-effort per row; one failure never
+// blocks the rest.
+async function _mirrorInboundAttachmentsToDocuments(messages) {
+  if (!sb || !state.activeProjectId) return;
+
+  // Collect candidate inbound attachments (structured table + fallback media URLs).
+  const candidates = [];
+  (messages || []).forEach(m => {
+    if (!m || m.direction !== 'inbound') return;
+    (m.attachments || []).forEach(a => {
+      if (a && a.public_url) candidates.push({
+        url: a.public_url,
+        name: a.file_name || _nameFromUrl(a.public_url),
+        size: a.file_size || null,
+        mime: a.mime_type || null,
+        from: m.sent_by_email || m.recipient_email || null,
+      });
+    });
+    // Twilio MMS media can land on the row instead of the attachments table.
+    ['media_urls','attachment_urls','sms_media_urls','media'].forEach(field => {
+      let v = m[field];
+      if (!v) return;
+      if (typeof v === 'string') { try { v = JSON.parse(v); } catch (e) { v = [v]; } }
+      (Array.isArray(v) ? v : [v]).forEach(u => {
+        if (u && typeof u === 'string') candidates.push({
+          url: u, name: _nameFromUrl(u), size: null, mime: null,
+          from: m.sent_by_email || m.recipient_email || null,
+        });
+      });
+    });
+  });
+  if (!candidates.length) return;
+
+  // Dedupe within this batch by url.
+  const byUrl = {};
+  candidates.forEach(c => { if (!byUrl[c.url]) byUrl[c.url] = c; });
+  const urls = Object.keys(byUrl);
+
+  // Which of these are already in Documents? One query, filtered to this project.
+  const { data: existing } = await sb.from('rebuild_documents')
+    .select('file_url')
+    .eq('project_id', state.activeProjectId)
+    .in('file_url', urls);
+  const have = new Set((existing || []).map(d => d.file_url));
+
+  const toInsert = urls.filter(u => !have.has(u)).map(u => {
+    const c = byUrl[u];
+    return {
+      project_id: state.activeProjectId,
+      category: 'Email Attachments',
+      filename: c.name,
+      file_url: c.url,
+      file_size_bytes: c.size,
+      mime_type: c.mime,
+      uploaded_by_email: c.from,
+      notes: 'Received via email/SMS' + (c.from ? ' from ' + c.from : ''),
+      // Do NOT auto-push inbound files to Albi — they arrived from an external
+      // party and the push pipeline is for platform-originated docs. Mark
+      // 'skipped' so the badge doesn't imply a push that shouldn't happen.
+      push_status: 'skipped',
+    };
+  });
+  if (!toInsert.length) return;
+
+  const { error } = await sb.from('rebuild_documents').insert(toInsert);
+  if (error) { console.warn('[msg-mirror] insert failed:', error.message); return; }
+  // Refresh the Documents tab so the newly-mirrored files appear without a reload.
+  if (typeof loadDocuments === 'function') { try { await loadDocuments(); } catch (e) {} }
+}
+
+function _nameFromUrl(u) {
+  try {
+    const raw = (String(u).split('/').pop() || 'attachment').split('?')[0];
+    return decodeURIComponent(raw) || 'attachment';
+  } catch (e) { return 'attachment'; }
 }
 
 function renderMessagesTab() {
