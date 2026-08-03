@@ -5167,6 +5167,20 @@ async function loadMyHours() {
   }
   var isLocked = !!TC.currentPeriodApproval;
 
+  // When the period is approved, the corrected/billable total the employee
+  // should see is frozen in timecard_archive (total_hours, after the 7:30
+  // start-clamp and lunch deductions payroll applies). The raw punch sum below
+  // is NOT what they get paid for once approved — so read the approved figure
+  // and display THAT as the headline period total. Same period_label format as
+  // the approval row ("M/D/YYYY - M/D/YYYY").
+  TC.currentPeriodArchive = null;
+  if (isLocked) {
+    try {
+      var arRows = await sb('/rest/v1/timecard_archive?employee_name=eq.'+encodeURIComponent(TC.employee.name)+'&period_label=eq.'+encodeURIComponent(periodLabelKey)+'&select=total_hours,reg_hours,ot_hours,gross_pay,approved_by,approved_at&order=approved_at.desc&limit=1');
+      if (arRows && arRows[0] && arRows[0].total_hours != null) TC.currentPeriodArchive = arRows[0];
+    } catch (e) { TC.currentPeriodArchive = null; }
+  }
+
   var entries = await sb('/rest/v1/time_entries?employee_id=eq.'+TC.employee.id+'&clock_in=gte.'+since.toISOString()+'&clock_in=lte.'+until.toISOString()+'&order=clock_in.desc&limit=100&select=*') || [];
   var today = new Date(); today.setHours(0,0,0,0);
   var todayMins=0, periodMins=0;
@@ -5183,7 +5197,21 @@ async function loadMyHours() {
   if (todayCard) todayCard.style.display = (offset === 0) ? '' : 'none';
 
   var s1=document.getElementById('hours-stat-today'); if(s1) s1.textContent=fmtDur(todayMins);
-  var s2=document.getElementById('hours-stat-week');  if(s2) s2.textContent=fmtDur(periodMins);
+  // Headline period total: once approved, show the frozen APPROVED billable
+  // hours (what payroll actually pays) so the app matches the timecard exactly.
+  // Before approval, show the raw punched total as before. Approved figure is
+  // shown in decimal hours to match the timecard's format precisely.
+  var s2=document.getElementById('hours-stat-week');
+  if (s2) {
+    if (TC.currentPeriodArchive) {
+      s2.textContent = Number(TC.currentPeriodArchive.total_hours).toFixed(2) + 'h';
+      s2.title = 'Approved payroll hours (raw punched: ' + fmtDur(periodMins) + ')';
+    } else {
+      s2.textContent = fmtDur(periodMins);
+    }
+  }
+  var s2lbl = document.getElementById('hours-stat-week-lbl');
+  if (s2lbl) s2lbl.textContent = TC.currentPeriodArchive ? 'Approved Hours' : 'Pay Period';
   var periodLabel = fmtShort(period.start) + ' – ' + fmtShort(period.end);
   var s3=document.getElementById('hours-stat-period-dates'); if(s3) s3.textContent=periodLabel;
 
@@ -5197,12 +5225,32 @@ async function loadMyHours() {
     var ap = TC.currentPeriodApproval;
     var apDate = ap.approved_at ? new Date(ap.approved_at) : null;
     var apDateStr = apDate ? (apDate.getMonth()+1)+'/'+apDate.getDate()+'/'+apDate.getFullYear() : '';
-    approvedBanner = '<div style="background:rgba(46,125,50,.08);border:1.5px solid #2e7d32;border-radius:12px;padding:12px 14px;margin-bottom:12px;display:flex;align-items:center;gap:12px;">' +
-        '<div style="font-size:22px;line-height:1;">🔒</div>' +
-        '<div style="flex:1;min-width:0;">' +
-          '<div style="font-size:13px;font-weight:700;color:#2e7d32;">Timecard Approved</div>' +
-          '<div style="font-size:11px;color:#1b5e20;margin-top:2px;line-height:1.4;">Approved by ' + (ap.approved_by || 'admin') + (apDateStr ? ' on ' + apDateStr : '') + '. Punches for this pay period are locked. Contact your manager if a change is needed.</div>' +
+    var arch = TC.currentPeriodArchive;
+    var approvedLine = '';
+    if (arch) {
+      var apprHrs = Number(arch.total_hours);
+      var rawHrs  = periodMins / 60;
+      var otBit   = (arch.ot_hours && Number(arch.ot_hours) > 0) ? ' · ' + Number(arch.ot_hours).toFixed(2) + 'h OT' : '';
+      approvedLine =
+        '<div style="margin-top:8px;padding-top:8px;border-top:1px solid rgba(46,125,50,.25);">' +
+          '<div style="display:flex;align-items:baseline;gap:8px;">' +
+            '<span style="font-size:20px;font-weight:800;color:#2e7d32;">' + apprHrs.toFixed(2) + 'h</span>' +
+            '<span style="font-size:11px;color:#1b5e20;font-weight:600;">approved payroll hours' + otBit + '</span>' +
+          '</div>' +
+          ((Math.abs(rawHrs - apprHrs) >= 0.02)
+            ? '<div style="font-size:11px;color:#1b5e20;margin-top:4px;line-height:1.4;">Your raw punches below total ' + rawHrs.toFixed(2) + 'h. Approved hours reflect the standard 7:30 start time and lunch adjustments applied to every timecard.</div>'
+            : '') +
+        '</div>';
+    }
+    approvedBanner = '<div style="background:rgba(46,125,50,.08);border:1.5px solid #2e7d32;border-radius:12px;padding:12px 14px;margin-bottom:12px;">' +
+        '<div style="display:flex;align-items:center;gap:12px;">' +
+          '<div style="font-size:22px;line-height:1;">🔒</div>' +
+          '<div style="flex:1;min-width:0;">' +
+            '<div style="font-size:13px;font-weight:700;color:#2e7d32;">Timecard Approved</div>' +
+            '<div style="font-size:11px;color:#1b5e20;margin-top:2px;line-height:1.4;">Approved by ' + (ap.approved_by || 'admin') + (apDateStr ? ' on ' + apDateStr : '') + '. Punches for this pay period are locked. Contact your manager if a change is needed.</div>' +
+          '</div>' +
         '</div>' +
+        approvedLine +
       '</div>';
   }
 
