@@ -123,6 +123,15 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--brdH);}
 <div class="modal-back" id="vModal"><div class="modal">
   <h2 id="vModalTitle">Add Vehicle</h2>
   <input type="hidden" id="vId">
+  <input type="hidden" id="fPhotoUrl">
+  <div class="frow" style="display:flex;align-items:center;gap:14px;">
+    <div id="photoPreview" style="width:84px;height:64px;border-radius:8px;background:#eef1f6 center/cover no-repeat;border:1px solid var(--brd);flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:22px;color:#9aa7bd;">🚐</div>
+    <div>
+      <label>Vehicle photo</label>
+      <input type="file" id="fPhotoFile" accept="image/*" style="font-size:12px;padding:6px;">
+      <div id="photoStatus" style="font-size:11px;color:var(--muted);margin-top:3px;">For identification. JPG/PNG.</div>
+    </div>
+  </div>
   <div class="f2"><div class="frow"><label>Name *</label><input id="fName" placeholder="Van 3"></div><div class="frow"><label>Fleet #</label><input id="fNumber" placeholder="V-03"></div></div>
   <div class="f3"><div class="frow"><label>Year</label><input id="fYear" type="number"></div><div class="frow"><label>Make</label><input id="fMake"></div><div class="frow"><label>Model</label><input id="fModel"></div></div>
   <div class="f2"><div class="frow"><label>Plate</label><input id="fPlate"></div><div class="frow"><label>VIN</label><input id="fVin"></div></div>
@@ -154,14 +163,50 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--brdH);}
 <script>
 const SB_URL='https://nuykvchgecpiuikoerze.supabase.co';
 const SB_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im51eWt2Y2hnZWNwaXVpa29lcnplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYyNjM3ODYsImV4cCI6MjA5MTgzOTc4Nn0.39hZ8DdjT_0iFJXPeAL2FXUSLw8FZBirDVzxZTO1W9s';
+// Roles allowed into Fleet — matches who gets the Fleet tile on the hub.
+const FLEET_ROLES=['admin','office','project manager'];
+// Fallback for pure-Google admin accounts that may not have an employees row.
 const ADMIN_EMAILS=['josh@jg-restoration.com','josh.greil@jg-restoration.com','lisa@jg-restoration.com','jgimprovements@gmail.com'];
 let sb=null,ME=null,VEHICLES=[],EMPLOYEES=[],ISSUES=[];
+
+// Multi-role aware: employees.role is comma-separated ("Office, Admin"), so
+// split and check for overlap rather than exact-matching the whole string.
+function _hasFleetRole(roleStr){
+  return String(roleStr||'').split(',').map(r=>r.trim().toLowerCase()).filter(Boolean).some(r=>FLEET_ROLES.indexOf(r)!==-1);
+}
+// Look the signer-in up on the roster and decide access by role. Anon key can
+// read employees (same as every other page). Returns true if allowed.
+async function _emailAllowed(email){
+  if(ADMIN_EMAILS.indexOf(email)!==-1) return true;   // hardcoded admins always in
+  try{
+    const c=window.supabase.createClient(SB_URL,SB_KEY);
+    const e=encodeURIComponent(email);
+    const {data}=await c.from('employees').select('role,active').or('email.eq.'+email+',personal_email.eq.'+email).limit(1);
+    const emp=data&&data[0];
+    if(emp&&emp.active!==false&&_hasFleetRole(emp.role)) return true;
+  }catch(err){/* fall through to deny */}
+  return false;
+}
 function toast(m){const t=document.getElementById('toast');t.textContent=m;t.classList.add('on');setTimeout(()=>t.classList.remove('on'),2600);}
 function closeModal(id){document.getElementById(id).classList.remove('on');}
 function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 function detectEmail(){try{const r=localStorage.getItem('jg_platform_user')||localStorage.getItem('jg_tc_user');if(r){const u=JSON.parse(r);return u&&u.email?String(u.email).toLowerCase():null;}}catch(e){}return null;}
+
+// Upload a vehicle photo to the shared storage bucket. Reuses the collision-proof
+// path pattern ({timestamp}-{random}-{name}) that was hardened for photo uploads,
+// so two uploads in the same millisecond can't overwrite each other. Returns the
+// public URL, or null on failure.
+async function uploadVehiclePhoto(file){
+  if(!sb||!file) return null;
+  const safe=(file.name||'photo.jpg').replace(/[^a-zA-Z0-9._-]/g,'_');
+  const uniq=(crypto.randomUUID?crypto.randomUUID().slice(0,8):Math.random().toString(36).slice(2,10));
+  const path='vehicles/'+Date.now()+'-'+uniq+'-'+safe;
+  const {error}=await sb.storage.from('rebuild-documents').upload(path,file,{contentType:file.type||'image/jpeg',upsert:false});
+  if(error){toast('Photo upload failed: '+error.message);return null;}
+  return sb.storage.from('rebuild-documents').getPublicUrl(path).data.publicUrl;
+}
 function openGate(msg){document.getElementById('gate').style.display='block';document.getElementById('app').style.display='none';if(msg)document.getElementById('gateMsg').textContent=msg;const p=detectEmail();if(p)document.getElementById('emailInput').value=p;}
-async function tryEnter(email){email=String(email||'').trim().toLowerCase();if(!email)return openGate('Enter your admin email.');if(ADMIN_EMAILS.indexOf(email)===-1)return openGate('That email is not an admin.');ME=email;document.getElementById('gate').style.display='none';document.getElementById('app').style.display='block';await boot();}
+async function tryEnter(email){email=String(email||'').trim().toLowerCase();if(!email)return openGate('Enter your email.');const ok=await _emailAllowed(email);if(!ok)return openGate('Your account does not have Fleet access. Contact the office.');ME=email;document.getElementById('gate').style.display='none';document.getElementById('app').style.display='block';await boot();}
 async function boot(){if(!window.supabase||!window.supabase.createClient){toast('Database library blocked - check tracking prevention');return;}sb=window.supabase.createClient(SB_URL,SB_KEY);await Promise.all([loadEmployees(),loadVehicles(),loadIssues()]);render();}
 async function loadEmployees(){const {data}=await sb.from('employees').select('id,name,active').eq('active',true).order('name');EMPLOYEES=data||[];document.getElementById('fUsual').innerHTML='<option value="">- none / pool -</option>'+EMPLOYEES.map(e=>'<option value="'+e.id+'">'+esc(e.name)+'</option>').join('');}
 async function loadVehicles(){const {data}=await sb.from('vehicles').select('*').order('name');VEHICLES=data||[];}
@@ -181,7 +226,9 @@ function renderFleet(){
   grid.innerHTML=list.map(v=>{
     const iss=openIssuesFor(v.id);
     const due=[dueRow('Registration',v.registration_due),dueRow('Insurance',v.insurance_due),dueRow('DOT inspection',v.inspection_due),oilDue(v)].filter(Boolean).join('');
-    return '<div class="vcard s-'+v.status+'"><h3>'+esc(v.name)+' <span class="badge '+v.status+'">'+v.status.replace('_',' ')+'</span></h3>'+
+    return '<div class="vcard s-'+v.status+'">'+
+      (v.photo_url?'<div style="width:100%;height:120px;border-radius:8px;margin-bottom:10px;background:#eef1f6 url('+esc(v.photo_url)+') center/cover no-repeat;"></div>':'')+
+      '<h3>'+esc(v.name)+' <span class="badge '+v.status+'">'+v.status.replace('_',' ')+'</span></h3>'+
       '<div class="vmeta">'+([v.year,esc(v.make),esc(v.model)].filter(Boolean).join(' ')||'—')+' · '+(v.market?(v.market==='stevens_point'?'Stevens Point':'Appleton'):'no market')+(v.vehicle_number?' · #'+esc(v.vehicle_number):'')+'</div>'+
       '<div class="kv"><span>Plate</span><b>'+(esc(v.plate)||'—')+'</b></div>'+
       '<div class="kv"><span>Current mileage</span><b class="mono">'+(v.current_mileage?v.current_mileage.toLocaleString():'—')+'</b></div>'+
@@ -197,9 +244,9 @@ function renderIssues(){
   const vn=id=>{const v=VEHICLES.find(x=>x.id===id);return v?v.name:'(unknown)';};
   wrap.innerHTML='<div class="section-hdr">Open Vehicle Issues</div>'+ISSUES.map(i=>'<div class="issue-card"><div><b style="color:var(--navy)">'+esc(vn(i.vehicle_id))+'</b> <span class="badge '+(i.severity==='urgent'?'flagged':'in_shop')+'">'+esc(i.category||'issue')+(i.severity==='urgent'?' · URGENT':'')+'</span><div style="font-size:13px;margin-top:4px">'+(esc(i.note)||'(no note)')+'</div><div style="font-size:11px;color:var(--muted);margin-top:3px">Reported by '+(esc(i.reported_by_name)||'?')+' · '+new Date(i.reported_at).toLocaleDateString()+' · '+esc(i.status)+'</div></div><div style="display:flex;gap:6px;align-items:flex-start;flex-wrap:wrap">'+(i.status==='open'?'<button class="btn sm ghost" onclick="ackIssue(\''+i.id+'\')">Acknowledge</button>':'')+'<button class="btn sm" onclick="resolveIssue(\''+i.id+'\')">Resolve</button></div></div>').join('');
 }
-function openAdd(){document.getElementById('vModalTitle').textContent='Add Vehicle';['vId','fName','fNumber','fYear','fMake','fModel','fPlate','fVin','fMileage','fLastOil','fReg','fIns','fInsp','fNotes'].forEach(id=>document.getElementById(id).value='');document.getElementById('fMarket').value='';document.getElementById('fUsual').value='';document.getElementById('fStatus').value='active';document.getElementById('fOilInterval').value='5000';document.getElementById('vModal').classList.add('on');}
-function editVehicle(id){const v=VEHICLES.find(x=>x.id===id);if(!v)return;document.getElementById('vModalTitle').textContent='Edit '+v.name;const set=(f,val)=>document.getElementById(f).value=val==null?'':val;set('vId',v.id);set('fName',v.name);set('fNumber',v.vehicle_number);set('fYear',v.year);set('fMake',v.make);set('fModel',v.model);set('fPlate',v.plate);set('fVin',v.vin);set('fMarket',v.market);set('fUsual',v.usual_assigned_to);set('fStatus',v.status);set('fMileage',v.current_mileage);set('fOilInterval',v.oil_interval_miles);set('fLastOil',v.last_oil_mileage);set('fReg',v.registration_due);set('fIns',v.insurance_due);set('fInsp',v.inspection_due);set('fNotes',v.notes);document.getElementById('vModal').classList.add('on');}
-async function saveVehicle(){const g=id=>{const el=document.getElementById(id);const v=el.value.trim?el.value.trim():el.value;return v===''?null:v;};const name=g('fName');if(!name){toast('Name is required');return;}const row={name,vehicle_number:g('fNumber'),year:g('fYear')?parseInt(g('fYear')):null,make:g('fMake'),model:g('fModel'),plate:g('fPlate'),vin:g('fVin'),market:g('fMarket')||null,usual_assigned_to:g('fUsual')||null,status:g('fStatus')||'active',current_mileage:g('fMileage')?parseInt(g('fMileage')):null,oil_interval_miles:g('fOilInterval')?parseInt(g('fOilInterval')):null,last_oil_mileage:g('fLastOil')?parseInt(g('fLastOil')):null,registration_due:g('fReg'),insurance_due:g('fIns'),inspection_due:g('fInsp'),notes:g('fNotes'),updated_at:new Date().toISOString()};const id=g('vId');let err;if(id){({error:err}=await sb.from('vehicles').update(row).eq('id',id));}else{({error:err}=await sb.from('vehicles').insert(row));}if(err){toast('Save failed: '+err.message);return;}closeModal('vModal');await loadVehicles();render();toast('Saved');}
+function openAdd(){document.getElementById('vModalTitle').textContent='Add Vehicle';['vId','fName','fNumber','fYear','fMake','fModel','fPlate','fVin','fMileage','fLastOil','fReg','fIns','fInsp','fNotes','fPhotoUrl'].forEach(id=>document.getElementById(id).value='');document.getElementById('fMarket').value='';document.getElementById('fUsual').value='';document.getElementById('fStatus').value='active';document.getElementById('fOilInterval').value='5000';document.getElementById('fPhotoFile').value='';document.getElementById('photoStatus').textContent='For identification. JPG/PNG.';setPhotoPreview('');document.getElementById('vModal').classList.add('on');}
+function editVehicle(id){const v=VEHICLES.find(x=>x.id===id);if(!v)return;document.getElementById('vModalTitle').textContent='Edit '+v.name;const set=(f,val)=>document.getElementById(f).value=val==null?'':val;set('vId',v.id);set('fName',v.name);set('fNumber',v.vehicle_number);set('fYear',v.year);set('fMake',v.make);set('fModel',v.model);set('fPlate',v.plate);set('fVin',v.vin);set('fMarket',v.market);set('fUsual',v.usual_assigned_to);set('fStatus',v.status);set('fMileage',v.current_mileage);set('fOilInterval',v.oil_interval_miles);set('fLastOil',v.last_oil_mileage);set('fReg',v.registration_due);set('fIns',v.insurance_due);set('fInsp',v.inspection_due);set('fNotes',v.notes);set('fPhotoUrl',v.photo_url);document.getElementById('fPhotoFile').value='';document.getElementById('photoStatus').textContent=v.photo_url?'Photo on file — pick a new one to replace':'For identification. JPG/PNG.';setPhotoPreview(v.photo_url);document.getElementById('vModal').classList.add('on');}
+async function saveVehicle(){const g=id=>{const el=document.getElementById(id);const v=el.value.trim?el.value.trim():el.value;return v===''?null:v;};const name=g('fName');if(!name){toast('Name is required');return;}const row={name,vehicle_number:g('fNumber'),year:g('fYear')?parseInt(g('fYear')):null,make:g('fMake'),model:g('fModel'),plate:g('fPlate'),vin:g('fVin'),market:g('fMarket')||null,usual_assigned_to:g('fUsual')||null,status:g('fStatus')||'active',current_mileage:g('fMileage')?parseInt(g('fMileage')):null,oil_interval_miles:g('fOilInterval')?parseInt(g('fOilInterval')):null,last_oil_mileage:g('fLastOil')?parseInt(g('fLastOil')):null,registration_due:g('fReg'),insurance_due:g('fIns'),inspection_due:g('fInsp'),notes:g('fNotes'),photo_url:g('fPhotoUrl'),updated_at:new Date().toISOString()};const id=g('vId');let err;if(id){({error:err}=await sb.from('vehicles').update(row).eq('id',id));}else{({error:err}=await sb.from('vehicles').insert(row));}if(err){toast('Save failed: '+err.message);return;}closeModal('vModal');await loadVehicles();render();toast('Saved');}
 function openService(vid){const v=VEHICLES.find(x=>x.id===vid);document.getElementById('sModalTitle').textContent='Service — '+(v?v.name:'');document.getElementById('sVehicleId').value=vid;['sMileage','sCost','sVendor','sNote'].forEach(id=>document.getElementById(id).value='');document.getElementById('sDate').value=new Date().toISOString().slice(0,10);document.getElementById('sType').value='oil';if(v&&v.current_mileage)document.getElementById('sMileage').value=v.current_mileage;loadServiceHistory(vid);document.getElementById('sModal').classList.add('on');}
 async function loadServiceHistory(vid){const {data}=await sb.from('vehicle_maintenance_log').select('*').eq('vehicle_id',vid).order('service_date',{ascending:false}).limit(10);const h=document.getElementById('sHistory');if(!data||!data.length){h.innerHTML='<div style="font-size:12px;color:var(--muted);margin-top:6px">No service history yet.</div>';return;}h.innerHTML='<div class="section-hdr" style="margin-top:12px">Recent Service</div>'+data.map(s=>'<div class="hist-row"><span>'+s.service_date+' · '+esc(s.service_type||'')+(s.mileage_at_service?' · '+s.mileage_at_service.toLocaleString()+'mi':'')+'</span><b class="mono">'+(s.cost!=null?'$'+Number(s.cost).toFixed(2):'')+'</b></div>').join('');}
 async function saveService(){const g=id=>{const v=document.getElementById(id).value;return v===''?null:v;};const vid=g('sVehicleId'),date=g('sDate');if(!date){toast('Date required');return;}const type=g('sType'),mileage=g('sMileage')?parseInt(g('sMileage')):null;const {error}=await sb.from('vehicle_maintenance_log').insert({vehicle_id:vid,service_date:date,service_type:type,mileage_at_service:mileage,cost:g('sCost')?parseFloat(g('sCost')):null,vendor:g('sVendor'),note:g('sNote'),created_by:ME});if(error){toast('Failed: '+error.message);return;}if(type==='oil'&&mileage){await sb.from('vehicles').update({last_oil_mileage:mileage,last_oil_date:date,updated_at:new Date().toISOString()}).eq('id',vid);await loadVehicles();}toast('Service logged');loadServiceHistory(vid);render();}
@@ -209,11 +256,20 @@ function showTab(t){document.getElementById('fleetTab').style.display=t==='fleet
 document.getElementById('tabFleet').onclick=()=>showTab('fleet');
 document.getElementById('tabIssues').onclick=()=>showTab('issues');
 document.getElementById('addBtn').onclick=openAdd;
+// Photo pick → upload immediately, preview, stash URL for save.
+document.getElementById('fPhotoFile').addEventListener('change',async function(e){
+  const file=e.target.files&&e.target.files[0];if(!file)return;
+  document.getElementById('photoStatus').textContent='Uploading…';
+  const url=await uploadVehiclePhoto(file);
+  if(url){document.getElementById('fPhotoUrl').value=url;setPhotoPreview(url);document.getElementById('photoStatus').textContent='Uploaded ✓';}
+  else{document.getElementById('photoStatus').textContent='Upload failed — try again';}
+});
+function setPhotoPreview(url){const p=document.getElementById('photoPreview');if(url){p.style.backgroundImage='url('+url+')';p.textContent='';}else{p.style.backgroundImage='';p.textContent='🚐';}}
 document.getElementById('saveVehicle').onclick=saveVehicle;
 document.getElementById('saveService').onclick=saveService;
 ['search','marketFilter','statusFilter'].forEach(id=>document.getElementById(id).addEventListener('input',renderFleet));
 document.getElementById('gateBtn').onclick=()=>tryEnter(document.getElementById('emailInput').value);
-(function(){const e=detectEmail();if(e&&ADMIN_EMAILS.indexOf(e)!==-1)tryEnter(e);else openGate('');})();
+(function(){const e=detectEmail();if(e)tryEnter(e);else openGate('');})();
 </script>
 </body>
 </html>
