@@ -29,6 +29,7 @@
     { section: 'OPERATIONS' },
     { label: 'Dispatch',            icon: '📋',  url: 'index.html' },
     { label: 'Rebuild Scheduler',   icon: '🔨',  url: 'rebuild.html' },
+    { label: 'Fleet',               icon: '🚐',  url: 'vehicles.html' },
 
     { section: 'TIME' },
     { label: 'Time Clock / Payroll',icon: '⏱',  url: 'timeclock_admin.html' },
