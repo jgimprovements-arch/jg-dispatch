@@ -249,11 +249,37 @@
         D.state.unassigned[m] = D.state.unassigned[m] || [];
       });
       if (canEdit()) {
-        var emp = await window.sb('/rest/v1/employees?active=eq.true&role=in.(Technician,%22Project%20Manager%22,Admin)&or=(show_on_dispatch.is.null,show_on_dispatch.eq.true)&select=id,name,role,market,show_on_dispatch,email');
+        // Load all active, dispatch-visible employees, then filter by role in JS.
+        // The old query used role=in.(Technician,"Project Manager",Admin), a PostgREST
+        // EXACT string match — so a multi-role value like "Project Manager, Sales"
+        // matched nothing and those employees silently never appeared on the board.
+        // Roles are comma-separated; split and check for overlap instead.
+        var DISPATCH_ROLES = ['technician', 'project manager', 'admin'];
+        var _hasDispatchRole = function(roleStr){
+          return String(roleStr || '').split(',')
+            .map(function(r){ return r.trim().toLowerCase(); })
+            .filter(Boolean)
+            .some(function(r){ return DISPATCH_ROLES.indexOf(r) !== -1; });
+        };
+        var _holdsRole = function(roleStr, target){
+          return String(roleStr || '').split(',')
+            .map(function(r){ return r.trim().toLowerCase(); })
+            .indexOf(target) !== -1;
+        };
+        var emp = await window.sb('/rest/v1/employees?active=eq.true&or=(show_on_dispatch.is.null,show_on_dispatch.eq.true)&select=id,name,role,market,show_on_dispatch,email');
         D.employees = (emp || []).filter(function(e){
-          if (e.role !== 'Admin') return true;
-          var k = (e.name||'').toLowerCase();
-          return k.indexOf('josh') !== -1 && k.indexOf('greil') !== -1;
+          if (!_hasDispatchRole(e.role)) return false;
+          // Admin is intentionally restricted to Josh Greil so other admins don't
+          // clutter the board — but only exclude on a PURE Admin role. Someone who
+          // is "Admin, Project Manager" still belongs here for the PM part.
+          var onlyAdmin = _holdsRole(e.role, 'admin')
+            && !_holdsRole(e.role, 'technician')
+            && !_holdsRole(e.role, 'project manager');
+          if (onlyAdmin) {
+            var k = (e.name||'').toLowerCase();
+            return k.indexOf('josh') !== -1 && k.indexOf('greil') !== -1;
+          }
+          return true;
         });
       }
       D.error = null;
