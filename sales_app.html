@@ -1236,6 +1236,7 @@ var APP = {
   routeTemplates: [],
   contacts: [],
   partnerContacts: [],
+  contactsPeople: [],
   contactsSearch: '',
   contactsLoaded: false,
   filterType: 'All',
@@ -1471,9 +1472,11 @@ async function loadAll() {
   var ch = await sb(chasesUrl);
   APP.chases = ch || [];
 
-  // Partner contacts — the people inside each partner business.
-  var pc = await sb('/rest/v1/sales_partner_contacts?order=is_primary.desc,name.asc&limit=5000');
+  // Partner-contact LINKS (person ↔ business) + the contact PEOPLE they point to.
+  var pc = await sb('/rest/v1/sales_partner_contacts?order=is_primary.desc&limit=8000');
   APP.partnerContacts = pc || [];
+  var cpeople = await sb('/rest/v1/sales_contacts?order=name.asc&limit=8000');
+  APP.contactsPeople = cpeople || [];
 
   renderHome();
   renderPartners();
@@ -3479,27 +3482,30 @@ function openPartnerDetail(pid) {
     '</a>';
   }
 
-  // ── Business contacts (people inside this partner) ──
-  var pcontacts = (APP.partnerContacts || []).filter(function(c){ return c.partner_id === p.id; });
-  pcontacts.sort(function(a,b){ return (b.is_primary?1:0)-(a.is_primary?1:0) || (a.name||'').localeCompare(b.name||''); });
+  // ── Business contacts (people linked to this partner) ──
+  // Many-to-many: rows are LINKS; the person lives in APP.contactsPeople.
+  var plinks = (APP.partnerContacts || []).filter(function(l){ return l.partner_id === p.id; });
+  plinks.sort(function(a,b){ return (b.is_primary?1:0)-(a.is_primary?1:0) || (_personName(a.contact_id)||'').localeCompare(_personName(b.contact_id)||''); });
   html += '<div style="display:flex;align-items:baseline;justify-content:space-between;margin:4px 0 8px;">';
-  html += '<span style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;">👥 Contacts (' + pcontacts.length + ')</span>';
-  html += '<button onclick="openAddPartnerContact(\'' + p.id + '\')" style="font-size:12px;color:var(--orange);background:transparent;border:none;cursor:pointer;font-weight:700;padding:0;font-family:inherit;">+ Add</button>';
+  html += '<span style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;">👥 Contacts (' + plinks.length + ')</span>';
+  html += '<button onclick="openAddContactMobile(\'' + p.id + '\')" style="font-size:12px;color:var(--orange);background:transparent;border:none;cursor:pointer;font-weight:700;padding:0;font-family:inherit;">+ Add</button>';
   html += '</div>';
-  if (!pcontacts.length) {
+  if (!plinks.length) {
     html += '<div style="font-size:12px;color:var(--muted);margin-bottom:12px;font-style:italic;">No contacts yet — add the owner, estimator, office manager…</div>';
   } else {
-    pcontacts.forEach(function(c){
-      var tapArgs = "'" + contactAttrEsc(c.name) + "','" + contactAttrEsc(c.phone||'') + "','" + contactAttrEsc(c.email||'') + "',''";
+    plinks.forEach(function(l){
+      var person = _person(l.contact_id) || { name:'(missing contact)' };
+      var otherCount = (APP.partnerContacts||[]).filter(function(x){ return x.contact_id === l.contact_id && x.partner_id !== p.id; }).length;
+      var tapArgs = "'" + contactAttrEsc(person.name) + "','" + contactAttrEsc(person.phone||'') + "','" + contactAttrEsc(person.email||'') + "',''";
       html += '<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border);">';
       html += '<div style="flex:1;min-width:0;" onclick="openContactSheet(' + tapArgs + ')">';
-      html += '<div style="font-size:14px;font-weight:600;color:var(--text);">' + contactEsc(c.name) + (c.is_primary ? ' <span style="font-size:9px;font-weight:700;padding:1px 6px;border-radius:4px;background:rgba(232,93,4,.12);color:var(--orange);">PRIMARY</span>' : '') + '</div>';
+      html += '<div style="font-size:14px;font-weight:600;color:var(--text);">' + contactEsc(person.name) + (l.is_primary ? ' <span style="font-size:9px;font-weight:700;padding:1px 6px;border-radius:4px;background:rgba(232,93,4,.12);color:var(--orange);">PRIMARY</span>' : '') + (otherCount ? ' <span style="font-size:9px;font-weight:600;padding:1px 6px;border-radius:4px;background:rgba(13,45,94,.08);color:var(--navy);">+' + otherCount + ' biz</span>' : '') + '</div>';
       var meta = [];
-      if (c.position) meta.push(contactEsc(c.position));
-      if (c.phone) meta.push(contactEsc(contactFmtPhone(c.phone)));
+      if (l.position) meta.push(contactEsc(l.position));
+      if (person.phone) meta.push(contactEsc(contactFmtPhone(person.phone)));
       if (meta.length) html += '<div style="font-size:11px;color:var(--muted);margin-top:2px;">' + meta.join(' · ') + '</div>';
       html += '</div>';
-      html += '<button onclick="openEditPartnerContact(\'' + c.id + '\')" style="background:rgba(13,45,94,.06);border:none;width:34px;height:34px;border-radius:50%;font-size:13px;cursor:pointer;flex-shrink:0;padding:0;">✏️</button>';
+      html += '<button onclick="openPersonSheet(\'' + l.contact_id + '\',\'' + p.id + '\')" style="background:rgba(13,45,94,.06);border:none;width:34px;height:34px;border-radius:50%;font-size:13px;cursor:pointer;flex-shrink:0;padding:0;">✏️</button>';
       html += '</div>';
     });
   }
@@ -3663,106 +3669,217 @@ function closePartnerDetail() {
   // Reset the referred-jobs expand state so next partner card opens collapsed
   APP._refExpanded = false;
 }
-// ── PARTNER CONTACTS (people inside a partner business) ───────────────────
-// A partner (e.g. a plumber) can have several individual contacts, each with
-// a position within the company. Data lives in sales_partner_contacts, shared
-// with the desktop dashboard. Add/edit uses a dynamically-built bottom sheet
-// (same pattern as openAddPartnerSA) layered over the open partner detail.
-function openAddPartnerContact(pid){ openPartnerContactSheet(pid, null); }
-function openEditPartnerContact(cid){
-  var c = (APP.partnerContacts||[]).find(function(x){ return x.id === cid; });
-  if (!c) return;
-  openPartnerContactSheet(c.partner_id, cid);
+// ── PARTNER CONTACTS (many-to-many: people ↔ businesses) ──────────────────
+// A person lives once in sales_contacts. sales_partner_contacts is the LINK
+// (person ↔ business, with a title on the link). From a partner you add an
+// existing person or create a new one; tapping ✏️ opens the person, where you
+// can attach them to more businesses. Sheets are built dynamically and wire
+// their own listeners; _reloadContacts() refetches both tables after a write.
+function _person(id){ return (APP.contactsPeople||[]).find(function(x){ return x.id === id; }); }
+function _personName(id){ var p = _person(id); return p ? p.name : ''; }
+var _mEsc = function(s){ return String(s||'').replace(/"/g,'&quot;'); };
+var _mTxt = function(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); };
+async function _reloadContacts(){
+  var pc = await sb('/rest/v1/sales_partner_contacts?order=is_primary.desc&limit=8000');
+  APP.partnerContacts = pc || [];
+  var cp = await sb('/rest/v1/sales_contacts?order=name.asc&limit=8000');
+  APP.contactsPeople = cp || [];
 }
-function openPartnerContactSheet(partnerId, contactId){
-  var c = contactId ? (APP.partnerContacts||[]).find(function(x){ return x.id === contactId; }) : null;
-  var positions = (window.JG_SHARED && window.JG_SHARED.PARTNER_CONTACT_POSITIONS) || ['Owner','Estimator','Project Manager','Office Manager','Dispatcher','Technician','AP/AR','Other'];
-  var posList = positions.slice();
-  if (c && c.position && posList.indexOf(c.position) === -1) posList.unshift(c.position);
-  var esc = function(s){ return String(s||'').replace(/"/g,'&quot;'); };
+function _mkSheet(){
   var overlay = document.createElement('div');
   overlay.className = 'sheet-overlay open';
   overlay.style.zIndex = '700';
   var sheet = document.createElement('div');
   sheet.className = 'sheet';
   sheet.style.transform = 'translateY(0)';
-  var html = '<div class="sheet-handle"></div>';
-  html += '<div class="sheet-title">' + (c ? '✏️ Edit Contact' : '+ Add Contact') + '</div>';
-  html += '<div class="field-label">Name *</div><input id="pc-name" class="field-input" style="margin:0;" autocapitalize="words" value="' + esc(c && c.name) + '" placeholder="Jane Smith">';
-  html += '<div class="field-label">Position</div><select id="pc-position" class="field-select">';
-  html += '<option value="">— Select —</option>';
-  posList.forEach(function(pos){ html += '<option value="' + esc(pos) + '"' + (c && c.position === pos ? ' selected' : '') + '>' + esc(pos) + '</option>'; });
-  html += '</select>';
-  html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">';
-  html += '<div><div class="field-label">Phone</div><input id="pc-phone" class="field-input" style="margin:0;" inputmode="tel" value="' + esc(c && c.phone) + '"></div>';
-  html += '<div><div class="field-label">Email</div><input id="pc-email" class="field-input" style="margin:0;" inputmode="email" autocapitalize="off" value="' + esc(c && c.email) + '"></div>';
-  html += '</div>';
-  html += '<label style="display:flex;align-items:center;gap:10px;margin:14px 0 2px;padding:10px 12px;background:rgba(232,93,4,.05);border-radius:10px;cursor:pointer;"><input type="checkbox" id="pc-primary" ' + (c && c.is_primary ? 'checked' : '') + ' style="width:18px;height:18px;accent-color:var(--orange);"><span style="font-size:13px;font-weight:600;color:var(--navy);">⭐ Primary contact</span></label>';
-  html += '<div class="field-label">Notes</div><textarea id="pc-notes" class="field-input" rows="2" style="resize:none;">' + (c && c.notes ? String(c.notes).replace(/</g,'&lt;').replace(/>/g,'&gt;') : '') + '</textarea>';
-  html += '<div style="display:flex;gap:8px;margin-top:16px;">';
-  if (c) html += '<button id="pc-delete" style="padding:13px 16px;border-radius:12px;border:1.5px solid var(--danger);background:transparent;color:var(--danger);font-size:14px;font-weight:700;font-family:inherit;cursor:pointer;">🗑</button>';
-  html += '<button id="pc-cancel" style="flex:1;padding:13px;border-radius:12px;border:1.5px solid var(--border);background:transparent;color:var(--navy);font-size:14px;font-weight:700;font-family:inherit;cursor:pointer;">Cancel</button>';
-  html += '<button id="pc-save" style="flex:2;padding:13px;border-radius:12px;border:none;background:var(--orange);color:#fff;font-size:14px;font-weight:700;font-family:inherit;cursor:pointer;">' + (c ? 'Save' : 'Add') + '</button>';
-  html += '</div>';
-  sheet.innerHTML = html;
   overlay.appendChild(sheet);
   document.body.appendChild(overlay);
   overlay.offsetHeight; // force layout so the slide-in transition takes
   var close = function(){ overlay.classList.remove('open'); setTimeout(function(){ if (overlay.parentNode) overlay.remove(); }, 320); };
   overlay.addEventListener('click', function(e){ if (e.target === overlay) close(); });
-  sheet.querySelector('#pc-cancel').addEventListener('click', close);
-  if (c) sheet.querySelector('#pc-delete').addEventListener('click', function(){ close(); deletePartnerContact(contactId, partnerId); });
-  sheet.querySelector('#pc-save').addEventListener('click', async function(){
-    var name = sheet.querySelector('#pc-name').value.trim();
-    if (!name) { toast('Name is required'); return; }
-    var isPrimary = !!sheet.querySelector('#pc-primary').checked;
-    var body = {
-      partner_id: partnerId,
-      name:       name,
-      position:   sheet.querySelector('#pc-position').value || null,
-      phone:      sheet.querySelector('#pc-phone').value.trim() || null,
-      email:      sheet.querySelector('#pc-email').value.trim() || null,
-      is_primary: isPrimary,
-      notes:      sheet.querySelector('#pc-notes').value || null,
-      updated_at: new Date().toISOString()
-    };
-    try {
-      // Enforce a single primary per partner: clear the flag on siblings first.
-      if (isPrimary) {
-        await fetch(SB_URL + '/rest/v1/sales_partner_contacts?partner_id=eq.' + partnerId + '&is_primary=eq.true', {
-          method:'PATCH',
-          headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json'},
-          body: JSON.stringify({ is_primary:false })
+  return { overlay: overlay, sheet: sheet, close: close };
+}
+
+// Add a contact to a partner: pick an existing person or create a new one,
+// then set the title/primary for THIS business link.
+function openAddContactMobile(partnerId){
+  var positions = (window.JG_SHARED && window.JG_SHARED.PARTNER_CONTACT_POSITIONS) || ['Owner','Estimator','Project Manager','Office Manager','Dispatcher','Technician','AP/AR','Other'];
+  var partner = (APP.partners||[]).find(function(x){ return x.id === partnerId; });
+  var bizName = partner ? partner.name : 'this business';
+  var mode = 'existing';   // 'existing' | 'new'
+  var selectedId = null;
+  var s = _mkSheet();
+  function draw(){
+    var h = '<div class="sheet-handle"></div>';
+    h += '<div class="sheet-title">+ Add Contact — ' + _mTxt(bizName) + '</div>';
+    if (mode === 'existing') {
+      h += '<div class="field-label">Find an existing person</div>';
+      h += '<input id="ac-q" class="field-input" style="margin:0;" placeholder="Search people..." autocomplete="off">';
+      h += '<div id="ac-results" style="max-height:200px;overflow-y:auto;border:1.5px solid var(--border);border-radius:10px;margin-top:6px;"></div>';
+      h += '<div style="text-align:center;margin:8px 0;"><button id="ac-newmode" style="background:transparent;border:none;color:var(--orange);font-weight:700;font-size:13px;font-family:inherit;cursor:pointer;">+ Create a new person instead</button></div>';
+      if (selectedId) { var sp = _person(selectedId); if (sp) h += '<div style="background:rgba(232,93,4,.06);border:1.5px solid rgba(232,93,4,.3);border-radius:10px;padding:10px 12px;margin-bottom:6px;font-size:13px;font-weight:700;color:var(--navy);">✓ ' + _mTxt(sp.name) + '</div>'; }
+    } else {
+      h += '<div class="field-label">Name *</div><input id="ac-name" class="field-input" style="margin:0;" autocapitalize="words" placeholder="Jane Smith">';
+      h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">';
+      h += '<div><div class="field-label">Phone</div><input id="ac-phone" class="field-input" style="margin:0;" inputmode="tel"></div>';
+      h += '<div><div class="field-label">Email</div><input id="ac-email" class="field-input" style="margin:0;" inputmode="email" autocapitalize="off"></div>';
+      h += '</div>';
+      h += '<div style="text-align:center;margin:8px 0;"><button id="ac-existmode" style="background:transparent;border:none;color:var(--orange);font-weight:700;font-size:13px;font-family:inherit;cursor:pointer;">← Pick an existing person instead</button></div>';
+    }
+    h += '<div class="field-label">Title at ' + _mTxt(bizName) + '</div><select id="ac-position" class="field-select"><option value="">— Select —</option>';
+    positions.forEach(function(pos){ h += '<option value="' + _mEsc(pos) + '">' + _mTxt(pos) + '</option>'; });
+    h += '</select>';
+    h += '<label style="display:flex;align-items:center;gap:10px;margin:14px 0 2px;padding:10px 12px;background:rgba(232,93,4,.05);border-radius:10px;cursor:pointer;"><input type="checkbox" id="ac-primary" style="width:18px;height:18px;accent-color:var(--orange);"><span style="font-size:13px;font-weight:600;color:var(--navy);">⭐ Primary contact here</span></label>';
+    h += '<div style="display:flex;gap:8px;margin-top:16px;">';
+    h += '<button id="ac-cancel" style="flex:1;padding:13px;border-radius:12px;border:1.5px solid var(--border);background:transparent;color:var(--navy);font-size:14px;font-weight:700;font-family:inherit;cursor:pointer;">Cancel</button>';
+    h += '<button id="ac-save" style="flex:2;padding:13px;border-radius:12px;border:none;background:var(--orange);color:#fff;font-size:14px;font-weight:700;font-family:inherit;cursor:pointer;">Add</button>';
+    h += '</div>';
+    s.sheet.innerHTML = h;
+    s.sheet.querySelector('#ac-cancel').addEventListener('click', s.close);
+    if (mode === 'existing') {
+      var q = s.sheet.querySelector('#ac-q');
+      var res = s.sheet.querySelector('#ac-results');
+      function renderResults(){
+        var term = (q.value||'').toLowerCase().trim();
+        var linkedHere = {}; (APP.partnerContacts||[]).forEach(function(l){ if (l.partner_id === partnerId) linkedHere[l.contact_id] = true; });
+        var matches = (APP.contactsPeople||[]).filter(function(pp){ if (!term) return true; var hay = ((pp.name||'')+' '+(pp.phone||'')+' '+(pp.email||'')).toLowerCase(); return hay.indexOf(term) !== -1; }).slice(0,30);
+        if (!matches.length) { res.innerHTML = '<div style="padding:12px;text-align:center;color:var(--muted);font-size:12px;">No people match. Create new below.</div>'; return; }
+        res.innerHTML = matches.map(function(pp){
+          var already = linkedHere[pp.id];
+          return '<div class="ac-row" data-id="' + pp.id + '" style="padding:10px 12px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;' + (already?'opacity:.5;':'cursor:pointer;') + '"><div style="flex:1;min-width:0;"><div style="font-size:13px;font-weight:600;color:var(--navy);">' + _mTxt(pp.name) + (selectedId===pp.id?' ✓':'') + '</div><div style="font-size:11px;color:var(--muted);">' + _mTxt([pp.phone,pp.email].filter(Boolean).join(' · ')||'—') + '</div></div>' + (already?'<span style="font-size:10px;color:var(--muted);">already here</span>':'<span style="color:var(--orange);font-size:18px;">+</span>') + '</div>';
+        }).join('');
+        Array.prototype.forEach.call(res.querySelectorAll('.ac-row'), function(row){
+          var id = row.getAttribute('data-id');
+          if (linkedHere[id]) return;
+          row.addEventListener('click', function(){ selectedId = id; draw(); });
         });
       }
-      var url    = contactId ? (SB_URL + '/rest/v1/sales_partner_contacts?id=eq.' + contactId) : (SB_URL + '/rest/v1/sales_partner_contacts');
-      var method = contactId ? 'PATCH' : 'POST';
-      var r = await fetch(url, {
-        method: method,
-        headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json','Prefer':'return=minimal'},
-        body: JSON.stringify(body)
-      });
-      if (!r.ok) { toast('Save failed: ' + (await r.text()).slice(0,60)); return; }
-      var pc = await sb('/rest/v1/sales_partner_contacts?order=is_primary.desc,name.asc&limit=5000');
-      APP.partnerContacts = pc || [];
-      close();
-      toast('✓ Contact saved');
-      openPartnerDetail(partnerId); // re-render the open detail sheet
-    } catch(e) { toast('Save failed'); }
-  });
-}
-async function deletePartnerContact(contactId, partnerId){
-  if (!confirm('Delete this contact? Cannot be undone.')) return;
-  try {
-    var r = await fetch(SB_URL + '/rest/v1/sales_partner_contacts?id=eq.' + contactId, {
-      method:'DELETE', headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY}
+      q.addEventListener('input', renderResults);
+      renderResults();
+      s.sheet.querySelector('#ac-newmode').addEventListener('click', function(){ mode = 'new'; selectedId = null; draw(); });
+    } else {
+      s.sheet.querySelector('#ac-existmode').addEventListener('click', function(){ mode = 'existing'; draw(); });
+    }
+    s.sheet.querySelector('#ac-save').addEventListener('click', async function(){
+      var contactId = null;
+      try {
+        if (mode === 'new') {
+          var nm = s.sheet.querySelector('#ac-name').value.trim();
+          if (!nm) { toast('Name is required'); return; }
+          var pr = await fetch(SB_URL + '/rest/v1/sales_contacts', { method:'POST', headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json','Prefer':'return=representation'}, body: JSON.stringify({ name:nm, phone:s.sheet.querySelector('#ac-phone').value.trim()||null, email:s.sheet.querySelector('#ac-email').value.trim()||null }) });
+          if (!pr.ok) { toast('Save failed: ' + (await pr.text()).slice(0,60)); return; }
+          var cr = await pr.json(); contactId = cr && cr[0] ? cr[0].id : null;
+        } else {
+          contactId = selectedId;
+          if (!contactId) { toast('Pick a person or create new'); return; }
+        }
+        var isPrimary = !!s.sheet.querySelector('#ac-primary').checked;
+        if (isPrimary) {
+          await fetch(SB_URL + '/rest/v1/sales_partner_contacts?partner_id=eq.' + partnerId + '&is_primary=eq.true', { method:'PATCH', headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json'}, body: JSON.stringify({ is_primary:false }) });
+        }
+        var lr = await fetch(SB_URL + '/rest/v1/sales_partner_contacts', { method:'POST', headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json','Prefer':'return=minimal'}, body: JSON.stringify({ partner_id:partnerId, contact_id:contactId, position:s.sheet.querySelector('#ac-position').value||null, is_primary:isPrimary }) });
+        if (!lr.ok) { var t = await lr.text(); toast(/duplicate|unique/i.test(t) ? 'Already a contact here' : ('Save failed: ' + t.slice(0,50))); return; }
+        await _reloadContacts();
+        s.close();
+        toast('✓ Contact added');
+        openPartnerDetail(partnerId);
+      } catch(e) { toast('Save failed'); }
     });
-    if (!r.ok) throw new Error(await r.text());
-    var pc = await sb('/rest/v1/sales_partner_contacts?order=is_primary.desc,name.asc&limit=5000');
-    APP.partnerContacts = pc || [];
-    toast('✓ Contact deleted');
-    openPartnerDetail(partnerId);
-  } catch(e) { toast('Delete failed'); }
+  }
+  draw();
+}
+
+// Open a person: edit their info + manage which businesses they're on
+// (add to more, retitle, remove, or delete the person entirely).
+function openPersonSheet(personId, fromPartnerId){
+  var positions = (window.JG_SHARED && window.JG_SHARED.PARTNER_CONTACT_POSITIONS) || ['Owner','Estimator','Project Manager','Office Manager','Dispatcher','Technician','AP/AR','Other'];
+  var s = _mkSheet();
+  function draw(){
+    var person = _person(personId);
+    if (!person) { s.close(); return; }
+    var links = (APP.partnerContacts||[]).filter(function(l){ return l.contact_id === personId; });
+    var h = '<div class="sheet-handle"></div>';
+    h += '<div class="sheet-title">👤 ' + _mTxt(person.name) + '</div>';
+    h += '<div class="field-label">Name *</div><input id="ps-name" class="field-input" style="margin:0;" value="' + _mEsc(person.name) + '">';
+    h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">';
+    h += '<div><div class="field-label">Phone</div><input id="ps-phone" class="field-input" style="margin:0;" inputmode="tel" value="' + _mEsc(person.phone) + '"></div>';
+    h += '<div><div class="field-label">Email</div><input id="ps-email" class="field-input" style="margin:0;" inputmode="email" autocapitalize="off" value="' + _mEsc(person.email) + '"></div>';
+    h += '</div>';
+    h += '<div class="field-label">Notes</div><textarea id="ps-notes" class="field-input" rows="2" style="resize:none;">' + _mTxt(person.notes) + '</textarea>';
+    h += '<div style="text-align:right;margin:8px 0 4px;"><button id="ps-save-person" style="padding:8px 14px;border-radius:10px;border:1.5px solid var(--navy);background:transparent;color:var(--navy);font-size:12px;font-weight:700;font-family:inherit;cursor:pointer;">Save person</button></div>';
+    h += '<div class="field-label" style="margin-top:8px;">Businesses (' + links.length + ')</div>';
+    if (!links.length) h += '<div style="font-size:12px;color:var(--muted);font-style:italic;margin-bottom:6px;">Not linked to any business yet.</div>';
+    links.forEach(function(l){
+      var bp = (APP.partners||[]).find(function(x){ return x.id === l.partner_id; }) || { name:'(missing business)' };
+      var pl = positions.slice(); if (l.position && pl.indexOf(l.position) === -1) pl.unshift(l.position);
+      h += '<div style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border);">';
+      h += '<div style="flex:1;min-width:0;font-size:13px;font-weight:700;color:var(--navy);">' + _mTxt(bp.name) + (l.is_primary ? ' <span style="font-size:9px;font-weight:700;padding:1px 6px;border-radius:4px;background:rgba(232,93,4,.12);color:var(--orange);">PRIMARY</span>' : '') + '</div>';
+      h += '<select class="ps-linkpos" data-link="' + l.id + '" style="font-size:11px;padding:5px 6px;border-radius:8px;border:1.5px solid var(--border);background:#fff;"><option value="">— title —</option>';
+      pl.forEach(function(pos){ h += '<option value="' + _mEsc(pos) + '"' + (l.position === pos ? ' selected' : '') + '>' + _mTxt(pos) + '</option>'; });
+      h += '</select>';
+      h += '<button class="ps-unlink" data-link="' + l.id + '" style="background:none;border:none;color:var(--danger);font-size:18px;cursor:pointer;padding:0 4px;">×</button>';
+      h += '</div>';
+    });
+    h += '<div class="field-label" style="margin-top:10px;">Add to a business</div>';
+    h += '<input id="ps-biz-q" class="field-input" style="margin:0;" placeholder="Search businesses..." autocomplete="off">';
+    h += '<div id="ps-biz-results" style="max-height:170px;overflow-y:auto;border:1.5px solid var(--border);border-radius:10px;margin-top:6px;"></div>';
+    h += '<div style="display:flex;gap:8px;margin-top:16px;">';
+    h += '<button id="ps-delete" style="padding:13px 14px;border-radius:12px;border:1.5px solid var(--danger);background:transparent;color:var(--danger);font-size:13px;font-weight:700;font-family:inherit;cursor:pointer;">🗑</button>';
+    h += '<button id="ps-done" style="flex:1;padding:13px;border-radius:12px;border:none;background:var(--orange);color:#fff;font-size:14px;font-weight:700;font-family:inherit;cursor:pointer;">Done</button>';
+    h += '</div>';
+    s.sheet.innerHTML = h;
+    s.sheet.querySelector('#ps-save-person').addEventListener('click', async function(){
+      var nm = s.sheet.querySelector('#ps-name').value.trim();
+      if (!nm) { toast('Name is required'); return; }
+      try {
+        var r = await fetch(SB_URL + '/rest/v1/sales_contacts?id=eq.' + personId, { method:'PATCH', headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json','Prefer':'return=minimal'}, body: JSON.stringify({ name:nm, phone:s.sheet.querySelector('#ps-phone').value.trim()||null, email:s.sheet.querySelector('#ps-email').value.trim()||null, notes:s.sheet.querySelector('#ps-notes').value||null, updated_at:new Date().toISOString() }) });
+        if (!r.ok) { toast('Save failed'); return; }
+        await _reloadContacts(); toast('✓ Saved'); draw();
+      } catch(e) { toast('Save failed'); }
+    });
+    Array.prototype.forEach.call(s.sheet.querySelectorAll('.ps-linkpos'), function(sel){
+      sel.addEventListener('change', async function(){
+        var lid = sel.getAttribute('data-link');
+        try {
+          await fetch(SB_URL + '/rest/v1/sales_partner_contacts?id=eq.' + lid, { method:'PATCH', headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json','Prefer':'return=minimal'}, body: JSON.stringify({ position:sel.value||null, updated_at:new Date().toISOString() }) });
+          var link = (APP.partnerContacts||[]).find(function(x){ return x.id === lid; }); if (link) link.position = sel.value||null;
+        } catch(e) { toast('Update failed'); }
+      });
+    });
+    Array.prototype.forEach.call(s.sheet.querySelectorAll('.ps-unlink'), function(btn){
+      btn.addEventListener('click', async function(){
+        if (!confirm('Remove from this business? (Person stays in contacts.)')) return;
+        var lid = btn.getAttribute('data-link');
+        try { var r = await fetch(SB_URL + '/rest/v1/sales_partner_contacts?id=eq.' + lid, { method:'DELETE', headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY} }); if (!r.ok) throw 0; await _reloadContacts(); draw(); } catch(e) { toast('Remove failed'); }
+      });
+    });
+    var bq = s.sheet.querySelector('#ps-biz-q'); var bres = s.sheet.querySelector('#ps-biz-results');
+    function renderBiz(){
+      var term = (bq.value||'').toLowerCase().trim();
+      if (!term) { bres.innerHTML = '<div style="padding:12px;text-align:center;color:var(--muted);font-size:12px;">Type to search for a business.</div>'; return; }
+      var linked = {}; (APP.partnerContacts||[]).forEach(function(l){ if (l.contact_id === personId) linked[l.partner_id] = true; });
+      var matches = (APP.partners||[]).filter(function(pp){ if (linked[pp.id]) return false; var hay = ((pp.name||'')+' '+(pp.company||'')+' '+(pp.city||'')).toLowerCase(); return hay.indexOf(term) !== -1; }).slice(0,20);
+      if (!matches.length) { bres.innerHTML = '<div style="padding:12px;text-align:center;color:var(--muted);font-size:12px;">No businesses match.</div>'; return; }
+      bres.innerHTML = matches.map(function(pp){ return '<div class="ps-bizrow" data-id="' + pp.id + '" style="padding:10px 12px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;cursor:pointer;"><div style="flex:1;min-width:0;"><div style="font-size:13px;font-weight:600;color:var(--navy);">' + _mTxt(pp.name) + '</div><div style="font-size:11px;color:var(--muted);">' + _mTxt([pp.type,pp.city].filter(Boolean).join(' · ')||'—') + '</div></div><span style="color:var(--orange);font-size:18px;">+</span></div>'; }).join('');
+      Array.prototype.forEach.call(bres.querySelectorAll('.ps-bizrow'), function(row){
+        row.addEventListener('click', async function(){
+          var bid = row.getAttribute('data-id');
+          try {
+            var r = await fetch(SB_URL + '/rest/v1/sales_partner_contacts', { method:'POST', headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json','Prefer':'return=minimal'}, body: JSON.stringify({ partner_id:bid, contact_id:personId, position:null, is_primary:false }) });
+            if (!r.ok) { var t = await r.text(); toast(/duplicate|unique/i.test(t) ? 'Already linked' : 'Add failed'); return; }
+            bq.value = ''; await _reloadContacts(); draw();
+          } catch(e) { toast('Add failed'); }
+        });
+      });
+    }
+    bq.addEventListener('input', renderBiz); renderBiz();
+    s.sheet.querySelector('#ps-delete').addEventListener('click', async function(){
+      if (!confirm('Delete this person entirely? Removed from ALL businesses. Cannot be undone.')) return;
+      try { var r = await fetch(SB_URL + '/rest/v1/sales_contacts?id=eq.' + personId, { method:'DELETE', headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY} }); if (!r.ok) throw 0; await _reloadContacts(); s.close(); toast('✓ Deleted'); if (fromPartnerId) openPartnerDetail(fromPartnerId); } catch(e) { toast('Delete failed'); }
+    });
+    s.sheet.querySelector('#ps-done').addEventListener('click', function(){ s.close(); if (fromPartnerId) openPartnerDetail(fromPartnerId); });
+  }
+  draw();
 }
 
 // ── REFERRED JOBS / PAYOUT SHEET (MOBILE) ─────────────────────────────────
