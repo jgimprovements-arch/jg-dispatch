@@ -10,7 +10,7 @@
 (function(global){
   'use strict';
 
-  var VERSION = '2026-04-20-1';
+  var VERSION = '2026-08-11-contacts';
 
   // ── CONSTANTS ───────────────────────────────────────────────────────────
   // Partner types — alphabetical. Used by both desktop filter pills and
@@ -51,6 +51,30 @@
     'Property Manager':    '#e65100',
     'Realtor':             '#6a1b9a'
   };
+
+  // Positions a person can hold inside a partner business. Shared so the
+  // desktop dashboard and mobile PWA render the same dropdown — same reason
+  // PARTNER_TYPES lives here. Add new roles in ONE place.
+  var PARTNER_CONTACT_POSITIONS = [
+    'Owner',
+    'Estimator',
+    'Project Manager',
+    'Office Manager',
+    'Dispatcher',
+    'Technician',
+    'AP/AR',
+    'Other'
+  ];
+
+  // Given a partner's contacts, return the one to treat as primary:
+  // the is_primary flag if set, otherwise the first by sort order.
+  function primaryContact(contacts) {
+    if (!contacts || !contacts.length) return null;
+    for (var i = 0; i < contacts.length; i++) {
+      if (contacts[i] && contacts[i].is_primary) return contacts[i];
+    }
+    return contacts[0];
+  }
 
   // Email → display name. Lowercased emails only.
   var REPS = {
@@ -319,6 +343,8 @@
     version: VERSION,
     PARTNER_TYPES: PARTNER_TYPES,
     TYPE_COLORS: TYPE_COLORS,
+    PARTNER_CONTACT_POSITIONS: PARTNER_CONTACT_POSITIONS,
+    primaryContact: primaryContact,
     REPS: REPS,
     ADMINS: ADMINS,
     MARKETS: MARKETS,
