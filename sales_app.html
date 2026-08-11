@@ -599,10 +599,10 @@
   .contacts-loading { text-align: center; padding: 50px 24px; color: var(--muted); font-size: 14px; }
 </style>
 <!-- Shared constants/permissions/market — keep ?v= in sync with sales-shared.js VERSION -->
-<script src="sales-shared.js?v=2026-05-04-goal"></script>
+<script src="sales-shared.js?v=2026-08-11-contacts"></script>
 <!-- Auto-update: service worker forces fresh fetch on every deploy -->
 <script>
-var APP_VERSION = '2026-06-02-v1'; // bump this AND sw.js VERSION on every deploy to force cache refresh on phones
+var APP_VERSION = '2026-08-11-contacts'; // bump this AND sw.js VERSION on every deploy to force cache refresh on phones
 if ('serviceWorker' in navigator) {
   // Note: we can't narrow scope below /jg-dispatch/ on GitHub Pages
   // (no Service-Worker-Allowed header support). The sw.js itself is
@@ -1235,6 +1235,7 @@ var APP = {
   followups: [],
   routeTemplates: [],
   contacts: [],
+  partnerContacts: [],
   contactsSearch: '',
   contactsLoaded: false,
   filterType: 'All',
@@ -1469,6 +1470,10 @@ async function loadAll() {
   var chasesUrl = '/rest/v1/sales_chases?order=event_date.desc&limit=2000';
   var ch = await sb(chasesUrl);
   APP.chases = ch || [];
+
+  // Partner contacts — the people inside each partner business.
+  var pc = await sb('/rest/v1/sales_partner_contacts?order=is_primary.desc,name.asc&limit=5000');
+  APP.partnerContacts = pc || [];
 
   renderHome();
   renderPartners();
@@ -3474,6 +3479,31 @@ function openPartnerDetail(pid) {
     '</a>';
   }
 
+  // ── Business contacts (people inside this partner) ──
+  var pcontacts = (APP.partnerContacts || []).filter(function(c){ return c.partner_id === p.id; });
+  pcontacts.sort(function(a,b){ return (b.is_primary?1:0)-(a.is_primary?1:0) || (a.name||'').localeCompare(b.name||''); });
+  html += '<div style="display:flex;align-items:baseline;justify-content:space-between;margin:4px 0 8px;">';
+  html += '<span style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;">👥 Contacts (' + pcontacts.length + ')</span>';
+  html += '<button onclick="openAddPartnerContact(\'' + p.id + '\')" style="font-size:12px;color:var(--orange);background:transparent;border:none;cursor:pointer;font-weight:700;padding:0;font-family:inherit;">+ Add</button>';
+  html += '</div>';
+  if (!pcontacts.length) {
+    html += '<div style="font-size:12px;color:var(--muted);margin-bottom:12px;font-style:italic;">No contacts yet — add the owner, estimator, office manager…</div>';
+  } else {
+    pcontacts.forEach(function(c){
+      var tapArgs = "'" + contactAttrEsc(c.name) + "','" + contactAttrEsc(c.phone||'') + "','" + contactAttrEsc(c.email||'') + "',''";
+      html += '<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border);">';
+      html += '<div style="flex:1;min-width:0;" onclick="openContactSheet(' + tapArgs + ')">';
+      html += '<div style="font-size:14px;font-weight:600;color:var(--text);">' + contactEsc(c.name) + (c.is_primary ? ' <span style="font-size:9px;font-weight:700;padding:1px 6px;border-radius:4px;background:rgba(232,93,4,.12);color:var(--orange);">PRIMARY</span>' : '') + '</div>';
+      var meta = [];
+      if (c.position) meta.push(contactEsc(c.position));
+      if (c.phone) meta.push(contactEsc(contactFmtPhone(c.phone)));
+      if (meta.length) html += '<div style="font-size:11px;color:var(--muted);margin-top:2px;">' + meta.join(' · ') + '</div>';
+      html += '</div>';
+      html += '<button onclick="openEditPartnerContact(\'' + c.id + '\')" style="background:rgba(13,45,94,.06);border:none;width:34px;height:34px;border-radius:50%;font-size:13px;cursor:pointer;flex-shrink:0;padding:0;">✏️</button>';
+      html += '</div>';
+    });
+  }
+
   // Stats
   if (p.assigned_to) {
     html += '<div style="display:flex;align-items:center;gap:6px;margin-bottom:12px;padding:8px 12px;background:rgba(13,45,94,.06);border-radius:10px;">' +
@@ -3632,6 +3662,107 @@ function closePartnerDetail() {
   _navPopOverlay('partner-detail-overlay');
   // Reset the referred-jobs expand state so next partner card opens collapsed
   APP._refExpanded = false;
+}
+// ── PARTNER CONTACTS (people inside a partner business) ───────────────────
+// A partner (e.g. a plumber) can have several individual contacts, each with
+// a position within the company. Data lives in sales_partner_contacts, shared
+// with the desktop dashboard. Add/edit uses a dynamically-built bottom sheet
+// (same pattern as openAddPartnerSA) layered over the open partner detail.
+function openAddPartnerContact(pid){ openPartnerContactSheet(pid, null); }
+function openEditPartnerContact(cid){
+  var c = (APP.partnerContacts||[]).find(function(x){ return x.id === cid; });
+  if (!c) return;
+  openPartnerContactSheet(c.partner_id, cid);
+}
+function openPartnerContactSheet(partnerId, contactId){
+  var c = contactId ? (APP.partnerContacts||[]).find(function(x){ return x.id === contactId; }) : null;
+  var positions = (window.JG_SHARED && window.JG_SHARED.PARTNER_CONTACT_POSITIONS) || ['Owner','Estimator','Project Manager','Office Manager','Dispatcher','Technician','AP/AR','Other'];
+  var posList = positions.slice();
+  if (c && c.position && posList.indexOf(c.position) === -1) posList.unshift(c.position);
+  var esc = function(s){ return String(s||'').replace(/"/g,'&quot;'); };
+  var overlay = document.createElement('div');
+  overlay.className = 'sheet-overlay open';
+  overlay.style.zIndex = '700';
+  var sheet = document.createElement('div');
+  sheet.className = 'sheet';
+  sheet.style.transform = 'translateY(0)';
+  var html = '<div class="sheet-handle"></div>';
+  html += '<div class="sheet-title">' + (c ? '✏️ Edit Contact' : '+ Add Contact') + '</div>';
+  html += '<div class="field-label">Name *</div><input id="pc-name" class="field-input" style="margin:0;" autocapitalize="words" value="' + esc(c && c.name) + '" placeholder="Jane Smith">';
+  html += '<div class="field-label">Position</div><select id="pc-position" class="field-select">';
+  html += '<option value="">— Select —</option>';
+  posList.forEach(function(pos){ html += '<option value="' + esc(pos) + '"' + (c && c.position === pos ? ' selected' : '') + '>' + esc(pos) + '</option>'; });
+  html += '</select>';
+  html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">';
+  html += '<div><div class="field-label">Phone</div><input id="pc-phone" class="field-input" style="margin:0;" inputmode="tel" value="' + esc(c && c.phone) + '"></div>';
+  html += '<div><div class="field-label">Email</div><input id="pc-email" class="field-input" style="margin:0;" inputmode="email" autocapitalize="off" value="' + esc(c && c.email) + '"></div>';
+  html += '</div>';
+  html += '<label style="display:flex;align-items:center;gap:10px;margin:14px 0 2px;padding:10px 12px;background:rgba(232,93,4,.05);border-radius:10px;cursor:pointer;"><input type="checkbox" id="pc-primary" ' + (c && c.is_primary ? 'checked' : '') + ' style="width:18px;height:18px;accent-color:var(--orange);"><span style="font-size:13px;font-weight:600;color:var(--navy);">⭐ Primary contact</span></label>';
+  html += '<div class="field-label">Notes</div><textarea id="pc-notes" class="field-input" rows="2" style="resize:none;">' + (c && c.notes ? String(c.notes).replace(/</g,'&lt;').replace(/>/g,'&gt;') : '') + '</textarea>';
+  html += '<div style="display:flex;gap:8px;margin-top:16px;">';
+  if (c) html += '<button id="pc-delete" style="padding:13px 16px;border-radius:12px;border:1.5px solid var(--danger);background:transparent;color:var(--danger);font-size:14px;font-weight:700;font-family:inherit;cursor:pointer;">🗑</button>';
+  html += '<button id="pc-cancel" style="flex:1;padding:13px;border-radius:12px;border:1.5px solid var(--border);background:transparent;color:var(--navy);font-size:14px;font-weight:700;font-family:inherit;cursor:pointer;">Cancel</button>';
+  html += '<button id="pc-save" style="flex:2;padding:13px;border-radius:12px;border:none;background:var(--orange);color:#fff;font-size:14px;font-weight:700;font-family:inherit;cursor:pointer;">' + (c ? 'Save' : 'Add') + '</button>';
+  html += '</div>';
+  sheet.innerHTML = html;
+  overlay.appendChild(sheet);
+  document.body.appendChild(overlay);
+  overlay.offsetHeight; // force layout so the slide-in transition takes
+  var close = function(){ overlay.classList.remove('open'); setTimeout(function(){ if (overlay.parentNode) overlay.remove(); }, 320); };
+  overlay.addEventListener('click', function(e){ if (e.target === overlay) close(); });
+  sheet.querySelector('#pc-cancel').addEventListener('click', close);
+  if (c) sheet.querySelector('#pc-delete').addEventListener('click', function(){ close(); deletePartnerContact(contactId, partnerId); });
+  sheet.querySelector('#pc-save').addEventListener('click', async function(){
+    var name = sheet.querySelector('#pc-name').value.trim();
+    if (!name) { toast('Name is required'); return; }
+    var isPrimary = !!sheet.querySelector('#pc-primary').checked;
+    var body = {
+      partner_id: partnerId,
+      name:       name,
+      position:   sheet.querySelector('#pc-position').value || null,
+      phone:      sheet.querySelector('#pc-phone').value.trim() || null,
+      email:      sheet.querySelector('#pc-email').value.trim() || null,
+      is_primary: isPrimary,
+      notes:      sheet.querySelector('#pc-notes').value || null,
+      updated_at: new Date().toISOString()
+    };
+    try {
+      // Enforce a single primary per partner: clear the flag on siblings first.
+      if (isPrimary) {
+        await fetch(SB_URL + '/rest/v1/sales_partner_contacts?partner_id=eq.' + partnerId + '&is_primary=eq.true', {
+          method:'PATCH',
+          headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json'},
+          body: JSON.stringify({ is_primary:false })
+        });
+      }
+      var url    = contactId ? (SB_URL + '/rest/v1/sales_partner_contacts?id=eq.' + contactId) : (SB_URL + '/rest/v1/sales_partner_contacts');
+      var method = contactId ? 'PATCH' : 'POST';
+      var r = await fetch(url, {
+        method: method,
+        headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json','Prefer':'return=minimal'},
+        body: JSON.stringify(body)
+      });
+      if (!r.ok) { toast('Save failed: ' + (await r.text()).slice(0,60)); return; }
+      var pc = await sb('/rest/v1/sales_partner_contacts?order=is_primary.desc,name.asc&limit=5000');
+      APP.partnerContacts = pc || [];
+      close();
+      toast('✓ Contact saved');
+      openPartnerDetail(partnerId); // re-render the open detail sheet
+    } catch(e) { toast('Save failed'); }
+  });
+}
+async function deletePartnerContact(contactId, partnerId){
+  if (!confirm('Delete this contact? Cannot be undone.')) return;
+  try {
+    var r = await fetch(SB_URL + '/rest/v1/sales_partner_contacts?id=eq.' + contactId, {
+      method:'DELETE', headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY}
+    });
+    if (!r.ok) throw new Error(await r.text());
+    var pc = await sb('/rest/v1/sales_partner_contacts?order=is_primary.desc,name.asc&limit=5000');
+    APP.partnerContacts = pc || [];
+    toast('✓ Contact deleted');
+    openPartnerDetail(partnerId);
+  } catch(e) { toast('Delete failed'); }
 }
 
 // ── REFERRED JOBS / PAYOUT SHEET (MOBILE) ─────────────────────────────────

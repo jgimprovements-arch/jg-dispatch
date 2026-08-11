@@ -10,7 +10,7 @@
 <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script src="auth.js?v=20260419-1"></script>
 <!-- Shared constants/permissions/market — keep ?v= in sync with sales-shared.js VERSION -->
-<script src="sales-shared.js?v=2026-05-04-nurture"></script>
+<script src="sales-shared.js?v=2026-08-11-contacts"></script>
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <style>
@@ -509,6 +509,84 @@ function _updateBulkBar() {
 // deletes attachments before deleting the partner itself (matches the
 // merge function's pattern — Supabase foreign keys aren't CASCADE so the
 // attachments must be removed first or the DELETE will fail).
+// ── PARTNER CONTACTS (people inside a partner business) ───────────────────
+// A partner (e.g. a plumber) can have several individual contacts, each with
+// a position within the company. Stored in sales_partner_contacts, shared with
+// the mobile PWA. Rendered inside the partner-detail modal; add/edit uses the
+// 'contact-edit' modal. Writes use raw fetch (not sb()) so real error text
+// surfaces — sb() swallows non-2xx responses.
+function openAddContact(partnerId) {
+  ST.contactPartnerId = partnerId;
+  ST.contactEditingId = null;
+  ST.modal = 'contact-edit';
+  render();
+}
+function openEditContact(contactId) {
+  var c = (ST.partnerContacts||[]).find(function(x){ return x.id === contactId; });
+  if (!c) return;
+  ST.contactPartnerId = c.partner_id;
+  ST.contactEditingId = contactId;
+  ST.modal = 'contact-edit';
+  render();
+}
+async function saveContact(partnerId) {
+  var nameEl = document.getElementById('cName');
+  var name = nameEl ? nameEl.value.trim() : '';
+  if (!name) { showErr('Contact name is required'); return; }
+  var isPrimary = !!document.getElementById('cPrimary').checked;
+  var body = {
+    partner_id: partnerId,
+    name:       name,
+    position:   document.getElementById('cPosition').value || null,
+    phone:      document.getElementById('cPhone').value.trim() || null,
+    email:      document.getElementById('cEmail').value.trim() || null,
+    is_primary: isPrimary,
+    notes:      document.getElementById('cNotes').value || null,
+    updated_at: new Date().toISOString()
+  };
+  var editingId = ST.contactEditingId;
+  try {
+    // Enforce a single primary per partner: clear the flag on siblings first.
+    if (isPrimary) {
+      await fetch(SB_URL + '/rest/v1/sales_partner_contacts?partner_id=eq.' + partnerId + '&is_primary=eq.true', {
+        method:'PATCH',
+        headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json'},
+        body: JSON.stringify({ is_primary:false })
+      });
+    }
+    var url    = editingId ? (SB_URL + '/rest/v1/sales_partner_contacts?id=eq.' + editingId) : (SB_URL + '/rest/v1/sales_partner_contacts');
+    var method = editingId ? 'PATCH' : 'POST';
+    var resp = await fetch(url, {
+      method: method,
+      headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json','Prefer':'return=minimal'},
+      body: JSON.stringify(body)
+    });
+    if (!resp.ok) throw new Error(await resp.text());
+    ST.modal = 'partner-detail';
+    ST.selected = partnerId;
+    ST.contactEditingId = null;
+    await loadAll();
+  } catch(err) {
+    showErr('Save failed: ' + (err.message || err));
+  }
+}
+async function deleteContact(contactId) {
+  if (!confirm('Delete this contact? This cannot be undone.')) return;
+  var c = (ST.partnerContacts||[]).find(function(x){ return x.id === contactId; });
+  var pid = c ? c.partner_id : null;
+  try {
+    var resp = await fetch(SB_URL + '/rest/v1/sales_partner_contacts?id=eq.' + contactId, {
+      method:'DELETE', headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY}
+    });
+    if (!resp.ok) throw new Error(await resp.text());
+    ST.modal = 'partner-detail';
+    ST.selected = pid;
+    ST.contactEditingId = null;
+    await loadAll();
+  } catch(err) {
+    showErr('Delete failed: ' + (err.message || err));
+  }
+}
 async function deletePartner(partnerId) {
   if (!partnerId) return;
   var p = ST.partners.find(function(x){ return x.id === partnerId; });
@@ -824,7 +902,9 @@ async function loadAll() {
     // Route templates — drive recurring route prediction on the calendar.
     // Mobile manages these via Plan Route → Make Recurring; desktop is
     // read-only on templates today (calendar shows them; doesn't edit them).
-    sbSafe('/rest/v1/sales_route_templates?active=eq.true&order=name.asc&limit=100')
+    sbSafe('/rest/v1/sales_route_templates?active=eq.true&order=name.asc&limit=100'),
+    // Partner contacts — the people inside each partner business.
+    sbSafe('/rest/v1/sales_partner_contacts?order=is_primary.desc,name.asc&limit=5000')
   ]);
 
   ST.partners       = results[0].status === 'fulfilled' ? (results[0].value || []) : [];
@@ -836,6 +916,7 @@ async function loadAll() {
   ST.referralPayouts = results[6].status === 'fulfilled' ? (results[6].value || []) : [];
   ST.chases         = results[7].status === 'fulfilled' ? (results[7].value || []) : [];
   ST.routeTemplates = results[8].status === 'fulfilled' ? (results[8].value || []) : [];
+  ST.partnerContacts = results[9].status === 'fulfilled' ? (results[9].value || []) : [];
 
   // Log any partial failures rather than swallowing them
   results.forEach(function(r, i){
@@ -2340,7 +2421,11 @@ function _bgSignature() {
     // Touches calendar state
     ST.touchesView || 'list',
     ST.touchCalMonth || '',
-    ST._touchDayPopupDate || ''
+    ST._touchDayPopupDate || '',
+    // Partner-contacts state so the detail modal repaints after a save.
+    (ST.partnerContacts || []).length,
+    ST.contactEditingId || '',
+    ST.contactPartnerId || ''
   ].join('|');
 }
 
@@ -4885,6 +4970,35 @@ function _buildModalHtml() {
         mh += '<div style="background:rgba(46,125,50,.06);border-radius:6px;padding:8px;text-align:center;"><div style="font-size:16px;font-weight:700;color:var(--ok);">$' + Math.round(prefRevenue).toLocaleString() + '</div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;">Rev</div></div>';
         mh += '</div>';
         if (p.notes) mh += '<div style="background:rgba(245,166,35,.06);border-radius:8px;padding:10px 12px;margin-bottom:12px;font-size:12px;">' + p.notes + '</div>';
+        // ── Business contacts (people inside this partner) ──
+        var pcontacts = (ST.partnerContacts || []).filter(function(c){ return c.partner_id === p.id; });
+        pcontacts.sort(function(a,b){
+          var pr = (b.is_primary?1:0) - (a.is_primary?1:0);
+          if (pr) return pr;
+          return (a.name||'').localeCompare(b.name||'');
+        });
+        mh += '<div style="display:flex;align-items:baseline;justify-content:space-between;margin:14px 0 8px;">';
+        mh += '<span style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;">👥 Contacts (' + pcontacts.length + ')</span>';
+        mh += '<button onclick="openAddContact(\'' + p.id + '\')" style="font-size:11px;color:var(--orange);background:transparent;border:none;cursor:pointer;font-weight:700;padding:0;font-family:DM Sans,sans-serif;">+ Add contact</button>';
+        mh += '</div>';
+        if (!pcontacts.length) {
+          mh += '<div style="font-size:12px;color:var(--muted);margin-bottom:12px;font-style:italic;">No contacts yet — add the owner, estimator, office manager…</div>';
+        } else {
+          pcontacts.forEach(function(c){
+            mh += '<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border);">';
+            mh += '<div style="flex:1;min-width:0;">';
+            mh += '<div style="font-size:13px;font-weight:700;color:var(--navy);">' + _ve(c.name) + (c.is_primary ? ' <span style="font-size:9px;font-weight:700;padding:1px 6px;border-radius:4px;background:rgba(232,93,4,.12);color:var(--orange);">PRIMARY</span>' : '') + '</div>';
+            var line = [];
+            if (c.position) line.push(_ve(c.position));
+            if (c.phone) line.push('<a href="tel:' + _ve(c.phone) + '" style="color:var(--navy);text-decoration:none;">' + _ve(c.phone) + '</a>');
+            if (c.email) line.push('<a href="mailto:' + _ve(c.email) + '" style="color:var(--navy);text-decoration:none;">' + _ve(c.email) + '</a>');
+            if (line.length) mh += '<div style="font-size:11px;color:var(--muted);margin-top:2px;">' + line.join(' · ') + '</div>';
+            if (c.notes) mh += '<div style="font-size:11px;color:var(--muted);margin-top:2px;font-style:italic;">' + _ve(c.notes) + '</div>';
+            mh += '</div>';
+            mh += '<button onclick="openEditContact(\'' + c.id + '\')" title="Edit contact" style="padding:5px 10px;border-radius:6px;border:1.5px solid var(--border);background:var(--surface);color:var(--navy);font-size:12px;cursor:pointer;flex-shrink:0;">✏️</button>';
+            mh += '</div>';
+          });
+        }
         // Touch history — 5-row preview by default with a Show all toggle.
         // Each row is two-line (icon+type+date on top, notes underneath) so
         // notes don't get truncated. Click count link to expand/collapse.
@@ -5068,6 +5182,33 @@ function _buildModalHtml() {
       }
     }
 
+    // ── ADD / EDIT PARTNER CONTACT ──────────────────────────────────────────
+    if (ST.modal === 'contact-edit') {
+      var cEdit = ST.contactEditingId ? (ST.partnerContacts||[]).find(function(x){ return x.id === ST.contactEditingId; }) : null;
+      var cPid = cEdit ? cEdit.partner_id : ST.contactPartnerId;
+      var positions = (window.JG_SHARED && window.JG_SHARED.PARTNER_CONTACT_POSITIONS) || ['Owner','Estimator','Project Manager','Office Manager','Dispatcher','Technician','AP/AR','Other'];
+      var posList = positions.slice();
+      if (cEdit && cEdit.position && posList.indexOf(cEdit.position) === -1) posList.unshift(cEdit.position);
+      mh += '<div class="modal-title">' + (cEdit ? '✏️ Edit Contact' : '+ Add Contact') + '</div>';
+      mh += '<div class="form-group"><label class="form-label">Name *</label><input class="form-input" id="cName" placeholder="Jane Smith" value="' + _ve(cEdit && cEdit.name) + '"></div>';
+      mh += '<div class="form-group"><label class="form-label">Position</label><select class="form-select" id="cPosition">';
+      mh += '<option value="">— Select —</option>';
+      posList.forEach(function(pos){ mh += '<option value="' + _ve(pos) + '"' + (cEdit && cEdit.position === pos ? ' selected' : '') + '>' + _ve(pos) + '</option>'; });
+      mh += '</select></div>';
+      mh += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">';
+      mh += '<div class="form-group"><label class="form-label">Phone</label><input class="form-input" id="cPhone" value="' + _ve(cEdit && cEdit.phone) + '"></div>';
+      mh += '<div class="form-group"><label class="form-label">Email</label><input class="form-input" id="cEmail" value="' + _ve(cEdit && cEdit.email) + '"></div>';
+      mh += '</div>';
+      mh += '<div class="form-group"><label style="display:flex;align-items:center;gap:10px;padding:10px 14px;background:rgba(232,93,4,.05);border:1.5px solid var(--line);border-radius:8px;cursor:pointer;"><input type="checkbox" id="cPrimary" ' + (cEdit && cEdit.is_primary ? 'checked' : '') + ' style="width:18px;height:18px;cursor:pointer;"><span style="font-size:13px;color:var(--navy);font-weight:600;">⭐ Primary contact</span><span style="font-size:11px;color:var(--muted);">(main point of contact)</span></label></div>';
+      mh += '<div class="form-group"><label class="form-label">Notes</label><textarea class="form-input" id="cNotes" rows="2" style="resize:vertical;">' + _ve(cEdit && cEdit.notes) + '</textarea></div>';
+      mh += '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">';
+      if (cEdit) {
+        mh += '<button style="margin-right:auto;padding:8px 14px;border-radius:6px;border:1.5px solid var(--danger);background:transparent;color:var(--danger);cursor:pointer;font-size:12px;font-weight:600;" onclick="deleteContact(\'' + cEdit.id + '\')">🗑 Delete</button>';
+      }
+      mh += '<button style="padding:8px 16px;border-radius:6px;border:1.5px solid var(--border);background:transparent;cursor:pointer;font-size:12px;" onclick="ST.modal=\'partner-detail\';ST.selected=\'' + cPid + '\';ST.contactEditingId=null;render()">Cancel</button>';
+      mh += '<button style="padding:8px 20px;border-radius:6px;border:none;background:var(--orange);color:#fff;font-size:12px;font-weight:600;cursor:pointer;" onclick="saveContact(\'' + cPid + '\')">' + (cEdit ? 'Save Changes' : 'Add Contact') + '</button>';
+      mh += '</div>';
+    }
     // ── FIND DUPLICATES ─────────────────────────────────────────────────────
     if (ST.modal === 'find-dupes') {
       var dupeGroups = findDuplicateGroups();
