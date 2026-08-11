@@ -540,21 +540,31 @@ function _renderContactPick(partnerId) {
   var q = (ST.contactAddSearch||'').toLowerCase().trim();
   var linkedHere = {};
   (ST.partnerContacts||[]).forEach(function(l){ if (l.partner_id === partnerId) linkedHere[l.contact_id] = true; });
-  var matches = (ST.contactsPeople||[]).filter(function(pp){
+  var all = (ST.contactsPeople||[]);
+  var matches = all.filter(function(pp){
     if (!q) return true;
     var hay = ((pp.name||'')+' '+(pp.phone||'')+' '+(pp.email||'')).toLowerCase();
     return hay.indexOf(q) !== -1;
-  }).slice(0, 40);
-  if (!matches.length) return '<div style="padding:14px;text-align:center;color:var(--muted);font-size:12px;">No people match. Create a new one below.</div>';
-  return matches.map(function(pp){
+  }).slice(0, 60);
+  if (!all.length) {
+    return '<div style="padding:8px 10px;font-size:11px;color:var(--muted);border:1px dashed var(--border);border-radius:8px;margin-bottom:10px;">No people in your contacts yet — type a name above and hit Add to create the first one.</div>';
+  }
+  if (!matches.length) {
+    return '<div style="padding:8px 10px;font-size:11px;color:var(--muted);border:1px dashed var(--border);border-radius:8px;margin-bottom:10px;">No match — “' + _ve(ST.contactAddSearch) + '” will be added as a new person.</div>';
+  }
+  var html = '<div style="border:1px solid var(--border);border-radius:8px;max-height:200px;overflow-y:auto;margin-bottom:10px;">';
+  html += '<div style="padding:6px 10px;font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;background:rgba(13,45,94,.03);">Existing people — click to link' + (q ? '' : ' (' + all.length + ')') + '</div>';
+  html += matches.map(function(pp){
     var already = linkedHere[pp.id];
     var bizCount = (ST.partnerContacts||[]).filter(function(l){ return l.contact_id === pp.id; }).length;
-    return '<div style="padding:9px 12px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;' + (already?'opacity:.5;':'cursor:pointer;') + '"' + (already?'':' onclick="_contactPickSelect(\''+pp.id+'\')"') + '>' +
+    return '<div style="padding:9px 12px;border-top:1px solid var(--border);display:flex;align-items:center;gap:10px;' + (already?'opacity:.5;':'cursor:pointer;') + '"' + (already?'':' onclick="_contactPickSelect(\''+pp.id+'\')"') + '>' +
       '<div style="flex:1;min-width:0;"><div style="font-size:13px;font-weight:600;color:var(--navy);">' + _ve(pp.name) + '</div>' +
       '<div style="font-size:11px;color:var(--muted);">' + _ve([pp.phone, pp.email].filter(Boolean).join(' · ') || '—') + (bizCount?' · '+bizCount+' biz':'') + '</div></div>' +
       (already ? '<span style="font-size:10px;color:var(--muted);">already here</span>' : '<span style="color:var(--orange);font-size:18px;">+</span>') +
     '</div>';
   }).join('');
+  html += '</div>';
+  return html;
 }
 function _contactPickType(v) {
   ST.contactAddSearch = v;
@@ -564,22 +574,25 @@ function _contactPickType(v) {
 function _contactPickSelect(id) { ST.contactAddSel = id; render(); }
 
 async function saveContactLink(partnerId) {
-  var contactId = null;
+  // No forced mode: if an existing person is selected use them; otherwise
+  // whatever's typed in the name box becomes a new person. Only a name is
+  // required — phone/email are optional and can be filled in later.
+  var contactId = ST.contactAddSel || null;
   try {
-    if (ST.contactAddNew) {
-      var nm = document.getElementById('cName').value.trim();
-      if (!nm) { showErr('Contact name is required'); return; }
+    if (!contactId) {
+      var nameEl = document.getElementById('cName');
+      var nm = nameEl ? nameEl.value.trim() : '';
+      if (!nm) { showErr('Enter a contact name'); return; }
+      var phEl = document.getElementById('cPhone');
+      var emEl = document.getElementById('cEmail');
       var pRes = await fetch(SB_URL + '/rest/v1/sales_contacts', {
         method:'POST',
         headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json','Prefer':'return=representation'},
-        body: JSON.stringify({ name:nm, phone:document.getElementById('cPhone').value.trim()||null, email:document.getElementById('cEmail').value.trim()||null })
+        body: JSON.stringify({ name:nm, phone:(phEl&&phEl.value.trim())||null, email:(emEl&&emEl.value.trim())||null })
       });
       if (!pRes.ok) throw new Error(await pRes.text());
       var created = await pRes.json();
       contactId = created && created[0] ? created[0].id : null;
-    } else {
-      contactId = ST.contactAddSel;
-      if (!contactId) { showErr('Pick an existing person or create a new one'); return; }
     }
     if (!contactId) { showErr('Could not resolve the contact'); return; }
     var isPrimary = !!document.getElementById('cPrimary').checked;
@@ -5299,7 +5312,10 @@ function _buildModalHtml() {
       }
     }
 
-    // ── ADD CONTACT TO A PARTNER (pick existing person OR create new) ───────
+    // ── ADD CONTACT TO A PARTNER ───────────────────────────────────────────
+    // One name box that searches existing people as you type. Pick a match to
+    // link them, or just type a name and Add creates a new person. Only the
+    // name is required — phone/email are optional and editable later.
     if (ST.modal === 'contact-add') {
       var addPid = ST.contactPartnerId;
       var addPartner = _partner(addPid);
@@ -5307,24 +5323,20 @@ function _buildModalHtml() {
       var selPerson = ST.contactAddSel ? _person(ST.contactAddSel) : null;
       var bizName = addPartner ? addPartner.name : 'this business';
       mh += '<div class="modal-title">+ Add Contact' + (addPartner ? ' — ' + _ve(addPartner.name) : '') + '</div>';
-      if (!ST.contactAddNew) {
-        mh += '<div class="form-group"><label class="form-label">Find an existing person</label>';
-        mh += '<input class="form-input" id="contact-pick-q" placeholder="Search people by name, phone, email..." oninput="_contactPickType(this.value)" value="' + _ve(ST.contactAddSearch) + '" autocomplete="off"></div>';
-        mh += '<div id="contact-pick-results" style="max-height:220px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;margin-bottom:8px;">' + _renderContactPick(addPid) + '</div>';
-        mh += '<div style="text-align:center;margin-bottom:10px;"><button style="background:transparent;border:none;color:var(--orange);font-weight:700;font-size:12px;cursor:pointer;font-family:DM Sans,sans-serif;" onclick="ST.contactAddNew=true;render()">+ Create a new person instead</button></div>';
-        if (selPerson) {
-          mh += '<div style="background:rgba(232,93,4,.06);border:1.5px solid rgba(232,93,4,.3);border-radius:8px;padding:10px 12px;margin-bottom:8px;display:flex;align-items:center;gap:10px;">';
-          mh += '<div style="flex:1;min-width:0;"><div style="font-size:13px;font-weight:700;color:var(--navy);">✓ ' + _ve(selPerson.name) + '</div><div style="font-size:11px;color:var(--muted);">' + _ve([selPerson.phone, selPerson.email].filter(Boolean).join(' · ')) + '</div></div>';
-          mh += '<button style="background:transparent;border:none;color:var(--muted);font-size:12px;cursor:pointer;text-decoration:underline;" onclick="ST.contactAddSel=null;render()">change</button>';
-          mh += '</div>';
-        }
+      if (selPerson) {
+        mh += '<div class="form-group"><label class="form-label">Person</label>';
+        mh += '<div style="background:rgba(232,93,4,.06);border:1.5px solid rgba(232,93,4,.3);border-radius:8px;padding:10px 12px;display:flex;align-items:center;gap:10px;">';
+        mh += '<div style="flex:1;min-width:0;"><div style="font-size:13px;font-weight:700;color:var(--navy);">✓ ' + _ve(selPerson.name) + '</div><div style="font-size:11px;color:var(--muted);">' + _ve([selPerson.phone, selPerson.email].filter(Boolean).join(' · ') || '—') + '</div></div>';
+        mh += '<button style="background:transparent;border:none;color:var(--muted);font-size:12px;cursor:pointer;text-decoration:underline;" onclick="ST.contactAddSel=null;render()">change</button>';
+        mh += '</div></div>';
       } else {
-        mh += '<div class="form-group"><label class="form-label">Name *</label><input class="form-input" id="cName" placeholder="Jane Smith"></div>';
+        mh += '<div class="form-group"><label class="form-label">Contact name *</label>';
+        mh += '<input class="form-input" id="cName" placeholder="Type a name — searches your contacts as you go" oninput="_contactPickType(this.value)" value="' + _ve(ST.contactAddSearch) + '" autocomplete="off"></div>';
+        mh += '<div id="contact-pick-results">' + _renderContactPick(addPid) + '</div>';
         mh += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">';
-        mh += '<div class="form-group"><label class="form-label">Phone</label><input class="form-input" id="cPhone"></div>';
-        mh += '<div class="form-group"><label class="form-label">Email</label><input class="form-input" id="cEmail"></div>';
+        mh += '<div class="form-group"><label class="form-label">Phone <span style="color:var(--muted);font-weight:400;">(optional)</span></label><input class="form-input" id="cPhone"></div>';
+        mh += '<div class="form-group"><label class="form-label">Email <span style="color:var(--muted);font-weight:400;">(optional)</span></label><input class="form-input" id="cEmail"></div>';
         mh += '</div>';
-        mh += '<div style="text-align:center;margin-bottom:6px;"><button style="background:transparent;border:none;color:var(--orange);font-weight:700;font-size:12px;cursor:pointer;font-family:DM Sans,sans-serif;" onclick="ST.contactAddNew=false;render()">← Pick an existing person instead</button></div>';
       }
       mh += '<div class="form-group"><label class="form-label">Title at ' + _ve(bizName) + '</label><select class="form-select" id="cPosition"><option value="">— Select —</option>';
       addPositions.forEach(function(pos){ mh += '<option value="' + _ve(pos) + '">' + _ve(pos) + '</option>'; });

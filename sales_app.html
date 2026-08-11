@@ -3700,31 +3700,30 @@ function _mkSheet(){
   return { overlay: overlay, sheet: sheet, close: close };
 }
 
-// Add a contact to a partner: pick an existing person or create a new one,
-// then set the title/primary for THIS business link.
+// Add a contact to a partner: one name box that searches existing people as
+// you type. Pick a match to link them, or just type a name and Add creates a
+// new person. Only a name is required — phone/email optional.
 function openAddContactMobile(partnerId){
   var positions = (window.JG_SHARED && window.JG_SHARED.PARTNER_CONTACT_POSITIONS) || ['Owner','Estimator','Project Manager','Office Manager','Dispatcher','Technician','AP/AR','Other'];
   var partner = (APP.partners||[]).find(function(x){ return x.id === partnerId; });
   var bizName = partner ? partner.name : 'this business';
-  var mode = 'existing';   // 'existing' | 'new'
   var selectedId = null;
   var s = _mkSheet();
   function draw(){
+    var sp = selectedId ? _person(selectedId) : null;
     var h = '<div class="sheet-handle"></div>';
     h += '<div class="sheet-title">+ Add Contact — ' + _mTxt(bizName) + '</div>';
-    if (mode === 'existing') {
-      h += '<div class="field-label">Find an existing person</div>';
-      h += '<input id="ac-q" class="field-input" style="margin:0;" placeholder="Search people..." autocomplete="off">';
-      h += '<div id="ac-results" style="max-height:200px;overflow-y:auto;border:1.5px solid var(--border);border-radius:10px;margin-top:6px;"></div>';
-      h += '<div style="text-align:center;margin:8px 0;"><button id="ac-newmode" style="background:transparent;border:none;color:var(--orange);font-weight:700;font-size:13px;font-family:inherit;cursor:pointer;">+ Create a new person instead</button></div>';
-      if (selectedId) { var sp = _person(selectedId); if (sp) h += '<div style="background:rgba(232,93,4,.06);border:1.5px solid rgba(232,93,4,.3);border-radius:10px;padding:10px 12px;margin-bottom:6px;font-size:13px;font-weight:700;color:var(--navy);">✓ ' + _mTxt(sp.name) + '</div>'; }
+    if (sp) {
+      h += '<div class="field-label">Person</div>';
+      h += '<div style="background:rgba(232,93,4,.06);border:1.5px solid rgba(232,93,4,.3);border-radius:10px;padding:10px 12px;display:flex;align-items:center;gap:10px;"><div style="flex:1;min-width:0;"><div style="font-size:14px;font-weight:700;color:var(--navy);">✓ ' + _mTxt(sp.name) + '</div><div style="font-size:11px;color:var(--muted);">' + _mTxt([sp.phone,sp.email].filter(Boolean).join(' · ')||'—') + '</div></div><button id="ac-change" style="background:transparent;border:none;color:var(--muted);font-size:12px;text-decoration:underline;cursor:pointer;">change</button></div>';
     } else {
-      h += '<div class="field-label">Name *</div><input id="ac-name" class="field-input" style="margin:0;" autocapitalize="words" placeholder="Jane Smith">';
-      h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">';
-      h += '<div><div class="field-label">Phone</div><input id="ac-phone" class="field-input" style="margin:0;" inputmode="tel"></div>';
-      h += '<div><div class="field-label">Email</div><input id="ac-email" class="field-input" style="margin:0;" inputmode="email" autocapitalize="off"></div>';
+      h += '<div class="field-label">Contact name *</div>';
+      h += '<input id="ac-name" class="field-input" style="margin:0;" autocapitalize="words" placeholder="Type a name…" autocomplete="off">';
+      h += '<div id="ac-results" style="max-height:190px;overflow-y:auto;border:1.5px solid var(--border);border-radius:10px;margin-top:6px;"></div>';
+      h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:8px;">';
+      h += '<div><div class="field-label">Phone <span style="color:var(--muted);font-weight:400;">(opt)</span></div><input id="ac-phone" class="field-input" style="margin:0;" inputmode="tel"></div>';
+      h += '<div><div class="field-label">Email <span style="color:var(--muted);font-weight:400;">(opt)</span></div><input id="ac-email" class="field-input" style="margin:0;" inputmode="email" autocapitalize="off"></div>';
       h += '</div>';
-      h += '<div style="text-align:center;margin:8px 0;"><button id="ac-existmode" style="background:transparent;border:none;color:var(--orange);font-weight:700;font-size:13px;font-family:inherit;cursor:pointer;">← Pick an existing person instead</button></div>';
     }
     h += '<div class="field-label">Title at ' + _mTxt(bizName) + '</div><select id="ac-position" class="field-select"><option value="">— Select —</option>';
     positions.forEach(function(pos){ h += '<option value="' + _mEsc(pos) + '">' + _mTxt(pos) + '</option>'; });
@@ -3736,17 +3735,21 @@ function openAddContactMobile(partnerId){
     h += '</div>';
     s.sheet.innerHTML = h;
     s.sheet.querySelector('#ac-cancel').addEventListener('click', s.close);
-    if (mode === 'existing') {
-      var q = s.sheet.querySelector('#ac-q');
+    if (sp) {
+      s.sheet.querySelector('#ac-change').addEventListener('click', function(){ selectedId = null; draw(); });
+    } else {
+      var q = s.sheet.querySelector('#ac-name');
       var res = s.sheet.querySelector('#ac-results');
       function renderResults(){
         var term = (q.value||'').toLowerCase().trim();
+        var all = (APP.contactsPeople||[]);
         var linkedHere = {}; (APP.partnerContacts||[]).forEach(function(l){ if (l.partner_id === partnerId) linkedHere[l.contact_id] = true; });
-        var matches = (APP.contactsPeople||[]).filter(function(pp){ if (!term) return true; var hay = ((pp.name||'')+' '+(pp.phone||'')+' '+(pp.email||'')).toLowerCase(); return hay.indexOf(term) !== -1; }).slice(0,30);
-        if (!matches.length) { res.innerHTML = '<div style="padding:12px;text-align:center;color:var(--muted);font-size:12px;">No people match. Create new below.</div>'; return; }
-        res.innerHTML = matches.map(function(pp){
+        var matches = all.filter(function(pp){ if (!term) return true; var hay = ((pp.name||'')+' '+(pp.phone||'')+' '+(pp.email||'')).toLowerCase(); return hay.indexOf(term) !== -1; }).slice(0,30);
+        if (!all.length) { res.innerHTML = '<div style="padding:12px;text-align:center;color:var(--muted);font-size:12px;">No contacts yet — type a name and tap Add to create the first.</div>'; return; }
+        if (!matches.length) { res.innerHTML = '<div style="padding:10px 12px;color:var(--muted);font-size:12px;">No match — “' + _mTxt(q.value) + '” will be added as new.</div>'; return; }
+        res.innerHTML = '<div style="padding:6px 10px;font-size:10px;color:var(--muted);text-transform:uppercase;background:rgba(13,45,94,.03);">Existing people — tap to link' + (term?'':' (' + all.length + ')') + '</div>' + matches.map(function(pp){
           var already = linkedHere[pp.id];
-          return '<div class="ac-row" data-id="' + pp.id + '" style="padding:10px 12px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;' + (already?'opacity:.5;':'cursor:pointer;') + '"><div style="flex:1;min-width:0;"><div style="font-size:13px;font-weight:600;color:var(--navy);">' + _mTxt(pp.name) + (selectedId===pp.id?' ✓':'') + '</div><div style="font-size:11px;color:var(--muted);">' + _mTxt([pp.phone,pp.email].filter(Boolean).join(' · ')||'—') + '</div></div>' + (already?'<span style="font-size:10px;color:var(--muted);">already here</span>':'<span style="color:var(--orange);font-size:18px;">+</span>') + '</div>';
+          return '<div class="ac-row" data-id="' + pp.id + '" style="padding:10px 12px;border-top:1px solid var(--border);display:flex;align-items:center;gap:10px;' + (already?'opacity:.5;':'cursor:pointer;') + '"><div style="flex:1;min-width:0;"><div style="font-size:13px;font-weight:600;color:var(--navy);">' + _mTxt(pp.name) + '</div><div style="font-size:11px;color:var(--muted);">' + _mTxt([pp.phone,pp.email].filter(Boolean).join(' · ')||'—') + '</div></div>' + (already?'<span style="font-size:10px;color:var(--muted);">already here</span>':'<span style="color:var(--orange);font-size:18px;">+</span>') + '</div>';
         }).join('');
         Array.prototype.forEach.call(res.querySelectorAll('.ac-row'), function(row){
           var id = row.getAttribute('data-id');
@@ -3756,23 +3759,20 @@ function openAddContactMobile(partnerId){
       }
       q.addEventListener('input', renderResults);
       renderResults();
-      s.sheet.querySelector('#ac-newmode').addEventListener('click', function(){ mode = 'new'; selectedId = null; draw(); });
-    } else {
-      s.sheet.querySelector('#ac-existmode').addEventListener('click', function(){ mode = 'existing'; draw(); });
     }
     s.sheet.querySelector('#ac-save').addEventListener('click', async function(){
-      var contactId = null;
+      var contactId = selectedId || null;
       try {
-        if (mode === 'new') {
-          var nm = s.sheet.querySelector('#ac-name').value.trim();
-          if (!nm) { toast('Name is required'); return; }
-          var pr = await fetch(SB_URL + '/rest/v1/sales_contacts', { method:'POST', headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json','Prefer':'return=representation'}, body: JSON.stringify({ name:nm, phone:s.sheet.querySelector('#ac-phone').value.trim()||null, email:s.sheet.querySelector('#ac-email').value.trim()||null }) });
+        if (!contactId) {
+          var nmEl = s.sheet.querySelector('#ac-name');
+          var nm = nmEl ? nmEl.value.trim() : '';
+          if (!nm) { toast('Enter a contact name'); return; }
+          var phEl = s.sheet.querySelector('#ac-phone'); var emEl = s.sheet.querySelector('#ac-email');
+          var pr = await fetch(SB_URL + '/rest/v1/sales_contacts', { method:'POST', headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json','Prefer':'return=representation'}, body: JSON.stringify({ name:nm, phone:(phEl&&phEl.value.trim())||null, email:(emEl&&emEl.value.trim())||null }) });
           if (!pr.ok) { toast('Save failed: ' + (await pr.text()).slice(0,60)); return; }
           var cr = await pr.json(); contactId = cr && cr[0] ? cr[0].id : null;
-        } else {
-          contactId = selectedId;
-          if (!contactId) { toast('Pick a person or create new'); return; }
         }
+        if (!contactId) { toast('Could not resolve the contact'); return; }
         var isPrimary = !!s.sheet.querySelector('#ac-primary').checked;
         if (isPrimary) {
           await fetch(SB_URL + '/rest/v1/sales_partner_contacts?partner_id=eq.' + partnerId + '&is_primary=eq.true', { method:'PATCH', headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json'}, body: JSON.stringify({ is_primary:false }) });
