@@ -547,6 +547,9 @@ function _renderContactPick(partnerId) {
     return hay.indexOf(q) !== -1;
   }).slice(0, 60);
   if (!all.length) {
+    if (ST.contactsTableOk === false) {
+      return '<div style="padding:10px 12px;font-size:12px;color:var(--danger);border:1px solid rgba(196,43,43,.4);border-radius:8px;margin-bottom:10px;font-weight:600;">⚠ The sales_contacts table wasn\'t found (or is blocked by RLS). Run the sales_partner_contacts.sql migration in Supabase, then reload.</div>';
+    }
     return '<div style="padding:8px 10px;font-size:11px;color:var(--muted);border:1px dashed var(--border);border-radius:8px;margin-bottom:10px;">No people in your contacts yet — type a name above and hit Add to create the first one.</div>';
   }
   if (!matches.length) {
@@ -708,6 +711,93 @@ async function addLinkForPerson(personId, partnerId) {
     ST.personBizSearch = '';
     await loadAll(); // re-renders the person hub with the new business
   } catch(err) { showErr('Add failed: ' + (err.message || err)); }
+}
+
+// ── MERGE DUPLICATE CONTACTS (people) ─────────────────────────────────────
+// Mirror of the partner merge/find-dupes tools, for sales_contacts. Groups
+// people by same normalized name / phone / email; merging re-points all the
+// loser's business links onto the keeper (deleting any that would collide with
+// a link the keeper already has), fills the keeper's blank fields, and deletes
+// the loser person.
+function openFindContactDupes() {
+  ST.modal = 'find-contact-dupes';
+  render();
+}
+function findContactDupeGroups() {
+  var groups = [];
+  var byName = {}, byPhone = {}, byEmail = {};
+  (ST.contactsPeople || []).forEach(function(p){
+    var nm = _normalizeName(p.name), ph = _normalizePhone(p.phone), em = _normalizeEmail(p.email);
+    if (nm && nm.length >= 3) (byName[nm]  = byName[nm]  || []).push(p);
+    if (ph && ph.length >= 10)(byPhone[ph] = byPhone[ph] || []).push(p);
+    if (em)                   (byEmail[em] = byEmail[em] || []).push(p);
+  });
+  var seen = {};
+  function add(list, reason) {
+    if (list.length < 2) return;
+    var key = list.map(function(p){ return p.id; }).sort().join('|') + '::' + reason;
+    if (seen[key]) return;
+    seen[key] = 1;
+    groups.push({ reason: reason, people: list });
+  }
+  Object.keys(byPhone).forEach(function(k){ add(byPhone[k], 'same phone'); });
+  Object.keys(byEmail).forEach(function(k){ add(byEmail[k], 'same email'); });
+  Object.keys(byName).forEach(function(k){ add(byName[k], 'same name'); });
+  return groups;
+}
+function openMergePeople(ids) {
+  ST.mergePeopleGroup = ids;
+  ST.mergePeopleKeeper = ids && ids.length ? ids[0] : null;
+  ST.modal = 'merge-people';
+  render();
+}
+function setMergePeopleKeeper(id) { ST.mergePeopleKeeper = id; render(); }
+async function confirmMergePeople() {
+  var ids = (ST.mergePeopleGroup || []).slice();
+  var keeperId = ST.mergePeopleKeeper;
+  var keeper = _person(keeperId);
+  if (!keeper || ids.length < 2) return;
+  var losers = ids.filter(function(id){ return id !== keeperId; });
+  if (!confirm('Merge ' + losers.length + ' contact' + (losers.length===1?'':'s') + ' into "' + keeper.name + '"?\n\nTheir business links move to ' + keeper.name + ' and the duplicate records are deleted. Cannot be undone.')) return;
+  var HDR = {'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json'};
+  try {
+    // Which partners is the keeper already linked to? (partner_id -> true)
+    var keeperPartners = {};
+    (ST.partnerContacts || []).filter(function(l){ return l.contact_id === keeperId; }).forEach(function(l){ keeperPartners[l.partner_id] = true; });
+    // Fill the keeper's blank fields from the losers (first non-empty wins).
+    var patch = {};
+    losers.forEach(function(lid){
+      var lp = _person(lid); if (!lp) return;
+      if (!keeper.phone && !patch.phone && lp.phone) patch.phone = lp.phone;
+      if (!keeper.email && !patch.email && lp.email) patch.email = lp.email;
+      if (!keeper.notes && !patch.notes && lp.notes) patch.notes = lp.notes;
+    });
+    if (Object.keys(patch).length) {
+      patch.updated_at = new Date().toISOString();
+      await fetch(SB_URL + '/rest/v1/sales_contacts?id=eq.' + keeperId, { method:'PATCH', headers:HDR, body:JSON.stringify(patch) });
+    }
+    // Re-point (or drop) each loser's links, then delete the loser.
+    for (var i = 0; i < losers.length; i++) {
+      var lid = losers[i];
+      var loserLinks = (ST.partnerContacts || []).filter(function(l){ return l.contact_id === lid; });
+      for (var j = 0; j < loserLinks.length; j++) {
+        var link = loserLinks[j];
+        if (keeperPartners[link.partner_id]) {
+          // Keeper already at this business → the loser's link is redundant.
+          await fetch(SB_URL + '/rest/v1/sales_partner_contacts?id=eq.' + link.id, { method:'DELETE', headers:HDR });
+        } else {
+          await fetch(SB_URL + '/rest/v1/sales_partner_contacts?id=eq.' + link.id, { method:'PATCH', headers:HDR, body:JSON.stringify({ contact_id:keeperId, updated_at:new Date().toISOString() }) });
+          keeperPartners[link.partner_id] = true;
+        }
+      }
+      await fetch(SB_URL + '/rest/v1/sales_contacts?id=eq.' + lid, { method:'DELETE', headers:HDR });
+    }
+    ST.modal = 'find-contact-dupes';
+    ST.mergePeopleGroup = null;
+    ST.mergePeopleKeeper = null;
+    await loadAll();
+    if (typeof showOk === 'function') showOk('✓ Contacts merged');
+  } catch(err) { showErr('Merge failed: ' + (err.message || err)); }
 }
 async function deletePartner(partnerId) {
   if (!partnerId) return;
@@ -1042,6 +1132,13 @@ async function loadAll() {
   ST.routeTemplates = results[8].status === 'fulfilled' ? (results[8].value || []) : [];
   ST.partnerContacts = results[9].status === 'fulfilled' ? (results[9].value || []) : [];
   ST.contactsPeople  = results[10].status === 'fulfilled' ? (results[10].value || []) : [];
+  // Distinguish "no contacts yet" from "sales_contacts table missing / blocked"
+  // — sbSafe() swallows the difference. Only probe when the list is empty.
+  if (ST.contactsPeople.length) { ST.contactsTableOk = true; }
+  else {
+    try { var _cr = await fetch(SB_URL + '/rest/v1/sales_contacts?limit=1', { headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY} }); ST.contactsTableOk = _cr.ok; }
+    catch(e) { ST.contactsTableOk = false; }
+  }
 
   // Log any partial failures rather than swallowing them
   results.forEach(function(r, i){
@@ -2591,6 +2688,7 @@ function _renderNow() {
   h += '</div>';
   h += '<div style="display:flex;gap:6px;">';
   h += '<button class="btn btn-ghost" style="font-size:11px;" onclick="openFindDuplicates()">🔍 Find Dupes</button>';
+  h += '<button class="btn btn-ghost" style="font-size:11px;" onclick="openFindContactDupes()">👤 Dupe Contacts</button>';
   if(isAdmin()) h += '<button class="btn btn-ghost" style="font-size:11px;" onclick="importAlbi()">↓ Import Albi</button>';
   if(isAdmin()) h += '<button class="btn btn-gold" style="font-size:11px;" onclick="addPartner()">+ Partner</button>';
   h += '</div></div>';
@@ -5389,6 +5487,49 @@ function _buildModalHtml() {
         mh += '<button style="padding:8px 20px;border-radius:6px;border:none;background:var(--orange);color:#fff;font-size:12px;font-weight:600;cursor:pointer;" onclick="' + doneNav + 'ST.contactPersonId=null;ST.personBizSearch=\'\';render()">Done</button>';
         mh += '</div>';
       }
+    }
+    // ── FIND DUPLICATE CONTACTS (people) ───────────────────────────────────
+    if (ST.modal === 'find-contact-dupes') {
+      var cGroups = findContactDupeGroups();
+      mh += '<div class="modal-title">👤 Merge Duplicate Contacts</div>';
+      mh += '<div style="font-size:12px;color:var(--muted);margin-bottom:12px;line-height:1.5;">People that look like duplicates (same name, phone, or email). Merge a group into one person — their business links combine onto the keeper.</div>';
+      if (!cGroups.length) {
+        mh += '<div style="padding:30px;text-align:center;background:rgba(46,125,50,.06);border-radius:8px;color:var(--ok);font-weight:600;">✓ No duplicate contacts found.</div>';
+      } else {
+        mh += '<div style="max-height:460px;overflow-y:auto;">';
+        cGroups.forEach(function(g){
+          mh += '<div style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:10px;">';
+          mh += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">';
+          mh += '<div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;">' + g.reason + ' · ' + g.people.length + ' contacts</div>';
+          mh += '<button style="padding:4px 12px;border-radius:6px;border:none;background:var(--orange);color:#fff;font-size:11px;font-weight:700;cursor:pointer;font-family:DM Sans,sans-serif;" onclick="openMergePeople([' + g.people.map(function(pp){ return "'" + pp.id + "'"; }).join(',') + '])">Merge →</button>';
+          mh += '</div>';
+          g.people.forEach(function(pp){
+            var bizCount = (ST.partnerContacts||[]).filter(function(l){ return l.contact_id === pp.id; }).length;
+            mh += '<div style="padding:5px 0;border-top:1px solid rgba(13,45,94,.05);font-size:12px;"><span style="font-weight:700;color:var(--navy);">' + _ve(pp.name) + '</span> <span style="color:var(--muted);">· ' + _ve([pp.phone, pp.email].filter(Boolean).join(' · ') || 'no contact info') + ' · ' + bizCount + ' biz</span></div>';
+          });
+          mh += '</div>';
+        });
+        mh += '</div>';
+      }
+      mh += '<div style="display:flex;justify-content:flex-end;margin-top:14px;"><button style="padding:8px 16px;border-radius:6px;border:1.5px solid var(--border);background:transparent;cursor:pointer;font-size:12px;" onclick="ST.modal=null;render()">Close</button></div>';
+    }
+    // ── MERGE CONTACTS — pick keeper + confirm ─────────────────────────────
+    if (ST.modal === 'merge-people') {
+      var mpIds = ST.mergePeopleGroup || [];
+      var mpKeeper = ST.mergePeopleKeeper;
+      mh += '<div class="modal-title">⇄ Merge Contacts</div>';
+      mh += '<div style="font-size:12px;color:var(--muted);margin-bottom:12px;line-height:1.5;">Pick the record to <strong>keep</strong>. The others merge into it — businesses move over, blank fields fill in, then the duplicates are deleted.</div>';
+      mpIds.forEach(function(id){
+        var pp = _person(id); if (!pp) return;
+        var isKeeper = id === mpKeeper;
+        var bizCount = (ST.partnerContacts||[]).filter(function(l){ return l.contact_id === id; }).length;
+        mh += '<div onclick="setMergePeopleKeeper(\'' + id + '\')" style="display:flex;align-items:center;gap:10px;padding:10px 12px;border:2px solid ' + (isKeeper?'var(--ok)':'var(--border)') + ';border-radius:8px;margin-bottom:6px;cursor:pointer;background:' + (isKeeper?'rgba(46,125,50,.05)':'transparent') + ';">';
+        mh += '<div style="width:16px;height:16px;border-radius:50%;border:2px solid ' + (isKeeper?'var(--ok)':'var(--muted)') + ';background:' + (isKeeper?'var(--ok)':'transparent') + ';flex-shrink:0;"></div>';
+        mh += '<div style="flex:1;min-width:0;"><div style="font-size:13px;font-weight:700;color:var(--navy);">' + _ve(pp.name) + (isKeeper?' <span style="font-size:9px;color:var(--ok);font-weight:700;">KEEP</span>':'') + '</div><div style="font-size:11px;color:var(--muted);">' + _ve([pp.phone, pp.email].filter(Boolean).join(' · ') || '—') + ' · ' + bizCount + ' biz</div></div>';
+        mh += '</div>';
+      });
+      mh += '<button style="width:100%;padding:12px;border-radius:8px;border:none;background:var(--orange);color:#fff;font-size:13px;font-weight:700;cursor:pointer;font-family:DM Sans,sans-serif;margin-top:8px;" onclick="confirmMergePeople()">⇄ Merge ' + (mpIds.length-1) + ' into keeper</button>';
+      mh += '<div style="text-align:center;margin-top:10px;"><button style="padding:8px 16px;border-radius:6px;border:none;background:transparent;color:var(--muted);cursor:pointer;font-size:12px;font-family:DM Sans,sans-serif;text-decoration:underline;" onclick="ST.modal=\'find-contact-dupes\';ST.mergePeopleGroup=null;ST.mergePeopleKeeper=null;render()">← Back</button></div>';
     }
     // ── FIND DUPLICATES ─────────────────────────────────────────────────────
     if (ST.modal === 'find-dupes') {
