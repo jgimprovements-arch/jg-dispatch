@@ -3390,6 +3390,76 @@ function closeSwapSheet() {
   if (sheet) sheet.classList.remove('open');
 }
 
+// ── APPROVER NOTIFICATIONS ────────────────────────────────────────────────
+// When someone submits a time-off or swap request, push an in-app
+// notification to everyone who can actually act on it. Before this, an
+// approver only found out by happening to open the admin page and noticing
+// the red tab badge — the request sat silent until then.
+//
+// Recipients are resolved by ROLE OVERLAP, never exact match. The role
+// column is comma-separated ("Project Manager, Sales"), so an exact-match
+// query silently skips every multi-role employee — which is most of the
+// approvers.
+//
+// Fails soft: the request itself is already saved before this runs. A
+// notification failure must never make a submitted request look rejected.
+function _rolesOf(emp) {
+  return String((emp && emp.role) || '')
+    .split(',')
+    .map(function(r){ return r.trim().toLowerCase(); })
+    .filter(Boolean);
+}
+
+function _empHasAnyRoleTC(emp, wanted) {
+  var mine = _rolesOf(emp);
+  return wanted.some(function(w){ return mine.indexOf(w.toLowerCase()) !== -1; });
+}
+
+async function _notifyApprovers(opts) {
+  try {
+    var roles = opts.roles || [];
+    var r = await fetch(SB_URL + '/rest/v1/employees?active=eq.true&select=id,name,email,role', {
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+    });
+    if (!r.ok) return;
+    var emps = await r.json();
+    if (!Array.isArray(emps)) return;
+
+    var meEmail = (TC.employee && TC.employee.email ? TC.employee.email : '').toLowerCase();
+    var recipients = emps.filter(function(e) {
+      if (!e.email) return false;
+      if (e.email.toLowerCase() === meEmail) return false;   // don't notify the requester
+      return _empHasAnyRoleTC(e, roles);
+    });
+    if (!recipients.length) return;
+
+    var expires = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString();
+    var rows = recipients.map(function(e) {
+      return {
+        recipient_employee_id: e.id,
+        recipient_email: e.email,
+        recipient_name: e.name,
+        category: opts.category,
+        severity: opts.severity || 'info',
+        title: opts.title,
+        body: opts.body,
+        action_url: opts.action_url,
+        action_label: opts.action_label,
+        metadata: opts.metadata || {},
+        expires_at: expires
+      };
+    });
+
+    await fetch(SB_URL + '/rest/v1/notifications', {
+      method: 'POST',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
+      body: JSON.stringify(rows)
+    });
+  } catch (e) {
+    console.warn('approver notify failed (request still submitted):', e);
+  }
+}
+
 async function submitSwapRequest() {
   if (!TC.employee) { toast('Not signed in'); return; }
   var myDate    = (document.getElementById('swap-my-date')     || {}).value || '';
@@ -3435,6 +3505,20 @@ async function submitSwapRequest() {
     var rangeLabel = myEnd ? (myDate + ' to ' + myEnd) : myDate;
     toast('✓ Swap request submitted — your PM will review it');
     logActivity('Swap Request Submitted', 'On-call swap requested for ' + rangeLabel + ' (' + myRole + ') with ' + withName, 'on_call');
+    // Push to everyone who can approve a swap (mirrors canApproveSwap()
+    // on the admin page: Admin, Office, Project Manager).
+    _notifyApprovers({
+      roles: ['Admin', 'Office', 'Project Manager'],
+      category: 'timeclock',
+      severity: 'info',
+      title: '🔄 Swap request — ' + TC.employee.name,
+      body: TC.employee.name + ' requested an on-call swap for ' + rangeLabel
+            + ' (' + (myRole || 'on-call') + ') with ' + withName.trim()
+            + '. Reason: ' + reason.trim(),
+      action_url: 'https://jgimprovements-arch.github.io/jg-dispatch/timeclock_admin.html#swaps',
+      action_label: 'Review swap',
+      metadata: { kind: 'swap_request', requester: TC.employee.name, my_date: myDate, market: TC.employee.market || null }
+    });
     // Refresh the My Swaps list immediately
     if (typeof loadMySwapRequests === 'function') loadMySwapRequests();
   } catch(e) {
@@ -4679,6 +4763,23 @@ async function submitVacationRequest() {
       });
     } catch(e) {}
 
+    // Push to whoever approves PTO: Admin, Office, and the Payroll tier.
+    // Short-notice requests are flagged 'warn' so they stand out in the bell.
+    _notifyApprovers({
+      roles: ['Admin', 'Office', 'Payroll'],
+      category: 'timeclock',
+      severity: (noticeRequired && !noticeMet) ? 'urgent' : 'info',
+      title: '🏖 Time off request — ' + TC.employee.name,
+      body: TC.employee.name + ' requested ' + days + ' day' + (days!==1?'s':'')
+            + ' off, ' + start + ' → ' + end + ' (' + reason + ')'
+            + ((noticeRequired && !noticeMet)
+                ? ' ⚠ Only ' + noticeDays + ' days notice — under the 30-day policy.'
+                : ''),
+      action_url: 'https://jgimprovements-arch.github.io/jg-dispatch/timeclock_admin.html#timeoff',
+      action_label: 'Review request',
+      metadata: { kind: 'time_off_request', requester: TC.employee.name, start_date: start, end_date: end, notice_days: noticeDays, notice_met: noticeMet }
+    });
+
     closeVacationRequest();
     var successMsg = '✓ Time off request submitted!\n\nYou\'ll be notified when it\'s reviewed.';
     if (noticeRequired && !noticeMet) {
@@ -5841,7 +5942,7 @@ function showAnniversaryCelebration(name, years) {
 
 </script>
 <script src="tc-dispatch.js?v=2026.08.03-r1"></script>
-<script src="fleet.js?v=2026.08.12-r1"></script>
+<script src="fleet.js?v=2026.08.14-r1"></script>
 <script src="presence.js?v=20260419-1"></script>
 <!-- Sidebar only on tablet/desktop (>1024px). Mobile timeclock stays full-screen. -->
 <script>
