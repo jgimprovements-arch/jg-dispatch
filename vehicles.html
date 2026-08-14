@@ -174,7 +174,10 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--brdH);}
   <div class="f2"><div class="frow"><label>Oil interval (mi)</label><input id="fOilInterval" type="number" placeholder="5000"></div><div class="frow"><label>Last oil @ mileage</label><input id="fLastOil" type="number"></div></div>
   <div class="f3"><div class="frow"><label>Registration due</label><input id="fReg" type="date"></div><div class="frow"><label>Insurance due</label><input id="fIns" type="date"></div><div class="frow"><label>DOT inspection due</label><input id="fInsp" type="date"></div></div>
   <div class="frow"><label>Notes</label><textarea id="fNotes"></textarea></div>
-  <div class="modal-actions"><button class="btn ghost" onclick="closeModal('vModal')">Cancel</button><button class="btn acc" id="saveVehicle">Save</button></div>
+  <div class="modal-actions" style="justify-content:space-between;">
+    <button class="btn ghost" id="deleteVehicle" style="color:#c62828;border-color:rgba(198,40,40,.35);display:none;">Delete</button>
+    <div style="display:flex;gap:8px;margin-left:auto;"><button class="btn ghost" onclick="closeModal('vModal')">Cancel</button><button class="btn acc" id="saveVehicle">Save</button></div>
+  </div>
 </div></div>
 <div class="modal-back" id="rModal"><div class="modal">
   <h2 id="rModalTitle">Retire Vehicle</h2>
@@ -229,7 +232,7 @@ const SB_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZ
 const FLEET_ROLES=['admin','office','project manager'];
 // Fallback for pure-Google admin accounts that may not have an employees row.
 const ADMIN_EMAILS=['josh@jg-restoration.com','josh.greil@jg-restoration.com','lisa@jg-restoration.com','jgimprovements@gmail.com'];
-let sb=null,ME=null,VEHICLES=[],EMPLOYEES=[],ISSUES=[];
+let sb=null,ME=null,IS_ADMIN=false,VEHICLES=[],EMPLOYEES=[],ISSUES=[];
 
 // Multi-role aware: employees.role is comma-separated ("Office, Admin"), so
 // split and check for overlap rather than exact-matching the whole string.
@@ -238,6 +241,19 @@ function _hasFleetRole(roleStr){
 }
 // Look the signer-in up on the roster and decide access by role. Anon key can
 // read employees (same as every other page). Returns true if allowed.
+// Delete is destructive and irreversible — Admin only. Everyone else with
+// Fleet access can still add, edit, log service, and retire.
+async function _isAdmin(email){
+  if(ADMIN_EMAILS.indexOf(email)!==-1) return true;
+  try{
+    const c=window.supabase.createClient(SB_URL,SB_KEY);
+    const {data}=await c.from('employees').select('role,active').or('email.eq.'+email+',personal_email.eq.'+email).limit(1);
+    const emp=data&&data[0];
+    if(!emp||emp.active===false) return false;
+    return String(emp.role||'').split(',').map(r=>r.trim().toLowerCase()).some(r=>r==='admin');
+  }catch(err){ return false; }
+}
+
 async function _emailAllowed(email){
   if(ADMIN_EMAILS.indexOf(email)!==-1) return true;   // hardcoded admins always in
   try{
@@ -268,7 +284,7 @@ async function uploadVehiclePhoto(file){
   return sb.storage.from('rebuild-documents').getPublicUrl(path).data.publicUrl;
 }
 function openGate(msg){document.getElementById('gate').style.display='block';document.getElementById('app').style.display='none';if(msg)document.getElementById('gateMsg').textContent=msg;const p=detectEmail();if(p)document.getElementById('emailInput').value=p;}
-async function tryEnter(email){email=String(email||'').trim().toLowerCase();if(!email)return openGate('Enter your email.');const ok=await _emailAllowed(email);if(!ok)return openGate('Your account does not have Fleet access. Contact the office.');ME=email;document.getElementById('gate').style.display='none';document.getElementById('app').style.display='block';await boot();}
+async function tryEnter(email){email=String(email||'').trim().toLowerCase();if(!email)return openGate('Enter your email.');const ok=await _emailAllowed(email);if(!ok)return openGate('Your account does not have Fleet access. Contact the office.');ME=email;IS_ADMIN=await _isAdmin(email);document.getElementById('gate').style.display='none';document.getElementById('app').style.display='block';await boot();}
 async function boot(){if(!window.supabase||!window.supabase.createClient){toast('Database library blocked - check tracking prevention');return;}sb=window.supabase.createClient(SB_URL,SB_KEY);await Promise.all([loadEmployees(),loadVehicles(),loadIssues()]);render();}
 async function loadEmployees(){const {data}=await sb.from('employees').select('id,name,active').eq('active',true).order('name');EMPLOYEES=data||[];document.getElementById('fUsual').innerHTML='<option value="">- none / pool -</option>'+EMPLOYEES.map(e=>'<option value="'+e.id+'">'+esc(e.name)+'</option>').join('');}
 async function loadVehicles(){const {data}=await sb.from('vehicles').select('*').order('name');VEHICLES=data||[];}
@@ -530,8 +546,58 @@ function renderIssues(){
   const vn=id=>{const v=VEHICLES.find(x=>x.id===id);return v?v.name:'(unknown)';};
   wrap.innerHTML='<div class="section-hdr">Open Vehicle Issues</div>'+ISSUES.map(i=>'<div class="issue-card"><div><b style="color:var(--navy)">'+esc(vn(i.vehicle_id))+'</b> <span class="badge '+(i.severity==='urgent'?'flagged':'in_shop')+'">'+esc(i.category||'issue')+(i.severity==='urgent'?' · URGENT':'')+'</span><div style="font-size:13px;margin-top:4px">'+(esc(i.note)||'(no note)')+'</div><div style="font-size:11px;color:var(--muted);margin-top:3px">Reported by '+(esc(i.reported_by_name)||'?')+' · '+new Date(i.reported_at).toLocaleDateString()+' · '+esc(i.status)+'</div></div><div style="display:flex;gap:6px;align-items:flex-start;flex-wrap:wrap">'+(i.status==='open'?'<button class="btn sm ghost" onclick="ackIssue(\''+i.id+'\')">Acknowledge</button>':'')+'<button class="btn sm" onclick="resolveIssue(\''+i.id+'\')">Resolve</button></div></div>').join('');
 }
-function openAdd(){document.getElementById('vModalTitle').textContent='Add Vehicle';['vId','fName','fNumber','fYear','fMake','fModel','fPlate','fVin','fMileage','fLastOil','fReg','fIns','fInsp','fNotes','fPhotoUrl'].forEach(id=>document.getElementById(id).value='');document.getElementById('fMarket').value='';document.getElementById('fUsual').value='';document.getElementById('fStatus').value='active';document.getElementById('fOilInterval').value='5000';document.getElementById('fPhotoFile').value='';document.getElementById('photoStatus').textContent='For identification. JPG/PNG.';setPhotoPreview('');document.getElementById('vModal').classList.add('on');}
-function editVehicle(id){const v=VEHICLES.find(x=>x.id===id);if(!v)return;document.getElementById('vModalTitle').textContent='Edit '+v.name;const set=(f,val)=>document.getElementById(f).value=val==null?'':val;set('vId',v.id);set('fName',v.name);set('fNumber',v.vehicle_number);set('fYear',v.year);set('fMake',v.make);set('fModel',v.model);set('fPlate',v.plate);set('fVin',v.vin);set('fMarket',v.market);set('fUsual',v.usual_assigned_to);set('fStatus',v.status);set('fMileage',v.current_mileage);set('fOilInterval',v.oil_interval_miles);set('fLastOil',v.last_oil_mileage);set('fReg',v.registration_due);set('fIns',v.insurance_due);set('fInsp',v.inspection_due);set('fNotes',v.notes);set('fPhotoUrl',v.photo_url);document.getElementById('fPhotoFile').value='';document.getElementById('photoStatus').textContent=v.photo_url?'Photo on file — pick a new one to replace':'For identification. JPG/PNG.';setPhotoPreview(v.photo_url);document.getElementById('vModal').classList.add('on');}
+function openAdd(){document.getElementById('vModalTitle').textContent='Add Vehicle';['vId','fName','fNumber','fYear','fMake','fModel','fPlate','fVin','fMileage','fLastOil','fReg','fIns','fInsp','fNotes','fPhotoUrl'].forEach(id=>document.getElementById(id).value='');document.getElementById('fMarket').value='';document.getElementById('fUsual').value='';document.getElementById('fStatus').value='active';document.getElementById('fOilInterval').value='5000';document.getElementById('fPhotoFile').value='';document.getElementById('photoStatus').textContent='For identification. JPG/PNG.';setPhotoPreview('');document.getElementById('deleteVehicle').style.display='none';document.getElementById('vModal').classList.add('on');}
+function editVehicle(id){const v=VEHICLES.find(x=>x.id===id);if(!v)return;document.getElementById('vModalTitle').textContent='Edit '+v.name;const set=(f,val)=>document.getElementById(f).value=val==null?'':val;set('vId',v.id);set('fName',v.name);set('fNumber',v.vehicle_number);set('fYear',v.year);set('fMake',v.make);set('fModel',v.model);set('fPlate',v.plate);set('fVin',v.vin);set('fMarket',v.market);set('fUsual',v.usual_assigned_to);set('fStatus',v.status);set('fMileage',v.current_mileage);set('fOilInterval',v.oil_interval_miles);set('fLastOil',v.last_oil_mileage);set('fReg',v.registration_due);set('fIns',v.insurance_due);set('fInsp',v.inspection_due);set('fNotes',v.notes);set('fPhotoUrl',v.photo_url);document.getElementById('fPhotoFile').value='';document.getElementById('photoStatus').textContent=v.photo_url?'Photo on file — pick a new one to replace':'For identification. JPG/PNG.';setPhotoPreview(v.photo_url);document.getElementById('deleteVehicle').style.display=IS_ADMIN?'':'none';document.getElementById('vModal').classList.add('on');}
+// ── DELETE ────────────────────────────────────────────────────────────────
+// Delete is for mistakes only — a duplicate entry, a typo, a vehicle added
+// to the wrong market. A vehicle that has ever been driven has assignments,
+// odometer readings, issues and service records hanging off it, and deleting
+// it would erase who was driving what on a given day. That history is the
+// whole point of the program, so once it exists the answer is Retire, which
+// keeps the record and takes the vehicle out of service.
+async function deleteVehiclePrompt(){
+  // Re-check rather than trusting the hidden button — hiding UI is not access
+  // control, and this is the one irreversible action on the page.
+  if(!IS_ADMIN){toast('Admin only — ask Josh or Lisa to delete this vehicle');return;}
+  const id=document.getElementById('vId').value;
+  const v=VEHICLES.find(x=>x.id===id); if(!v) return;
+
+  let counts;
+  try{
+    const [a,i,m]=await Promise.all([
+      sb.from('vehicle_assignments').select('id',{count:'exact',head:true}).eq('vehicle_id',id),
+      sb.from('vehicle_issues').select('id',{count:'exact',head:true}).eq('vehicle_id',id),
+      sb.from('vehicle_maintenance_log').select('id',{count:'exact',head:true}).eq('vehicle_id',id)
+    ]);
+    counts={assign:a.count||0,issues:i.count||0,service:m.count||0};
+  }catch(e){toast('Could not check vehicle history — not deleting');return;}
+
+  const total=counts.assign+counts.issues+counts.service;
+  if(total>0){
+    const parts=[];
+    if(counts.assign)  parts.push(counts.assign+' driver assignment'+(counts.assign!==1?'s':''));
+    if(counts.issues)  parts.push(counts.issues+' reported issue'+(counts.issues!==1?'s':''));
+    if(counts.service) parts.push(counts.service+' service record'+(counts.service!==1?'s':''));
+    const go=confirm(
+      v.name+' can\'t be deleted — it has history attached:\n\n• '+parts.join('\n• ')+
+      '\n\nDeleting it would erase the record of who drove it and when. '+
+      'Retire it instead: it comes off dispatch and keeps its history.\n\nOpen the Retire form now?'
+    );
+    if(go){closeModal('vModal');openRetire(id);}
+    return;
+  }
+
+  const typed=prompt('This vehicle has no history and can be permanently deleted.\n\nType the vehicle name to confirm:\n'+v.name);
+  if(typed===null) return;
+  if(typed.trim().toLowerCase()!==String(v.name).trim().toLowerCase()){toast('Name did not match — nothing deleted');return;}
+
+  const {error}=await sb.from('vehicles').delete().eq('id',id);
+  if(error){toast('Delete failed: '+error.message);return;}
+  closeModal('vModal');
+  await loadVehicles(); render();
+  toast('Vehicle deleted');
+}
+
 async function saveVehicle(){const g=id=>{const el=document.getElementById(id);const v=el.value.trim?el.value.trim():el.value;return v===''?null:v;};const name=g('fName');if(!name){toast('Name is required');return;}const row={name,vehicle_number:g('fNumber'),year:g('fYear')?parseInt(g('fYear')):null,make:g('fMake'),model:g('fModel'),plate:g('fPlate'),vin:g('fVin'),market:g('fMarket')||null,usual_assigned_to:g('fUsual')||null,status:g('fStatus')||'active',current_mileage:g('fMileage')?parseInt(g('fMileage')):null,oil_interval_miles:g('fOilInterval')?parseInt(g('fOilInterval')):null,last_oil_mileage:g('fLastOil')?parseInt(g('fLastOil')):null,registration_due:g('fReg'),insurance_due:g('fIns'),inspection_due:g('fInsp'),notes:g('fNotes'),photo_url:g('fPhotoUrl'),updated_at:new Date().toISOString()};const id=g('vId');let err;if(id){({error:err}=await sb.from('vehicles').update(row).eq('id',id));}else{({error:err}=await sb.from('vehicles').insert(row));}if(err){toast('Save failed: '+err.message);return;}closeModal('vModal');await loadVehicles();render();toast('Saved');}
 function openService(vid){const v=VEHICLES.find(x=>x.id===vid);document.getElementById('sModalTitle').textContent='Service — '+(v?v.name:'');document.getElementById('sVehicleId').value=vid;['sMileage','sCost','sVendor','sNote'].forEach(id=>document.getElementById(id).value='');document.getElementById('sDate').value=new Date().toISOString().slice(0,10);document.getElementById('sType').value='oil';if(v&&v.current_mileage)document.getElementById('sMileage').value=v.current_mileage;loadServiceHistory(vid);document.getElementById('sModal').classList.add('on');}
 async function loadServiceHistory(vid){const {data}=await sb.from('vehicle_maintenance_log').select('*').eq('vehicle_id',vid).order('service_date',{ascending:false}).limit(10);const h=document.getElementById('sHistory');if(!data||!data.length){h.innerHTML='<div style="font-size:12px;color:var(--muted);margin-top:6px">No service history yet.</div>';return;}h.innerHTML='<div class="section-hdr" style="margin-top:12px">Recent Service</div>'+data.map(s=>'<div class="hist-row"><span>'+s.service_date+' · '+esc(s.service_type||'')+(s.mileage_at_service?' · '+s.mileage_at_service.toLocaleString()+'mi':'')+'</span><b class="mono">'+(s.cost!=null?'$'+Number(s.cost).toFixed(2):'')+'</b></div>').join('');}
@@ -676,6 +742,7 @@ function historyCsv(){
 document.getElementById('tabFleet').onclick=()=>showTab('fleet');
 document.getElementById('tabIssues').onclick=()=>showTab('issues');
 document.getElementById('addBtn').onclick=openAdd;
+document.getElementById('deleteVehicle').onclick=deleteVehiclePrompt;
 // Photo pick → upload immediately, preview, stash URL for save.
 document.getElementById('fPhotoFile').addEventListener('change',async function(e){
   const file=e.target.files&&e.target.files[0];if(!file)return;
