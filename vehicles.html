@@ -108,6 +108,7 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--brdH);}
   <div class="sub-tab-bar">
     <button class="sub-tab active" id="tabFleet">Fleet</button>
     <button class="sub-tab" id="tabIssues">Open Issues <span id="issueCount" class="mono"></span></button>
+    <button class="sub-tab" id="tabHistory">Driver History</button>
   </div>
   <div class="wrap">
     <div id="fleetTab">
@@ -127,6 +128,30 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--brdH);}
       <div class="vgrid" id="vgrid"></div>
     </div>
     <div id="issuesTab" style="display:none"></div>
+    <div id="historyTab" style="display:none">
+      <div class="toolbar">
+        <div style="display:flex;flex-direction:column;gap:3px;">
+          <label style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;font-weight:700;">From</label>
+          <input id="hFrom" type="date" style="max-width:160px;">
+        </div>
+        <div style="display:flex;flex-direction:column;gap:3px;">
+          <label style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;font-weight:700;">To</label>
+          <input id="hTo" type="date" style="max-width:160px;">
+        </div>
+        <div style="display:flex;flex-direction:column;gap:3px;">
+          <label style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;font-weight:700;">Vehicle</label>
+          <select id="hVehicle" style="max-width:220px;"><option value="">All vehicles</option></select>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:3px;">
+          <label style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;font-weight:700;">Driver</label>
+          <select id="hDriver" style="max-width:220px;"><option value="">All drivers</option></select>
+        </div>
+        <button class="btn acc" id="hLoad" style="align-self:flex-end;">Search</button>
+        <button class="btn ghost" id="hToday" style="align-self:flex-end;">Today</button>
+        <button class="btn ghost" id="hCsv" style="align-self:flex-end;">↓ CSV</button>
+      </div>
+      <div id="historyOut"><div class="empty">Pick a date range and hit Search.</div></div>
+    </div>
   </div>
 </div>
 <div class="modal-back" id="vModal"><div class="modal">
@@ -332,6 +357,7 @@ function renderFleet(){
       (due?'<div class="due">'+due+'</div>':'')+
       (iss.length?'<div class="issue-flag">⚠ '+iss.length+' open issue'+(iss.length>1?'s':'')+': '+esc(iss[0].category||'')+(iss[0].note?' — '+esc(iss[0].note.slice(0,50)):'')+'</div>':'')+
       '<div class="vactions"><button class="btn sm ghost" onclick="editVehicle(\''+v.id+'\')">Edit</button><button class="btn sm acc" onclick="openService(\''+v.id+'\')">Log service</button>'+
+      '<button class="btn sm ghost" onclick="vehicleHistory(\''+v.id+'\')">History</button>'+
       (v.status==='retired'
         ? '<button class="btn sm ghost" onclick="reactivateVehicle(\''+v.id+'\')">Reactivate</button>'
         : '<button class="btn sm ghost" style="color:#c62828;border-color:rgba(198,40,40,.35)" onclick="openRetire(\''+v.id+'\')">Retire</button>')+
@@ -512,7 +538,141 @@ async function loadServiceHistory(vid){const {data}=await sb.from('vehicle_maint
 async function saveService(){const g=id=>{const v=document.getElementById(id).value;return v===''?null:v;};const vid=g('sVehicleId'),date=g('sDate');if(!date){toast('Date required');return;}const type=g('sType'),mileage=g('sMileage')?parseInt(g('sMileage')):null;const {error}=await sb.from('vehicle_maintenance_log').insert({vehicle_id:vid,service_date:date,service_type:type,mileage_at_service:mileage,cost:g('sCost')?parseFloat(g('sCost')):null,vendor:g('sVendor'),note:g('sNote'),created_by:ME});if(error){toast('Failed: '+error.message);return;}if(type==='oil'&&mileage){await sb.from('vehicles').update({last_oil_mileage:mileage,last_oil_date:date,updated_at:new Date().toISOString()}).eq('id',vid);await loadVehicles();}toast('Service logged');loadServiceHistory(vid);render();}
 async function ackIssue(id){await sb.from('vehicle_issues').update({status:'acknowledged',acknowledged_by:ME,acknowledged_at:new Date().toISOString()}).eq('id',id);await loadIssues();render();toast('Acknowledged');}
 async function resolveIssue(id){const note=prompt('Resolution note (optional):')||'';const iss=ISSUES.find(x=>x.id===id);await sb.from('vehicle_issues').update({status:'resolved',resolved_by:ME,resolved_at:new Date().toISOString(),resolution_note:note}).eq('id',id);if(iss){const remaining=ISSUES.filter(x=>x.vehicle_id===iss.vehicle_id&&x.id!==id&&x.status!=='resolved');const v=VEHICLES.find(x=>x.id===iss.vehicle_id);if(v&&v.status==='flagged'&&!remaining.length){await sb.from('vehicles').update({status:'active'}).eq('id',v.id);await loadVehicles();}}await loadIssues();render();toast('Resolved');}
-function showTab(t){document.getElementById('fleetTab').style.display=t==='fleet'?'':'none';document.getElementById('issuesTab').style.display=t==='issues'?'':'none';document.getElementById('tabFleet').classList.toggle('active',t==='fleet');document.getElementById('tabIssues').classList.toggle('active',t==='issues');}
+function showTab(t){
+  document.getElementById('fleetTab').style.display=t==='fleet'?'':'none';
+  document.getElementById('issuesTab').style.display=t==='issues'?'':'none';
+  document.getElementById('historyTab').style.display=t==='history'?'':'none';
+  document.getElementById('tabFleet').classList.toggle('active',t==='fleet');
+  document.getElementById('tabIssues').classList.toggle('active',t==='issues');
+  document.getElementById('tabHistory').classList.toggle('active',t==='history');
+  if(t==='history') initHistory();
+}
+
+// ── DRIVER HISTORY ────────────────────────────────────────────────────────
+// "Who was in Van 3 on March 14?" — the question you get asked after an
+// accident, a damage claim, or a customer complaint about a vehicle at a
+// job site. vehicle_assignments already records it; this makes it findable.
+let HIST=[],_histInit=false;
+
+function initHistory(){
+  if(_histInit) return; _histInit=true;
+  const vs=document.getElementById('hVehicle');
+  VEHICLES.slice().sort((a,b)=>a.name.localeCompare(b.name)).forEach(v=>{
+    vs.innerHTML+='<option value="'+v.id+'">'+esc(v.name)+(v.vehicle_number?' #'+esc(v.vehicle_number):'')+(v.status==='retired'?' (retired)':'')+'</option>';
+  });
+  const ds=document.getElementById('hDriver');
+  EMPLOYEES.slice().sort((a,b)=>(a.name||'').localeCompare(b.name||'')).forEach(e=>{
+    ds.innerHTML+='<option value="'+e.id+'">'+esc(e.name)+'</option>';
+  });
+  const today=new Date().toISOString().slice(0,10);
+  const ago=new Date(Date.now()-13*86400000).toISOString().slice(0,10);
+  document.getElementById('hFrom').value=ago;
+  document.getElementById('hTo').value=today;
+  loadHistory();
+}
+
+async function loadHistory(){
+  const from=document.getElementById('hFrom').value;
+  const to=document.getElementById('hTo').value;
+  const vid=document.getElementById('hVehicle').value;
+  const eid=document.getElementById('hDriver').value;
+  if(!from||!to){toast('Pick both dates');return;}
+  if(to<from){toast('To date is before From date');return;}
+  const out=document.getElementById('historyOut');
+  out.innerHTML='<div class="empty">Loading…</div>';
+
+  let q=sb.from('vehicle_assignments').select('*')
+        .gte('work_date',from).lte('work_date',to)
+        .order('work_date',{ascending:false});
+  if(vid) q=q.eq('vehicle_id',vid);
+  if(eid) q=q.eq('employee_id',eid);
+  const {data,error}=await q;
+  if(error){out.innerHTML='<div class="empty">Could not load history: '+esc(error.message)+'</div>';return;}
+  HIST=data||[];
+  renderHistory();
+}
+
+function renderHistory(){
+  const out=document.getElementById('historyOut');
+  if(!HIST.length){out.innerHTML='<div class="empty">No vehicle assignments in that range.</div>';return;}
+  const vn=id=>{const v=VEHICLES.find(x=>x.id===id);return v?(v.name+(v.vehicle_number?' #'+v.vehicle_number:'')):'(deleted vehicle)';};
+  const en=id=>{const e=EMPLOYEES.find(x=>x.id===id);return e?e.name:null;};
+
+  // Miles driven = this reading minus the previous recorded reading on the
+  // same vehicle. Only shown where both exist — never estimated.
+  const byVeh={};
+  HIST.slice().sort((a,b)=>a.work_date.localeCompare(b.work_date)).forEach(r=>{
+    if(r.mileage_end==null) return;
+    (byVeh[r.vehicle_id]=byVeh[r.vehicle_id]||[]).push(r);
+  });
+  const milesFor={};
+  Object.values(byVeh).forEach(rows=>{
+    rows.forEach((r,i)=>{ if(i>0&&rows[i-1].mileage_end!=null) milesFor[r.id]=r.mileage_end-rows[i-1].mileage_end; });
+  });
+
+  // Group by date, then by vehicle — reads the way the question is asked.
+  const days={};
+  HIST.forEach(r=>{(days[r.work_date]=days[r.work_date]||[]).push(r);});
+
+  out.innerHTML='<div style="font-size:11px;color:var(--muted);margin-bottom:10px;">'+HIST.length+' assignment'+(HIST.length!==1?'s':'')+' across '+Object.keys(days).length+' day'+(Object.keys(days).length!==1?'s':'')+'</div>'+
+    Object.keys(days).sort().reverse().map(d=>{
+      const rows=days[d];
+      const perVeh={};
+      rows.forEach(r=>{(perVeh[r.vehicle_id]=perVeh[r.vehicle_id]||[]).push(r);});
+      const label=new Date(d+'T00:00:00').toLocaleDateString('en-US',{weekday:'long',month:'short',day:'numeric',year:'numeric'});
+      return '<div class="card" style="margin-bottom:12px;">'+
+        '<div class="card-hdr"><div class="card-title">'+label+'</div>'+
+        '<div style="font-size:11px;color:var(--muted);">'+Object.keys(perVeh).length+' vehicle'+(Object.keys(perVeh).length!==1?'s':'')+'</div></div>'+
+        Object.keys(perVeh).map(v=>{
+          const list=perVeh[v];
+          const withReading=list.find(x=>x.mileage_end!=null);
+          const miles=withReading?milesFor[withReading.id]:null;
+          return '<div style="padding:11px 16px;border-bottom:1px solid var(--border);">'+
+            '<div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:baseline;">'+
+              '<b style="color:var(--navy);font-size:14px;">'+esc(vn(v))+'</b>'+
+              '<span class="mono" style="font-size:12px;color:'+(withReading?'var(--navy)':'var(--red)')+';">'+
+                (withReading
+                  ? withReading.mileage_end.toLocaleString()+' mi'+(miles!=null&&miles>=0?' · +'+miles.toLocaleString()+' that day':'')
+                  : 'no odometer reading')+
+              '</span></div>'+
+            '<div style="font-size:12px;color:var(--muted);margin-top:4px;">'+
+              list.map(r=>{
+                const nm=r.employee_name||en(r.employee_id)||'(unknown)';
+                const isReader=withReading&&r.id===withReading.id;
+                return '<span style="display:inline-block;margin-right:12px;">'+(isReader?'🔑 ':'')+esc(nm)+'</span>';
+              }).join('')+
+            '</div>'+
+            (withReading&&withReading.mileage_entered_at?'<div style="font-size:10px;color:var(--mut);margin-top:3px;">Reading entered '+new Date(withReading.mileage_entered_at).toLocaleString()+'</div>':'')+
+          '</div>';
+        }).join('')+
+      '</div>';
+    }).join('');
+}
+
+function vehicleHistory(vid){
+  showTab('history');
+  document.getElementById('hVehicle').value=vid;
+  const to=new Date().toISOString().slice(0,10);
+  const from=new Date(Date.now()-89*86400000).toISOString().slice(0,10);
+  document.getElementById('hFrom').value=from;
+  document.getElementById('hTo').value=to;
+  loadHistory();
+}
+
+function historyCsv(){
+  if(!HIST.length){toast('Nothing to export');return;}
+  const vn=id=>{const v=VEHICLES.find(x=>x.id===id);return v?v.name:'(deleted)';};
+  const head=['Date','Vehicle','Driver','Odometer','Reading entered by','Reading entered at','Market'];
+  const rows=HIST.slice().sort((a,b)=>b.work_date.localeCompare(a.work_date)).map(r=>{
+    const eb=r.mileage_entered_by?(EMPLOYEES.find(x=>x.id===r.mileage_entered_by)||{}).name||'':'';
+    return [r.work_date,vn(r.vehicle_id),r.employee_name||'',r.mileage_end==null?'':r.mileage_end,eb,r.mileage_entered_at||'',r.market||''];
+  });
+  const csv=[head].concat(rows).map(r=>r.map(c=>'"'+String(c==null?'':c).replace(/"/g,'""')+'"').join(',')).join('\n');
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));
+  a.download='vehicle-driver-history.csv';
+  a.click();
+}
 document.getElementById('tabFleet').onclick=()=>showTab('fleet');
 document.getElementById('tabIssues').onclick=()=>showTab('issues');
 document.getElementById('addBtn').onclick=openAdd;
