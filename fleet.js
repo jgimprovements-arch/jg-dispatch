@@ -350,6 +350,7 @@
         F.vehicles = {}; F.byMarket = {}; F.assigns = {}; F.openIssues = {};
 
         var vs = await get('vehicles?select=id,name,vehicle_number,market,status,current_mileage,'
+          + 'usual_assigned_to,'
           + 'last_oil_mileage,oil_interval_miles,registration_due,insurance_due,inspection_due'
           + '&status=in.(active,flagged,in_shop)&order=name.asc');
         if (vs) {
@@ -403,11 +404,18 @@
       var opts = '<option value="">🚐 no vehicle</option>';
       var seen = {};
       list.forEach(function (v) {
-        if (seen[v.id]) return; seen[v.id] = 1;
+        if (seen[v.id]) return;
+        // A vehicle with a dedicated driver belongs to that person — it is
+        // not pool equipment and must not appear in anyone else's picker.
+        // The one exception is a vehicle already assigned to this lane, so
+        // an existing assignment never silently disappears from the list.
+        if (v.usual_assigned_to && v.usual_assigned_to !== eid && v.id !== curId) return;
+        seen[v.id] = 1;
         var probs = vehicleProblems(v, F.openIssues[v.id]);
         var warn = probs.length ? (probs.some(function(p){return p.urgent;}) ? ' ⛔' : ' ⚠') : '';
+        var mine = (v.usual_assigned_to && v.usual_assigned_to === eid) ? '★ ' : '';
         opts += '<option value="' + esc(v.id) + '"' + (v.id === curId ? ' selected' : '') + '>'
-          + esc(vehicleLabel(v)) + warn + '</option>';
+          + mine + esc(vehicleLabel(v)) + warn + '</option>';
       });
       // A vehicle assigned but no longer in the active list (retired
       // mid-day) still needs to show, or the picker would silently
