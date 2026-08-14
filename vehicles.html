@@ -114,7 +114,9 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--brdH);}
           <option value="active_set">Active + In Shop</option><option value="">All (incl. retired)</option><option value="active">Active only</option><option value="in_shop">In shop</option><option value="flagged">Flagged</option><option value="retired">Retired</option>
         </select>
         <button class="btn acc" id="addBtn">+ Add Vehicle</button>
+        <button class="btn ghost" id="retiredChip" style="display:none;margin-left:auto;" title="View retired vehicles"></button>
       </div>
+      <div id="retireBanner"></div>
       <div class="vgrid" id="vgrid"></div>
     </div>
     <div id="issuesTab" style="display:none"></div>
@@ -141,6 +143,34 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--brdH);}
   <div class="f3"><div class="frow"><label>Registration due</label><input id="fReg" type="date"></div><div class="frow"><label>Insurance due</label><input id="fIns" type="date"></div><div class="frow"><label>DOT inspection due</label><input id="fInsp" type="date"></div></div>
   <div class="frow"><label>Notes</label><textarea id="fNotes"></textarea></div>
   <div class="modal-actions"><button class="btn ghost" onclick="closeModal('vModal')">Cancel</button><button class="btn acc" id="saveVehicle">Save</button></div>
+</div></div>
+<div class="modal-back" id="rModal"><div class="modal">
+  <h2 id="rModalTitle">Retire Vehicle</h2>
+  <input type="hidden" id="rVehicleId">
+  <div style="background:#fdecea;border-left:4px solid #c62828;padding:12px 14px;border-radius:6px;margin-bottom:14px;font-size:13px;color:#8c1414;line-height:1.5;">
+    <b>Before you finish:</b> this vehicle stays on the insurance policy and the
+    registration until someone cancels them. Retiring here creates a reminder that
+    won't clear until both are closed out.
+  </div>
+  <div class="f2">
+    <div class="frow"><label>Retired on *</label><input id="rDate" type="date"></div>
+    <div class="frow"><label>What happened to it</label><select id="rDisp">
+      <option value="sold">Sold</option><option value="traded">Traded in</option>
+      <option value="totaled">Totaled</option><option value="scrapped">Scrapped</option>
+      <option value="other">Other</option></select></div>
+  </div>
+  <div class="frow"><label>Notes (buyer, claim #, etc.)</label><textarea id="rReason"></textarea></div>
+  <div class="frow" style="margin-top:4px;">
+    <label>Offboarding checklist</label>
+    <label style="display:flex;align-items:center;gap:8px;font-weight:400;font-size:13px;margin:6px 0;text-transform:none;letter-spacing:0;">
+      <input type="checkbox" id="rIns" style="width:auto;"> Insurance already cancelled
+    </label>
+    <label style="display:flex;align-items:center;gap:8px;font-weight:400;font-size:13px;margin:2px 0;text-transform:none;letter-spacing:0;">
+      <input type="checkbox" id="rPlates" style="width:auto;"> Plates returned / registration closed
+    </label>
+    <div style="font-size:11px;color:var(--muted);margin-top:6px;">Leave unchecked if it still needs doing — it'll show on the reminder banner until closed.</div>
+  </div>
+  <div class="modal-actions"><button class="btn ghost" onclick="closeModal('rModal')">Cancel</button><button class="btn" style="background:#c62828;color:#fff;border-color:#c62828;" id="confirmRetire">Retire Vehicle</button></div>
 </div></div>
 <div class="modal-back" id="sModal"><div class="modal">
   <h2 id="sModalTitle">Log Service</h2>
@@ -215,13 +245,34 @@ function daysUntil(d){if(!d)return null;return Math.round((new Date(d)-new Date(
 function dueRow(label,d){const n=daysUntil(d);if(n===null)return '';let cls='',txt=d;if(n<0){cls='overdue';txt=d+' · OVERDUE';}else if(n<=30){cls='soon';txt=d+' · '+n+'d';}return '<div class="drow"><span>'+label+'</span><span class="'+cls+'">'+txt+'</span></div>';}
 function oilDue(v){if(!v.current_mileage||!v.last_oil_mileage||!v.oil_interval_miles)return '';const next=v.last_oil_mileage+v.oil_interval_miles,left=next-v.current_mileage;let cls='',txt=next.toLocaleString()+' mi';if(left<0){cls='overdue';txt='OVERDUE '+Math.abs(left).toLocaleString()+' mi';}else if(left<=500){cls='soon';txt='due in '+left.toLocaleString()+' mi';}return '<div class="drow"><span>Oil change</span><span class="'+cls+'">'+txt+'</span></div>';}
 function openIssuesFor(id){return ISSUES.filter(i=>i.vehicle_id===id);}
-function render(){renderFleet();renderIssues();}
+function render(){renderRetireBanner();renderRetiredChip();renderFleet();renderIssues();}
+
+// Retired vehicles still exist — they're just filtered out of the default
+// view. Without this, retiring a van makes it silently vanish and nobody
+// can find the record again.
+function renderRetiredChip(){
+  const chip=document.getElementById('retiredChip'); if(!chip) return;
+  const n=VEHICLES.filter(v=>v.status==='retired').length;
+  if(!n){chip.style.display='none';return;}
+  const sf=document.getElementById('statusFilter').value;
+  const viewing=(sf==='retired');
+  chip.style.display='';
+  chip.textContent=viewing?'← Back to active fleet':'🗄 Retired ('+n+')';
+  chip.onclick=function(){
+    document.getElementById('statusFilter').value=viewing?'active_set':'retired';
+    render();
+  };
+}
 function renderFleet(){
   const q=(document.getElementById('search').value||'').toLowerCase().trim();
   const mf=document.getElementById('marketFilter').value,sf=document.getElementById('statusFilter').value;
   let list=VEHICLES.filter(v=>{if(mf&&v.market!==mf)return false;if(sf==='active_set'){if(v.status==='retired')return false;}else if(sf&&v.status!==sf)return false;if(q){const h=(v.name+' '+(v.plate||'')+' '+(v.vehicle_number||'')+' '+(v.make||'')+' '+(v.model||'')).toLowerCase();if(h.indexOf(q)===-1)return false;}return true;});
   const grid=document.getElementById('vgrid');
-  if(!list.length){grid.innerHTML='<div class="empty">No vehicles yet. Click <b>+ Add Vehicle</b> to start.</div>';return;}
+  if(!list.length){
+    const retired=VEHICLES.filter(v=>v.status==='retired').length;
+    grid.innerHTML='<div class="empty">'+(VEHICLES.length
+      ? 'No vehicles match this filter.'+(retired&&sf!=='retired'?' <b>'+retired+' retired</b> vehicle'+(retired>1?'s are':' is')+' hidden — switch the status filter to see '+(retired>1?'them':'it')+'.':'')
+      : 'No vehicles yet. Click <b>+ Add Vehicle</b> to start.')+'</div>';return;}
   const en=id=>{const e=EMPLOYEES.find(x=>x.id===id);return e?e.name:'';};
   grid.innerHTML=list.map(v=>{
     const iss=openIssuesFor(v.id);
@@ -235,9 +286,173 @@ function renderFleet(){
       '<div class="kv"><span>Usual driver</span><b>'+(esc(en(v.usual_assigned_to))||'pool')+'</b></div>'+
       (due?'<div class="due">'+due+'</div>':'')+
       (iss.length?'<div class="issue-flag">⚠ '+iss.length+' open issue'+(iss.length>1?'s':'')+': '+esc(iss[0].category||'')+(iss[0].note?' — '+esc(iss[0].note.slice(0,50)):'')+'</div>':'')+
-      '<div class="vactions"><button class="btn sm ghost" onclick="editVehicle(\''+v.id+'\')">Edit</button><button class="btn sm acc" onclick="openService(\''+v.id+'\')">Log service</button></div></div>';
+      '<div class="vactions"><button class="btn sm ghost" onclick="editVehicle(\''+v.id+'\')">Edit</button><button class="btn sm acc" onclick="openService(\''+v.id+'\')">Log service</button>'+
+      (v.status==='retired'
+        ? '<button class="btn sm ghost" onclick="reactivateVehicle(\''+v.id+'\')">Reactivate</button>'
+        : '<button class="btn sm ghost" style="color:#c62828;border-color:rgba(198,40,40,.35)" onclick="openRetire(\''+v.id+'\')">Retire</button>')+
+      '</div>'+
+      (v.status==='retired'?retiredFooter(v):'')+'</div>';
   }).join('');
 }
+// ── RETIREMENT / OFFBOARDING ──────────────────────────────────────────────
+// Retiring is a checklist, not a status flip. The costly mistake is a sold
+// van still sitting on the insurance policy months later, so open items stay
+// visible on a banner until someone actually closes them.
+const DISP_LABEL={sold:'Sold',traded:'Traded in',totaled:'Totaled',scrapped:'Scrapped',other:'Other'};
+
+function retiredFooter(v){
+  const open=[];
+  if(!v.insurance_cancelled) open.push('insurance');
+  if(!v.plates_returned)     open.push('plates/registration');
+  const when=v.retired_at?new Date(v.retired_at+'T00:00:00').toLocaleDateString():'—';
+  let h='<div style="margin-top:8px;padding-top:8px;border-top:1px dashed var(--brd);font-size:11px;color:var(--muted);">';
+  h+='Retired '+when+(v.disposition?' · '+(DISP_LABEL[v.disposition]||v.disposition):'');
+  h+='</div>';
+  if(open.length){
+    h+='<div class="issue-flag" style="margin-top:6px;">⚠ Still open: '+open.join(' + ')+'</div>';
+    h+='<div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap;">';
+    if(!v.insurance_cancelled) h+='<button class="btn sm" onclick="closeOffboard(\''+v.id+'\',\'insurance\')">✓ Insurance cancelled</button>';
+    if(!v.plates_returned)     h+='<button class="btn sm ghost" onclick="closeOffboard(\''+v.id+'\',\'plates\')">✓ Plates returned</button>';
+    h+='</div>';
+  }
+  return h;
+}
+
+// Persistent nag at the top of the fleet list. This is the actual reminder —
+// an email is easy to miss, a banner that won't go away is not.
+function renderRetireBanner(){
+  const el=document.getElementById('retireBanner');
+  if(!el) return;
+  const open=VEHICLES.filter(v=>v.status==='retired'&&(!v.insurance_cancelled||!v.plates_returned));
+  if(!open.length){el.innerHTML='';return;}
+  el.innerHTML='<div style="background:#fff4e5;border:1.5px solid #e65100;border-left:5px solid #e65100;border-radius:10px;padding:14px 16px;margin-bottom:16px;">'+
+    '<div style="font-weight:800;color:#8a3d00;font-size:14px;margin-bottom:8px;">⚠ Retired vehicles with open paperwork ('+open.length+')</div>'+
+    open.map(v=>{
+      const items=[];
+      if(!v.insurance_cancelled) items.push('<b>cancel insurance</b>');
+      if(!v.plates_returned)     items.push('return plates');
+      const days=v.retired_at?Math.floor((Date.now()-new Date(v.retired_at+'T00:00:00'))/86400000):null;
+      return '<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;padding:6px 0;border-top:1px solid rgba(230,81,0,.18);">'+
+        '<div style="font-size:13px;color:#5c2c00;"><b>'+esc(v.name)+'</b>'+(v.plate?' · '+esc(v.plate):'')+
+        ' — still needs to '+items.join(' and ')+
+        (days!==null?' <span style="color:#8a3d00;">('+days+' day'+(days!==1?'s':'')+' since retired)</span>':'')+'</div>'+
+        '<div style="display:flex;gap:6px;">'+
+        (!v.insurance_cancelled?'<button class="btn sm" onclick="closeOffboard(\''+v.id+'\',\'insurance\')">✓ Insurance cancelled</button>':'')+
+        (!v.plates_returned?'<button class="btn sm ghost" onclick="closeOffboard(\''+v.id+'\',\'plates\')">✓ Plates returned</button>':'')+
+        '</div></div>';
+    }).join('')+'</div>';
+}
+
+function openRetire(vid){
+  const v=VEHICLES.find(x=>x.id===vid); if(!v) return;
+  document.getElementById('rModalTitle').textContent='Retire — '+v.name;
+  document.getElementById('rVehicleId').value=vid;
+  document.getElementById('rDate').value=new Date().toISOString().slice(0,10);
+  document.getElementById('rDisp').value='sold';
+  document.getElementById('rReason').value='';
+  document.getElementById('rIns').checked=false;
+  document.getElementById('rPlates').checked=false;
+  document.getElementById('rModal').classList.add('on');
+}
+
+async function confirmRetireVehicle(){
+  const vid=document.getElementById('rVehicleId').value;
+  const v=VEHICLES.find(x=>x.id===vid); if(!v) return;
+  const date=document.getElementById('rDate').value;
+  if(!date){toast('Retired-on date is required');return;}
+  const disp=document.getElementById('rDisp').value;
+  const reason=document.getElementById('rReason').value||null;
+  const insDone=document.getElementById('rIns').checked;
+  const platesDone=document.getElementById('rPlates').checked;
+  const now=new Date().toISOString();
+
+  const row={
+    status:'retired',
+    retired_at:date,
+    retired_by:ME,
+    retired_reason:reason,
+    disposition:disp,
+    insurance_cancelled:insDone,
+    insurance_cancelled_at:insDone?now:null,
+    insurance_cancelled_by:insDone?ME:null,
+    plates_returned:platesDone,
+    plates_returned_at:platesDone?now:null,
+    plates_returned_by:platesDone?ME:null,
+    usual_assigned_to:null,
+    updated_at:now
+  };
+  const {error}=await sb.from('vehicles').update(row).eq('id',vid);
+  if(error){toast('Retire failed: '+error.message);return;}
+
+  // Clear any FUTURE dispatch assignments so nobody is sent to a van that
+  // no longer exists. Past assignments are history and stay untouched.
+  try{
+    const today=new Date().toISOString().slice(0,10);
+    await sb.from('vehicle_assignments').delete().eq('vehicle_id',vid).gte('work_date',today);
+  }catch(e){console.warn('assignment cleanup:',e);}
+
+  closeModal('rModal');
+  await loadVehicles(); render();
+  toast(insDone?'Vehicle retired':'Vehicle retired — insurance still needs cancelling');
+  emailRetired(v,{date,disp,reason,insDone,platesDone});
+}
+
+async function closeOffboard(vid,which){
+  const v=VEHICLES.find(x=>x.id===vid); if(!v) return;
+  const label=which==='insurance'?'insurance cancelled':'plates returned';
+  if(!confirm('Mark '+label+' for '+v.name+'?')) return;
+  const now=new Date().toISOString();
+  const row=which==='insurance'
+    ? {insurance_cancelled:true,insurance_cancelled_at:now,insurance_cancelled_by:ME,updated_at:now}
+    : {plates_returned:true,plates_returned_at:now,plates_returned_by:ME,updated_at:now};
+  const {error}=await sb.from('vehicles').update(row).eq('id',vid);
+  if(error){toast('Failed: '+error.message);return;}
+  await loadVehicles(); render(); toast('✓ '+label.charAt(0).toUpperCase()+label.slice(1));
+}
+
+async function reactivateVehicle(id){
+  const v=VEHICLES.find(x=>x.id===id); if(!v) return;
+  if(!confirm('Put '+v.name+' back in service?\n\nMake sure insurance and registration are active again before assigning anyone to it.')) return;
+  const {error}=await sb.from('vehicles').update({status:'active',retired_at:null,retired_reason:null,disposition:null,updated_at:new Date().toISOString()}).eq('id',id);
+  if(error){toast('Failed: '+error.message);return;}
+  await loadVehicles(); render(); toast('Vehicle reactivated');
+}
+
+// Email the office so cancelling the policy lands on someone's desk, not
+// just on a screen nobody opened.
+async function emailRetired(v,o){
+  try{
+    const {data}=await sb.from('platform_settings').select('value').eq('key','mailer_api_key').single();
+    if(!data||!data.value){console.warn('[fleet] no mailer key — retire email skipped');return;}
+    const todo=[];
+    if(!o.insDone)    todo.push('Cancel the insurance policy for this vehicle');
+    if(!o.platesDone) todo.push('Return the plates / close the registration');
+    const rows=[
+      ['Vehicle',v.name+(v.vehicle_number?' #'+v.vehicle_number:'')],
+      ['Plate',v.plate||'—'],['VIN',v.vin||'—'],
+      ['Retired on',o.date],['Disposition',DISP_LABEL[o.disp]||o.disp],
+      ['Final mileage',v.current_mileage?v.current_mileage.toLocaleString()+' mi':'—'],
+      ['Retired by',ME],['Notes',o.reason||'—']
+    ].map(r=>'<tr><td style="padding:8px 14px;border-bottom:1px solid #e6eaf0;font-size:12px;color:#6b7a96;text-transform:uppercase;letter-spacing:.04em;font-weight:700;white-space:nowrap;">'+r[0]+'</td><td style="padding:8px 14px;border-bottom:1px solid #e6eaf0;font-size:14px;color:#0d1f3c;font-weight:600;">'+esc(String(r[1]))+'</td></tr>').join('');
+    const html='<div style="font-family:Arial,Helvetica,sans-serif;background:#f4f6f9;padding:24px;"><div style="max-width:560px;margin:0 auto;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 2px 10px rgba(13,45,94,.08);">'+
+      '<div style="background:#0d2d5e;padding:18px 22px;"><div style="color:#fff;font-size:17px;font-weight:700;">🚐 Vehicle retired</div><div style="color:rgba(255,255,255,.72);font-size:12px;margin-top:3px;">JG Restoration — fleet</div></div>'+
+      (todo.length?'<div style="background:#fdecea;border-left:4px solid #c62828;padding:14px 18px;"><div style="font-size:13px;color:#8c1414;font-weight:800;margin-bottom:6px;">ACTION REQUIRED</div><ul style="margin:0;padding-left:18px;font-size:13px;color:#8c1414;font-weight:600;">'+todo.map(t=>'<li style="margin:3px 0;">'+t+'</li>').join('')+'</ul></div>':'<div style="background:#e8f5e9;border-left:4px solid #2e7d32;padding:12px 18px;font-size:13px;color:#1b5e20;font-weight:600;">Insurance and registration already closed out — nothing outstanding.</div>')+
+      '<table style="width:100%;border-collapse:collapse;">'+rows+'</table>'+
+      '<div style="padding:20px 22px;"><a href="https://jgimprovements-arch.github.io/jg-dispatch/vehicles.html" style="display:inline-block;background:#e85d04;color:#fff;text-decoration:none;font-weight:700;font-size:14px;padding:12px 22px;border-radius:8px;">Open Fleet</a></div></div></div>';
+    await fetch('https://jg-platform-mailer.josh-70f.workers.dev/send',{
+      method:'POST',headers:{'Content-Type':'application/json','X-Mailer-Key':data.value},
+      body:JSON.stringify({
+        from:'josh@jg-restoration.com',
+        to:'josh@jg-restoration.com,hannah@jg-restoration.com,lisa@jg-restoration.com',
+        subject:(todo.length?'ACTION: ':'')+'Vehicle retired — '+v.name+(todo.length?' (cancel insurance)':''),
+        html:html,
+        text:v.name+' was retired on '+o.date+' ('+(DISP_LABEL[o.disp]||o.disp)+').'+(todo.length?' Still to do: '+todo.join('; ')+'.':' Insurance and registration already closed.'),
+        reply_to:'josh@jg-restoration.com'
+      })
+    });
+  }catch(e){console.warn('[fleet] retire email failed:',e);}
+}
+
 function renderIssues(){
   const wrap=document.getElementById('issuesTab');
   if(!ISSUES.length){wrap.innerHTML='<div class="empty">No open issues.</div>';return;}
@@ -267,7 +482,8 @@ document.getElementById('fPhotoFile').addEventListener('change',async function(e
 function setPhotoPreview(url){const p=document.getElementById('photoPreview');if(url){p.style.backgroundImage='url('+url+')';p.textContent='';}else{p.style.backgroundImage='';p.textContent='🚐';}}
 document.getElementById('saveVehicle').onclick=saveVehicle;
 document.getElementById('saveService').onclick=saveService;
-['search','marketFilter','statusFilter'].forEach(id=>document.getElementById(id).addEventListener('input',renderFleet));
+document.getElementById('confirmRetire').onclick=confirmRetireVehicle;
+['search','marketFilter','statusFilter'].forEach(id=>document.getElementById(id).addEventListener('input',function(){renderRetiredChip();renderFleet();}));
 document.getElementById('gateBtn').onclick=()=>tryEnter(document.getElementById('emailInput').value);
 (function(){const e=detectEmail();if(e)tryEnter(e);else openGate('');})();
 </script>
