@@ -148,6 +148,130 @@
     return 'platform';
   }
 
+  // ── ALERTING ────────────────────────────────────────────────
+  // Who hears about vehicle problems. EDIT HERE to change recipients.
+  var FLEET_MAIL_TO   = ['josh@jg-restoration.com', 'hannah@jg-restoration.com', 'lisa@jg-restoration.com'];
+  var FLEET_MAIL_FROM = 'josh@jg-restoration.com';
+  var FLEET_MAILER    = 'https://jg-platform-mailer.josh-70f.workers.dev/send';
+  var _fleetMailKey   = null;
+
+  async function mailerKey() {
+    if (_fleetMailKey) return _fleetMailKey;
+    var rows = await get('platform_settings?key=eq.mailer_api_key&select=value&limit=1');
+    if (!rows || !rows.length) return null;
+    _fleetMailKey = rows[0].value;
+    return _fleetMailKey;
+  }
+
+  // Fire-and-forget. The underlying record is always written first, so a
+  // failed alert never costs you the data — only the notice.
+  async function alertFleet(opts) {
+    // 1. Email
+    try {
+      var key = await mailerKey();
+      if (key) {
+        await fetch(FLEET_MAILER, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Mailer-Key': key },
+          body: JSON.stringify({
+            from: FLEET_MAIL_FROM,
+            to: FLEET_MAIL_TO.join(','),
+            subject: opts.subject,
+            html: opts.html,
+            text: opts.text,
+            reply_to: FLEET_MAIL_FROM
+          })
+        });
+      } else {
+        console.warn('[fleet] no mailer key — email skipped');
+      }
+    } catch (e) { console.warn('[fleet] alert email failed:', e.message); }
+
+    // 2. In-app bell, for anyone who manages the fleet. Role is a
+    // comma-separated string, so match by overlap, never exact equality.
+    try {
+      var emps = await get('employees?active=eq.true&select=id,name,email,role');
+      if (!emps) return;
+      var want = ['admin', 'office', 'project manager'];
+      var rows = emps.filter(function (e) {
+        if (!e.email) return false;
+        var mine = String(e.role || '').split(',').map(function (r) { return r.trim().toLowerCase(); });
+        return want.some(function (w) { return mine.indexOf(w) !== -1; });
+      }).map(function (e) {
+        return {
+          recipient_employee_id: e.id,
+          recipient_email: e.email,
+          recipient_name: e.name,
+          category: 'timeclock',
+          severity: opts.urgent ? 'urgent' : 'info',
+          title: opts.subject,
+          body: opts.text,
+          action_url: 'https://jgimprovements-arch.github.io/jg-dispatch/vehicles.html',
+          action_label: 'Open Fleet',
+          metadata: opts.metadata || {},
+          expires_at: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString()
+        };
+      });
+      if (rows.length) await write('POST', 'notifications', rows);
+    } catch (e) { console.warn('[fleet] alert notification failed:', e.message); }
+  }
+
+  function fleetMailHtml(o) {
+    var rows = (o.rows || []).map(function (r) {
+      return '<tr><td style="padding:8px 14px;border-bottom:1px solid #e6eaf0;font-size:12px;color:#6b7a96;'
+        + 'text-transform:uppercase;letter-spacing:.04em;font-weight:700;white-space:nowrap;">' + r[0] + '</td>'
+        + '<td style="padding:8px 14px;border-bottom:1px solid #e6eaf0;font-size:14px;color:#0d1f3c;'
+        + 'font-weight:600;">' + r[1] + '</td></tr>';
+    }).join('');
+    return '<div style="font-family:Arial,Helvetica,sans-serif;background:#f4f6f9;padding:24px;">'
+      + '<div style="max-width:560px;margin:0 auto;background:#fff;border-radius:12px;overflow:hidden;'
+      + 'box-shadow:0 2px 10px rgba(13,45,94,.08);">'
+      + '<div style="background:' + (o.urgent ? '#c62828' : '#0d2d5e') + ';padding:18px 22px;">'
+      + '<div style="color:#fff;font-size:17px;font-weight:700;">' + o.heading + '</div>'
+      + '<div style="color:rgba(255,255,255,.72);font-size:12px;margin-top:3px;">JG Restoration — fleet</div></div>'
+      + (o.alert ? '<div style="background:#fdecea;border-left:4px solid #c62828;padding:12px 18px;'
+          + 'font-size:13px;color:#8c1414;font-weight:600;">' + o.alert + '</div>' : '')
+      + '<table style="width:100%;border-collapse:collapse;">' + rows + '</table>'
+      + '<div style="padding:20px 22px;">'
+      + '<a href="https://jgimprovements-arch.github.io/jg-dispatch/vehicles.html" '
+      + 'style="display:inline-block;background:#e85d04;color:#fff;text-decoration:none;font-weight:700;'
+      + 'font-size:14px;padding:12px 22px;border-radius:8px;">Open Fleet</a></div></div></div>';
+  }
+
+  // ── MAINTENANCE STATUS ──────────────────────────────────────
+  // Mirrors the due logic in vehicles.html so the board and the fleet page
+  // never disagree about whether a van is roadworthy.
+  function daysUntil(d) {
+    if (!d) return null;
+    var t = new Date(d + 'T00:00:00');
+    if (isNaN(t)) return null;
+    return Math.ceil((t - new Date()) / 86400000);
+  }
+
+  // Returns [{ text, urgent }] — everything wrong with this vehicle.
+  function vehicleProblems(v, issueCount) {
+    var out = [];
+    if (!v) return out;
+    if (issueCount) out.push({ text: issueCount + ' open issue' + (issueCount > 1 ? 's' : ''), urgent: true });
+    if (v.status === 'flagged') out.push({ text: 'Flagged — do not drive', urgent: true });
+    if (v.status === 'in_shop')  out.push({ text: 'In shop', urgent: true });
+
+    [['Registration', v.registration_due], ['Insurance', v.insurance_due], ['DOT inspection', v.inspection_due]]
+      .forEach(function (p) {
+        var n = daysUntil(p[1]);
+        if (n === null) return;
+        if (n < 0)       out.push({ text: p[0] + ' EXPIRED', urgent: true });
+        else if (n <= 30) out.push({ text: p[0] + ' due in ' + n + 'd', urgent: false });
+      });
+
+    if (v.current_mileage && v.last_oil_mileage && v.oil_interval_miles) {
+      var left = (v.last_oil_mileage + v.oil_interval_miles) - v.current_mileage;
+      if (left < 0)        out.push({ text: 'Oil OVERDUE by ' + Math.abs(left).toLocaleString() + ' mi', urgent: true });
+      else if (left <= 500) out.push({ text: 'Oil due in ' + left.toLocaleString() + ' mi', urgent: false });
+    }
+    return out;
+  }
+
   // ── styles (injected once, scoped with jgf- prefix) ─────────
   function injectCss() {
     if (document.getElementById('jgf-css')) return;
@@ -161,6 +285,8 @@
       'padding:3px 4px;cursor:pointer;}',
       '.jgf-sel.jgf-warn{background:#ffe9e5;border-color:#c02020;color:#8c1414;}',
       '.jgf-share{font-size:9px;color:rgba(255,255,255,.7);font-family:"DM Mono",monospace;flex-shrink:0;}',
+      '.jgf-why{font-size:9px;line-height:1.3;margin-top:3px;color:#ffd9d2;font-weight:700;}',
+      '.jgf-why.urgent{color:#ff8a75;}',
       /* punch-out sheet */
       '.jgf-ov{position:fixed;inset:0;background:rgba(13,29,60,.72);z-index:9000;display:none;',
       'align-items:flex-end;justify-content:center;}',
@@ -223,7 +349,8 @@
         F.market = mk; F.date = day;
         F.vehicles = {}; F.byMarket = {}; F.assigns = {}; F.openIssues = {};
 
-        var vs = await get('vehicles?select=id,name,vehicle_number,market,status,current_mileage'
+        var vs = await get('vehicles?select=id,name,vehicle_number,market,status,current_mileage,'
+          + 'last_oil_mileage,oil_interval_miles,registration_due,insurance_due,inspection_due'
           + '&status=in.(active,flagged,in_shop)&order=name.asc');
         if (vs) {
           vs.forEach(function (v) {
@@ -269,13 +396,16 @@
       var enm = slot.getAttribute('data-jgf-name') || '';
       var cur = F.assigns[eid];
       var curId = cur ? cur.vehicle_id : '';
-      var flagged = curId && (F.openIssues[curId] || (F.vehicles[curId] && F.vehicles[curId].status === 'flagged'));
+      var curProblems = curId ? vehicleProblems(F.vehicles[curId], F.openIssues[curId]) : [];
+      var flagged = curProblems.length > 0;
+      var isUrgent = curProblems.some(function (p) { return p.urgent; });
 
       var opts = '<option value="">🚐 no vehicle</option>';
       var seen = {};
       list.forEach(function (v) {
         if (seen[v.id]) return; seen[v.id] = 1;
-        var warn = F.openIssues[v.id] || v.status === 'flagged' ? ' ⚠' : '';
+        var probs = vehicleProblems(v, F.openIssues[v.id]);
+        var warn = probs.length ? (probs.some(function(p){return p.urgent;}) ? ' ⛔' : ' ⚠') : '';
         opts += '<option value="' + esc(v.id) + '"' + (v.id === curId ? ' selected' : '') + '>'
           + esc(vehicleLabel(v)) + warn + '</option>';
       });
@@ -290,13 +420,20 @@
 
       var share = (curId && shareCount[curId] > 1) ? '<span class="jgf-share">+' + (shareCount[curId] - 1) + '</span>' : '';
 
+      // Spell out WHY the vehicle is flagged. A red box with no reason just
+      // trains people to ignore red boxes.
+      var reason = curProblems.length
+        ? '<div class="jgf-why' + (isUrgent ? ' urgent' : '') + '">'
+          + esc(curProblems.map(function (p) { return p.text; }).join(' · ')) + '</div>'
+        : '';
+
       slot.innerHTML = '<div class="jgf-row">'
         + '<select class="jgf-sel' + (flagged ? ' jgf-warn' : '') + '"'
         + ' data-jgf-emp="' + esc(eid) + '" data-jgf-name="' + esc(enm) + '"'
         + ' data-jgf-prev="' + esc(curId || '') + '"'
         + ' onchange="JGFleet.setVehicle(this)" onclick="event.stopPropagation()"'
         + ' title="Vehicle for this day">' + opts + '</select>'
-        + share + '</div>';
+        + share + '</div>' + reason;
     });
   }
 
@@ -330,6 +467,22 @@
         market: F.market,
         created_by: actorName()
       };
+
+      // Tell the PM what's wrong BEFORE the assignment lands. Urgent
+      // problems (open issue, flagged, expired registration, oil overdue)
+      // require an explicit override; soft warnings just inform.
+      var probs = vehicleProblems(F.vehicles[vid], F.openIssues[vid]);
+      if (probs.some(function (p) { return p.urgent; })) {
+        var v0 = F.vehicles[vid];
+        var okGo = confirm(
+          (v0 ? vehicleLabel(v0) : 'This vehicle') + ' has a problem:\n\n'
+          + probs.map(function (p) { return '• ' + p.text; }).join('\n')
+          + '\n\nAssign ' + (enm || 'this tech') + ' to it anyway?'
+        );
+        if (!okGo) { sel.value = prev; sel.disabled = false; return; }
+      } else if (probs.length) {
+        say('⚠ ' + probs.map(function (p) { return p.text; }).join(' · '));
+      }
 
       // ── STAGE 1: upsert on the unique index ──────────────────
       // Fastest path, but only works if vehicle_assignments_emp_date_key
@@ -421,7 +574,8 @@
           if (!as || !as.length || !as[0].vehicle_id) return resolve(true); // no vehicle today
 
           var assign = as[0];
-          var vs = await get('vehicles?select=id,name,vehicle_number,current_mileage,status'
+          var vs = await get('vehicles?select=id,name,vehicle_number,current_mileage,status,'
+            + 'last_oil_mileage,oil_interval_miles'
             + '&id=eq.' + encodeURIComponent(assign.vehicle_id) + '&limit=1');
           if (!vs || !vs.length) return resolve(true);
           var veh = vs[0];
@@ -585,6 +739,58 @@
           await write('PATCH', 'vehicles?id=eq.' + encodeURIComponent(ctx.veh.id), {
             current_mileage: mi, updated_at: nowIso
           });
+
+          // Oil interval: alert on the CROSSING only — the reading that
+          // first pushes the van past due. Comparing old vs new means this
+          // fires exactly once, not every night from then on.
+          var v = ctx.veh;
+          if (v.last_oil_mileage && v.oil_interval_miles) {
+            var nextOil = v.last_oil_mileage + v.oil_interval_miles;
+            var wasDue  = last != null && last >= nextOil;
+            var nowDue  = mi >= nextOil;
+            var wasNear = last != null && last >= nextOil - 500;
+            var nowNear = mi >= nextOil - 500;
+
+            if (nowDue && !wasDue) {
+              alertFleet({
+                urgent: true,
+                subject: '🛢 Oil change DUE — ' + vehicleLabel(v),
+                text: vehicleLabel(v) + ' hit ' + mi.toLocaleString() + ' mi and is now past its oil change at '
+                      + nextOil.toLocaleString() + ' mi.',
+                html: fleetMailHtml({
+                  urgent: true,
+                  heading: '🛢 Oil change due',
+                  alert: 'This vehicle has passed its scheduled oil change interval.',
+                  rows: [
+                    ['Vehicle',      vehicleLabel(v)],
+                    ['Current',      mi.toLocaleString() + ' mi'],
+                    ['Was due at',   nextOil.toLocaleString() + ' mi'],
+                    ['Overdue by',   (mi - nextOil).toLocaleString() + ' mi'],
+                    ['Last changed', v.last_oil_mileage.toLocaleString() + ' mi'],
+                    ['Reading from', ctx.empName || '—']
+                  ]
+                }),
+                metadata: { kind: 'oil_due', vehicle_id: v.id, mileage: mi, due_at: nextOil }
+              });
+            } else if (nowNear && !wasNear) {
+              alertFleet({
+                urgent: false,
+                subject: '🛢 Oil change coming up — ' + vehicleLabel(v),
+                text: vehicleLabel(v) + ' is within ' + (nextOil - mi).toLocaleString()
+                      + ' mi of its next oil change.',
+                html: fleetMailHtml({
+                  heading: '🛢 Oil change approaching',
+                  rows: [
+                    ['Vehicle',    vehicleLabel(v)],
+                    ['Current',    mi.toLocaleString() + ' mi'],
+                    ['Due at',     nextOil.toLocaleString() + ' mi'],
+                    ['Miles left', (nextOil - mi).toLocaleString() + ' mi']
+                  ]
+                }),
+                metadata: { kind: 'oil_soon', vehicle_id: v.id, mileage: mi, due_at: nextOil }
+              });
+            }
+          }
         }
       }
 
@@ -610,6 +816,32 @@
         if (!r2.ok) failures.push('issue report (' + errMsg(r2) + ')');
         if (r2.ok && sev === 'urgent') {
           await write('PATCH', 'vehicles?id=eq.' + encodeURIComponent(ctx.veh.id), { status: 'flagged' });
+        }
+        if (r2.ok) {
+          var sevLabel = sev === 'urgent' ? 'URGENT — do not drive'
+                       : sev === 'soon'   ? 'Needs attention soon' : 'Minor';
+          alertFleet({
+            urgent: sev === 'urgent',
+            subject: (sev === 'urgent' ? '⛔ URGENT vehicle issue — ' : '🔧 Vehicle issue — ') + vehicleLabel(ctx.veh),
+            text: (ctx.empName || 'A tech') + ' reported "' + cat + '" on ' + vehicleLabel(ctx.veh)
+                  + ' (' + sevLabel + ')' + (note ? ': ' + note : '') + '.',
+            html: fleetMailHtml({
+              urgent: sev === 'urgent',
+              heading: '🔧 Vehicle issue reported',
+              alert: sev === 'urgent'
+                ? 'Reported as URGENT — this vehicle should not go out tomorrow. It has been flagged on the dispatch board.'
+                : null,
+              rows: [
+                ['Vehicle',    vehicleLabel(ctx.veh)],
+                ['Reported by', ctx.empName || '—'],
+                ['Problem',    cat],
+                ['Severity',   sevLabel],
+                ['Details',    note || '—'],
+                ['Odometer',   mi != null ? mi.toLocaleString() + ' mi' : '—']
+              ]
+            }),
+            metadata: { kind: 'vehicle_issue', vehicle_id: ctx.veh.id, severity: sev, category: cat }
+          });
         }
       }
 
