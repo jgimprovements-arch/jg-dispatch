@@ -3460,6 +3460,95 @@ async function _notifyApprovers(opts) {
   }
 }
 
+// ── APPROVER EMAIL (platform mailer Worker) ───────────────────────────────
+// The in-app bell only reaches someone who opens the app. This sends the
+// same request to the three people who actually approve, by email, the
+// moment it's submitted.
+//
+// EDIT HERE to change who gets the email — one line, no other changes needed.
+var APPROVER_MAIL_TO   = ['josh@jg-restoration.com', 'hannah@jg-restoration.com', 'lisa@jg-restoration.com'];
+// The mailer Worker only accepts senders on its authorized list, so we send
+// from a known platform address and set reply-to to the requester — replying
+// to the email goes straight back to the employee who asked.
+var APPROVER_MAIL_FROM = 'josh@jg-restoration.com';
+var TC_MAILER_URL      = 'https://jg-platform-mailer.josh-70f.workers.dev/send';
+var _tcMailerKey       = null;
+
+async function _getMailerKeyTC() {
+  if (_tcMailerKey) return _tcMailerKey;
+  try {
+    var r = await fetch(SB_URL + '/rest/v1/platform_settings?key=eq.mailer_api_key&select=value&limit=1', {
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+    });
+    if (!r.ok) return null;
+    var rows = await r.json();
+    if (!rows || !rows.length) return null;
+    _tcMailerKey = rows[0].value;
+    return _tcMailerKey;
+  } catch (e) { return null; }
+}
+
+// Branded HTML shell so these don't look like raw system mail.
+function _approverEmailHtml(opts) {
+  var rows = (opts.rows || []).map(function (r) {
+    return '<tr>'
+      + '<td style="padding:8px 14px;border-bottom:1px solid #e6eaf0;font-size:12px;color:#6b7a96;'
+      + 'text-transform:uppercase;letter-spacing:.04em;font-weight:700;white-space:nowrap;">' + r[0] + '</td>'
+      + '<td style="padding:8px 14px;border-bottom:1px solid #e6eaf0;font-size:14px;color:#0d1f3c;font-weight:600;">' + r[1] + '</td>'
+      + '</tr>';
+  }).join('');
+
+  return '<div style="font-family:Arial,Helvetica,sans-serif;background:#f4f6f9;padding:24px;">'
+    + '<div style="max-width:560px;margin:0 auto;background:#fff;border-radius:12px;overflow:hidden;'
+    + 'box-shadow:0 2px 10px rgba(13,45,94,.08);">'
+    + '<div style="background:#0d2d5e;padding:18px 22px;">'
+    + '<div style="color:#fff;font-size:17px;font-weight:700;">' + opts.heading + '</div>'
+    + '<div style="color:rgba(255,255,255,.72);font-size:12px;margin-top:3px;">JG Restoration — pending your approval</div>'
+    + '</div>'
+    + (opts.alert
+        ? '<div style="background:#fdecea;border-left:4px solid #c62828;padding:12px 18px;font-size:13px;color:#8c1414;font-weight:600;">'
+          + opts.alert + '</div>'
+        : '')
+    + '<table style="width:100%;border-collapse:collapse;">' + rows + '</table>'
+    + '<div style="padding:20px 22px;">'
+    + '<a href="' + opts.actionUrl + '" style="display:inline-block;background:#e85d04;color:#fff;'
+    + 'text-decoration:none;font-weight:700;font-size:14px;padding:12px 22px;border-radius:8px;">'
+    + opts.actionLabel + '</a>'
+    + '<div style="font-size:11px;color:#6b7a96;margin-top:14px;line-height:1.5;">'
+    + 'Reply to this email to reach ' + opts.requester + ' directly. '
+    + 'Sent automatically by the JG platform when the request was submitted.</div>'
+    + '</div></div></div>';
+}
+
+// Fire-and-forget. The request row is already saved before this runs, so a
+// mail failure can never make a submitted request look rejected.
+async function _emailApprovers(opts) {
+  try {
+    var key = await _getMailerKeyTC();
+    if (!key) { console.warn('[mail] no mailer key configured — approver email skipped'); return; }
+
+    var resp = await fetch(TC_MAILER_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Mailer-Key': key },
+      body: JSON.stringify({
+        from: APPROVER_MAIL_FROM,
+        to: APPROVER_MAIL_TO.join(','),
+        subject: opts.subject,
+        html: opts.html,
+        text: opts.text,
+        reply_to: opts.replyTo || APPROVER_MAIL_FROM
+      })
+    });
+    var data = {};
+    try { data = await resp.json(); } catch (e) {}
+    if (!resp.ok || !data.ok) {
+      console.warn('[mail] approver email failed:', data.error || resp.status);
+    }
+  } catch (e) {
+    console.warn('[mail] approver email failed:', e.message);
+  }
+}
+
 async function submitSwapRequest() {
   if (!TC.employee) { toast('Not signed in'); return; }
   var myDate    = (document.getElementById('swap-my-date')     || {}).value || '';
@@ -3518,6 +3607,27 @@ async function submitSwapRequest() {
       action_url: 'https://jgimprovements-arch.github.io/jg-dispatch/timeclock_admin.html#swaps',
       action_label: 'Review swap',
       metadata: { kind: 'swap_request', requester: TC.employee.name, my_date: myDate, market: TC.employee.market || null }
+    });
+
+    _emailApprovers({
+      subject: 'Swap request — ' + TC.employee.name + ' (' + rangeLabel + ')',
+      replyTo: (TC.employee.email || (TC.user ? TC.user.email : '') || ''),
+      text: TC.employee.name + ' requested an on-call swap for ' + rangeLabel
+            + ' (' + (myRole || 'on-call') + ') with ' + withName.trim()
+            + '. Reason: ' + reason.trim(),
+      html: _approverEmailHtml({
+        heading: '🔄 On-call swap request',
+        requester: TC.employee.name,
+        rows: [
+          ['Employee',  TC.employee.name],
+          ['Market',    TC.employee.market || 'Appleton'],
+          ['Their shift', rangeLabel + (myRole ? ' · ' + myRole : '')],
+          ['Trade with', withName.trim() + (theirDate ? ' · ' + theirDate + (theirEnd ? ' to ' + theirEnd : '') : '')],
+          ['Reason',    reason.trim()]
+        ],
+        actionUrl: 'https://jgimprovements-arch.github.io/jg-dispatch/timeclock_admin.html#swaps',
+        actionLabel: 'Review swap request'
+      })
     });
     // Refresh the My Swaps list immediately
     if (typeof loadMySwapRequests === 'function') loadMySwapRequests();
@@ -4778,6 +4888,31 @@ async function submitVacationRequest() {
       action_url: 'https://jgimprovements-arch.github.io/jg-dispatch/timeclock_admin.html#timeoff',
       action_label: 'Review request',
       metadata: { kind: 'time_off_request', requester: TC.employee.name, start_date: start, end_date: end, notice_days: noticeDays, notice_met: noticeMet }
+    });
+
+    _emailApprovers({
+      subject: 'Time off request — ' + TC.employee.name + ' (' + start + ' → ' + end + ')',
+      replyTo: (TC.employee.email || ''),
+      text: TC.employee.name + ' requested ' + days + ' day' + (days!==1?'s':'') + ' off, '
+            + start + ' → ' + end + ' (' + reason + ').'
+            + ((noticeRequired && !noticeMet) ? ' Only ' + noticeDays + ' days notice.' : ''),
+      html: _approverEmailHtml({
+        heading: '🏖 Time off request',
+        requester: TC.employee.name,
+        alert: (noticeRequired && !noticeMet)
+          ? '⚠ Only ' + noticeDays + ' day' + (noticeDays!==1?'s':'') + ' notice — under the 30-day policy.'
+          : null,
+        rows: [
+          ['Employee', TC.employee.name],
+          ['Dates',    start + ' → ' + end],
+          ['Amount',   days + ' day' + (days!==1?'s':'') + ' · ' + hours + ' hrs'],
+          ['Reason',   reason],
+          ['Notes',    notes || '—'],
+          ['Notice',   noticeDays + ' days']
+        ],
+        actionUrl: 'https://jgimprovements-arch.github.io/jg-dispatch/timeclock_admin.html#timeoff',
+        actionLabel: 'Review time off request'
+      })
     });
 
     closeVacationRequest();
