@@ -58,6 +58,9 @@
     } catch (e) { console.warn('[fleet] GET failed:', e.message); return null; }
   }
 
+  // Returns { ok, status, error } so callers can react to the ACTUAL failure
+  // instead of a bare false. Silent write failures are how a feature ends up
+  // looking deployed while quietly doing nothing.
   async function write(method, path, body, extraPrefer) {
     try {
       var h = hdr(true);
@@ -70,10 +73,23 @@
         var t = '';
         try { t = await r.text(); } catch (e) {}
         console.warn('[fleet] ' + method + ' ' + path + ' → ' + r.status + ' ' + t);
-        return false;
+        return { ok: false, status: r.status, error: t };
       }
-      return true;
-    } catch (e) { console.warn('[fleet] write failed:', e.message); return false; }
+      return { ok: true, status: r.status };
+    } catch (e) {
+      console.warn('[fleet] write failed:', e.message);
+      return { ok: false, status: 0, error: e.message };
+    }
+  }
+
+  // Pull the human-readable bit out of a PostgREST error body.
+  function errMsg(res) {
+    if (!res) return 'unknown error';
+    var t = res.error || '';
+    try {
+      var j = JSON.parse(t);
+      return j.message || j.hint || j.details || t;
+    } catch (e) { return t || ('HTTP ' + res.status); }
   }
 
   function esc(s) {
@@ -94,7 +110,7 @@
 
   // Dispatch day in Central with the same 5am rollover the board uses,
   // so a vehicle picked on the board and a punch-out at 11pm land on the
-  // same assign_date.
+  // same work_date.
   function dispatchDate() {
     var fmt = new Intl.DateTimeFormat('en-US', {
       timeZone: 'America/Chicago', year: 'numeric', month: '2-digit',
@@ -218,8 +234,8 @@
           });
         }
 
-        var as = await get('vehicle_assignments?select=id,vehicle_id,employee_id,employee_name,assign_date'
-          + '&assign_date=eq.' + encodeURIComponent(day));
+        var as = await get('vehicle_assignments?select=id,vehicle_id,employee_id,employee_name,work_date'
+          + '&work_date=eq.' + encodeURIComponent(day));
         if (as) as.forEach(function (a) { F.assigns[a.employee_id] = a; });
 
         var iss = await get('vehicle_issues?select=vehicle_id&status=neq.resolved');
@@ -277,6 +293,7 @@
       slot.innerHTML = '<div class="jgf-row">'
         + '<select class="jgf-sel' + (flagged ? ' jgf-warn' : '') + '"'
         + ' data-jgf-emp="' + esc(eid) + '" data-jgf-name="' + esc(enm) + '"'
+        + ' data-jgf-prev="' + esc(curId || '') + '"'
         + ' onchange="JGFleet.setVehicle(this)" onclick="event.stopPropagation()"'
         + ' title="Vehicle for this day">' + opts + '</select>'
         + share + '</div>';
@@ -284,6 +301,7 @@
   }
 
   async function setVehicle(sel) {
+    var prev = sel.getAttribute('data-jgf-prev') || '';
     try {
       var eid = sel.getAttribute('data-jgf-emp');
       var enm = sel.getAttribute('data-jgf-name') || '';
@@ -291,13 +309,16 @@
       var day = F.date || dispatchDate();
       if (!eid) return;
 
+      sel.disabled = true;
+
+      // ── CLEAR ────────────────────────────────────────────────
       if (!vid) {
-        var ok = await write('DELETE',
+        var del = await write('DELETE',
           'vehicle_assignments?employee_id=eq.' + encodeURIComponent(eid)
-          + '&assign_date=eq.' + encodeURIComponent(day));
-        if (ok) { delete F.assigns[eid]; say('Vehicle cleared'); }
-        else say('⚠ Could not clear vehicle');
-        paint(F.market);
+          + '&work_date=eq.' + encodeURIComponent(day));
+        sel.disabled = false;
+        if (del.ok) { delete F.assigns[eid]; say('Vehicle cleared'); paint(F.market); }
+        else { say('⚠ Could not clear: ' + errMsg(del)); sel.value = prev; }
         return;
       }
 
@@ -305,25 +326,74 @@
         vehicle_id: vid,
         employee_id: eid,
         employee_name: enm,
-        assign_date: day,
+        work_date: day,
         market: F.market,
         created_by: actorName()
       };
-      var saved = await write('POST',
-        'vehicle_assignments?on_conflict=employee_id,assign_date',
+
+      // ── STAGE 1: upsert on the unique index ──────────────────
+      // Fastest path, but only works if vehicle_assignments_emp_date_key
+      // exists. If the slice-2 migration hasn't run, PostgREST returns
+      // 42P10 ("no unique or exclusion constraint matching the ON CONFLICT
+      // specification") and we fall through rather than failing the user.
+      var res = await write('POST',
+        'vehicle_assignments?on_conflict=employee_id,work_date',
         row, 'resolution=merge-duplicates,return=minimal');
 
-      if (saved) {
+      // ── STAGE 2: read-then-write ─────────────────────────────
+      // Works on any table shape that has the columns, index or not.
+      if (!res.ok) {
+        console.warn('[fleet] upsert unavailable, falling back to read-then-write');
+        var existing = await get('vehicle_assignments?select=id&employee_id=eq.'
+          + encodeURIComponent(eid) + '&work_date=eq.' + encodeURIComponent(day) + '&limit=1');
+
+        if (existing && existing.length) {
+          res = await write('PATCH',
+            'vehicle_assignments?id=eq.' + encodeURIComponent(existing[0].id),
+            { vehicle_id: vid, employee_name: enm, market: F.market, created_by: actorName() });
+        } else {
+          res = await write('POST', 'vehicle_assignments', row);
+        }
+      }
+
+      sel.disabled = false;
+
+      if (res.ok) {
         F.assigns[eid] = row;
+        sel.setAttribute('data-jgf-prev', vid);
         var v = F.vehicles[vid];
         say('🚐 ' + (enm.split(' ')[0] || 'Tech') + ' → ' + (v ? vehicleLabel(v) : 'vehicle'));
+        paint(F.market);
       } else {
-        say('⚠ Vehicle not saved');
+        // Show the real reason. A silent revert would leave the dispatcher
+        // believing a vehicle is assigned when nothing was written.
+        sel.value = prev;
+        say('⚠ Vehicle not saved: ' + errMsg(res));
       }
-      paint(F.market);
     } catch (e) {
+      sel.disabled = false;
+      sel.value = prev;
       console.warn('[fleet] setVehicle failed:', e.message);
+      say('⚠ Vehicle not saved: ' + e.message);
     }
+  }
+
+  // Console diagnostic — run JGFleet.diagnose() on the board to see exactly
+  // which piece is failing, instead of guessing from a toast.
+  async function diagnose() {
+    var out = { date: F.date || dispatchDate(), market: F.market };
+    var v = await get('vehicles?select=id,name&limit=1');
+    out.vehicles_readable = !!v;
+    out.vehicle_count = Object.keys(F.vehicles).length;
+    var a = await get('vehicle_assignments?select=*&limit=1');
+    out.assignments_readable = !!a;
+    out.assignment_columns = (a && a.length) ? Object.keys(a[0]) : '(table empty — cannot infer columns)';
+    var probe = await write('POST', 'vehicle_assignments?on_conflict=employee_id,work_date',
+      { employee_id: '00000000-0000-0000-0000-000000000000', work_date: out.date },
+      'resolution=merge-duplicates,return=minimal');
+    out.upsert_probe = probe.ok ? 'OK' : errMsg(probe);
+    console.table ? console.table(out) : console.log(out);
+    return out;
   }
 
   /* ==========================================================
@@ -347,7 +417,7 @@
 
           var as = await get('vehicle_assignments?select=id,vehicle_id,employee_id'
             + '&employee_id=eq.' + encodeURIComponent(empId)
-            + '&assign_date=eq.' + encodeURIComponent(day) + '&limit=1');
+            + '&work_date=eq.' + encodeURIComponent(day) + '&limit=1');
           if (!as || !as.length || !as[0].vehicle_id) return resolve(true); // no vehicle today
 
           var assign = as[0];
@@ -361,7 +431,7 @@
           var lastOut = true;
           var crew = await get('vehicle_assignments?select=employee_id'
             + '&vehicle_id=eq.' + encodeURIComponent(veh.id)
-            + '&assign_date=eq.' + encodeURIComponent(day));
+            + '&work_date=eq.' + encodeURIComponent(day));
           var others = (crew || []).map(function (c) { return c.employee_id; })
             .filter(function (id) { return id && id !== empId; });
           if (others.length) {
@@ -497,16 +567,21 @@
     try {
       var nowIso = new Date().toISOString();
 
+      var failures = [];
+
       if (mi != null) {
-        await write('PATCH', 'vehicle_assignments?id=eq.' + encodeURIComponent(ctx.assign.id), {
-          end_mileage: mi,
-          end_mileage_at: nowIso,
-          end_mileage_by: ctx.empName || null,
+        var r1 = await write('PATCH', 'vehicle_assignments?id=eq.' + encodeURIComponent(ctx.assign.id), {
+          mileage_end: mi,
+          mileage_entered_at: nowIso,
+          // uuid column — the employee id, not the name. The name is
+          // recoverable from employee_id on the same row.
+          mileage_entered_by: ctx.empId || null,
           entry_id: ctx.entryId || null
         });
+        if (!r1.ok) failures.push('odometer (' + errMsg(r1) + ')');
         // Only ever move the odometer forward — a stale or mistyped low
         // reading must not roll the vehicle's baseline backwards.
-        if (last == null || mi >= last) {
+        if (r1.ok && (last == null || mi >= last)) {
           await write('PATCH', 'vehicles?id=eq.' + encodeURIComponent(ctx.veh.id), {
             current_mileage: mi, updated_at: nowIso
           });
@@ -517,7 +592,7 @@
         var cat = (document.getElementById('jgf-cat') || {}).value || 'Other';
         var sev = (document.getElementById('jgf-sev') || {}).value || 'minor';
         var note = (document.getElementById('jgf-note') || {}).value || '';
-        await write('POST', 'vehicle_issues', {
+        var r2 = await write('POST', 'vehicle_issues', {
           vehicle_id: ctx.veh.id,
           category: cat,
           severity: sev,
@@ -532,9 +607,16 @@
         // Urgent = the van shouldn't roll tomorrow. Flagging turns it red
         // on the board so nobody assigns into it. vehicles.html clears the
         // flag automatically when the last open issue is resolved.
-        if (sev === 'urgent') {
+        if (!r2.ok) failures.push('issue report (' + errMsg(r2) + ')');
+        if (r2.ok && sev === 'urgent') {
           await write('PATCH', 'vehicles?id=eq.' + encodeURIComponent(ctx.veh.id), { status: 'flagged' });
         }
+      }
+
+      if (failures.length) {
+        // Tell the tech the truth — but never block the punch.
+        say('⚠ Not saved: ' + failures.join(', '));
+      } else if (ctx.issue) {
         say('🔧 Issue reported — office notified');
       } else if (mi != null) {
         say('✓ Odometer saved');
@@ -554,6 +636,7 @@
     setVehicle: setVehicle,
     punchOutFlow: punchOutFlow,
     dispatchDate: dispatchDate,
+    diagnose: diagnose,
     _issue: toggleIssue,
     _close: closeSheet,
     _submit: submitSheet
