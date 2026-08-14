@@ -8,7 +8,7 @@
 <link rel="icon" type="image/png" href="https://jgimprovements-arch.github.io/jg-dispatch/logo.png">
 <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script src="auth.js?v=20260419-1"></script>
-<script src="sidebar.js?v=2026.08.04-r1"></script>
+<script src="sidebar.js?v=20260419-1"></script>
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <script src="https://unpkg.com/@supabase/supabase-js@2"></script>
 <script>if(!window.supabase||!window.supabase.createClient){document.write('<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"><\/script>');}</script>
@@ -26,9 +26,18 @@
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:var(--bg);color:var(--txt);font-family:'DM Sans',system-ui,sans-serif;min-height:100vh;}
 .mono{font-family:'DM Mono',monospace}
-.admin-hdr{background:var(--navy);padding:0 16px;height:50px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:95;}
-.admin-hdr .back{color:rgba(255,255,255,.75);font-size:12px;text-decoration:none;font-weight:600;}
-.admin-hdr .back:hover{color:#fff;}
+.admin-hdr{background:var(--navy);padding:14px 20px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:95;}
+.hdr-title{font-size:16px;font-weight:700;color:#fff;display:flex;align-items:center;gap:10px;}
+.hdr-title span{font-size:20px;}
+.hdr-btn{padding:8px 14px;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;font-family:'DM Sans',sans-serif;background:rgba(255,255,255,.1);color:rgba(255,255,255,.8);border:1px solid rgba(255,255,255,.2);}
+.hdr-btn:hover{background:rgba(255,255,255,.18);color:#fff;}
+.sub-tab-bar{top:56px;}
+.stat-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:12px;margin-bottom:18px;}
+.stat-card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px 16px;box-shadow:0 1px 4px rgba(13,45,94,.05);cursor:pointer;transition:border-color .15s;}
+.stat-card:hover{border-color:var(--brdH);}
+.stat-card.on{border-color:var(--orange);box-shadow:0 0 0 2px rgba(232,93,4,.15);}
+.stat-val{font-family:'DM Mono',monospace;font-size:26px;font-weight:600;color:var(--navy);line-height:1;}
+.stat-lbl{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-top:4px;}
 .export-btn{padding:8px 16px;border-radius:6px;border:none;font-size:12px;font-weight:700;cursor:pointer;font-family:'DM Sans',sans-serif;background:var(--orange);color:#fff;}
 .export-btn:hover{filter:brightness(.95);}
 .sub-tab-bar{background:var(--s1);border-bottom:1px solid var(--brd);padding:0 16px;display:flex;position:sticky;top:50px;z-index:94;}
@@ -93,11 +102,8 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--brdH);}
 <body>
 <div id="app" style="display:none">
   <div class="admin-hdr">
-    <div style="display:flex;align-items:center;gap:10px;">
-      <span style="font-size:18px;">🚐</span>
-      <span style="font-size:13px;font-weight:600;color:#fff;letter-spacing:-.3px;">JG Restoration <span style="color:var(--gold);">Fleet</span></span>
-    </div>
-    <a href="admin.html" class="back">← Admin Panel</a>
+    <div class="hdr-title"><span>🚐</span> Fleet / Vehicles</div>
+    <button class="hdr-btn" onclick="boot()">↻ Refresh</button>
   </div>
   <div class="sub-tab-bar">
     <button class="sub-tab active" id="tabFleet">Fleet</button>
@@ -116,6 +122,7 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--brdH);}
         <button class="btn acc" id="addBtn">+ Add Vehicle</button>
         <button class="btn ghost" id="retiredChip" style="display:none;margin-left:auto;" title="View retired vehicles"></button>
       </div>
+      <div class="stat-row" id="statRow"></div>
       <div id="retireBanner"></div>
       <div class="vgrid" id="vgrid"></div>
     </div>
@@ -245,7 +252,45 @@ function daysUntil(d){if(!d)return null;return Math.round((new Date(d)-new Date(
 function dueRow(label,d){const n=daysUntil(d);if(n===null)return '';let cls='',txt=d;if(n<0){cls='overdue';txt=d+' · OVERDUE';}else if(n<=30){cls='soon';txt=d+' · '+n+'d';}return '<div class="drow"><span>'+label+'</span><span class="'+cls+'">'+txt+'</span></div>';}
 function oilDue(v){if(!v.current_mileage||!v.last_oil_mileage||!v.oil_interval_miles)return '';const next=v.last_oil_mileage+v.oil_interval_miles,left=next-v.current_mileage;let cls='',txt=next.toLocaleString()+' mi';if(left<0){cls='overdue';txt='OVERDUE '+Math.abs(left).toLocaleString()+' mi';}else if(left<=500){cls='soon';txt='due in '+left.toLocaleString()+' mi';}return '<div class="drow"><span>Oil change</span><span class="'+cls+'">'+txt+'</span></div>';}
 function openIssuesFor(id){return ISSUES.filter(i=>i.vehicle_id===id);}
-function render(){renderRetireBanner();renderRetiredChip();renderFleet();renderIssues();}
+function render(){renderStats();renderRetireBanner();renderRetiredChip();renderFleet();renderIssues();}
+
+// Headcount tiles — same stat-card pattern the rest of the platform uses.
+// Each tile is also the filter: click Retired to see retired, click again
+// to clear. Cheaper than hunting through the status dropdown.
+function renderStats(){
+  const el=document.getElementById('statRow'); if(!el) return;
+  const c=k=>VEHICLES.filter(v=>v.status===k).length;
+  const openPaper=VEHICLES.filter(v=>v.status==='retired'&&(!v.insurance_cancelled||!v.plates_returned)).length;
+  const sf=document.getElementById('statusFilter').value;
+  const tiles=[
+    {k:'active_set',  val:VEHICLES.filter(v=>v.status!=='retired').length, lbl:'In service'},
+    {k:'active',      val:c('active'),   lbl:'Active'},
+    {k:'in_shop',     val:c('in_shop'),  lbl:'In shop'},
+    {k:'flagged',     val:c('flagged'),  lbl:'Flagged'},
+    {k:'retired',     val:c('retired'),  lbl:'Retired'},
+    {k:'__issues',    val:ISSUES.length, lbl:'Open issues'}
+  ];
+  let h=tiles.map(t=>{
+    const on=(t.k===sf)?' on':'';
+    const col=(t.k==='flagged'&&t.val)?'color:var(--red);':(t.k==='__issues'&&t.val)?'color:var(--wrn);':'';
+    return '<div class="stat-card'+on+'" onclick="statClick(\''+t.k+'\')">'+
+      '<div class="stat-val" style="'+col+'">'+t.val+'</div>'+
+      '<div class="stat-lbl">'+t.lbl+'</div></div>';
+  }).join('');
+  if(openPaper){
+    h+='<div class="stat-card" style="border-color:rgba(230,81,0,.45);" onclick="statClick(\'retired\')">'+
+       '<div class="stat-val" style="color:var(--wrn);">'+openPaper+'</div>'+
+       '<div class="stat-lbl">Paperwork open</div></div>';
+  }
+  el.innerHTML=h;
+}
+
+function statClick(k){
+  if(k==='__issues'){showTab('issues');return;}
+  const sel=document.getElementById('statusFilter');
+  sel.value=(sel.value===k)?'active_set':k;
+  render();
+}
 
 // Retired vehicles still exist — they're just filtered out of the default
 // view. Without this, retiring a van makes it silently vanish and nobody
@@ -483,7 +528,7 @@ function setPhotoPreview(url){const p=document.getElementById('photoPreview');if
 document.getElementById('saveVehicle').onclick=saveVehicle;
 document.getElementById('saveService').onclick=saveService;
 document.getElementById('confirmRetire').onclick=confirmRetireVehicle;
-['search','marketFilter','statusFilter'].forEach(id=>document.getElementById(id).addEventListener('input',function(){renderRetiredChip();renderFleet();}));
+['search','marketFilter','statusFilter'].forEach(id=>document.getElementById(id).addEventListener('input',function(){renderStats();renderRetiredChip();renderFleet();}));
 document.getElementById('gateBtn').onclick=()=>tryEnter(document.getElementById('emailInput').value);
 (function(){const e=detectEmail();if(e)tryEnter(e);else openGate('');})();
 </script>
