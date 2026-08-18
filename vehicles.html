@@ -124,6 +124,11 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--brdH);}
         <button class="btn ghost" id="retiredChip" style="display:none;margin-left:auto;" title="View retired vehicles"></button>
       </div>
       <div class="stat-row" id="statRow"></div>
+      <div id="exportBar" style="display:none;align-items:center;gap:10px;background:var(--navy);border-radius:8px;padding:10px 14px;margin-bottom:14px;flex-wrap:wrap;">
+        <span id="exportCount" style="color:#fff;font-size:13px;font-weight:700;"></span>
+        <button class="btn sm acc" onclick="exportSelected()">↓ Export selected</button>
+        <button class="btn sm ghost" style="background:rgba(255,255,255,.1);color:#fff;border-color:rgba(255,255,255,.25);" onclick="clearExportSel()">Clear</button>
+      </div>
       <div id="retireBanner"></div>
       <div class="vgrid" id="vgrid"></div>
     </div>
@@ -435,7 +440,7 @@ function daysUntil(d){if(!d)return null;return Math.round((new Date(d)-new Date(
 function dueRow(label,d){const n=daysUntil(d);if(n===null)return '';let cls='',txt=d;if(n<0){cls='overdue';txt=d+' · OVERDUE';}else if(n<=30){cls='soon';txt=d+' · '+n+'d';}return '<div class="drow"><span>'+label+'</span><span class="'+cls+'">'+txt+'</span></div>';}
 function oilDue(v){if(!v.current_mileage||!v.last_oil_mileage||!v.oil_interval_miles)return '';const next=v.last_oil_mileage+v.oil_interval_miles,left=next-v.current_mileage;let cls='',txt=next.toLocaleString()+' mi';if(left<0){cls='overdue';txt='OVERDUE '+Math.abs(left).toLocaleString()+' mi';}else if(left<=500){cls='soon';txt='due in '+left.toLocaleString()+' mi';}return '<div class="drow"><span>Oil change</span><span class="'+cls+'">'+txt+'</span></div>';}
 function openIssuesFor(id){return ISSUES.filter(i=>i.vehicle_id===id);}
-function render(){renderStats();renderRetireBanner();renderRetiredChip();renderFleet();renderIssues();}
+function render(){renderStats();renderRetireBanner();renderRetiredChip();renderFleet();renderIssues();renderExportBar();}
 
 // Headcount tiles — same stat-card pattern the rest of the platform uses.
 // Each tile is also the filter: click Retired to see retired, click again
@@ -506,6 +511,7 @@ function renderFleet(){
     const iss=openIssuesFor(v.id);
     const due=[dueRow('Registration',v.registration_due),dueRow('Insurance',v.insurance_due),dueRow('DOT inspection',v.inspection_due),oilDue(v)].filter(Boolean).join('');
     return '<div class="vcard s-'+v.status+'">'+
+      '<label style="position:absolute;top:8px;right:8px;z-index:2;display:flex;align-items:center;gap:4px;background:rgba(255,255,255,.9);border-radius:6px;padding:3px 7px;font-size:10px;font-weight:700;color:var(--navy);cursor:pointer;box-shadow:0 1px 3px rgba(0,0,0,.12);"><input type="checkbox" class="veh-pick" value="'+v.id+'" '+(EXPORT_SEL[v.id]?'checked':'')+' onchange="toggleExportPick(this)" style="cursor:pointer;"> export</label>'+
       (v.photo_url?'<div style="width:100%;height:150px;border-radius:8px;margin-bottom:10px;background:#eef1f6 url('+esc(v.photo_url)+') center/contain no-repeat;cursor:zoom-in;" title="Click to view full size" onclick="openPhoto(\''+esc(v.photo_url)+'\',\''+esc(v.name)+'\')"></div>':'')+
       '<h3>'+esc(v.name)+' <span class="badge '+v.status+'">'+v.status.replace('_',' ')+'</span></h3>'+
       '<div class="vmeta">'+([v.year,esc(v.make),esc(v.model)].filter(Boolean).join(' ')||'—')+' · '+(v.market?(v.market==='stevens_point'?'Stevens Point':'Appleton'):'no market')+(v.vehicle_number?' · #'+esc(v.vehicle_number):'')+'</div>'+
@@ -517,6 +523,7 @@ function renderFleet(){
       '<div class="vactions"><button class="btn sm ghost" onclick="editVehicle(\''+v.id+'\')">Edit</button><button class="btn sm acc" onclick="openService(\''+v.id+'\')">Log service</button>'+
       '<button class="btn sm ghost" onclick="vehicleHistory(\''+v.id+'\')">History</button>'+
       '<button class="btn sm ghost" onclick="openPhotos(\''+v.id+'\')">📷 Photos'+(PHOTOS_BY_VEH[v.id]?' ('+PHOTOS_BY_VEH[v.id].length+')':'')+'</button>'+
+      '<button class="btn sm ghost" onclick="exportOne(\''+v.id+'\')">↓ Export</button>'+
       (v.status==='retired'
         ? '<button class="btn sm ghost" onclick="reactivateVehicle(\''+v.id+'\')">Reactivate</button>'
         : '<button class="btn sm ghost" style="color:#c62828;border-color:rgba(198,40,40,.35)" onclick="openRetire(\''+v.id+'\')">Retire</button>')+
@@ -577,6 +584,130 @@ function renderRetireBanner(){
 // Cards use object-fit: contain so nothing is cropped out of frame, but a
 // 150px strip is still small for checking damage or reading a decal. Tapping
 // opens the original at full size.
+// ── EXPORT ────────────────────────────────────────────────────────────────
+// Self-contained HTML export — one vehicle or a selected set. HTML (not PDF)
+// because it needs no library, embeds the photos inline, opens in any
+// browser, and prints to PDF from there if a buyer wants a static file. This
+// is the asset-condition record for a data room: specs, maintenance status,
+// service history, open issues, driver history, and dated photos in one file.
+let EXPORT_SEL={};
+function toggleExportPick(cb){ if(cb.checked) EXPORT_SEL[cb.value]=true; else delete EXPORT_SEL[cb.value]; renderExportBar(); }
+function clearExportSel(){ EXPORT_SEL={}; render(); }
+function renderExportBar(){
+  const bar=document.getElementById('exportBar'); if(!bar) return;
+  const n=Object.keys(EXPORT_SEL).length;
+  bar.style.display=n?'flex':'none';
+  const c=document.getElementById('exportCount'); if(c) c.textContent=n+' vehicle'+(n!==1?'s':'')+' selected';
+}
+
+function exportSelected(){
+  const ids=Object.keys(EXPORT_SEL);
+  if(!ids.length){toast('Select at least one vehicle');return;}
+  buildExport(ids);
+}
+function exportOne(vid){ buildExport([vid]); }
+
+async function buildExport(ids){
+  toast('Building export…');
+  // Pull service history + full issue history for these vehicles (the card
+  // only holds open issues; an export should show resolved ones too).
+  let svc=[], iss=[], asg=[];
+  try{
+    const q=await Promise.all([
+      sb.from('vehicle_maintenance_log').select('*').in('vehicle_id',ids).order('service_date',{ascending:false}),
+      sb.from('vehicle_issues').select('*').in('vehicle_id',ids).order('reported_at',{ascending:false}),
+      sb.from('vehicle_assignments').select('*').in('vehicle_id',ids).order('work_date',{ascending:false}).limit(500)
+    ]);
+    svc=q[0].data||[]; iss=q[1].data||[]; asg=q[2].data||[];
+  }catch(e){ console.warn('export fetch partial:',e); }
+
+  const byVeh=(arr)=>{const m={};arr.forEach(r=>{(m[r.vehicle_id]=m[r.vehicle_id]||[]).push(r);});return m;};
+  const svcBy=byVeh(svc), issBy=byVeh(iss), asgBy=byVeh(asg);
+  const enm=id=>{const e=EMPLOYEES.find(x=>x.id===id);return e?e.name:(id||'');};
+
+  const sections=ids.map(id=>{
+    const v=VEHICLES.find(x=>x.id===id); if(!v) return '';
+    return _exportVehicleHtml(v,svcBy[id]||[],issBy[id]||[],asgBy[id]||[],PHOTOS_BY_VEH[id]||[],enm);
+  }).join('<div style="page-break-after:always;"></div>');
+
+  const title=ids.length===1
+    ? (VEHICLES.find(x=>x.id===ids[0])||{}).name+' — Vehicle Record'
+    : 'Fleet Vehicle Records ('+ids.length+' vehicles)';
+
+  const doc='<!doctype html><html><head><meta charset="utf-8"><title>'+esc(title)+'</title>'+
+    '<style>body{font-family:Arial,Helvetica,sans-serif;color:#0d1f3c;margin:0;background:#f4f6f9;}'+
+    '.wrap{max-width:820px;margin:0 auto;padding:24px;}'+
+    '.vh{background:#0d2d5e;color:#fff;padding:18px 22px;border-radius:10px 10px 0 0;}'+
+    '.vh h1{margin:0;font-size:22px;} .vh .sub{color:rgba(255,255,255,.75);font-size:13px;margin-top:4px;}'+
+    '.card{background:#fff;border:1px solid #e6eaf0;border-top:none;border-radius:0 0 10px 10px;padding:20px 22px;margin-bottom:26px;}'+
+    'h2{font-size:13px;text-transform:uppercase;letter-spacing:.05em;color:#6b7a96;border-bottom:1px solid #e6eaf0;padding-bottom:6px;margin:20px 0 10px;}'+
+    'table{width:100%;border-collapse:collapse;font-size:13px;} td,th{text-align:left;padding:6px 8px;border-bottom:1px solid #eef1f6;} th{color:#6b7a96;font-size:11px;text-transform:uppercase;}'+
+    '.kv{display:grid;grid-template-columns:150px 1fr;gap:2px 12px;font-size:13px;} .kv b{color:#0d2d5e;}'+
+    '.photos{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px;}'+
+    '.ph{border:1px solid #e6eaf0;border-radius:8px;overflow:hidden;} .ph img{width:100%;height:130px;object-fit:cover;display:block;} .ph .cap{padding:7px 9px;font-size:11px;}'+
+    '.badge{display:inline-block;font-size:11px;font-weight:700;padding:2px 8px;border-radius:4px;background:#eef1f6;color:#0d2d5e;}'+
+    '.over{color:#c62828;font-weight:700;}'+
+    '@media print{body{background:#fff;} .card{border:none;} .no-print{display:none;}}'+
+    '</style></head><body><div class="wrap">'+
+    '<div class="no-print" style="margin-bottom:16px;"><button onclick="window.print()" style="background:#e85d04;color:#fff;border:none;padding:10px 18px;border-radius:8px;font-weight:700;cursor:pointer;">🖨 Print / Save as PDF</button></div>'+
+    sections+
+    '<div style="color:#6b7a96;font-size:11px;text-align:center;padding:16px 0;">Generated '+new Date().toLocaleString()+' · JG Restoration fleet</div>'+
+    '</div></body></html>';
+
+  const blob=new Blob([doc],{type:'text/html'});
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);
+  a.download=(ids.length===1?((VEHICLES.find(x=>x.id===ids[0])||{}).name||'vehicle').replace(/[^a-z0-9]/gi,'_'):'JG_Fleet_'+ids.length+'_vehicles')+'_'+new Date().toISOString().slice(0,10)+'.html';
+  a.click();
+  toast('✓ Exported '+ids.length+' vehicle'+(ids.length!==1?'s':''));
+}
+
+function _exportVehicleHtml(v,svc,iss,asg,photos,enm){
+  const D=d=>d?new Date(d.length<=10?d+'T00:00:00':d).toLocaleDateString():'—';
+  const openIss=iss.filter(i=>i.status!=='resolved');
+  const oilNext=(v.last_oil_mileage&&v.oil_interval_miles)?v.last_oil_mileage+v.oil_interval_miles:null;
+  const oilOver=(oilNext&&v.current_mileage)?v.current_mileage-oilNext:null;
+  let h='<div class="vh"><h1>'+esc(v.name)+(v.vehicle_number?' #'+esc(v.vehicle_number):'')+'</h1>'+
+    '<div class="sub">'+[v.year,esc(v.make),esc(v.model)].filter(Boolean).join(' ')+' · '+(v.market==='stevens_point'?'Stevens Point':(v.market?'Appleton':'no market'))+' · <span class="badge">'+esc(v.status)+'</span></div></div>'+
+    '<div class="card">'+
+    '<div class="kv">'+
+      '<span>Plate</span><b>'+(esc(v.plate)||'—')+'</b>'+
+      '<span>VIN</span><b>'+(esc(v.vin)||'—')+'</b>'+
+      '<span>Current mileage</span><b>'+(v.current_mileage?Number(v.current_mileage).toLocaleString()+' mi':'—')+'</b>'+
+      '<span>Usual driver</span><b>'+(v.usual_assigned_to?esc(enm(v.usual_assigned_to)):'pool')+'</b>'+
+      '<span>Oil change</span><b>'+(oilNext?('due at '+oilNext.toLocaleString()+(oilOver>=0?' · <span class="over">OVERDUE '+oilOver.toLocaleString()+' mi</span>':'')):'—')+'</b>'+
+      '<span>Registration</span><b>'+D(v.registration_due)+'</b>'+
+      '<span>Insurance</span><b>'+D(v.insurance_due)+'</b>'+
+      '<span>DOT inspection</span><b>'+D(v.inspection_due)+'</b>'+
+    '</div>';
+
+  if(v.notes) h+='<h2>Notes</h2><div style="font-size:13px;">'+esc(v.notes)+'</div>';
+
+  h+='<h2>Open issues ('+openIss.length+')</h2>';
+  h+=openIss.length?'<table><tr><th>Category</th><th>Note</th><th>Severity</th><th>Reported</th></tr>'+
+     openIss.map(i=>'<tr><td>'+esc(i.category||'—')+'</td><td>'+esc(i.note||'')+'</td><td>'+esc(i.severity||'')+'</td><td>'+D(i.reported_at)+'</td></tr>').join('')+'</table>'
+     :'<div style="font-size:13px;color:#6b7a96;">None open.</div>';
+
+  h+='<h2>Service history ('+svc.length+')</h2>';
+  h+=svc.length?'<table><tr><th>Date</th><th>Type</th><th>Mileage</th><th>Cost</th><th>Notes</th></tr>'+
+     svc.map(s=>'<tr><td>'+D(s.service_date)+'</td><td>'+esc(s.service_type||'')+'</td><td>'+(s.mileage_at_service?Number(s.mileage_at_service).toLocaleString():'—')+'</td><td>'+(s.cost!=null?'$'+s.cost:'—')+'</td><td>'+esc(s.note||s.notes||'')+'</td></tr>').join('')+'</table>'
+     :'<div style="font-size:13px;color:#6b7a96;">No service records.</div>';
+
+  if(photos.length){
+    h+='<h2>Condition photos ('+photos.length+')</h2><div class="photos">'+
+      photos.map(p=>'<div class="ph"><img src="'+esc(p.url)+'"><div class="cap"><b>'+esc(_catLabel(p.category))+'</b>'+(p.caption?'<br>'+esc(p.caption):'')+'<br><span style="color:#6b7a96;">'+D(p.taken_at)+(p.mileage?' · '+Number(p.mileage).toLocaleString()+' mi':'')+'</span></div></div>').join('')+'</div>';
+  }
+
+  if(asg.length){
+    const recent=asg.slice(0,20);
+    h+='<h2>Recent driver history</h2><table><tr><th>Date</th><th>Driver</th><th>Odometer</th></tr>'+
+      recent.map(a=>'<tr><td>'+D(a.work_date)+'</td><td>'+esc(a.employee_name||enm(a.employee_id)||'')+'</td><td>'+(a.mileage_end?Number(a.mileage_end).toLocaleString()+' mi':'—')+'</td></tr>').join('')+'</table>';
+  }
+
+  h+='</div>';
+  return h;
+}
+
 // ── CONDITION PHOTOS ──────────────────────────────────────────────────────
 // A dated gallery per vehicle — tires, body, interior, damage, odometer. The
 // files reuse the existing storage bucket; vehicle_photos indexes them.
