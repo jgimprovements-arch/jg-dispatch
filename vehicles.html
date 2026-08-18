@@ -371,47 +371,48 @@ async function notifyMaintenance(vehicleId,noteText){
 
 async function syncMaintenanceIssues(){
   try{
-    // Existing auto-issues, so we neither duplicate nor clobber manual ones.
-    // Match on EITHER signal: the auto_source column (new rows) OR the reporter
-    // label (rows created before the column existed). Missing the old rows was
-    // making the sweep try to re-insert them every load — the unique index
-    // then rejected the attempt with a 409, four times, on every refresh.
-    let autoOpen=[], hasAutoCol=true;
+    // Read ALL open issues and dedup by vehicle + category. This is immune to
+    // how the existing row was labelled (em-dash vs hyphen, auto_source null vs
+    // set, punch-out vs sweep) — if a vehicle already has an open "Oil change"
+    // issue, we don't create a second one. That mismatch was what made the
+    // sweep POST duplicates every load and collect 409s from the unique index.
+    let allOpen=[], hasAutoCol=true;
     try{
-      // reporter label catches everything the sweep ever made, column or not.
       const res=await sb.from('vehicle_issues')
-        .select('id,vehicle_id,category,note,auto_source,reported_by_name')
-        .eq('reported_by_name','Auto — maintenance').neq('status','resolved');
+        .select('id,vehicle_id,category,note,auto_source,reported_by_name,status')
+        .neq('status','resolved');
       if(res.error){ throw res.error; }
-      autoOpen=res.data||[];
-      // Probe whether auto_source exists so inserts know whether to send it.
-      const probe=await sb.from('vehicle_issues').select('auto_source').limit(1);
-      hasAutoCol=!probe.error;
-    }catch(e){ hasAutoCol=false; autoOpen=[]; }
-    const openBy={}; (autoOpen||[]).forEach(i=>{openBy[i.vehicle_id]=i;});
+      allOpen=res.data||[];
+      hasAutoCol = allOpen.length ? ('auto_source' in allOpen[0]) : true;
+    }catch(e){ hasAutoCol=false; allOpen=[]; }
 
-    // Heal legacy rows: any auto-issue created before the column existed has
-    // auto_source=null. Stamp them so the unique index and future dedup reads
-    // treat them like every other auto-issue. One-time, self-clearing.
-    if(hasAutoCol){
-      const legacy=(autoOpen||[]).filter(i=>!i.auto_source).map(i=>i.id);
-      if(legacy.length){ try{ await sb.from('vehicle_issues').update({auto_source:'maintenance'}).in('id',legacy); }catch(e){} }
-    }
+    // Key: vehicle_id + normalized category → the existing open issue.
+    const norm=c=>String(c||'').trim().toLowerCase();
+    const openByVehCat={};
+    // Also track auto-issues by vehicle for the auto-resolve path.
+    const autoByVeh={};
+    allOpen.forEach(i=>{
+      openByVehCat[i.vehicle_id+'|'+norm(i.category)]=i;
+      const isAuto = i.auto_source==='maintenance' || /auto/i.test(i.reported_by_name||'');
+      if(isAuto) autoByVeh[i.vehicle_id]=i;
+    });
 
     const now=new Date().toISOString();
     const toCreate=[], toResolve=[];
 
     VEHICLES.forEach(v=>{
       const due=_maintenanceDue(v);
-      const existing=openBy[v.vehicle_id];
+      const existing = due ? openByVehCat[v.id+'|'+norm(due.category)] : null;
+      const autoExisting = autoByVeh[v.id];
       if(due&&!existing){
         const row={vehicle_id:v.id,category:due.category,severity:'normal',
           note:due.label,status:'open',reported_at:now,reported_by_name:'Auto — maintenance'};
         if(hasAutoCol) row.auto_source='maintenance';   // only send the column if it exists
         toCreate.push(row);
-      }else if(!due&&existing){
-        // Work got done — clear the machine-made flag automatically.
-        toResolve.push(existing.id);
+      }else if(!due&&autoExisting){
+        // No longer overdue and we have an auto-created flag → clear it.
+        // Only auto-issues are auto-resolved; a hand-logged issue stays.
+        toResolve.push(autoExisting.id);
       }
     });
 
@@ -1203,6 +1204,7 @@ function historyCsv(){
 }
 document.getElementById('tabFleet').onclick=()=>showTab('fleet');
 document.getElementById('tabIssues').onclick=()=>showTab('issues');
+document.getElementById('tabHistory').onclick=()=>showTab('history');
 document.getElementById('addBtn').onclick=openAdd;
 document.getElementById('deleteVehicle').onclick=deleteVehiclePrompt;
 // Photo pick → upload immediately, preview, stash URL for save.
