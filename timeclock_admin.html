@@ -10206,13 +10206,31 @@ function _buildEmployeeFilePdf(data) {
       kvRow('Handbook Version', _fmtDate(ob.handbook_version.version_date));
       kvRow('Handbook Hash', ob.handbook_version.file_hash ? (ob.handbook_version.file_hash.substring(0,24)+'…') : '—');
     }
-    var ackItems = [];
-    if (ob.code_of_conduct) ackItems.push('Code of Conduct');
-    if (ob.safety_ppe) ackItems.push('Safety & PPE');
-    if (ob.confidentiality) ackItems.push('Confidentiality');
-    if (ob.drug_free_workplace) ackItems.push('Drug-Free Workplace');
-    if (ob.harassment_policy) ackItems.push('Harassment Policy');
-    kvRow('Policies Acknowledged', ackItems.length ? ackItems.join(', ') : '—');
+    // Keys must match what onboarding actually writes into
+    // employee_invites.acknowledgments. These were previously guessed
+    // (code_of_conduct / safety_ppe / …) and matched nothing, so this row
+    // printed an em-dash even for a fully signed employee — the exported
+    // file understated the record it was meant to evidence.
+    var ackDefs = [
+      { key: 'handbook',     label: 'Employee Handbook receipt' },
+      { key: 'at_will',      label: 'At-will employment (Wisconsin)' },
+      { key: 'safety',       label: 'Safety & PPE requirements' },
+      { key: 'timeclock',    label: 'Timeclock accuracy commitment' },
+      { key: 'confidential', label: 'Confidentiality agreement' }
+    ];
+    var ackYes = [], ackNo = [];
+    ackDefs.forEach(function(d){ (ob[d.key] ? ackYes : ackNo).push(d.label); });
+    kvRow('Policies Acknowledged', ackYes.length ? ackYes.join(', ') : 'None recorded');
+    if (ackNo.length) kvRow('NOT Acknowledged', ackNo.join(', '));
+
+    // Evidence of receipt, not just of signing.
+    if (ob.handbook_version) {
+      kvRow('Handbook Opened', ob.handbook_viewed
+        ? ('Yes' + (ob.handbook_viewed_at ? ' — ' + _fmtDate(ob.handbook_viewed_at, true) : ''))
+        : 'No record of opening before signing');
+      if (ob.handbook_version.filename) kvRow('Handbook File', ob.handbook_version.filename);
+    }
+    if (ob.user_agent) kvRow('Signing Device', String(ob.user_agent).substring(0, 90));
   } else if (emp.onboarding_signed_at) {
     kvRow('Signed', _fmtDate(emp.onboarding_signed_at, true));
     kvRow('Typed Signature', emp.onboarding_signed_name || '—');
