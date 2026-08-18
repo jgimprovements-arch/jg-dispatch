@@ -141,6 +141,19 @@
     return n;
   }
 
+  // Several vehicles share a name with no unit number ("Van", "Van", "Van";
+  // "Transit Van", "Transit Van"), which made the picker a guess. The plate
+  // is the one thing that's always unique and is written on the truck, so
+  // it's the disambiguator a PM can verify from the lot.
+  function vehicleSubLabel(v) {
+    if (!v) return '';
+    var bits = [];
+    if (v.plate) bits.push(v.plate);
+    if (v.year && v.model) bits.push(v.year + ' ' + v.model);
+    else if (v.model) bits.push(v.model);
+    return bits.join(' · ');
+  }
+
   function actorName() {
     try {
       var raw = localStorage.getItem('jg_dispatch_user') || localStorage.getItem('jg_user');
