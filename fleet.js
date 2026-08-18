@@ -36,6 +36,7 @@
     byMarket: {},        // marketKey → [vehicle]
     assigns: {},         // employeeId → assignment row (for mounted day)
     openIssues: {},      // vehicleId → count of unresolved issues
+    choices: {},        // employeeId → [vehicle] currently offered in that lane
     market: null,
     date: null,
     mounting: false
@@ -286,6 +287,26 @@
       '.jgf-sel.jgf-warn{background:#ffe9e5;border-color:#c02020;color:#8c1414;}',
       '.jgf-share{font-size:9px;color:rgba(255,255,255,.7);font-family:"DM Mono",monospace;flex-shrink:0;}',
       '.jgf-why{font-size:9px;line-height:1.3;margin-top:3px;color:#ffd9d2;font-weight:700;}',
+      /* custom vehicle picker — a native <select> cannot render thumbnails,
+         and the fleet has four vehicles literally named "Van" */
+      '.jgf-btn2{flex:1;min-width:0;display:flex;align-items:center;gap:6px;background:#fff;',
+      'border:1px solid rgba(255,255,255,.25);border-radius:4px;padding:2px 5px 2px 2px;',
+      'cursor:pointer;font-family:"DM Mono",monospace;font-size:11px;font-weight:600;color:#0d1f3c;',
+      'text-align:left;width:100%;}',
+      '.jgf-btn2.jgf-warn{background:#ffe9e5;border-color:#c02020;color:#8c1414;}',
+      '.jgf-thumb{width:26px;height:20px;border-radius:3px;flex-shrink:0;background:#e6eaf0 center/cover no-repeat;}',
+      '.jgf-thumb.ph{display:flex;align-items:center;justify-content:center;font-size:11px;}',
+      '.jgf-btn2 .jgf-nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;}',
+      '.jgf-pop{position:fixed;z-index:9600;background:#fff;border:1px solid #d5dce6;border-radius:8px;',
+      'box-shadow:0 8px 28px rgba(13,45,94,.25);max-height:340px;overflow-y:auto;padding:4px;width:270px;}',
+      '.jgf-opt{display:flex;align-items:center;gap:8px;padding:5px 6px;border-radius:5px;cursor:pointer;',
+      'font-size:13px;color:#0d1f3c;}',
+      '.jgf-opt:hover{background:rgba(232,93,4,.09);}',
+      '.jgf-opt.sel{background:rgba(232,93,4,.14);font-weight:700;}',
+      '.jgf-opt .t{width:46px;height:34px;border-radius:4px;flex-shrink:0;background:#e6eaf0 center/cover no-repeat;',
+      'display:flex;align-items:center;justify-content:center;font-size:15px;}',
+      '.jgf-opt .meta{font-size:10px;color:#6b7a96;}',
+      '.jgf-opt .bad{font-size:10px;color:#c02020;font-weight:700;}',
       '.jgf-why.urgent{color:#ff8a75;}',
       /* punch-out sheet */
       '.jgf-ov{position:fixed;inset:0;background:rgba(13,29,60,.72);z-index:9000;display:none;',
@@ -350,7 +371,7 @@
         F.vehicles = {}; F.byMarket = {}; F.assigns = {}; F.openIssues = {};
 
         var vs = await get('vehicles?select=id,name,vehicle_number,market,status,current_mileage,'
-          + 'usual_assigned_to,'
+          + 'usual_assigned_to,photo_url,plate,year,model,'
           + 'last_oil_mileage,oil_interval_miles,registration_due,insurance_due,inspection_due'
           + '&status=in.(active,flagged,in_shop)&order=name.asc');
         if (vs) {
@@ -401,31 +422,22 @@
       var flagged = curProblems.length > 0;
       var isUrgent = curProblems.some(function (p) { return p.urgent; });
 
-      var opts = '<option value="">🚐 no vehicle</option>';
+      // Which vehicles this lane may choose from. A vehicle with a dedicated
+      // driver belongs to that person and is not pool equipment, so it stays
+      // out of everyone else's picker — unless it's already assigned to this
+      // lane, in which case hiding it would misrepresent who is in what.
+      var choices = [];
       var seen = {};
       list.forEach(function (v) {
         if (seen[v.id]) return;
-        // A vehicle with a dedicated driver belongs to that person — it is
-        // not pool equipment and must not appear in anyone else's picker.
-        // The one exception is a vehicle already assigned to this lane, so
-        // an existing assignment never silently disappears from the list.
         if (v.usual_assigned_to && v.usual_assigned_to !== eid && v.id !== curId) return;
         seen[v.id] = 1;
-        var probs = vehicleProblems(v, F.openIssues[v.id]);
-        var warn = probs.length ? (probs.some(function(p){return p.urgent;}) ? ' ⛔' : ' ⚠') : '';
-        var mine = (v.usual_assigned_to && v.usual_assigned_to === eid) ? '★ ' : '';
-        opts += '<option value="' + esc(v.id) + '"' + (v.id === curId ? ' selected' : '') + '>'
-          + mine + esc(vehicleLabel(v)) + warn + '</option>';
+        choices.push(v);
       });
-      // A vehicle assigned but no longer in the active list (retired
-      // mid-day) still needs to show, or the picker would silently
-      // misrepresent who is in what.
-      if (curId && !seen[curId]) {
-        var gone = F.vehicles[curId];
-        opts += '<option value="' + esc(curId) + '" selected>'
-          + esc(gone ? vehicleLabel(gone) : 'Vehicle (retired)') + '</option>';
-      }
+      if (curId && !seen[curId] && F.vehicles[curId]) { choices.push(F.vehicles[curId]); seen[curId] = 1; }
+      F.choices[eid] = choices;
 
+      var curV = curId ? F.vehicles[curId] : null;
       var share = (curId && shareCount[curId] > 1) ? '<span class="jgf-share">+' + (shareCount[curId] - 1) + '</span>' : '';
 
       // Spell out WHY the vehicle is flagged. A red box with no reason just
@@ -436,34 +448,112 @@
         : '';
 
       slot.innerHTML = '<div class="jgf-row">'
-        + '<select class="jgf-sel' + (flagged ? ' jgf-warn' : '') + '"'
+        + '<button type="button" class="jgf-btn2' + (flagged ? ' jgf-warn' : '') + '"'
         + ' data-jgf-emp="' + esc(eid) + '" data-jgf-name="' + esc(enm) + '"'
         + ' data-jgf-prev="' + esc(curId || '') + '"'
-        + ' onchange="JGFleet.setVehicle(this)" onclick="event.stopPropagation()"'
-        + ' title="Vehicle for this day">' + opts + '</select>'
+        + ' onclick="event.stopPropagation();JGFleet.openPicker(this)"'
+        + ' title="Vehicle for this day">'
+        + thumbHtml(curV, 'jgf-thumb')
+        + '<span class="jgf-nm">' + (curV ? esc(vehicleLabel(curV)) : 'no vehicle') + '</span>'
+        + '<span style="opacity:.5;flex-shrink:0;">▾</span>'
+        + '</button>'
         + share + '</div>' + reason;
     });
   }
 
-  async function setVehicle(sel) {
-    var prev = sel.getAttribute('data-jgf-prev') || '';
+  function thumbHtml(v, cls) {
+    if (v && v.photo_url) {
+      return '<span class="' + cls + '" style="background-image:url(\'' + esc(v.photo_url) + '\');"></span>';
+    }
+    return '<span class="' + cls + ' ph">🚐</span>';
+  }
+
+  // Native <select> can't show images, and the roster has four vehicles named
+  // some variant of "Van" — a photo is the fastest way to pick the right one.
+  // The panel is position:fixed off the button's rect so it can't be clipped
+  // by the lane's overflow.
+  function openPicker(btn) {
+    closePicker();
+    var eid = btn.getAttribute('data-jgf-emp');
+    var enm = btn.getAttribute('data-jgf-name') || '';
+    var prev = btn.getAttribute('data-jgf-prev') || '';
+    var choices = F.choices[eid] || [];
+
+    var pop = document.createElement('div');
+    pop.className = 'jgf-pop';
+    pop.id = 'jgf-pop';
+
+    var html = '<div class="jgf-opt' + (prev ? '' : ' sel') + '" data-vid="">'
+      + '<span class="t">—</span><div><div>No vehicle</div>'
+      + '<div class="meta">Clear the assignment</div></div></div>';
+
+    choices.forEach(function (v) {
+      var probs = vehicleProblems(v, F.openIssues[v.id]);
+      var mine = (v.usual_assigned_to && v.usual_assigned_to === eid);
+      var sub = vehicleSubLabel(v);
+      html += '<div class="jgf-opt' + (v.id === prev ? ' sel' : '') + '" data-vid="' + esc(v.id) + '">'
+        + thumbHtml(v, 't')
+        + '<div style="min-width:0;">'
+        + '<div>' + (mine ? '★ ' : '') + esc(vehicleLabel(v)) + '</div>'
+        + (sub ? '<div class="meta">' + esc(sub) + '</div>' : '')
+        + (probs.length ? '<div class="bad">' + esc(probs.map(function (p) { return p.text; }).join(' · ')) + '</div>' : '')
+        + '</div></div>';
+    });
+    pop.innerHTML = html;
+
+    document.body.appendChild(pop);
+    var r = btn.getBoundingClientRect();
+    var w = 270, h = pop.offsetHeight;
+    var left = Math.min(Math.max(8, r.left), window.innerWidth - w - 8);
+    var top = (r.bottom + h + 8 > window.innerHeight && r.top - h - 4 > 0) ? (r.top - h - 4) : (r.bottom + 4);
+    pop.style.left = left + 'px';
+    pop.style.top = Math.max(8, top) + 'px';
+
+    pop.addEventListener('click', function (e) {
+      var opt = e.target.closest('.jgf-opt');
+      if (!opt) return;
+      e.stopPropagation();
+      closePicker();
+      commitVehicle(eid, enm, opt.getAttribute('data-vid') || '', prev);
+    });
+
+    F._closer = function (e) { if (!e || !pop.contains(e.target)) closePicker(); };
+    setTimeout(function () {
+      document.addEventListener('click', F._closer, true);
+      document.addEventListener('keydown', F._esc = function (e) { if (e.key === 'Escape') closePicker(); });
+    }, 0);
+  }
+
+  function closePicker() {
+    var p = document.getElementById('jgf-pop');
+    if (p) p.remove();
+    if (F._closer) { document.removeEventListener('click', F._closer, true); F._closer = null; }
+    if (F._esc) { document.removeEventListener('keydown', F._esc); F._esc = null; }
+  }
+
+  // Kept for compatibility with any lane still rendering a native <select>.
+  function setVehicle(sel) {
+    return commitVehicle(
+      sel.getAttribute('data-jgf-emp'),
+      sel.getAttribute('data-jgf-name') || '',
+      sel.value,
+      sel.getAttribute('data-jgf-prev') || ''
+    );
+  }
+
+  async function commitVehicle(eid, enm, vid, prev) {
     try {
-      var eid = sel.getAttribute('data-jgf-emp');
-      var enm = sel.getAttribute('data-jgf-name') || '';
-      var vid = sel.value;
       var day = F.date || dispatchDate();
       if (!eid) return;
-
-      sel.disabled = true;
 
       // ── CLEAR ────────────────────────────────────────────────
       if (!vid) {
         var del = await write('DELETE',
           'vehicle_assignments?employee_id=eq.' + encodeURIComponent(eid)
           + '&work_date=eq.' + encodeURIComponent(day));
-        sel.disabled = false;
-        if (del.ok) { delete F.assigns[eid]; say('Vehicle cleared'); paint(F.market); }
-        else { say('⚠ Could not clear: ' + errMsg(del)); sel.value = prev; }
+        if (del.ok) { delete F.assigns[eid]; say('Vehicle cleared'); }
+        else { say('⚠ Could not clear: ' + errMsg(del)); }
+        paint(F.market);
         return;
       }
 
@@ -487,7 +577,7 @@
           + probs.map(function (p) { return '• ' + p.text; }).join('\n')
           + '\n\nAssign ' + (enm || 'this tech') + ' to it anyway?'
         );
-        if (!okGo) { sel.value = prev; sel.disabled = false; return; }
+        if (!okGo) { paint(F.market); return; }
       } else if (probs.length) {
         say('⚠ ' + probs.map(function (p) { return p.text; }).join(' · '));
       }
@@ -517,11 +607,8 @@
         }
       }
 
-      sel.disabled = false;
-
       if (res.ok) {
         F.assigns[eid] = row;
-        sel.setAttribute('data-jgf-prev', vid);
         var v = F.vehicles[vid];
         say('🚐 ' + (enm.split(' ')[0] || 'Tech') + ' → ' + (v ? vehicleLabel(v) : 'vehicle'));
         paint(F.market);
@@ -874,6 +961,8 @@
     laneSlot: laneSlot,
     mount: mount,
     setVehicle: setVehicle,
+    openPicker: openPicker,
+    closePicker: closePicker,
     punchOutFlow: punchOutFlow,
     dispatchDate: dispatchDate,
     diagnose: diagnose,
