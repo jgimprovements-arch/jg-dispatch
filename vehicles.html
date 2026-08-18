@@ -921,9 +921,62 @@ async function emailRetired(v,o){
 
 function renderIssues(){
   const wrap=document.getElementById('issuesTab');
-  if(!ISSUES.length){wrap.innerHTML='<div class="empty">No open issues.</div>';return;}
+  const hdr='<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">'+
+    '<div class="section-hdr" style="margin:0;">Open Vehicle Issues'+(ISSUES.length?' ('+ISSUES.length+')':'')+'</div>'+
+    '<button class="btn sm acc" onclick="openReportIssue()">+ Report issue</button></div>';
+  if(!ISSUES.length){wrap.innerHTML=hdr+'<div class="empty">No open issues. Use <b>+ Report issue</b> to log one.</div>';return;}
   const vn=id=>{const v=VEHICLES.find(x=>x.id===id);return v?v.name:'(unknown)';};
-  wrap.innerHTML='<div class="section-hdr">Open Vehicle Issues</div>'+ISSUES.map(i=>'<div class="issue-card"><div><b style="color:var(--navy)">'+esc(vn(i.vehicle_id))+'</b> <span class="badge '+(i.severity==='urgent'?'flagged':'in_shop')+'">'+esc(i.category||'issue')+(i.severity==='urgent'?' · URGENT':'')+'</span><div style="font-size:13px;margin-top:4px">'+(esc(i.note)||'(no note)')+'</div><div style="font-size:11px;color:var(--muted);margin-top:3px">Reported by '+(esc(i.reported_by_name)||'?')+' · '+new Date(i.reported_at).toLocaleDateString()+' · '+esc(i.status)+(i.last_notified_at?' · <span style="color:#2e7d32;">notified '+new Date(i.last_notified_at).toLocaleDateString()+'</span>':'')+'</div></div><div style="display:flex;gap:6px;align-items:flex-start;flex-wrap:wrap">'+(IS_ADMIN?'<button class="btn sm" style="background:var(--navy);color:#fff;border-color:var(--navy);" onclick="notifyIssue(\''+i.id+'\')" title="Email + alert the assigned driver or pool PMs">📣 Notify</button>':'')+(i.status==='open'?'<button class="btn sm ghost" onclick="ackIssue(\''+i.id+'\')">Acknowledge</button>':'')+'<button class="btn sm" onclick="resolveIssue(\''+i.id+'\')">Resolve</button></div></div>').join('');
+  wrap.innerHTML=hdr+ISSUES.map(i=>'<div class="issue-card"><div><b style="color:var(--navy)">'+esc(vn(i.vehicle_id))+'</b> <span class="badge '+(i.severity==='urgent'?'flagged':'in_shop')+'">'+esc(i.category||'issue')+(i.severity==='urgent'?' · URGENT':'')+'</span><div style="font-size:13px;margin-top:4px">'+(esc(i.note)||'(no note)')+'</div><div style="font-size:11px;color:var(--muted);margin-top:3px">Reported by '+(esc(i.reported_by_name)||'?')+' · '+new Date(i.reported_at).toLocaleDateString()+' · '+esc(i.status)+(i.last_notified_at?' · <span style="color:#2e7d32;">notified '+new Date(i.last_notified_at).toLocaleDateString()+'</span>':'')+'</div></div><div style="display:flex;gap:6px;align-items:flex-start;flex-wrap:wrap">'+(IS_ADMIN?'<button class="btn sm" style="background:var(--navy);color:#fff;border-color:var(--navy);" onclick="notifyIssue(\''+i.id+'\')" title="Email + alert the assigned driver or pool PMs">📣 Notify</button>':'')+(i.status==='open'?'<button class="btn sm ghost" onclick="ackIssue(\''+i.id+'\')">Acknowledge</button>':'')+'<button class="btn sm" onclick="resolveIssue(\''+i.id+'\')">Resolve</button></div></div>').join('');
+}
+
+// Manual issue entry — the office fields a call ("brakes feel soft on the
+// Transit") and logs it here. Same table and routing as punch-out reports,
+// so notify/resolve/flag all behave identically.
+function openReportIssue(){
+  let ov=document.getElementById('reportIssueModal');
+  if(!ov){ ov=document.createElement('div'); ov.id='reportIssueModal'; ov.className='modal-back'; document.body.appendChild(ov); }
+  const vOpts=VEHICLES.filter(v=>v.status!=='retired').sort((a,b)=>a.name.localeCompare(b.name))
+    .map(v=>'<option value="'+v.id+'">'+esc(v.name)+(v.vehicle_number?' #'+esc(v.vehicle_number):'')+(v.plate?' · '+esc(v.plate):'')+'</option>').join('');
+  const cats=['Tires / wheels','Brakes','Engine / warning light','Fluids / leak','Body / glass','Electrical / lights','Equipment / rack','Oil change','Other']
+    .map(c=>'<option value="'+c+'">'+c+'</option>').join('');
+  ov.innerHTML='<div class="modal">'+
+    '<h2>Report a vehicle issue</h2>'+
+    '<div class="frow"><label>Vehicle *</label><select id="ri-veh" class="form-select">'+vOpts+'</select></div>'+
+    '<div class="f2">'+
+      '<div class="frow"><label>Problem</label><select id="ri-cat" class="form-select">'+cats+'</select></div>'+
+      '<div class="frow"><label>Severity</label><select id="ri-sev" class="form-select">'+
+        '<option value="normal">Normal — schedule it</option>'+
+        '<option value="urgent">Urgent — do not drive</option></select></div>'+
+    '</div>'+
+    '<div class="frow"><label>Details</label><textarea id="ri-note" placeholder="What is wrong, who reported it…"></textarea></div>'+
+    '<div style="font-size:11px;color:var(--muted);margin-bottom:8px;">Urgent flags the vehicle on the dispatch board. Saving notifies the assigned driver or pool PMs and the office.</div>'+
+    '<div class="modal-actions"><button class="btn ghost" onclick="closeModal(\'reportIssueModal\')">Cancel</button><button class="btn acc" id="ri-save">Save issue</button></div>'+
+  '</div>';
+  ov.classList.add('on');
+  document.getElementById('ri-save').onclick=saveReportedIssue;
+}
+
+async function saveReportedIssue(){
+  const vid=document.getElementById('ri-veh').value;
+  if(!vid){toast('Pick a vehicle');return;}
+  const cat=document.getElementById('ri-cat').value||'Other';
+  const sev=document.getElementById('ri-sev').value==='urgent'?'urgent':'normal';
+  const note=document.getElementById('ri-note').value.trim()||null;
+  const now=new Date().toISOString();
+  const v=VEHICLES.find(x=>x.id===vid);
+
+  const {error}=await sb.from('vehicle_issues').insert({
+    vehicle_id:vid,category:cat,severity:sev,note:note,status:'open',
+    reported_at:now,reported_by_name:ME+' (office)'
+  });
+  if(error){toast('Save failed: '+error.message);return;}
+
+  if(sev==='urgent'&&v&&v.status!=='flagged'){ await sb.from('vehicles').update({status:'flagged'}).eq('id',vid); }
+  closeModal('reportIssueModal');
+  await loadVehicles(); await loadIssues(); render();
+  // Same notification routing as everything else in the fleet.
+  notifyMaintenance(vid,(cat?cat+': ':'')+(note||'Issue reported'));
+  toast('✓ Issue logged'+(sev==='urgent'?' — vehicle flagged':''));
 }
 function openAdd(){document.getElementById('vModalTitle').textContent='Add Vehicle';['vId','fName','fNumber','fYear','fMake','fModel','fPlate','fVin','fMileage','fLastOil','fReg','fIns','fInsp','fNotes','fPhotoUrl'].forEach(id=>document.getElementById(id).value='');document.getElementById('fMarket').value='';document.getElementById('fUsual').value='';document.getElementById('fStatus').value='active';document.getElementById('fOilInterval').value='5000';document.getElementById('fPhotoFile').value='';document.getElementById('photoStatus').textContent='For identification. JPG/PNG.';setPhotoPreview('');document.getElementById('deleteVehicle').style.display='none';document.getElementById('vModal').classList.add('on');}
 function editVehicle(id){const v=VEHICLES.find(x=>x.id===id);if(!v)return;document.getElementById('vModalTitle').textContent='Edit '+v.name;const set=(f,val)=>document.getElementById(f).value=val==null?'':val;set('vId',v.id);set('fName',v.name);set('fNumber',v.vehicle_number);set('fYear',v.year);set('fMake',v.make);set('fModel',v.model);set('fPlate',v.plate);set('fVin',v.vin);set('fMarket',v.market);set('fUsual',v.usual_assigned_to);set('fStatus',v.status);set('fMileage',v.current_mileage);set('fOilInterval',v.oil_interval_miles);set('fLastOil',v.last_oil_mileage);set('fReg',v.registration_due);set('fIns',v.insurance_due);set('fInsp',v.inspection_due);set('fNotes',v.notes);set('fPhotoUrl',v.photo_url);document.getElementById('fPhotoFile').value='';document.getElementById('photoStatus').textContent=v.photo_url?'Photo on file — pick a new one to replace':'For identification. JPG/PNG.';setPhotoPreview(v.photo_url);document.getElementById('deleteVehicle').style.display=IS_ADMIN?'':'none';document.getElementById('vModal').classList.add('on');}
