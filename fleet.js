@@ -30,6 +30,10 @@
   // Typo guard: a single day's driving that exceeds this is almost
   // certainly a fat-fingered odometer (84,210 typed as 842,100).
   var MAX_DAILY_MILES = 3000;
+  // A day's driving beyond this is almost certainly an added digit, not a
+  // real trip. Readings above it are recorded but quarantined — they don't
+  // move the vehicle's tracked mileage until the office confirms.
+  var HARD_MAX_MILES = 15000;
 
   var F = {
     vehicles: {},        // id → vehicle row
@@ -860,12 +864,23 @@
     // Data-quality guards. Bad mileage silently poisons every maintenance
     // prediction downstream, so catch it at the point of entry.
     var last = ctx.veh.current_mileage;
+    var mileageSuspect = false;   // saved to the assignment, but NOT trusted as the new baseline
     if (mi != null && last != null) {
+      var jump = mi - last;
       if (mi < last) {
         if (!confirm('That reading (' + mi.toLocaleString() + ') is LOWER than the last one on file ('
           + Number(last).toLocaleString() + ').\n\nDouble-check the odometer. Save it anyway?')) return;
-      } else if (mi - last > MAX_DAILY_MILES) {
-        if (!confirm('That\'s ' + (mi - last).toLocaleString() + ' miles since the last reading.\n\nIs that right?')) return;
+        mileageSuspect = true;   // a lower-than-last reading never advances the baseline
+      } else if (jump > HARD_MAX_MILES) {
+        // Beyond any believable day — almost certainly an added digit
+        // (127,308 → 1,273,080). Two-step confirm, and even if they tap
+        // through it's flagged so it can't corrupt the vehicle baseline.
+        if (!confirm('That reading is ' + mi.toLocaleString() + ' — a jump of '
+          + jump.toLocaleString() + ' miles since the last reading.\n\nThat looks like a typo. Re-check the odometer.')) return;
+        if (!confirm('Save ' + mi.toLocaleString() + ' anyway?\n\nIt will be recorded against today, but won\'t change the truck\'s tracked mileage until the office confirms it.')) return;
+        mileageSuspect = true;
+      } else if (jump > MAX_DAILY_MILES) {
+        if (!confirm('That\'s ' + jump.toLocaleString() + ' miles since the last reading.\n\nIs that right?')) return;
       }
     }
 
@@ -886,9 +901,11 @@
           entry_id: ctx.entryId || null
         });
         if (!r1.ok) failures.push('odometer (' + errMsg(r1) + ')');
-        // Only ever move the odometer forward — a stale or mistyped low
-        // reading must not roll the vehicle's baseline backwards.
-        if (r1.ok && (last == null || mi >= last)) {
+        // Advance the vehicle baseline only for readings that are (a) higher
+        // than the last and (b) not flagged suspect. A quarantined reading is
+        // still saved on the assignment row for the office to review, but it
+        // never becomes the tracked mileage that maintenance math depends on.
+        if (r1.ok && !mileageSuspect && (last == null || mi >= last)) {
           await write('PATCH', 'vehicles?id=eq.' + encodeURIComponent(ctx.veh.id), {
             current_mileage: mi, updated_at: nowIso
           });
