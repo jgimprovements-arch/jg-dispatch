@@ -391,20 +391,27 @@ async function syncMaintenanceIssues(){
     });
 
     if(toCreate.length){
-      const ins=await sb.from('vehicle_issues').insert(toCreate);
-      if(ins.error){
-        // Surface the FULL error — message, details, hint, code — so a 400
-        // names its own cause instead of printing "[object]".
-        const e=ins.error;
-        console.error('[fleet] auto-issue insert failed:',
-          '\n  message:', e.message,
-          '\n  details:', e.details,
-          '\n  hint:',    e.hint,
-          '\n  code:',    e.code,
-          '\n  payload sample:', JSON.stringify(toCreate[0]));
-        toast('\u26a0 Maintenance flag not saved: '+(e.message||e.details||e.code||'unknown'));
-        return;
+      // Insert ONE AT A TIME so a duplicate on one vehicle can't sink the
+      // whole batch, and treat a unique-violation (code 23505 from the
+      // partial index) as success — it means the row already exists, which
+      // is exactly the state we wanted. The DB index is the real guarantee;
+      // this loop just keeps the client from spamming errors.
+      const created=[];
+      for(const row of toCreate){
+        const ins=await sb.from('vehicle_issues').insert(row);
+        if(ins.error){
+          if(ins.error.code==='23505'){ continue; }   // already flagged — fine
+          const e=ins.error;
+          console.error('[fleet] auto-issue insert failed:',
+            '\n  message:', e.message, '\n  details:', e.details,
+            '\n  hint:', e.hint, '\n  code:', e.code,
+            '\n  payload:', JSON.stringify(row));
+          toast('\u26a0 Maintenance flag not saved: '+(e.message||e.details||e.code||'unknown'));
+          continue;
+        }
+        created.push(row);
       }
+      toCreate.length=0; Array.prototype.push.apply(toCreate,created);  // only truly-new ones notify
     }
     if(toResolve.length) await sb.from('vehicle_issues').update({status:'resolved',resolved_by:'auto',resolved_at:now,resolution_note:'Maintenance no longer overdue'}).in('id',toResolve);
 
