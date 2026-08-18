@@ -394,10 +394,55 @@
       }
 
       paint(mk);
+      autoDefaultDedicated(mk);
     } catch (e) {
       console.warn('[fleet] mount failed (board unaffected):', e.message);
     } finally {
       F.mounting = false;
+    }
+  }
+
+  // A dedicated vehicle (usual_assigned_to set) belongs to one driver every
+  // day. If that driver is on today's board and has no vehicle chosen yet,
+  // assign theirs automatically — but WRITE the row, don't just pre-select,
+  // because the punch-out odometer prompt reads a real assignment. The PM can
+  // still change it in the dropdown; a manual pick already counts as "chosen"
+  // so we never override a deliberate choice. Idempotent per day.
+  function autoDefaultDedicated(mk) {
+    try {
+      // Map each dedicated vehicle to its driver, within this market or pool.
+      var dedicatedByDriver = {};
+      (F.byMarket[mk] || []).concat(F.byMarket.__pool__ || []).forEach(function (v) {
+        if (v.usual_assigned_to && v.status !== 'retired') dedicatedByDriver[v.usual_assigned_to] = v;
+      });
+
+      var slots = document.querySelectorAll('.jgf-slot[data-jgf-emp]');
+      Array.prototype.forEach.call(slots, function (slot) {
+        var eid = slot.getAttribute('data-jgf-emp');
+        var enm = slot.getAttribute('data-jgf-name') || '';
+        var v = dedicatedByDriver[eid];
+        if (!v) return;                    // no dedicated vehicle for this person
+        if (F.assigns[eid]) return;        // already has one (auto or manual) — leave it
+        if (F._autoTried && F._autoTried[eid] === F.date) return; // don't retry same day
+
+        F._autoTried = F._autoTried || {};
+        F._autoTried[eid] = F.date;
+
+        var row = {
+          vehicle_id: v.id, employee_id: eid, employee_name: enm,
+          work_date: F.date, market: F.market, created_by: 'auto-default'
+        };
+        // Optimistic local update so the board reflects it immediately.
+        F.assigns[eid] = row;
+        write('POST', 'vehicle_assignments?on_conflict=employee_id,work_date',
+          row, 'resolution=merge-duplicates,return=minimal').then(function (res) {
+          if (!res.ok) { delete F.assigns[eid]; }  // roll back the optimistic add
+          paint(F.market);
+        });
+      });
+      paint(mk);
+    } catch (e) {
+      console.warn('[fleet] auto-default skipped:', e.message);
     }
   }
 

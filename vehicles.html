@@ -285,9 +285,106 @@ async function uploadVehiclePhoto(file){
 }
 function openGate(msg){document.getElementById('gate').style.display='block';document.getElementById('app').style.display='none';if(msg)document.getElementById('gateMsg').textContent=msg;const p=detectEmail();if(p)document.getElementById('emailInput').value=p;}
 async function tryEnter(email){email=String(email||'').trim().toLowerCase();if(!email)return openGate('Enter your email.');const ok=await _emailAllowed(email);if(!ok)return openGate('Your account does not have Fleet access. Contact the office.');ME=email;IS_ADMIN=await _isAdmin(email);document.getElementById('gate').style.display='none';document.getElementById('app').style.display='block';await boot();}
-async function boot(){if(!window.supabase||!window.supabase.createClient){toast('Database library blocked - check tracking prevention');return;}sb=window.supabase.createClient(SB_URL,SB_KEY);await Promise.all([loadEmployees(),loadVehicles(),loadIssues()]);render();}
+async function boot(){if(!window.supabase||!window.supabase.createClient){toast('Database library blocked - check tracking prevention');return;}sb=window.supabase.createClient(SB_URL,SB_KEY);await Promise.all([loadEmployees(),loadVehicles(),loadIssues()]);await syncMaintenanceIssues();render();}
 async function loadEmployees(){const {data}=await sb.from('employees').select('id,name,active').eq('active',true).order('name');EMPLOYEES=data||[];document.getElementById('fUsual').innerHTML='<option value="">- none / pool -</option>'+EMPLOYEES.map(e=>'<option value="'+e.id+'">'+esc(e.name)+'</option>').join('');}
 async function loadVehicles(){const {data}=await sb.from('vehicles').select('*').order('name');VEHICLES=data||[];}
+// ── AUTO MAINTENANCE ISSUES ───────────────────────────────────────────────
+// A vehicle going overdue shouldn't depend on anyone noticing a red number.
+// On load we reconcile: every overdue vehicle gets ONE open maintenance
+// issue, and that issue clears itself once the work is logged. auto_source
+// marks these so a person's hand-written issue is never touched.
+function _maintenanceDue(v){
+  // Returns {due:bool, label, category} for the worst current problem, or null.
+  if(v.status==='retired') return null;
+  if(v.current_mileage&&v.last_oil_mileage&&v.oil_interval_miles){
+    const next=v.last_oil_mileage+v.oil_interval_miles;
+    const over=v.current_mileage-next;
+    if(over>=0) return {due:true,category:'Oil change',label:'Oil change overdue by '+over.toLocaleString()+' mi (at '+v.current_mileage.toLocaleString()+', due '+next.toLocaleString()+')'};
+  }
+  const dOut=d=>{if(!d)return null;const t=new Date(d+'T00:00:00');return isNaN(t)?null:Math.ceil((t-new Date())/86400000);};
+  for(const [lbl,d] of [['Registration',v.registration_due],['Insurance',v.insurance_due],['DOT inspection',v.inspection_due]]){
+    const n=dOut(d); if(n!==null&&n<0) return {due:true,category:lbl,label:lbl+' expired '+Math.abs(n)+' day'+(Math.abs(n)!==1?'s':'')+' ago'};
+  }
+  return null;
+}
+
+// Alert recipients: always office; plus the dedicated driver if the vehicle
+// has one, otherwise the PMs (pool vehicle → whoever might grab it). Role is
+// comma-separated, so match by overlap.
+async function notifyMaintenance(vehicleId,noteText){
+  try{
+    const v=VEHICLES.find(x=>x.id===vehicleId); if(!v) return;
+    const label=v.name+(v.vehicle_number?' #'+v.vehicle_number:'');
+    const recips=[];        // {email,name}
+    const seen={};
+    const add=e=>{ if(e&&e.email&&!seen[e.email.toLowerCase()]){seen[e.email.toLowerCase()]=1;recips.push({email:e.email,name:e.name});} };
+
+    if(v.usual_assigned_to){
+      const d=EMPLOYEES.find(e=>e.id===v.usual_assigned_to); if(d) add(d);
+    }else{
+      // pool vehicle → PMs in that market (fall back to all PMs)
+      EMPLOYEES.filter(e=>String(e.role||'').split(',').map(r=>r.trim().toLowerCase()).includes('project manager'))
+        .filter(e=>!v.market||!e.market||e.market===v.market).forEach(add);
+    }
+
+    // In-app bell for office + the resolved recipients.
+    const bellRoles=['admin','office'];
+    const bellRows=EMPLOYEES.filter(e=>e.email&&String(e.role||'').split(',').map(r=>r.trim().toLowerCase()).some(r=>bellRoles.includes(r)))
+      .map(e=>({email:e.email,name:e.name}));
+    bellRows.forEach(add);
+
+    if(recips.length){
+      const rows=recips.map(r=>({recipient_email:r.email,recipient_name:r.name,category:'timeclock',severity:'info',
+        title:'🛢 Maintenance due — '+label,body:noteText+(v.usual_assigned_to?'':' (pool vehicle)'),
+        action_url:'https://jgimprovements-arch.github.io/jg-dispatch/vehicles.html',action_label:'Open Fleet',
+        expires_at:new Date(Date.now()+14*864e5).toISOString()}));
+      try{ await sb.from('notifications').insert(rows); }catch(e){}
+    }
+
+    // Email via platform mailer (office list + driver if dedicated).
+    const {data}=await sb.from('platform_settings').select('value').eq('key','mailer_api_key').single();
+    if(!data||!data.value) return;
+    const to=['josh@jg-restoration.com','hannah@jg-restoration.com','lisa@jg-restoration.com'];
+    if(v.usual_assigned_to){ const d=EMPLOYEES.find(e=>e.id===v.usual_assigned_to); if(d&&d.email) to.push(d.email); }
+    await fetch('https://jg-platform-mailer.josh-70f.workers.dev/send',{method:'POST',
+      headers:{'Content-Type':'application/json','X-Mailer-Key':data.value},
+      body:JSON.stringify({from:'josh@jg-restoration.com',to:[...new Set(to)].join(','),
+        subject:'🛢 Maintenance due — '+label,
+        text:label+': '+noteText+(v.usual_assigned_to?' (assigned driver notified)':' (pool vehicle — PMs notified)'),
+        reply_to:'josh@jg-restoration.com'})});
+  }catch(e){ console.warn('[fleet] maintenance notify skipped:',e); }
+}
+
+async function syncMaintenanceIssues(){
+  try{
+    // Existing auto-issues, so we neither duplicate nor clobber manual ones.
+    const {data:autoOpen}=await sb.from('vehicle_issues').select('id,vehicle_id,category,note').eq('auto_source','maintenance').neq('status','resolved');
+    const openBy={}; (autoOpen||[]).forEach(i=>{openBy[i.vehicle_id]=i;});
+    const now=new Date().toISOString();
+    const toCreate=[], toResolve=[];
+
+    VEHICLES.forEach(v=>{
+      const due=_maintenanceDue(v);
+      const existing=openBy[v.vehicle_id];
+      if(due&&!existing){
+        toCreate.push({vehicle_id:v.id,category:due.category,severity:'soon',
+          note:due.label,status:'open',reported_at:now,reported_by_name:'Auto — maintenance',
+          auto_source:'maintenance'});
+      }else if(!due&&existing){
+        // Work got done — clear the machine-made flag automatically.
+        toResolve.push(existing.id);
+      }
+    });
+
+    if(toCreate.length) await sb.from('vehicle_issues').insert(toCreate);
+    if(toResolve.length) await sb.from('vehicle_issues').update({status:'resolved',resolved_by:'auto',resolved_at:now,resolution_note:'Maintenance no longer overdue'}).in('id',toResolve);
+
+    // Alert on newly-created ones: office + the assigned driver (dedicated) or
+    // the pool PMs. Fire-and-forget; the issue already exists regardless.
+    if(toCreate.length){ for(const c of toCreate){ notifyMaintenance(c.vehicle_id,c.note); } await loadIssues(); }
+  }catch(e){ console.warn('[fleet] maintenance sync skipped:',e); }
+}
+
 async function loadIssues(){const {data}=await sb.from('vehicle_issues').select('*').neq('status','resolved').order('reported_at',{ascending:false});ISSUES=data||[];document.getElementById('issueCount').textContent=ISSUES.length?'('+ISSUES.length+')':'';}
 function daysUntil(d){if(!d)return null;return Math.round((new Date(d)-new Date())/86400000);}
 function dueRow(label,d){const n=daysUntil(d);if(n===null)return '';let cls='',txt=d;if(n<0){cls='overdue';txt=d+' · OVERDUE';}else if(n<=30){cls='soon';txt=d+' · '+n+'d';}return '<div class="drow"><span>'+label+'</span><span class="'+cls+'">'+txt+'</span></div>';}
@@ -364,7 +461,7 @@ function renderFleet(){
     const iss=openIssuesFor(v.id);
     const due=[dueRow('Registration',v.registration_due),dueRow('Insurance',v.insurance_due),dueRow('DOT inspection',v.inspection_due),oilDue(v)].filter(Boolean).join('');
     return '<div class="vcard s-'+v.status+'">'+
-      (v.photo_url?'<div style="width:100%;height:120px;border-radius:8px;margin-bottom:10px;background:#eef1f6 url('+esc(v.photo_url)+') center/cover no-repeat;"></div>':'')+
+      (v.photo_url?'<div style="width:100%;height:150px;border-radius:8px;margin-bottom:10px;background:#eef1f6 url('+esc(v.photo_url)+') center/contain no-repeat;cursor:zoom-in;" title="Click to view full size" onclick="openPhoto(\''+esc(v.photo_url)+'\',\''+esc(v.name)+'\')"></div>':'')+
       '<h3>'+esc(v.name)+' <span class="badge '+v.status+'">'+v.status.replace('_',' ')+'</span></h3>'+
       '<div class="vmeta">'+([v.year,esc(v.make),esc(v.model)].filter(Boolean).join(' ')||'—')+' · '+(v.market?(v.market==='stevens_point'?'Stevens Point':'Appleton'):'no market')+(v.vehicle_number?' · #'+esc(v.vehicle_number):'')+'</div>'+
       '<div class="kv"><span>Plate</span><b>'+(esc(v.plate)||'—')+'</b></div>'+
@@ -428,6 +525,24 @@ function renderRetireBanner(){
         (!v.plates_returned?'<button class="btn sm ghost" onclick="closeOffboard(\''+v.id+'\',\'plates\')">✓ Plates returned</button>':'')+
         '</div></div>';
     }).join('')+'</div>';
+}
+
+// Cards use object-fit: contain so nothing is cropped out of frame, but a
+// 150px strip is still small for checking damage or reading a decal. Tapping
+// opens the original at full size.
+function openPhoto(url,name){
+  if(!url) return;
+  let ov=document.getElementById('photoLightbox');
+  if(!ov){
+    ov=document.createElement('div');
+    ov.id='photoLightbox';
+    ov.style.cssText='position:fixed;inset:0;background:rgba(13,29,60,.9);z-index:9500;display:flex;align-items:center;justify-content:center;flex-direction:column;padding:24px;cursor:zoom-out;';
+    ov.onclick=()=>ov.remove();
+    document.body.appendChild(ov);
+  }
+  ov.innerHTML='<div style="color:#fff;font-weight:700;font-size:15px;margin-bottom:12px;">'+esc(name||'')+'</div>'+
+    '<img src="'+esc(url)+'" style="max-width:100%;max-height:80vh;border-radius:10px;background:#fff;">'+
+    '<div style="color:rgba(255,255,255,.6);font-size:11px;margin-top:12px;">Tap anywhere to close</div>';
 }
 
 function openRetire(vid){
