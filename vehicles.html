@@ -358,7 +358,20 @@ async function notifyMaintenance(vehicleId,noteText){
 async function syncMaintenanceIssues(){
   try{
     // Existing auto-issues, so we neither duplicate nor clobber manual ones.
-    const {data:autoOpen}=await sb.from('vehicle_issues').select('id,vehicle_id,category,note').eq('auto_source','maintenance').neq('status','resolved');
+    // If the auto_source column doesn't exist yet (migration not run), that
+    // filtered read 400s — fall back to matching on the reporter label so the
+    // sweep still works and still won't touch hand-written issues.
+    let autoOpen=null, hasAutoCol=true;
+    {
+      const res=await sb.from('vehicle_issues').select('id,vehicle_id,category,note,auto_source').eq('auto_source','maintenance').neq('status','resolved');
+      if(res.error){
+        hasAutoCol=false;
+        const res2=await sb.from('vehicle_issues').select('id,vehicle_id,category,note,reported_by_name').eq('reported_by_name','Auto — maintenance').neq('status','resolved');
+        autoOpen=res2.data||[];
+      }else{
+        autoOpen=res.data||[];
+      }
+    }
     const openBy={}; (autoOpen||[]).forEach(i=>{openBy[i.vehicle_id]=i;});
     const now=new Date().toISOString();
     const toCreate=[], toResolve=[];
@@ -367,16 +380,26 @@ async function syncMaintenanceIssues(){
       const due=_maintenanceDue(v);
       const existing=openBy[v.vehicle_id];
       if(due&&!existing){
-        toCreate.push({vehicle_id:v.id,category:due.category,severity:'soon',
-          note:due.label,status:'open',reported_at:now,reported_by_name:'Auto — maintenance',
-          auto_source:'maintenance'});
+        const row={vehicle_id:v.id,category:due.category,severity:'soon',
+          note:due.label,status:'open',reported_at:now,reported_by_name:'Auto — maintenance'};
+        if(hasAutoCol) row.auto_source='maintenance';   // only send the column if it exists
+        toCreate.push(row);
       }else if(!due&&existing){
         // Work got done — clear the machine-made flag automatically.
         toResolve.push(existing.id);
       }
     });
 
-    if(toCreate.length) await sb.from('vehicle_issues').insert(toCreate);
+    if(toCreate.length){
+      const ins=await sb.from('vehicle_issues').insert(toCreate);
+      if(ins.error){
+        // Surface it instead of failing silently — this is exactly the class
+        // of bug (missing column, bad enum value) that hides behind a caught error.
+        console.error('[fleet] auto-issue insert failed:',ins.error);
+        toast('\u26a0 Maintenance flag not saved: '+(ins.error.message||'unknown'));
+        return;
+      }
+    }
     if(toResolve.length) await sb.from('vehicle_issues').update({status:'resolved',resolved_by:'auto',resolved_at:now,resolution_note:'Maintenance no longer overdue'}).in('id',toResolve);
 
     // Alert on newly-created ones: office + the assigned driver (dedicated) or
