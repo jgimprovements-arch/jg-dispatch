@@ -11087,6 +11087,59 @@ function updateDispatchToggle(cb) {
   if (thumb) thumb.style.left = cb.checked ? '22px' : '2px';
 }
 
+// ── PAY RATE LOCK ─────────────────────────────────────────────────────────
+// Pay is editable while setting a new hire up, then locks once they're
+// active. After that, every change has to go through Compensation History
+// so there's a timestamped record of what changed, when, and why.
+//
+// The reason this matters: a rate typed straight into the employee record
+// overwrites the old value with no trace. A buyer auditing payroll can't
+// reconstruct what someone was paid last year, and neither can you in a wage
+// dispute. Comp History is the system of record; this makes it the only door.
+function _payLocked(emp) {
+  return !!(emp && emp.id && emp.active !== false && !ST._payUnlocked);
+}
+
+function _payLockAttrs(emp) {
+  if (!_payLocked(emp)) return '';
+  return ' readonly style="background:rgba(13,45,94,.05);color:var(--muted);cursor:not-allowed;"'
+       + ' title="Locked — use Compensation History to record a pay change"';
+}
+
+function _payLockNote(emp) {
+  if (!_payLocked(emp)) return '';
+  return ' <span style="font-weight:400;color:var(--muted);font-size:10px;">🔒 locked</span>';
+}
+
+function _payLockHint(emp) {
+  if (!_payLocked(emp)) {
+    return (emp && emp.id) ? '' :
+      '<div style="font-size:10px;color:var(--muted);margin-top:4px;">Set the starting rate here. It locks once they\'re active.</div>';
+  }
+  return '<div style="font-size:10px;color:var(--muted);margin-top:4px;line-height:1.5;">'
+       + 'Pay changes go through <b>Compensation History</b> so the change is dated and attributed. '
+       + '<a href="#" onclick="_unlockPay(event)" style="color:var(--orange);font-weight:600;">Correct a data-entry error</a></div>';
+}
+
+// Escape hatch for a genuine typo — deliberate, confirmed, and logged, so it
+// can't quietly become the normal way people change pay.
+function _unlockPay(ev) {
+  if (ev) ev.preventDefault();
+  if (!isAdmin()) { toast('Admin only'); return; }
+  if (!confirm('Unlock the pay field?\n\nOnly do this to fix a typo in the ORIGINAL entry.\n\nA real pay change — a raise, a promotion, a rate correction going forward — belongs in Compensation History so it\'s dated and attributed.\n\nThis unlock is logged.')) return;
+  ST._payUnlocked = true;
+  var r = document.getElementById('emp-rate'); var sal = document.getElementById('emp-salary');
+  [r, sal].forEach(function(el){
+    if (!el) return;
+    el.removeAttribute('readonly');
+    el.style.background = 'rgba(230,81,0,.06)';
+    el.style.color = 'var(--text)';
+    el.style.cursor = 'text';
+  });
+  logActivity('Pay Field Unlocked', 'Admin unlocked pay entry to correct a data-entry error', 'employees');
+  toast('Pay field unlocked — correction only');
+}
+
 function togglePayFields() {
   var type = (document.getElementById('emp-pay-type') || {}).value;
   var hourlyDiv = document.getElementById('emp-hourly-fields');
@@ -11134,12 +11187,12 @@ function buildEmpForm(emp) {
     '</div>' +
     '<div id="emp-hourly-fields" style="display:'+(emp.pay_type=="salary"?"none":"block")+';">' +
     '<div class="form-row">' +
-    '<div><label class="form-label">Hourly Rate ($)</label><input class="form-input" id="emp-rate" type="number" step="0.01" value="'+(emp.hourly_rate||'')+'"></div>' +
+    '<div><label class="form-label">Hourly Rate ($)'+_payLockNote(emp)+'</label><input class="form-input" id="emp-rate" type="number" step="0.01" value="'+(emp.hourly_rate||'')+'"'+_payLockAttrs(emp)+'>'+_payLockHint(emp)+'</div>' +
     '<div><label class="form-label">Paychex Employee ID</label><input class="form-input" id="emp-paychex-id" type="text" value="'+(emp.paychex_id||'')+'" placeholder="required for payroll export"></div>' +
     '</div></div>' +
     '<div id="emp-salary-fields" style="display:'+(emp.pay_type=="salary"?"block":"none")+';">' +
     '<div class="form-row">' +
-    '<div><label class="form-label">Annual Salary ($)</label><input class="form-input" id="emp-salary" type="number" step="100" value="'+(emp.annual_salary||'')+'" placeholder="e.g. 52000" oninput="calcDailyRate()"></div>' +
+    '<div><label class="form-label">Annual Salary ($)'+_payLockNote(emp)+'</label><input class="form-input" id="emp-salary" type="number" step="100" value="'+(emp.annual_salary||'')+'" placeholder="e.g. 52000" oninput="calcDailyRate()"'+_payLockAttrs(emp)+'>'+_payLockHint(emp)+'</div>' +
     '<div><label class="form-label">Daily Rate (auto)</label><input class="form-input" id="emp-daily-rate" type="number" step="0.01" value="'+(emp.annual_salary?(emp.annual_salary/260).toFixed(2):(emp.daily_rate||''))+'" placeholder="salary ÷ 260 days" readonly style="background:rgba(13,45,94,.03);"></div>' +
     '</div>' +
     '<div class="form-row"><div><label class="form-label">Paychex Employee ID</label><input class="form-input" id="emp-paychex-id-sal" type="text" value="'+(emp.paychex_id||'')+'" placeholder="required for payroll export"></div><div></div></div>' +
@@ -11195,6 +11248,9 @@ async function saveEmployee(opts) {
   // sendInviteFromModal so it can chain the invite call afterward.
   // Returns true/false so the caller knows whether to proceed.
   var skipUi = !!(opts && opts.skipUiSideEffects);
+  // The unlock is single-use: it lasts for this one save and never carries
+  // to the next employee opened.
+  ST._payUnlocked = false;
   var personalEmail = ((document.getElementById('emp-personal-email')||{}).value || '').trim().toLowerCase();
   // Validate: if provided, must look like an email
   if (personalEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(personalEmail)) {
