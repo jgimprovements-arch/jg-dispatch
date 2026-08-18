@@ -287,7 +287,16 @@ function openGate(msg){document.getElementById('gate').style.display='block';doc
 async function tryEnter(email){email=String(email||'').trim().toLowerCase();if(!email)return openGate('Enter your email.');const ok=await _emailAllowed(email);if(!ok)return openGate('Your account does not have Fleet access. Contact the office.');ME=email;IS_ADMIN=await _isAdmin(email);document.getElementById('gate').style.display='none';document.getElementById('app').style.display='block';await boot();}
 async function boot(){if(!window.supabase||!window.supabase.createClient){toast('Database library blocked - check tracking prevention');return;}sb=window.supabase.createClient(SB_URL,SB_KEY);await Promise.all([loadEmployees(),loadVehicles(),loadIssues()]);await syncMaintenanceIssues();render();}
 async function loadEmployees(){const {data}=await sb.from('employees').select('id,name,active').eq('active',true).order('name');EMPLOYEES=data||[];document.getElementById('fUsual').innerHTML='<option value="">- none / pool -</option>'+EMPLOYEES.map(e=>'<option value="'+e.id+'">'+esc(e.name)+'</option>').join('');}
-async function loadVehicles(){const {data}=await sb.from('vehicles').select('*').order('name');VEHICLES=data||[];}
+let PHOTOS_BY_VEH={};
+async function loadVehicles(){const {data}=await sb.from('vehicles').select('*').order('name');VEHICLES=data||[];await loadVehiclePhotos();}
+async function loadVehiclePhotos(){
+  PHOTOS_BY_VEH={};
+  try{
+    const {data,error}=await sb.from('vehicle_photos').select('*').order('taken_at',{ascending:false});
+    if(error) return;                       // table not created yet — gallery just stays empty
+    (data||[]).forEach(p=>{(PHOTOS_BY_VEH[p.vehicle_id]=PHOTOS_BY_VEH[p.vehicle_id]||[]).push(p);});
+  }catch(e){ console.warn('[fleet] photos load skipped:',e); }
+}
 // ── AUTO MAINTENANCE ISSUES ───────────────────────────────────────────────
 // A vehicle going overdue shouldn't depend on anyone noticing a red number.
 // On load we reconcile: every overdue vehicle gets ONE open maintenance
@@ -507,10 +516,12 @@ function renderFleet(){
       (iss.length?'<div class="issue-flag">⚠ '+iss.length+' open issue'+(iss.length>1?'s':'')+': '+esc(iss[0].category||'')+(iss[0].note?' — '+esc(iss[0].note.slice(0,50)):'')+'</div>':'')+
       '<div class="vactions"><button class="btn sm ghost" onclick="editVehicle(\''+v.id+'\')">Edit</button><button class="btn sm acc" onclick="openService(\''+v.id+'\')">Log service</button>'+
       '<button class="btn sm ghost" onclick="vehicleHistory(\''+v.id+'\')">History</button>'+
+      '<button class="btn sm ghost" onclick="openPhotos(\''+v.id+'\')">📷 Photos'+(PHOTOS_BY_VEH[v.id]?' ('+PHOTOS_BY_VEH[v.id].length+')':'')+'</button>'+
       (v.status==='retired'
         ? '<button class="btn sm ghost" onclick="reactivateVehicle(\''+v.id+'\')">Reactivate</button>'
         : '<button class="btn sm ghost" style="color:#c62828;border-color:rgba(198,40,40,.35)" onclick="openRetire(\''+v.id+'\')">Retire</button>')+
       '</div>'+
+      _photoStrip(v.id)+
       (v.status==='retired'?retiredFooter(v):'')+'</div>';
   }).join('');
 }
@@ -566,6 +577,92 @@ function renderRetireBanner(){
 // Cards use object-fit: contain so nothing is cropped out of frame, but a
 // 150px strip is still small for checking damage or reading a decal. Tapping
 // opens the original at full size.
+// ── CONDITION PHOTOS ──────────────────────────────────────────────────────
+// A dated gallery per vehicle — tires, body, interior, damage, odometer. The
+// files reuse the existing storage bucket; vehicle_photos indexes them.
+const PHOTO_CATS=[['tires','🛞 Tires'],['body','🚗 Body'],['interior','🪑 Interior'],['damage','⚠️ Damage'],['odometer','🔢 Odometer'],['other','📷 Other']];
+function _catLabel(c){const f=PHOTO_CATS.find(x=>x[0]===c);return f?f[1]:'📷 '+(c||'Other');}
+
+// Small thumbnail strip on the card. Caps at 6 with a "+N" overflow.
+function _photoStrip(vid){
+  const list=PHOTOS_BY_VEH[vid]||[];
+  if(!list.length) return '';
+  const show=list.slice(0,6);
+  let h='<div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;">';
+  show.forEach(p=>{
+    h+='<div title="'+esc(_catLabel(p.category)+(p.caption?' — '+p.caption:''))+'" onclick="openPhoto(\''+esc(p.url)+'\',\''+esc(_catLabel(p.category))+'\')" '+
+       'style="width:48px;height:36px;border-radius:4px;background:#e6eaf0 url('+esc(p.url)+') center/cover no-repeat;cursor:zoom-in;border:1px solid var(--border);"></div>';
+  });
+  if(list.length>6) h+='<div onclick="openPhotos(\''+vid+'\')" style="width:48px;height:36px;border-radius:4px;background:rgba(13,45,94,.06);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:var(--navy);cursor:pointer;">+'+(list.length-6)+'</div>';
+  h+='</div>';
+  return h;
+}
+
+// Full gallery + upload, in a modal.
+function openPhotos(vid){
+  const v=VEHICLES.find(x=>x.id===vid); if(!v) return;
+  let ov=document.getElementById('photosModal');
+  if(!ov){ ov=document.createElement('div'); ov.id='photosModal'; ov.className='modal-back'; document.body.appendChild(ov); }
+  const list=PHOTOS_BY_VEH[vid]||[];
+  const catOpts=PHOTO_CATS.map(c=>'<option value="'+c[0]+'">'+c[1]+'</option>').join('');
+  ov.innerHTML='<div class="modal" style="max-width:640px;">'+
+    '<h2>📷 '+esc(v.name)+' — condition photos</h2>'+
+    '<div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;background:rgba(13,45,94,.03);padding:12px;border-radius:8px;margin-bottom:14px;">'+
+      '<div><label class="form-label" style="font-size:10px;">Category</label><select id="ph-cat" class="form-select" style="min-width:130px;">'+catOpts+'</select></div>'+
+      '<div style="flex:1;min-width:140px;"><label class="form-label" style="font-size:10px;">Caption (optional)</label><input id="ph-cap" class="form-input" placeholder="e.g. front-left tire worn"></div>'+
+      '<div><label class="form-label" style="font-size:10px;">Photo</label><input type="file" id="ph-file" accept="image/*" capture="environment" style="font-size:12px;"></div>'+
+      '<button class="btn acc" id="ph-upload" data-vid="'+vid+'">Upload</button>'+
+    '</div>'+
+    '<div id="ph-status" style="font-size:11px;color:var(--muted);margin-bottom:10px;"></div>'+
+    '<div id="ph-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;max-height:50vh;overflow-y:auto;">'+
+      (list.length?list.map(p=>_photoCard(p)).join(''):'<div class="empty" style="grid-column:1/-1;">No photos yet. Add the first one above.</div>')+
+    '</div>'+
+    '<div class="modal-actions"><button class="btn ghost" onclick="closeModal(\'photosModal\')">Close</button></div>'+
+  '</div>';
+  ov.classList.add('on');
+  document.getElementById('ph-upload').onclick=uploadConditionPhoto;
+}
+
+function _photoCard(p){
+  const when=p.taken_at?new Date(p.taken_at).toLocaleDateString():'';
+  return '<div style="border:1px solid var(--border);border-radius:8px;overflow:hidden;background:#fff;">'+
+    '<div onclick="openPhoto(\''+esc(p.url)+'\',\''+esc(_catLabel(p.category))+'\')" style="height:110px;background:#e6eaf0 url('+esc(p.url)+') center/cover no-repeat;cursor:zoom-in;"></div>'+
+    '<div style="padding:7px 9px;">'+
+      '<div style="font-size:11px;font-weight:700;color:var(--navy);">'+_catLabel(p.category)+'</div>'+
+      (p.caption?'<div style="font-size:11px;color:var(--text);margin-top:2px;">'+esc(p.caption)+'</div>':'')+
+      '<div style="font-size:10px;color:var(--muted);margin-top:3px;">'+when+(p.taken_by?' · '+esc(p.taken_by):'')+'</div>'+
+      (IS_ADMIN?'<button class="btn sm ghost" style="color:#c62828;border-color:rgba(198,40,40,.3);margin-top:6px;font-size:10px;padding:3px 8px;" onclick="deleteConditionPhoto(\''+p.id+'\',\''+p.vehicle_id+'\')">Delete</button>':'')+
+    '</div></div>';
+}
+
+async function uploadConditionPhoto(e){
+  const vid=e.target.getAttribute('data-vid');
+  const file=(document.getElementById('ph-file').files||[])[0];
+  if(!file){toast('Pick a photo first');return;}
+  const cat=document.getElementById('ph-cat').value||'other';
+  const cap=document.getElementById('ph-cap').value.trim()||null;
+  const st=document.getElementById('ph-status'); st.textContent='Uploading…';
+  const url=await uploadVehiclePhoto(file);
+  if(!url){st.textContent='Upload failed — try again';return;}
+  const v=VEHICLES.find(x=>x.id===vid);
+  const {error}=await sb.from('vehicle_photos').insert({
+    vehicle_id:vid,url:url,category:cat,caption:cap,taken_by:ME,
+    mileage:v&&v.current_mileage?v.current_mileage:null
+  });
+  if(error){st.textContent='Saved file but record failed: '+error.message;return;}
+  await loadVehiclePhotos(); render(); openPhotos(vid);   // refresh gallery
+  toast('📷 Photo added');
+}
+
+async function deleteConditionPhoto(id,vid){
+  if(!IS_ADMIN){toast('Admin only');return;}
+  if(!confirm('Delete this photo?')) return;
+  const {error}=await sb.from('vehicle_photos').delete().eq('id',id);
+  if(error){toast('Delete failed: '+error.message);return;}
+  await loadVehiclePhotos(); render(); openPhotos(vid);
+  toast('Photo deleted');
+}
+
 function openPhoto(url,name){
   if(!url) return;
   let ov=document.getElementById('photoLightbox');
