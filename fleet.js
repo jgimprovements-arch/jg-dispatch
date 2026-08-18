@@ -798,7 +798,7 @@
       + '<select id="jgf-cat" class="jgf-sel2">' + cats + '</select>'
       + '<label class="jgf-lbl" style="margin-top:14px;">How bad?</label>'
       + '<select id="jgf-sev" class="jgf-sel2">'
-      + '<option value="minor">Minor — still safe to drive</option>'
+      + '<option value="normal">Minor — still safe to drive</option>'
       + '<option value="soon">Needs attention soon</option>'
       + '<option value="urgent">Urgent — do not drive</option>'
       + '</select>'
@@ -949,7 +949,13 @@
 
       if (ctx.issue) {
         var cat = (document.getElementById('jgf-cat') || {}).value || 'Other';
-        var sev = (document.getElementById('jgf-sev') || {}).value || 'minor';
+        var sevEl = document.getElementById('jgf-sev');
+        // The dropdown shows three human labels but the DB constraint only
+        // allows 'normal' or 'urgent'. Capture the label for the email, but
+        // write a value the constraint accepts. Only true "urgent" flags the van.
+        var sevText = sevEl ? sevEl.options[sevEl.selectedIndex].text : 'Minor';
+        var isUrgent = sevEl ? (sevEl.value === 'urgent') : false;
+        var sev = isUrgent ? 'urgent' : 'normal';
         var note = (document.getElementById('jgf-note') || {}).value || '';
         var r2 = await write('POST', 'vehicle_issues', {
           vehicle_id: ctx.veh.id,
@@ -967,21 +973,20 @@
         // on the board so nobody assigns into it. vehicles.html clears the
         // flag automatically when the last open issue is resolved.
         if (!r2.ok) failures.push('issue report (' + errMsg(r2) + ')');
-        if (r2.ok && sev === 'urgent') {
+        if (r2.ok && isUrgent) {
           await write('PATCH', 'vehicles?id=eq.' + encodeURIComponent(ctx.veh.id), { status: 'flagged' });
         }
         if (r2.ok) {
-          var sevLabel = sev === 'urgent' ? 'URGENT — do not drive'
-                       : sev === 'soon'   ? 'Needs attention soon' : 'Minor';
+          var sevLabel = sevText;
           alertFleet({
-            urgent: sev === 'urgent',
-            subject: (sev === 'urgent' ? '⛔ URGENT vehicle issue — ' : '🔧 Vehicle issue — ') + vehicleLabel(ctx.veh),
+            urgent: isUrgent,
+            subject: (isUrgent ? '⛔ URGENT vehicle issue — ' : '🔧 Vehicle issue — ') + vehicleLabel(ctx.veh),
             text: (ctx.empName || 'A tech') + ' reported "' + cat + '" on ' + vehicleLabel(ctx.veh)
                   + ' (' + sevLabel + ')' + (note ? ': ' + note : '') + '.',
             html: fleetMailHtml({
-              urgent: sev === 'urgent',
+              urgent: isUrgent,
               heading: '🔧 Vehicle issue reported',
-              alert: sev === 'urgent'
+              alert: isUrgent
                 ? 'Reported as URGENT — this vehicle should not go out tomorrow. It has been flagged on the dispatch board.'
                 : null,
               rows: [

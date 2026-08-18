@@ -380,7 +380,7 @@ async function syncMaintenanceIssues(){
       const due=_maintenanceDue(v);
       const existing=openBy[v.vehicle_id];
       if(due&&!existing){
-        const row={vehicle_id:v.id,category:due.category,severity:'soon',
+        const row={vehicle_id:v.id,category:due.category,severity:'normal',
           note:due.label,status:'open',reported_at:now,reported_by_name:'Auto — maintenance'};
         if(hasAutoCol) row.auto_source='maintenance';   // only send the column if it exists
         toCreate.push(row);
@@ -393,10 +393,16 @@ async function syncMaintenanceIssues(){
     if(toCreate.length){
       const ins=await sb.from('vehicle_issues').insert(toCreate);
       if(ins.error){
-        // Surface it instead of failing silently — this is exactly the class
-        // of bug (missing column, bad enum value) that hides behind a caught error.
-        console.error('[fleet] auto-issue insert failed:',ins.error);
-        toast('\u26a0 Maintenance flag not saved: '+(ins.error.message||'unknown'));
+        // Surface the FULL error — message, details, hint, code — so a 400
+        // names its own cause instead of printing "[object]".
+        const e=ins.error;
+        console.error('[fleet] auto-issue insert failed:',
+          '\n  message:', e.message,
+          '\n  details:', e.details,
+          '\n  hint:',    e.hint,
+          '\n  code:',    e.code,
+          '\n  payload sample:', JSON.stringify(toCreate[0]));
+        toast('\u26a0 Maintenance flag not saved: '+(e.message||e.details||e.code||'unknown'));
         return;
       }
     }
