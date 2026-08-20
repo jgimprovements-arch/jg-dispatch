@@ -367,6 +367,44 @@
   // Emitted inline while renderBoard() builds the lane head. Purely a
   // placeholder — if mount() never succeeds it stays empty and the lane
   // looks exactly like it does today.
+  // ── TIMECLOCK VEHICLE BADGE ─────────────────────────────────────────────
+  // Shows the tech which vehicle is theirs today, in the clock card. Reads the
+  // same vehicle_assignments the punch-out prompt uses, so what they see here
+  // is exactly the vehicle they'll be asked to record an odometer for. Renders
+  // into an element the host page provides (id 'vehicle-badge'); does nothing
+  // if that element is absent, so it's safe to call from anywhere.
+  async function showVehicleBadge(empId) {
+    try {
+      var el = document.getElementById('vehicle-badge');
+      if (!el || !empId) return;
+      var day = dispatchDate();
+      var as = await get('vehicle_assignments?select=vehicle_id&employee_id=eq.'
+        + encodeURIComponent(empId) + '&work_date=eq.' + encodeURIComponent(day) + '&limit=1');
+      if (!as || !as.length || !as[0].vehicle_id) { el.style.display = 'none'; return; }
+
+      var vs = await get('vehicles?select=id,name,vehicle_number,plate,status,current_mileage,'
+        + 'last_oil_mileage,oil_interval_miles,registration_due,insurance_due,inspection_due'
+        + '&id=eq.' + encodeURIComponent(as[0].vehicle_id) + '&limit=1');
+      if (!vs || !vs.length) { el.style.display = 'none'; return; }
+      var v = vs[0];
+
+      // Any current problem (open issue count unknown here, so status + dates).
+      var probs = vehicleProblems(v, 0);
+      var warn = probs.some(function (p) { return p.urgent; });
+      var label = '🚐 ' + vehicleLabel(v) + (v.plate ? ' · ' + v.plate : '');
+      if (probs.length) label += '  ⚠ ' + probs[0].text;
+
+      el.textContent = label;
+      el.style.display = '';
+      el.style.background = warn ? 'rgba(198,40,40,.08)' : 'rgba(13,45,94,.05)';
+      el.style.color = warn ? '#8c1414' : '';
+      el.style.border = warn ? '1px solid rgba(198,40,40,.3)' : '';
+      el.title = 'Your vehicle today — you\'ll record its odometer at clock-out';
+    } catch (e) {
+      console.warn('[fleet] vehicle badge skipped:', e.message);
+    }
+  }
+
   function laneSlot(empId, empName) {
     if (!empId) return '';
     return '<div class="jgf-slot" data-jgf-emp="' + esc(empId) + '" data-jgf-name="' + esc(empName) + '"></div>';
@@ -1039,6 +1077,7 @@
 
   var JGFleet = {
     laneSlot: laneSlot,
+    showVehicleBadge: showVehicleBadge,
     mount: mount,
     setVehicle: setVehicle,
     openPicker: openPicker,
