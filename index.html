@@ -494,6 +494,7 @@ body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);min
       </div>
     </div>
     <div class="pool" id="pool"></div>
+    <div id="assignedRow"></div>
   </div>
 </div>
 
@@ -2753,6 +2754,66 @@ function renderPool(){
   });
   const ctog=document.getElementById('cross-toggle');
   if(ctog) ctog.onclick=()=>{ SHOW_CROSS_LOC=!SHOW_CROSS_LOC; renderPool(); };
+
+  renderAssignedRow(q, sortFn);
+}
+
+// ── ASSIGNED JOBS — ADD MORE TECHS ────────────────────────────────────────
+// A job assigned to a tech leaves the unassigned pool, which is right for the
+// normal flow. But to put a SECOND tech on the same job — especially a tech
+// from the other location — the dispatcher needs the assigned job to still be
+// reachable. This is a separate, collapsed-by-default row so it never clutters
+// the main pool; open it (or search) to drag an already-assigned job onto
+// another lane. The same job on multiple lanes is how team/cross-loc jobs work.
+function renderAssignedRow(q, sortFn){
+  const host=document.getElementById('assignedRow');
+  if(!host) return;
+
+  // Every job that sits on at least one tech lane, in either location.
+  const assignedIds=new Set();
+  Object.values(techQ).forEach(techs=>{
+    Object.values(techs||{}).forEach(t=>{ (t.jobs||[]).forEach(jid=>assignedIds.add(jid)); });
+  });
+
+  let ids=[...assignedIds].filter(jid=>{
+    const j=jobs[jid]; if(!j) return false;
+    if(!q) return true;
+    return j.name.toLowerCase().includes(q)||(j.num&&j.num.toLowerCase().includes(q))||(j.addr&&j.addr.toLowerCase().includes(q))||String(jid).toLowerCase().includes(q)||j.city.toLowerCase().includes(q)||j.status.toLowerCase().includes(q)||j.type.toLowerCase().includes(q);
+  });
+
+  if(!ids.length){ host.innerHTML=''; return; }
+  ids.sort(sortFn);
+
+  const open = q || SHOW_ASSIGNED;   // searching forces it open
+  let h='<div id="assigned-toggle" style="cursor:pointer;font-size:11px;font-weight:700;color:var(--gold);text-transform:uppercase;letter-spacing:.5px;padding:8px 4px 4px;">'
+    +(open?'▾':'▸')+' Assigned — add more techs ('+ids.length+')</div>';
+  if(open){
+    h+='<div style="font-size:10px;color:#3E4E62;padding:0 4px 6px;">Drag any of these onto another tech to add them to the same job.</div>';
+    h+='<div id="assigned-cards" style="display:flex;flex-wrap:wrap;gap:8px;padding:0 4px 8px;"></div>';
+  }
+  host.innerHTML=h;
+
+  const tog=document.getElementById('assigned-toggle');
+  if(tog) tog.onclick=()=>{ SHOW_ASSIGNED=!SHOW_ASSIGNED; renderPool(); };
+
+  if(open){
+    const wrap=document.getElementById('assigned-cards');
+    ids.forEach(jid=>{
+      const j=jobs[jid]; if(!j) return;
+      // Which lanes it's already on, for the "assigned to" line.
+      const on=[];
+      Object.entries(techQ).forEach(([lc,techs])=>{
+        Object.entries(techs||{}).forEach(([nm,t])=>{ if((t.jobs||[]).includes(jid)) on.push(nm); });
+      });
+      const c=document.createElement('div');
+      c.className='uc uc-'+j.type; c.draggable=true; c.dataset.jobId=jid; c.dataset.pool='1'; c.dataset.assigned='1';
+      c.style.opacity='.92';
+      const locBadge = j.loc!==loc ? `<div style="font-size:9px;font-weight:700;color:var(--gold);text-transform:uppercase;">${j.location||(j.loc==='stevens'?'Stevens Point':'Appleton')}</div>` : '';
+      c.innerHTML=`<div class="uc-jobname">${j.name}</div><div class="uc-city">${j.city}</div>${locBadge}<div style="font-size:9px;color:#3E4E62;margin-top:2px;">✓ ${on.join(', ')}</div>`;
+      c.addEventListener('dragstart',onDS); c.addEventListener('dragend',onDE);
+      wrap.appendChild(c);
+    });
+  }
 }
 
 // ── DRAG & DROP ───────────────────────────
@@ -3984,6 +4045,7 @@ async function restoreSnapshot(snapshotDate){
 // ── CROSS-LOCATION TECHS ─────────────────
 let crossLocTechs = {appleton:[], stevens:[]};
 let SHOW_CROSS_LOC = false;   // cross-location jobs hidden by default, shown via pool toggle or search
+let SHOW_ASSIGNED = false;    // 'assigned — add more techs' row collapsed by default
 let crossLocTarget = null;
 let crossLocTargetLabel = null;
 
