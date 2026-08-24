@@ -2680,16 +2680,18 @@ function renderPool(){
   // When searching, include jobs from both locations
   let list = unassigned[loc]||[];
   let crossLocJobs = [];
-  if(q){
-    const otherLoc = loc==='appleton'?'stevens':'appleton';
-    const otherList = unassigned[otherLoc]||[];
-    crossLocJobs = otherList.filter(jid=>{
-      const j=jobs[jid];if(!j)return false;
-      return j.name.toLowerCase().includes(q)||j.city.toLowerCase().includes(q)||j.status.toLowerCase().includes(q)||j.type.toLowerCase().includes(q);
-    });
-  }
+  const otherLoc = loc==='appleton'?'stevens':'appleton';
+  const otherList = unassigned[otherLoc]||[];
+  crossLocJobs = otherList.filter(jid=>{
+    const j=jobs[jid];if(!j)return false;
+    if(!q) return true;
+    return j.name.toLowerCase().includes(q)||j.city.toLowerCase().includes(q)||j.status.toLowerCase().includes(q)||j.type.toLowerCase().includes(q);
+  });
   const otherLocLabel = loc==='appleton'?'Stevens Point':'Appleton';
-  document.getElementById('pool-lbl').textContent=LOCATIONS[loc].label+' · '+list.length+' unassigned'+(crossLocJobs.length?' · '+crossLocJobs.length+' from '+otherLocLabel:'');
+  const showCross = q || SHOW_CROSS_LOC;   // always show when searching; else honor toggle
+  document.getElementById('pool-lbl').innerHTML=LOCATIONS[loc].label+' · '+list.length+' unassigned'
+    +(crossLocJobs.length?' · <span id="cross-toggle" style="color:var(--gold);cursor:pointer;text-decoration:underline;" title="Show/hide jobs from the other location">'
+      +(showCross?'hide ':'show ')+crossLocJobs.length+' from '+otherLocLabel+'</span>':'');
   pool.innerHTML='';
   pool.addEventListener('dragover',e=>{e.preventDefault();pool.classList.add('drag-over');});
   pool.addEventListener('dragleave',()=>pool.classList.remove('drag-over'));
@@ -2726,7 +2728,7 @@ function renderPool(){
     const j=jobs[jid];if(!j)return false;
     return j.name.toLowerCase().includes(q)||j.city.toLowerCase().includes(q)||j.status.toLowerCase().includes(q)||j.type.toLowerCase().includes(q);
   }):sorted;
-  const sortedCross=[...crossLocJobs].sort(sortFn);
+  const sortedCross = showCross ? [...crossLocJobs].sort(sortFn) : [];
   const allFiltered=[...filtered,...sortedCross];
   if(!allFiltered.length){pool.innerHTML='<div style="font-size:11px;color:#3E4E62;padding:8px;">'+(q?'No jobs match search':'All jobs assigned')+'</div>';return;}
   // Track if we need a divider between local and cross-loc results
@@ -2748,6 +2750,8 @@ function renderPool(){
     c.addEventListener('dragstart',onDS);c.addEventListener('dragend',onDE);
     pool.appendChild(c);
   });
+  const ctog=document.getElementById('cross-toggle');
+  if(ctog) ctog.onclick=()=>{ SHOW_CROSS_LOC=!SHOW_CROSS_LOC; renderPool(); };
 }
 
 // ── DRAG & DROP ───────────────────────────
@@ -3978,6 +3982,7 @@ async function restoreSnapshot(snapshotDate){
 
 // ── CROSS-LOCATION TECHS ─────────────────
 let crossLocTechs = {appleton:[], stevens:[]};
+let SHOW_CROSS_LOC = false;   // cross-location jobs hidden by default, shown via pool toggle or search
 let crossLocTarget = null;
 let crossLocTargetLabel = null;
 
