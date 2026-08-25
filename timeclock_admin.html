@@ -4756,6 +4756,7 @@ function renderEmployees() {
   h += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px;">';
   h += '<div style="font-size:13px;font-weight:700;color:var(--navy);">Employees ('+ST.employees.length+')'+_countPills+'</div>';
   h += '<div style="display:flex;gap:8px;">';
+  h += '<button class="btn" onclick="exportSafetyAcks()" style="background:transparent;color:var(--navy);border-color:var(--navy);" title="Safety & PPE acknowledgment certificate for OSHA — all active employees">🦺 Safety Acks (OSHA)</button>';
   h += '<button class="btn" onclick="exportAllEmployeeFilesPDF()" style="background:transparent;color:var(--navy);border-color:var(--navy);" title="Generate PDF for every active employee and download as a ZIP">📦 Export All Files</button>';
   h += '<button class="btn" onclick="openInviteEmployee()" style="background:var(--orange);color:#fff;border-color:var(--orange);">📲 Invite Employee</button>';
   h += '<button class="btn btn-primary" onclick="openAddEmployee()">+ Add Employee</button>';
@@ -9830,6 +9831,76 @@ async function deleteReview(reviewId, empId) {
 
 // ── EMPLOYEE FILE PDF EXPORT ──
 // Fetches all employee data + generates a curated 2-3 page diligence-grade PDF
+
+// ── OSHA SAFETY ACKNOWLEDGMENT EXPORT ─────────────────────────────────────
+// A focused, single-purpose certificate of who acknowledged the Safety & PPE
+// policy, when, with the signature and the exact handbook version/hash they
+// received. This is what an OSHA inspector actually asks for — proof of
+// receipt — as opposed to the full employee file (which carries comp and HR
+// data you'd have to redact first). Self-contained HTML: no library, opens
+// anywhere, prints to PDF from the browser.
+async function exportSafetyAcks(oneEmpId){
+  try{
+    var emps = oneEmpId
+      ? ST.employees.filter(function(e){ return e.id===oneEmpId; })
+      : ST.employees.filter(function(e){ return e.active; });
+    if(!emps.length){ alert('No employees to export.'); return; }
+
+    // Pull the latest invite (which holds acknowledgments) per employee.
+    var invites = await Promise.all(emps.map(function(e){
+      return sb('/rest/v1/employee_invites?employee_id=eq.'+e.id+'&order=sent_at.desc&limit=1')
+        .then(function(r){ return (r&&r.length)?r[0]:null; })
+        .catch(function(){ return null; });
+    }));
+
+    var rows = emps.map(function(e,i){
+      var ob = invites[i] && invites[i].acknowledgments ? invites[i].acknowledgments : null;
+      var signed = ob && (ob.signed_at || ob.signature);
+      var safetyAck = ob && !!ob.safety;
+      var hv = ob && ob.handbook_version ? ob.handbook_version : null;
+      var status = !signed ? 'NOT SIGNED' : (safetyAck ? 'ACKNOWLEDGED' : 'SIGNED — SAFETY NOT CHECKED');
+      var color = !signed ? '#c62828' : (safetyAck ? '#2e7d32' : '#e65100');
+      return '<div style="border:1px solid #e6eaf0;border-radius:10px;margin-bottom:14px;overflow:hidden;page-break-inside:avoid;">'
+        + '<div style="display:flex;justify-content:space-between;align-items:center;background:#0d2d5e;color:#fff;padding:12px 16px;">'
+          + '<div style="font-size:15px;font-weight:700;">'+_oshaEsc(e.name)+'</div>'
+          + '<div style="font-size:11px;font-weight:700;background:'+color+';padding:3px 10px;border-radius:4px;">'+status+'</div></div>'
+        + '<table style="width:100%;border-collapse:collapse;font-size:13px;">'
+          + _oshaRow('Safety &amp; PPE requirements', safetyAck ? '✓ Acknowledged' : (signed?'Not checked':'—'))
+          + _oshaRow('Signed on', signed && ob.signed_at ? _fmtDate(ob.signed_at, true) : '—')
+          + _oshaRow('Signature', signed ? (_oshaEsc(ob.signature||e.onboarding_signed_name||'—')) : '—')
+          + _oshaRow('Market', _oshaEsc(e.market||'—'))
+          + (hv ? _oshaRow('Handbook version', _fmtDate(hv.version_date)+(hv.filename?' · '+_oshaEsc(hv.filename):'')) : '')
+          + (hv && hv.file_hash ? _oshaRow('Document hash (SHA-256)', '<span style="font-family:monospace;font-size:11px;">'+_oshaEsc(hv.file_hash)+'</span>') : '')
+          + (ob && ob.handbook_viewed_at ? _oshaRow('Opened before signing', _fmtDate(ob.handbook_viewed_at, true)) : '')
+          + (ob && ob.user_agent ? _oshaRow('Signing device', '<span style="font-size:11px;color:#6b7a96;">'+_oshaEsc(String(ob.user_agent).substring(0,80))+'</span>') : '')
+        + '</table></div>';
+    }).join('');
+
+    var ackCount = emps.filter(function(e,i){ var ob=invites[i]&&invites[i].acknowledgments; return ob&&ob.safety; }).length;
+    var title = oneEmpId ? (emps[0].name+' — Safety Acknowledgment') : 'Safety & PPE Acknowledgments — JG Restoration';
+
+    var doc='<!doctype html><html><head><meta charset="utf-8"><title>'+_oshaEsc(title)+'</title>'
+      +'<style>body{font-family:Arial,Helvetica,sans-serif;color:#0d1f3c;background:#f4f6f9;margin:0;}'
+      +'.wrap{max-width:760px;margin:0 auto;padding:24px;}'
+      +'td{padding:7px 16px;border-bottom:1px solid #eef1f6;} td:first-child{color:#6b7a96;font-size:11px;text-transform:uppercase;letter-spacing:.04em;width:190px;white-space:nowrap;} td:last-child{font-weight:600;}'
+      +'@media print{body{background:#fff;} .no-print{display:none;}}</style></head><body><div class="wrap">'
+      +'<div class="no-print" style="margin-bottom:16px;"><button onclick="window.print()" style="background:#e85d04;color:#fff;border:none;padding:10px 18px;border-radius:8px;font-weight:700;cursor:pointer;">🖨 Print / Save as PDF</button></div>'
+      +'<h1 style="font-size:20px;margin:0 0 4px;">Safety &amp; PPE Acknowledgment Record</h1>'
+      +'<div style="color:#6b7a96;font-size:13px;margin-bottom:6px;">JG Restoration · '+ackCount+' of '+emps.length+' active employees have acknowledged Safety &amp; PPE requirements</div>'
+      +'<div style="color:#6b7a96;font-size:11px;margin-bottom:20px;">Each record shows the electronic acknowledgment, signature, and the cryptographic hash identifying the exact handbook version received. Records are stored immutably with timestamp and device fingerprint.</div>'
+      +rows
+      +'<div style="color:#6b7a96;font-size:11px;text-align:center;padding:18px 0;">Generated '+new Date().toLocaleString()+'</div>'
+      +'</div></body></html>';
+
+    var blob=new Blob([doc],{type:'text/html'});
+    var a=document.createElement('a');
+    a.href=URL.createObjectURL(blob);
+    a.download=(oneEmpId?emps[0].name.replace(/[^a-z0-9]/gi,'_'):'JG_Safety_Acknowledgments')+'_'+new Date().toISOString().slice(0,10)+'.html';
+    a.click();
+  }catch(err){ alert('Export failed: '+(err.message||err)); }
+}
+function _oshaRow(k,v){ return '<tr><td>'+k+'</td><td>'+v+'</td></tr>'; }
+function _oshaEsc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
 async function _fetchEmployeeFileData(empId) {
   var emp = ST.employees.find(function(e){ return e.id === empId; });
