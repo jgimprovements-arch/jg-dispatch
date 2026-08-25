@@ -1467,6 +1467,7 @@ async function loadProjects() {
   // states, not Albi terminal states, and we want them visible.
   const { data, error } = await sb.from('rebuild_projects')
     .select('*')
+    .is('deleted_at', null)
     .not('albi_status_normalized', 'in', '("close","lost")')
     .order('created_at', { ascending: false });
   if (error) { console.error(error); toast('Failed to load projects'); return; }
@@ -2159,7 +2160,7 @@ const SYNC_COOLDOWN_MS = 60 * 1000; // skip sync if last one was <60s ago
 async function pullAllAlbiPages() {
   // Probe first page to know if there's data; then fan out parallel fetches.
   const first = await pullAlbiPage(1);
-  if (!first.length) return [];
+  if (!first.length) { pullAllAlbiPages._complete = true; return []; }
 
   // Debug: log field names from first project so we can see what Albi returns
   if (first[0]) {
@@ -2167,17 +2168,22 @@ async function pullAllAlbiPages() {
     console.log('[Albi Sync] First project sample:', first[0]);
   }
 
-  // Fetch pages 2..15 in parallel (15 pages * 50 = up to 750 jobs).
-  const parallelPages = await Promise.all(
-    [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15].map(p =>
-      pullAlbiPage(p).catch(() => [])
-    )
-  );
+  // Fetch pages 2..40 in parallel (40 pages * 50 = up to 2,000 jobs). We track
+  // whether we reached the END of Albi's data — a short page means no more.
+  // Reconciliation (soft-deleting jobs not seen) is ONLY safe on a complete
+  // pull, so if we somehow fill every page we mark it incomplete and skip
+  // removals rather than risk hiding a live job that sits past the cap.
+  const PAGES = [];
+  for (let p = 2; p <= 40; p++) PAGES.push(p);
+  const parallelPages = await Promise.all(PAGES.map(p => pullAlbiPage(p).catch(() => [])));
   const all = [first];
+  let reachedEnd = first.length < 50;   // first page already short → done
   for (const items of parallelPages) {
-    if (!items || !items.length) break;
+    if (!items || !items.length) { reachedEnd = true; break; }
     all.push(items);
+    if (items.length < 50) { reachedEnd = true; break; }
   }
+  pullAllAlbiPages._complete = reachedEnd;
   return all.flat();
 }
 
@@ -2208,11 +2214,13 @@ async function runAlbiSync(opts) {
 
     // Run upserts in parallel chunks of 8 — much faster than serial
     const CHUNK = 8;
+    const seenIds = new Set();
     for (let i = 0; i < candidates.length; i += CHUNK) {
       const slice = candidates.slice(i, i + CHUNK);
       const results = await Promise.all(slice.map(p =>
         syncOneProject(p).catch(e => { console.error(e); return { error: true }; })
       ));
+      slice.forEach(p => { const id = String(p.id || p.projectId || ''); if (id) seenIds.add(id); });
       for (const r of results) {
         if (r?.skipped) summary.skipped++;
         else if (r?.inserted) summary.inserted++;
@@ -2221,9 +2229,39 @@ async function runAlbiSync(opts) {
       }
     }
 
+    // ── RECONCILE REMOVALS ──────────────────────────────────────────────
+    // The sync above only ADDS and UPDATES. A job that was closed or deleted
+    // in Albi simply stops coming back as an active candidate — but its row
+    // lingered in our table forever, showing as a ghost in the list (this is
+    // why "New" jobs deleted in Albi kept appearing). Here we soft-delete any
+    // non-deleted project whose Albi id wasn't seen in THIS sync. Soft, not
+    // hard: deleted_at keeps the audit trail and is reversible.
+    //
+    // SAFETY: only reconcile when the pull reached the END of Albi's data. If
+    // we hit the page cap without exhausting Albi, a live job could sit past
+    // the last page we fetched — soft-deleting it would wrongly hide real
+    // work. Better to leave a ghost than to hide a live job.
+    if (pullAllAlbiPages._complete && items.length && seenIds.size) {
+      try {
+        const { data: existing } = await sb.from('rebuild_projects')
+          .select('id, project_id, name').is('deleted_at', null);
+        const stale = (existing || []).filter(r => r.project_id && !seenIds.has(String(r.project_id)));
+        if (stale.length) {
+          const ids = stale.map(r => r.id);
+          await sb.from('rebuild_projects')
+            .update({ deleted_at: new Date().toISOString() })
+            .in('id', ids);
+          summary.removed = stale.length;
+        }
+      } catch (e) { console.warn('reconcile removals skipped:', e); }
+    } else if (!pullAllAlbiPages._complete) {
+      console.warn('[Albi Sync] pull hit page cap without reaching end — skipping removal reconciliation to avoid hiding live jobs');
+    }
+
     _lastSyncAt = Date.now();
-    if (!silent || summary.inserted || (summary.updated > 0 && !silent)) {
-      toast(`Synced: +${summary.inserted} new, ${summary.updated} updated`);
+    if (!silent || summary.inserted || summary.removed || (summary.updated > 0 && !silent)) {
+      toast(`Synced: +${summary.inserted} new, ${summary.updated} updated`
+        + (summary.removed ? `, ${summary.removed} removed` : ''));
     }
     await loadProjects();
   } catch (e) {
