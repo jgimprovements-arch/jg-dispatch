@@ -2168,20 +2168,28 @@ async function pullAllAlbiPages() {
     console.log('[Albi Sync] First project sample:', first[0]);
   }
 
-  // Fetch pages 2..40 in parallel (40 pages * 50 = up to 2,000 jobs). We track
-  // whether we reached the END of Albi's data — a short page means no more.
-  // Reconciliation (soft-deleting jobs not seen) is ONLY safe on a complete
-  // pull, so if we somehow fill every page we mark it incomplete and skip
-  // removals rather than risk hiding a live job that sits past the cap.
-  const PAGES = [];
-  for (let p = 2; p <= 40; p++) PAGES.push(p);
-  const parallelPages = await Promise.all(PAGES.map(p => pullAlbiPage(p).catch(() => [])));
+  // Fetch in parallel BATCHES, continuing until Albi returns a short/empty
+  // page (the true end). A fixed cap was the bug: with 2,000+ active projects
+  // the old 40-page limit never reached the end, so reconciliation was always
+  // skipped and closed/deleted jobs (3292, 3293…) never cleared. We page until
+  // exhausted, with a generous hard stop of 200 pages (10,000 jobs) purely as
+  // a runaway guard — reachedEnd tells reconciliation whether it's safe.
+  const BATCH = 15;      // pages fetched at once
+  const HARD_STOP = 200; // 10,000 jobs — a safety ceiling, not the normal exit
   const all = [first];
-  let reachedEnd = first.length < 50;   // first page already short → done
-  for (const items of parallelPages) {
-    if (!items || !items.length) { reachedEnd = true; break; }
-    all.push(items);
-    if (items.length < 50) { reachedEnd = true; break; }
+  let reachedEnd = first.length < 50;
+  let nextPage = 2;
+  while (!reachedEnd && nextPage <= HARD_STOP) {
+    const batch = [];
+    for (let k = 0; k < BATCH && (nextPage + k) <= HARD_STOP; k++) batch.push(nextPage + k);
+    const pages = await Promise.all(batch.map(p => pullAlbiPage(p).catch(() => null)));
+    for (const items of pages) {
+      if (items === null) { /* a page errored — treat as incomplete, stop safely */ reachedEnd = false; nextPage = HARD_STOP + 1; break; }
+      if (!items.length) { reachedEnd = true; break; }
+      all.push(items);
+      if (items.length < 50) { reachedEnd = true; break; }
+    }
+    nextPage += BATCH;
   }
   pullAllAlbiPages._complete = reachedEnd;
   return all.flat();
