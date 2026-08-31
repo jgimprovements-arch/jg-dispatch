@@ -745,8 +745,13 @@ function classifyEstimateItem(item, mappings) {
   if (/\bpaint|prime|seal|stain & finish|stain and finish/.test(desc)) return 'paint';
   if (/\bcabin|countertop|sink|backsplash/.test(desc)) return 'cabinetry';
   if (/\bbaseboard|casing|shoe|crown|trim\b/.test(desc)) return 'trim';
-  if (/\bvinyl|sheet goods|underlayment|floor cover|carpet|tile floor/.test(desc)) return 'flooring';
-  if (/\bfloor preparation\b/.test(desc)) return 'flooring';
+  // Roofing and siding must be tested BEFORE flooring — roofing uses
+  // "underlayment" and both can mention materials that the flooring rule
+  // would otherwise swallow. Without these two rules, every roofing/siding
+  // estimate item fell through to flooring or general.
+  if (/\broof|shingle|ridge cap|drip edge|roof underlayment|felt paper|ice (?:&|and) water|flashing|soffit|fascia|gutter|downspout/.test(desc)) return 'roofing';
+  if (/\bsiding|house ?wrap|weather ?barrier|tyvek|j-channel|starter strip|vinyl siding|lap siding|fiber cement|hardie|corner post|exterior trim board/.test(desc)) return 'siding';
+  if (/\bvinyl (?:plank|tile|floor)|sheet goods|floor covering|carpet\b|tile floor|floor underlayment|floor preparation|lvp|lvt/.test(desc)) return 'flooring';
   if (/\bbatt insulation|insulation\b/.test(desc)) return 'insulation';
   if (/\binterior door|door knob|door slab|pre-hung/.test(desc)) return 'doors';
   if (/\bdoor hardware|hinge\b/.test(desc)) return 'hardware';
