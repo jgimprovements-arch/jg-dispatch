@@ -219,6 +219,7 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--brdH);}
   <div class="f2"><div class="frow"><label>Mileage at service</label><input id="sMileage" type="number"></div><div class="frow"><label>Cost ($)</label><input id="sCost" type="number" step="0.01"></div></div>
   <div class="frow"><label>Vendor</label><input id="sVendor"></div>
   <div class="frow"><label>Note</label><textarea id="sNote"></textarea></div>
+  <div id="sResolveIssues"></div>
   <div id="sHistory"></div>
   <div class="modal-actions"><button class="btn ghost" onclick="closeModal('sModal')">Close</button><button class="btn acc" id="saveService">Save Service</button></div>
 </div></div>
@@ -1043,9 +1044,41 @@ async function deleteVehiclePrompt(){
 }
 
 async function saveVehicle(){const g=id=>{const el=document.getElementById(id);const v=el.value.trim?el.value.trim():el.value;return v===''?null:v;};const name=g('fName');if(!name){toast('Name is required');return;}const row={name,vehicle_number:g('fNumber'),year:g('fYear')?parseInt(g('fYear')):null,make:g('fMake'),model:g('fModel'),plate:g('fPlate'),vin:g('fVin'),market:g('fMarket')||null,usual_assigned_to:g('fUsual')||null,status:g('fStatus')||'active',current_mileage:g('fMileage')?parseInt(g('fMileage')):null,oil_interval_miles:g('fOilInterval')?parseInt(g('fOilInterval')):null,last_oil_mileage:g('fLastOil')?parseInt(g('fLastOil')):null,registration_due:g('fReg'),insurance_due:g('fIns'),inspection_due:g('fInsp'),notes:g('fNotes'),photo_url:g('fPhotoUrl'),updated_at:new Date().toISOString()};const id=g('vId');let err;if(id){({error:err}=await sb.from('vehicles').update(row).eq('id',id));}else{({error:err}=await sb.from('vehicles').insert(row));}if(err){toast('Save failed: '+err.message);return;}closeModal('vModal');await loadVehicles();render();toast('Saved');}
-function openService(vid){const v=VEHICLES.find(x=>x.id===vid);document.getElementById('sModalTitle').textContent='Service — '+(v?v.name:'');document.getElementById('sVehicleId').value=vid;['sMileage','sCost','sVendor','sNote'].forEach(id=>document.getElementById(id).value='');document.getElementById('sDate').value=new Date().toISOString().slice(0,10);document.getElementById('sType').value='oil';if(v&&v.current_mileage)document.getElementById('sMileage').value=v.current_mileage;loadServiceHistory(vid);document.getElementById('sModal').classList.add('on');}
+function openService(vid){const v=VEHICLES.find(x=>x.id===vid);document.getElementById('sModalTitle').textContent='Service — '+(v?v.name:'');document.getElementById('sVehicleId').value=vid;['sMileage','sCost','sVendor','sNote'].forEach(id=>document.getElementById(id).value='');document.getElementById('sDate').value=new Date().toISOString().slice(0,10);document.getElementById('sType').value='oil';if(v&&v.current_mileage)document.getElementById('sMileage').value=v.current_mileage;renderResolveIssues(vid);loadServiceHistory(vid);document.getElementById('sModal').classList.add('on');}
+
+// Open issues on this vehicle, offered as checkboxes so logging the service
+// can close them out in the same step — the service usually IS the fix, and
+// making people resolve separately means issues linger open long after the
+// work is done.
+function renderResolveIssues(vid){
+  const host=document.getElementById('sResolveIssues'); if(!host) return;
+  const open=(ISSUES||[]).filter(i=>i.vehicle_id===vid&&i.status!=='resolved');
+  if(!open.length){ host.innerHTML=''; return; }
+  host.innerHTML='<div class="frow"><label style="display:flex;align-items:center;gap:8px;">Resolve open issues with this service'
+    +'<span style="font-size:10px;color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0;">optional</span></label>'
+    +'<div style="display:flex;flex-direction:column;gap:6px;margin-top:4px;">'
+    +open.map(i=>'<label style="display:flex;align-items:flex-start;gap:8px;font-size:13px;font-weight:400;text-transform:none;letter-spacing:0;cursor:pointer;padding:6px 8px;border:1px solid var(--border);border-radius:6px;">'
+      +'<input type="checkbox" class="s-resolve-issue" value="'+i.id+'" style="width:auto;margin-top:2px;">'
+      +'<span><b>'+esc(i.category||'issue')+(i.severity==='urgent'?' · URGENT':'')+'</b>'
+      +(i.note?'<br><span style="color:var(--muted);">'+esc(i.note)+'</span>':'')+'</span></label>').join('')
+    +'</div></div>';
+}
 async function loadServiceHistory(vid){const {data}=await sb.from('vehicle_maintenance_log').select('*').eq('vehicle_id',vid).order('service_date',{ascending:false}).limit(10);const h=document.getElementById('sHistory');if(!data||!data.length){h.innerHTML='<div style="font-size:12px;color:var(--muted);margin-top:6px">No service history yet.</div>';return;}h.innerHTML='<div class="section-hdr" style="margin-top:12px">Recent Service</div>'+data.map(s=>'<div class="hist-row"><span>'+s.service_date+' · '+esc(s.service_type||'')+(s.mileage_at_service?' · '+s.mileage_at_service.toLocaleString()+'mi':'')+'</span><b class="mono">'+(s.cost!=null?'$'+Number(s.cost).toFixed(2):'')+'</b></div>').join('');}
-async function saveService(){const g=id=>{const v=document.getElementById(id).value;return v===''?null:v;};const vid=g('sVehicleId'),date=g('sDate');if(!date){toast('Date required');return;}const type=g('sType'),mileage=g('sMileage')?parseInt(g('sMileage')):null;const {error}=await sb.from('vehicle_maintenance_log').insert({vehicle_id:vid,service_date:date,service_type:type,mileage_at_service:mileage,cost:g('sCost')?parseFloat(g('sCost')):null,vendor:g('sVendor'),note:g('sNote'),created_by:ME});if(error){toast('Failed: '+error.message);return;}if(type==='oil'&&mileage){await sb.from('vehicles').update({last_oil_mileage:mileage,last_oil_date:date,updated_at:new Date().toISOString()}).eq('id',vid);await loadVehicles();}toast('Service logged');loadServiceHistory(vid);render();}
+async function saveService(){const g=id=>{const v=document.getElementById(id).value;return v===''?null:v;};const vid=g('sVehicleId'),date=g('sDate');if(!date){toast('Date required');return;}const type=g('sType'),mileage=g('sMileage')?parseInt(g('sMileage')):null;const {error}=await sb.from('vehicle_maintenance_log').insert({vehicle_id:vid,service_date:date,service_type:type,mileage_at_service:mileage,cost:g('sCost')?parseFloat(g('sCost')):null,vendor:g('sVendor'),note:g('sNote'),created_by:ME});if(error){toast('Failed: '+error.message);return;}if(type==='oil'&&mileage){await sb.from('vehicles').update({last_oil_mileage:mileage,last_oil_date:date,updated_at:new Date().toISOString()}).eq('id',vid);await loadVehicles();}
+  // Resolve any issues the user checked off — the service is the fix.
+  const resolveIds=[...document.querySelectorAll('.s-resolve-issue:checked')].map(c=>c.value);
+  let resolvedCount=0;
+  if(resolveIds.length){
+    const {error:re}=await sb.from('vehicle_issues').update({status:'resolved',resolved_by:ME,resolved_at:new Date().toISOString(),resolution_note:'Resolved via service log ('+type+', '+date+')'}).in('id',resolveIds);
+    if(re){toast('Service saved, but issue resolve failed: '+re.message);} else {resolvedCount=resolveIds.length;}
+    // If we cleared the last open issue on a flagged vehicle, un-flag it.
+    const stillOpen=(ISSUES||[]).filter(i=>i.vehicle_id===vid&&i.status!=='resolved'&&!resolveIds.includes(i.id)).length;
+    const v=VEHICLES.find(x=>x.id===vid);
+    if(v&&v.status==='flagged'&&stillOpen===0){ await sb.from('vehicles').update({status:'active'}).eq('id',vid); }
+    await loadIssues();
+  }
+  toast(resolvedCount?('Service logged · '+resolvedCount+' issue'+(resolvedCount!==1?'s':'')+' resolved'):'Service logged');
+  loadServiceHistory(vid);await loadVehicles();render();}
 // Manual maintenance nudge — admin-only. Re-uses the same routing as the
 // automatic sweep (assigned driver if dedicated, otherwise pool PMs, plus
 // office) but on demand, for when the first alert got ignored. Stamps
