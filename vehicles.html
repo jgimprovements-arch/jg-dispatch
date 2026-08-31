@@ -534,7 +534,7 @@ function renderFleet(){
       (due?'<div class="due">'+due+'</div>':'')+
       (iss.length?'<div class="issue-flag">⚠ '+iss.length+' open issue'+(iss.length>1?'s':'')+': '+esc(iss[0].category||'')+(iss[0].note?' — '+esc(iss[0].note.slice(0,50)):'')+'</div>':'')+
       '<div class="vactions"><button class="btn sm ghost" onclick="editVehicle(\''+v.id+'\')">Edit</button><button class="btn sm acc" onclick="openService(\''+v.id+'\')">Log service</button>'+
-      '<button class="btn sm ghost" onclick="vehicleHistory(\''+v.id+'\')">History</button>'+
+      '<button class="btn sm ghost" onclick="openServiceHistory(\''+v.id+'\')">🔧 Service</button>'+
       '<button class="btn sm ghost" onclick="openPhotos(\''+v.id+'\')">📷 Photos'+(PHOTOS_BY_VEH[v.id]?' ('+PHOTOS_BY_VEH[v.id].length+')':'')+'</button>'+
       '<button class="btn sm ghost" onclick="openReportIssue(\''+v.id+'\')">⚠ Log issue</button>'+
       (v.status==='retired'
@@ -1209,6 +1209,41 @@ function renderHistory(){
         }).join('')+
       '</div>';
     }).join('');
+}
+
+// ── SERVICE HISTORY POPUP ─────────────────────────────────────────────────
+// Full maintenance record for one vehicle — every service with all details
+// (date, type, mileage, cost, vendor, who logged it, notes) plus a running
+// total spent. This is the "what's been done to this truck" view, and for the
+// sale it's the maintenance trail a buyer inspects per asset.
+function _usd(n){ return '$'+Number(n||0).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}); }
+async function openServiceHistory(vid){
+  const v=VEHICLES.find(x=>x.id===vid); if(!v) return;
+  let ov=document.getElementById('svcHistModal');
+  if(!ov){ ov=document.createElement('div'); ov.id='svcHistModal'; ov.className='modal-back'; document.body.appendChild(ov); }
+  ov.innerHTML='<div class="modal" style="max-width:680px;"><h2>\u{1F527} '+esc(v.name)+' \u2014 service history</h2><div id="svcHistBody" style="max-height:60vh;overflow-y:auto;"><div class="empty">Loading\u2026</div></div><div class="modal-actions"><button class="btn ghost" onclick="closeModal(\'svcHistModal\')">Close</button><button class="btn acc" onclick="openService(\''+vid+'\');closeModal(\'svcHistModal\')">+ Log service</button></div></div>';
+  ov.classList.add('on');
+
+  const {data,error}=await sb.from('vehicle_maintenance_log').select('*').eq('vehicle_id',vid).order('service_date',{ascending:false});
+  const body=document.getElementById('svcHistBody');
+  if(error){ body.innerHTML='<div class="empty">Could not load: '+esc(error.message)+'</div>'; return; }
+  if(!data||!data.length){ body.innerHTML='<div class="empty">No service recorded yet. Use <b>+ Log service</b> to add the first entry.</div>'; return; }
+
+  const total=data.reduce((s,r)=>s+(r.cost!=null?Number(r.cost):0),0);
+  const TYPE_ICON={oil:'\u{1F6E2}',tires:'\u{1F6DE}',brakes:'\u{1F6D1}',registration:'\u{1F4CB}',insurance:'\u{1F4C4}',inspection:'\u{1F50D}',repair:'\u{1F527}',other:'\u{1F4DD}'};
+  body.innerHTML='<div style="font-size:12px;color:var(--muted);margin-bottom:12px;">'+data.length+' record'+(data.length!==1?'s':'')+' \u00b7 '+_usd(total)+' total spent</div>'+
+    data.map(s=>'<div style="border:1px solid var(--border);border-radius:8px;padding:12px 14px;margin-bottom:10px;">'+
+      '<div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px;flex-wrap:wrap;">'+
+        '<b style="color:var(--navy);font-size:14px;">'+(TYPE_ICON[s.service_type]||'\u{1F527}')+' '+esc((s.service_type||'service').replace(/^./,c=>c.toUpperCase()))+'</b>'+
+        '<span style="font-size:12px;color:var(--muted);">'+esc(s.service_date)+'</span></div>'+
+      '<div style="display:grid;grid-template-columns:auto auto;gap:2px 18px;font-size:12px;margin-top:8px;color:var(--text);">'+
+        (s.mileage_at_service?'<span style="color:var(--muted);">Mileage</span><b class="mono">'+Number(s.mileage_at_service).toLocaleString()+' mi</b>':'')+
+        (s.cost!=null?'<span style="color:var(--muted);">Cost</span><b class="mono">'+_usd(Number(s.cost))+'</b>':'')+
+        (s.vendor?'<span style="color:var(--muted);">Vendor</span><b>'+esc(s.vendor)+'</b>':'')+
+        (s.created_by?'<span style="color:var(--muted);">Logged by</span><b>'+esc(s.created_by)+'</b>':'')+
+      '</div>'+
+      (s.note?'<div style="font-size:13px;margin-top:8px;padding-top:8px;border-top:1px dashed var(--border);color:var(--text);">'+esc(s.note)+'</div>':'')+
+    '</div>').join('');
 }
 
 function vehicleHistory(vid){
