@@ -85,7 +85,7 @@ body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);min
 .board{display:flex;gap:8px;align-items:start;min-width:max-content;}
 .lane{width:240px;flex-shrink:0;background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:visible;box-shadow:var(--shadow);transition:border-color .15s;}.lane.timeline-active{overflow:visible;}
 .lane.sick{border-color:var(--danger);}
-.lane-hd{background:var(--navy);padding:7px 9px;display:flex;align-items:flex-start;justify-content:space-between;}
+.lane-hd{background:var(--navy);padding:7px 9px;display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;}
 .lane-hd.sick-hd{background:#6b1515;}
 .lane-hd-l{display:flex;align-items:center;gap:7px;min-width:0;flex:1;}
 .av{width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:700;flex-shrink:0;color:#fff;}
@@ -744,14 +744,21 @@ let PM_NAMES = new Set(['Rylan Reoh','Brandon Olmsted','Chad Pansier','Anthony A
 
 async function refreshPMNames(){
   try {
-    const r = await fetch(SB_URL + "/rest/v1/employees?role=eq.Project%20Manager&active=eq.true&select=name", {
+    // role is comma-separated ("Project Manager, Sales"), so eq.Project Manager
+    // misses multi-role PMs and they get sorted into Technicians. Fetch active
+    // employees and match by overlap. (Same systemic exact-match bug.)
+    const r = await fetch(SB_URL + "/rest/v1/employees?active=eq.true&select=name,role", {
       headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
     });
     if (!r.ok) return;
     const rows = await r.json();
     if (!Array.isArray(rows)) return;
     const fresh = new Set();
-    rows.forEach(function(e){ if (e && e.name) fresh.add(e.name.trim()); });
+    rows.forEach(function(e){
+      if (!e || !e.name) return;
+      const mine = String(e.role||'').split(',').map(function(x){return x.trim().toLowerCase();});
+      if (mine.indexOf('project manager') !== -1) fresh.add(e.name.trim());
+    });
     // Only swap if we got at least one result — otherwise keep fallback
     if (fresh.size > 0) {
       PM_NAMES = fresh;
@@ -5228,6 +5235,6 @@ document.addEventListener("DOMContentLoaded",()=>jgCheckAuth());
 <script src="mobile-dispatch.js?v=20260419-1"></script>
 <script src="presence.js?v=20260419-1"></script>
 <script src="sidebar.js?v=20260419-1"></script>
-<script src="fleet.js?v=2026.08.27-r15"></script>
+<script src="fleet.js?v=2026.08.27-r16"></script>
 </body>
 </html>
