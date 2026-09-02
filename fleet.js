@@ -303,6 +303,7 @@
       'padding:3px 4px;cursor:pointer;}',
       '.jgf-sel.jgf-warn{background:#ffe9e5;border-color:#c02020;color:#8c1414;}',
       '.jgf-share{font-size:9px;color:rgba(255,255,255,.7);font-family:"DM Mono",monospace;flex-shrink:0;}',
+      '.jgf-self{font-size:8px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:#0d2d5e;background:#f4d58d;border-radius:3px;padding:1px 4px;flex-shrink:0;}',
       '.jgf-why{font-size:9px;line-height:1.3;margin-top:3px;color:#ffd9d2;font-weight:700;}',
       /* custom vehicle picker — a native <select> cannot render thumbnails,
          and the fleet has four vehicles literally named "Van" */
@@ -373,14 +374,20 @@
   // is exactly the vehicle they'll be asked to record an odometer for. Renders
   // into an element the host page provides (id 'vehicle-badge'); does nothing
   // if that element is absent, so it's safe to call from anywhere.
-  async function showVehicleBadge(empId) {
+  async function showVehicleBadge(empId, empName, market) {
     try {
       var el = document.getElementById('vehicle-badge');
       if (!el || !empId) return;
       var day = dispatchDate();
-      var as = await get('vehicle_assignments?select=vehicle_id&employee_id=eq.'
+      var as = await get('vehicle_assignments?select=vehicle_id,created_by&employee_id=eq.'
         + encodeURIComponent(empId) + '&work_date=eq.' + encodeURIComponent(day) + '&limit=1');
-      if (!as || !as.length || !as[0].vehicle_id) { el.style.display = 'none'; return; }
+
+      // No vehicle assigned yet → offer a self-assign picker. The moment a PM
+      // assigns one on the board, this branch stops showing (there's a row),
+      // so a tech can never override a PM's placement — only fill a gap.
+      if (!as || !as.length || !as[0].vehicle_id) {
+        return renderSelfAssign(el, empId, empName, market, day);
+      }
 
       var vs = await get('vehicles?select=id,name,vehicle_number,plate,status,current_mileage,'
         + 'last_oil_mileage,oil_interval_miles,registration_due,insurance_due,inspection_due'
@@ -388,9 +395,9 @@
       if (!vs || !vs.length) { el.style.display = 'none'; return; }
       var v = vs[0];
 
-      // Any current problem (open issue count unknown here, so status + dates).
       var probs = vehicleProblems(v, 0);
       var warn = probs.some(function (p) { return p.urgent; });
+      var self = /self/i.test(as[0].created_by || '');
       var label = '🚐 ' + vehicleLabel(v) + (v.plate ? ' · ' + v.plate : '');
       if (probs.length) label += '  ⚠ ' + probs[0].text;
 
@@ -399,9 +406,87 @@
       el.style.background = warn ? 'rgba(198,40,40,.08)' : 'rgba(13,45,94,.05)';
       el.style.color = warn ? '#8c1414' : '';
       el.style.border = warn ? '1px solid rgba(198,40,40,.3)' : '';
-      el.title = 'Your vehicle today — you\'ll record its odometer at clock-out';
+      el.title = (self ? 'You picked this vehicle. ' : 'Assigned to you. ')
+        + "You'll record its odometer at clock-out.";
     } catch (e) {
       console.warn('[fleet] vehicle badge skipped:', e.message);
+    }
+  }
+
+  // Self-assign picker, shown only when no vehicle is set for the day. Offers
+  // pool vehicles plus this tech's own dedicated one; excludes vehicles that
+  // already belong to someone else as a dedicated unit. A pick writes an
+  // assignment stamped created_by '<name> (self)' so the board shows it was
+  // the tech's choice, not a PM placement.
+  async function renderSelfAssign(el, empId, empName, market, day) {
+    try {
+      var mk = marketKey(market);
+      var vs = await get('vehicles?select=id,name,vehicle_number,plate,status,usual_assigned_to,market'
+        + '&status=in.(active,flagged,in_shop)&order=name.asc');
+      if (!vs || !vs.length) { el.style.display = 'none'; return; }
+
+      var list = vs.filter(function (v) {
+        // a dedicated vehicle belonging to someone else isn't self-grabbable
+        if (v.usual_assigned_to && v.usual_assigned_to !== empId) return false;
+        // keep to this tech's market plus pool (no market)
+        if (mk && v.market && v.market !== mk) return false;
+        return true;
+      });
+      if (!list.length) { el.style.display = 'none'; return; }
+
+      var opts = '<option value="">🚐 pick your vehicle…</option>'
+        + list.map(function (v) {
+          var mine = v.usual_assigned_to === empId ? '★ ' : '';
+          var warn = v.status === 'flagged' ? ' ⚠' : '';
+          return '<option value="' + esc(v.id) + '">' + mine + esc(vehicleLabel(v))
+            + (v.plate ? ' · ' + esc(v.plate) : '') + warn + '</option>';
+        }).join('');
+
+      el.style.display = '';
+      el.style.background = 'rgba(13,45,94,.05)';
+      el.style.border = '';
+      el.style.color = '';
+      el.innerHTML = '<span style="font-size:12px;color:#3E4E62;margin-right:6px;">No vehicle set —</span>'
+        + '<select id="jgf-self-veh" style="font-size:13px;font-weight:600;padding:4px 6px;border-radius:6px;'
+        + 'border:1px solid rgba(13,45,94,.25);background:#fff;color:#0d1f3c;">' + opts + '</select>';
+
+      var sel = document.getElementById('jgf-self-veh');
+      sel.onchange = function () {
+        if (!sel.value) return;
+        selfAssignVehicle(empId, empName, sel.value, day, market);
+      };
+    } catch (e) {
+      console.warn('[fleet] self-assign picker skipped:', e.message);
+      el.style.display = 'none';
+    }
+  }
+
+  async function selfAssignVehicle(empId, empName, vehicleId, day, market) {
+    try {
+      // Guard against a race: if a PM assigned one in the meantime, don't
+      // override — re-render to show their placement instead.
+      var chk = await get('vehicle_assignments?select=vehicle_id&employee_id=eq.'
+        + encodeURIComponent(empId) + '&work_date=eq.' + encodeURIComponent(day) + '&limit=1');
+      if (chk && chk.length && chk[0].vehicle_id) {
+        say('A vehicle was just assigned to you');
+        return showVehicleBadge(empId, empName, market);
+      }
+      var row = {
+        vehicle_id: vehicleId, employee_id: empId, employee_name: empName,
+        work_date: day, market: marketKey(market),
+        created_by: (empName || 'Tech') + ' (self)'
+      };
+      var res = await write('POST', 'vehicle_assignments?on_conflict=employee_id,work_date',
+        row, 'resolution=merge-duplicates,return=minimal');
+      if (!res.ok) {
+        // fall back to read-then-write if the unique index isn't present
+        res = await write('POST', 'vehicle_assignments', row);
+      }
+      if (res.ok) { say('🚐 Vehicle set'); showVehicleBadge(empId, empName, market); }
+      else say('⚠ Could not set vehicle: ' + errMsg(res));
+    } catch (e) {
+      console.warn('[fleet] self-assign failed:', e.message);
+      say('⚠ Could not set vehicle');
     }
   }
 
@@ -438,7 +523,7 @@
           });
         }
 
-        var as = await get('vehicle_assignments?select=id,vehicle_id,employee_id,employee_name,work_date'
+        var as = await get('vehicle_assignments?select=id,vehicle_id,employee_id,employee_name,work_date,created_by'
           + '&work_date=eq.' + encodeURIComponent(day));
         if (as) as.forEach(function (a) { F.assigns[a.employee_id] = a; });
 
@@ -539,6 +624,7 @@
 
       var curV = curId ? F.vehicles[curId] : null;
       var share = (curId && shareCount[curId] > 1) ? '<span class="jgf-share">+' + (shareCount[curId] - 1) + '</span>' : '';
+      var selfPick = (cur && /self/i.test(cur.created_by || '')) ? '<span class="jgf-self">self</span>' : '';
 
       // Spell out WHY the vehicle is flagged. A red box with no reason just
       // trains people to ignore red boxes.
@@ -557,7 +643,7 @@
         + '<span class="jgf-nm">' + (curV ? esc(vehicleLabel(curV)) : 'no vehicle') + '</span>'
         + '<span style="opacity:.5;flex-shrink:0;">▾</span>'
         + '</button>'
-        + share + '</div>' + reason;
+        + selfPick + share + '</div>' + reason;
     });
   }
 
