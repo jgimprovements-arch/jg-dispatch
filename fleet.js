@@ -296,8 +296,8 @@
     var s = document.createElement('style');
     s.id = 'jgf-css';
     s.textContent = [
-      '.jgf-slot{display:block;}',
-      '.jgf-row{display:flex;align-items:center;gap:4px;}',
+      '.jgf-slot{display:block;width:100%;min-width:0;box-sizing:border-box;}',
+      '.jgf-row{display:flex;align-items:center;gap:4px;width:100%;min-width:0;}',
       '.jgf-sel{flex:1;min-width:0;font-size:11px;font-weight:600;font-family:"DM Mono",monospace;',
       'background:#fff;border:1px solid rgba(255,255,255,.25);border-radius:4px;color:#0d1f3c;',
       'padding:3px 4px;cursor:pointer;}',

@@ -2174,14 +2174,23 @@ async function loadTechRoster(){
     }
     techQ={appleton:{},stevens:{}};
 
-    // Fetch active Technicians and Project Managers only — Admins excluded from dispatch
-    const DISPATCH_ROLES = ['Technician','Project Manager'];
-    const rolesParam = DISPATCH_ROLES.map(r=>encodeURIComponent(r)).join(',');
-    const er = await fetch(SB_URL + '/rest/v1/employees?active=eq.true&role=in.(' + rolesParam + ')&select=id,name,role,market,show_on_dispatch', {
+    // Roles are comma-separated in employees.role ("Project Manager, Sales").
+    // A SQL role=in.(...) does an EXACT string match, so it silently dropped
+    // every multi-role person — that's why Rylan and Brent (Project Manager,
+    // Sales) never appeared on the board. Fetch all active employees and
+    // filter by role OVERLAP client-side instead. (Systemic exact-match bug.)
+    const DISPATCH_ROLES = ['technician','project manager'];
+    const er = await fetch(SB_URL + '/rest/v1/employees?active=eq.true&select=id,name,role,market,show_on_dispatch', {
       headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
     });
     if (!er.ok) throw new Error('employees fetch HTTP ' + er.status);
-    const emps = await er.json();
+    let emps = await er.json();
+    if (Array.isArray(emps)) {
+      emps = emps.filter(function(e){
+        const mine = String(e.role||'').split(',').map(function(r){return r.trim().toLowerCase();});
+        return mine.some(function(r){ return DISPATCH_ROLES.indexOf(r) !== -1; });
+      });
+    }
     if (!Array.isArray(emps) || !emps.length) {
       showToast('⚠ No active employees found in roster');
       return;
@@ -2526,7 +2535,7 @@ function renderBoard(){
           ?`<button class="undo-btn" onclick="undoSick('${nm}')">↩ Undo</button>`
           :`<button class="tout-btn" onclick="promptOut('${nm}')">Out</button>`}
       </div>
-      ${(!isSick && window.JGFleet) ? `<div style="flex-basis:100%;margin-top:6px;">${JGFleet.laneSlot(tech.id, nm)}</div>` : ''}`;
+      ${(!isSick && window.JGFleet) ? `<div style="flex-basis:100%;min-width:0;margin-top:6px;">${JGFleet.laneSlot(tech.id, nm)}</div>` : ''}`;
       const body=document.createElement('div');
       body.className='lane-body'+(timelineModes.has(nm)?' timeline-mode':'');
       body.dataset.tech=nm;
@@ -2618,7 +2627,7 @@ function renderBoard(){
       <div class="lane-hd-btns">
         <button class="undo-btn" onclick="removeCrossLocTech('${nm}')" style="font-size:9px;">✕ Remove</button>
       </div>
-      ${(!isSick && window.JGFleet) ? `<div style="flex-basis:100%;margin-top:6px;">${JGFleet.laneSlot(tech.id, nm)}</div>` : ''}`;
+      ${(!isSick && window.JGFleet) ? `<div style="flex-basis:100%;min-width:0;margin-top:6px;">${JGFleet.laneSlot(tech.id, nm)}</div>` : ''}`;
       const body=document.createElement('div');body.className='lane-body';
       body.addEventListener('dragover',onDO);body.addEventListener('dragleave',onDL);body.addEventListener('drop',(e)=>onDDCross(e,nm,otherLoc2));
       tech.jobs.forEach(jid=>{
@@ -5219,6 +5228,6 @@ document.addEventListener("DOMContentLoaded",()=>jgCheckAuth());
 <script src="mobile-dispatch.js?v=20260419-1"></script>
 <script src="presence.js?v=20260419-1"></script>
 <script src="sidebar.js?v=20260419-1"></script>
-<script src="fleet.js?v=2026.08.27-r14"></script>
+<script src="fleet.js?v=2026.08.27-r15"></script>
 </body>
 </html>
