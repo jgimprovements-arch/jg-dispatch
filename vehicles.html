@@ -215,7 +215,7 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--brdH);}
 <div class="modal-back" id="sModal"><div class="modal">
   <h2 id="sModalTitle">Log Service</h2>
   <input type="hidden" id="sVehicleId">
-  <div class="f2"><div class="frow"><label>Date *</label><input id="sDate" type="date"></div><div class="frow"><label>Type</label><select id="sType"><option>oil</option><option>tires</option><option>brakes</option><option>registration</option><option>insurance</option><option>inspection</option><option>repair</option><option>other</option></select></div></div>
+  <div class="f2"><div class="frow"><label>Date *</label><input id="sDate" type="date"></div><div class="frow"><label>Type</label><select id="sType" onchange="renderResolveIssues(document.getElementById('sVehicleId').value)"><option>oil</option><option>tires</option><option>brakes</option><option>registration</option><option>insurance</option><option>inspection</option><option>repair</option><option>other</option></select></div></div>
   <div class="f2"><div class="frow"><label>Mileage at service</label><input id="sMileage" type="number"></div><div class="frow"><label>Cost ($)</label><input id="sCost" type="number" step="0.01"></div></div>
   <div class="frow"><label>Vendor</label><input id="sVendor"></div>
   <div class="frow"><label>Note</label><textarea id="sNote"></textarea></div>
@@ -1054,11 +1054,19 @@ function renderResolveIssues(vid){
   const host=document.getElementById('sResolveIssues'); if(!host) return;
   const open=(ISSUES||[]).filter(i=>i.vehicle_id===vid&&i.status!=='resolved');
   if(!open.length){ host.innerHTML=''; return; }
+  // Pre-check issues that match the service being logged, so logging an oil
+  // change defaults to resolving the open "oil change" issue — which is what
+  // people expect and kept missing. Match service type to issue category.
+  const sType=(document.getElementById('sType')||{}).value||'';
+  const TYPE_MATCH={oil:['oil'],tires:['tire','wheel'],brakes:['brake'],
+    inspection:['inspection','dot'],registration:['registration'],insurance:['insurance']};
+  const wants=TYPE_MATCH[sType]||[];
+  const matches=i=>{const c=(i.category||'').toLowerCase();return wants.some(w=>c.includes(w));};
   host.innerHTML='<div class="frow"><label style="display:flex;align-items:center;gap:8px;">Resolve open issues with this service'
-    +'<span style="font-size:10px;color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0;">optional</span></label>'
+    +'<span style="font-size:10px;color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0;">check to close</span></label>'
     +'<div style="display:flex;flex-direction:column;gap:6px;margin-top:4px;">'
-    +open.map(i=>'<label style="display:flex;align-items:flex-start;gap:8px;font-size:13px;font-weight:400;text-transform:none;letter-spacing:0;cursor:pointer;padding:6px 8px;border:1px solid var(--border);border-radius:6px;">'
-      +'<input type="checkbox" class="s-resolve-issue" value="'+i.id+'" style="width:auto;margin-top:2px;">'
+    +open.map(i=>'<label style="display:flex;align-items:flex-start;gap:8px;font-size:13px;font-weight:400;text-transform:none;letter-spacing:0;cursor:pointer;padding:6px 8px;border:1px solid '+(matches(i)?'var(--orange)':'var(--border)')+';border-radius:6px;'+(matches(i)?'background:rgba(232,93,4,.06);':'')+'">'
+      +'<input type="checkbox" class="s-resolve-issue" value="'+i.id+'"'+(matches(i)?' checked':'')+' style="width:auto;margin-top:2px;">'
       +'<span><b>'+esc(i.category||'issue')+(i.severity==='urgent'?' · URGENT':'')+'</b>'
       +(i.note?'<br><span style="color:var(--muted);">'+esc(i.note)+'</span>':'')+'</span></label>').join('')
     +'</div></div>';
