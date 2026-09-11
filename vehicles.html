@@ -1063,13 +1063,31 @@ function renderResolveIssues(vid){
   const wants=TYPE_MATCH[sType]||[];
   const matches=i=>{const c=(i.category||'').toLowerCase();return wants.some(w=>c.includes(w));};
   host.innerHTML='<div class="frow"><label style="display:flex;align-items:center;gap:8px;">Resolve open issues with this service'
-    +'<span style="font-size:10px;color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0;">check to close</span></label>'
+    +'<span style="font-size:10px;color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0;">check to close on save</span></label>'
     +'<div style="display:flex;flex-direction:column;gap:6px;margin-top:4px;">'
     +open.map(i=>'<label style="display:flex;align-items:flex-start;gap:8px;font-size:13px;font-weight:400;text-transform:none;letter-spacing:0;cursor:pointer;padding:6px 8px;border:1px solid '+(matches(i)?'var(--orange)':'var(--border)')+';border-radius:6px;'+(matches(i)?'background:rgba(232,93,4,.06);':'')+'">'
       +'<input type="checkbox" class="s-resolve-issue" value="'+i.id+'"'+(matches(i)?' checked':'')+' style="width:auto;margin-top:2px;">'
-      +'<span><b>'+esc(i.category||'issue')+(i.severity==='urgent'?' · URGENT':'')+'</b>'
-      +(i.note?'<br><span style="color:var(--muted);">'+esc(i.note)+'</span>':'')+'</span></label>').join('')
+      +'<span style="flex:1;"><b>'+esc(i.category||'issue')+(i.severity==='urgent'?' · URGENT':'')+'</b>'
+      +(i.note?'<br><span style="color:var(--muted);">'+esc(i.note)+'</span>':'')+'</span>'
+      +'<a href="#" onclick="event.preventDefault();resolveIssueNow(\''+i.id+'\',\''+vid+'\')" style="font-size:11px;color:var(--orange);font-weight:600;white-space:nowrap;margin-top:2px;">resolve now</a>'
+      +'</label>').join('')
+    +'<div style="font-size:10px;color:var(--muted);margin-top:2px;">Already did the work earlier? Use <b>resolve now</b> to close an issue without logging another service.</div>'
     +'</div></div>';
+}
+
+// Close an issue immediately — for when the service was already logged in a
+// previous entry, so there's no need to create a duplicate service record.
+async function resolveIssueNow(issueId, vid){
+  if(!confirm('Mark this issue resolved?')) return;
+  const {error}=await sb.from('vehicle_issues').update({status:'resolved',resolved_by:ME,resolved_at:new Date().toISOString(),resolution_note:'Resolved from service screen'}).eq('id',issueId);
+  if(error){toast('Failed: '+error.message);return;}
+  // Un-flag the vehicle if that was its last open issue.
+  const stillOpen=(ISSUES||[]).filter(i=>i.vehicle_id===vid&&i.status!=='resolved'&&i.id!==issueId).length;
+  const v=VEHICLES.find(x=>x.id===vid);
+  if(v&&v.status==='flagged'&&stillOpen===0){ await sb.from('vehicles').update({status:'active'}).eq('id',vid); }
+  await loadIssues(); await loadVehicles();
+  renderResolveIssues(vid); render();
+  toast('Issue resolved');
 }
 async function loadServiceHistory(vid){const {data}=await sb.from('vehicle_maintenance_log').select('*').eq('vehicle_id',vid).order('service_date',{ascending:false}).limit(10);const h=document.getElementById('sHistory');if(!data||!data.length){h.innerHTML='<div style="font-size:12px;color:var(--muted);margin-top:6px">No service history yet.</div>';return;}h.innerHTML='<div class="section-hdr" style="margin-top:12px">Recent Service</div>'+data.map(s=>'<div class="hist-row"><span>'+s.service_date+' · '+esc(s.service_type||'')+(s.mileage_at_service?' · '+s.mileage_at_service.toLocaleString()+'mi':'')+'</span><b class="mono">'+(s.cost!=null?'$'+Number(s.cost).toFixed(2):'')+'</b></div>').join('');}
 async function saveService(){const g=id=>{const v=document.getElementById(id).value;return v===''?null:v;};const vid=g('sVehicleId'),date=g('sDate');if(!date){toast('Date required');return;}const type=g('sType'),mileage=g('sMileage')?parseInt(g('sMileage')):null;const {error}=await sb.from('vehicle_maintenance_log').insert({vehicle_id:vid,service_date:date,service_type:type,mileage_at_service:mileage,cost:g('sCost')?parseFloat(g('sCost')):null,vendor:g('sVendor'),note:g('sNote'),created_by:ME});if(error){toast('Failed: '+error.message);return;}if(type==='oil'&&mileage){await sb.from('vehicles').update({last_oil_mileage:mileage,last_oil_date:date,updated_at:new Date().toISOString()}).eq('id',vid);await loadVehicles();}
