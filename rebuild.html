@@ -7783,16 +7783,23 @@ async function convertAllApproved() {
 async function upsertWoBuilderRow(tradeCategory, fields) {
   const uploadId = state.woBudget?.upload?.id;
   if (!uploadId) return { ok: false, error: 'No upload loaded' };
-  const { data: existing, error: selErr } = await sb.from('wo_builder_work_orders')
+  // Fetch ALL matching rows — not maybeSingle(). Duplicate rows for the same
+  // (upload_id, trade_category) can exist (e.g. left over from splitting roofing
+  // /siding out of a merged group), and maybeSingle() throws "multiple rows",
+  // which blocked every save on that trade. Update all matches at once so any
+  // duplicates stay consistent, then heal-forward via the cleanup SQL + unique index.
+  const { data: rows, error: selErr } = await sb.from('wo_builder_work_orders')
     .select('id')
     .eq('upload_id', uploadId)
-    .eq('trade_category', tradeCategory)
-    .maybeSingle();
+    .eq('trade_category', tradeCategory);
   if (selErr) return { ok: false, error: selErr.message };
-  if (existing) {
-    const { error } = await sb.from('wo_builder_work_orders').update(fields).eq('id', existing.id);
+  if (rows && rows.length) {
+    const { error } = await sb.from('wo_builder_work_orders')
+      .update(fields)
+      .eq('upload_id', uploadId)
+      .eq('trade_category', tradeCategory);
     if (error) return { ok: false, error: error.message };
-    return { ok: true, id: existing.id };
+    return { ok: true, id: rows[0].id, duplicates: rows.length > 1 ? rows.length : undefined };
   } else {
     const { data, error } = await sb.from('wo_builder_work_orders').insert({
       upload_id: uploadId,
