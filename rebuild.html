@@ -5975,6 +5975,37 @@ function sumField(arr, field) {
 }
 
 // ─── Detail popup: line-by-line view of a trade's items + materials + labor ───
+// Build the <option> list for the WO Builder subcontractor picker.
+// Subs already linked to THIS project (via a relationship record — matched by
+// directory_contact_id, or by company/contact name as a fallback) are floated
+// to the top, bolded, and grouped under "On this project" so the PM sees the
+// people actually on the job first instead of scrolling the whole directory.
+function wbSubOptionsHtml(currentSubId) {
+  const subs = state.subs || [];
+  const rels = state.relationships || [];
+  // IDs of directory subs linked to this project.
+  const projIds = new Set(rels.map(r => r.directory_contact_id).filter(Boolean));
+  // Names linked to this project (fallback for relationships with no directory link).
+  const projNames = new Set(
+    rels.flatMap(r => [r.display_name, r.company])
+        .filter(Boolean)
+        .map(n => String(n).trim().toLowerCase())
+  );
+  const onProject = s => projIds.has(s.id)
+    || projNames.has(String(s.company_name || '').trim().toLowerCase())
+    || (s.primary_contact && projNames.has(String(s.primary_contact).trim().toLowerCase()));
+  const opt = (s, star) => {
+    const label = esc(s.company_name) + (s.primary_contact ? ' · ' + esc(s.primary_contact) : '');
+    const sel = s.id === currentSubId ? ' selected' : '';
+    return `<option value="${s.id}"${sel}${star ? ' style="font-weight:700"' : ''}>${star ? '★ ' : ''}${label}</option>`;
+  };
+  const here = subs.filter(onProject);
+  const rest = subs.filter(s => !onProject(s));
+  if (!here.length) return subs.map(s => opt(s, false)).join('');
+  return `<optgroup label="On this project">${here.map(s => opt(s, true)).join('')}</optgroup>`
+       + `<optgroup label="All subcontractors">${rest.map(s => opt(s, false)).join('')}</optgroup>`;
+}
+
 function renderWoDetailModal(tradeKey, tradeLabel, budget) {
   const isUnassigned = tradeKey === '__unassigned__';
 
@@ -6004,10 +6035,8 @@ function renderWoDetailModal(tradeKey, tradeLabel, budget) {
     : (wo?.assignee_employee_id ? [wo.assignee_employee_id] : []);
   const currentEmpIdSet = new Set(currentEmployeeIds);
 
-  // Build sub/employee options
-  const subOptions = (state.subs || []).map(s =>
-    `<option value="${s.id}" ${s.id === currentSubId ? 'selected' : ''}>${esc(s.company_name)}${s.primary_contact ? ' · ' + esc(s.primary_contact) : ''}</option>`
-  ).join('');
+  // Build sub/employee options — project subs floated to the top and bolded.
+  const subOptions = wbSubOptionsHtml(currentSubId);
   // Carpenter checkboxes — multi-select
   const empCheckboxes = (state.employees || []).map(e =>
     `<label class="wobx-emp-checkbox">
@@ -6485,7 +6514,7 @@ function wireWoDetailModal(tradeKey) {
         picker.innerHTML = `
           <select id="wobx_assignee_id" class="wobx-assignee-id">
             <option value="">— Choose subcontractor —</option>
-            ${(state.subs || []).map(s => `<option value="${s.id}">${esc(s.company_name)}${s.primary_contact ? ' · ' + esc(s.primary_contact) : ''}</option>`).join('')}
+            ${wbSubOptionsHtml('')}
           </select>
         `;
       } else if (t === 'carpenter') {
