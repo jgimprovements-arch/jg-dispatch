@@ -11932,9 +11932,17 @@ var _albiJobs = null;
 async function ensureAlbiJobsLoaded() {
   if (_albiJobs) return _albiJobs;
   try {
-    var allJobs = [];
+    // Page through the ENTIRE Albi project list, not just the first ~1,000.
+    // The proxy's sort order (newest- vs oldest-first) is unknown, so capping
+    // early could drop exactly the current jobs we need (e.g. a brand-new job
+    // number). Loading all pages and deduping makes the picker order-proof.
+    var byId = {};              // dedupe across pages
     var page = 1;
-    while (page <= 20) {
+    var MAX_PAGES = 200;        // safety stop (~10k jobs); real list is far smaller
+    while (page <= MAX_PAGES) {
+      // Surface progress so a large first load doesn't look frozen.
+      var dd0 = document.getElementById('entry-job-dropdown');
+      if (dd0) { dd0.innerHTML = '<div style="padding:10px 14px;font-size:12px;color:var(--muted);">Loading Albi jobs… ' + Object.keys(byId).length + ' so far</div>'; dd0.style.display = 'block'; }
       var r = await fetch('https://jg-albi-proxy.josh-70f.workers.dev?pageSize=50&page=' + page);
       if (!r.ok) break;
       var data = await r.json();
@@ -11942,12 +11950,14 @@ async function ensureAlbiJobsLoaded() {
       if (!items.length) break;
       items.forEach(function(p) {
         var jid = String(p.uniqueNumber || p.id || '');
+        if (!jid || byId[jid]) return;
         var name = p.name || p.projectName || jid;
         var loc = (p.location || '').toString().toLowerCase();
         var market = (loc.includes('stevens') || loc.includes('point')) ? 'Stevens Point' : 'Appleton';
-        if (jid) allJobs.push({
+        byId[jid] = {
           id: jid,
           name: name,
+          number: String(p.uniqueNumber || ''),   // real Albi job number (may be blank); search uses this + name
           market: market,
           // Commission preview fields
           salesPerson: p.salesPerson || null,
@@ -11960,12 +11970,12 @@ async function ensureAlbiJobsLoaded() {
           closedDate: p.statusDate || p.updatedAt || null,  // best-effort close date proxy
           customerName: p.customerName || null,
           url: p.url || null
-        });
+        };
       });
-      if (items.length < 50) break;
+      if (items.length < 50) break;   // last page reached
       page++;
     }
-    _albiJobs = allJobs.sort(function(a,b){ return a.name.localeCompare(b.name); });
+    _albiJobs = Object.keys(byId).map(function(k){ return byId[k]; }).sort(function(a,b){ return a.name.localeCompare(b.name); });
   } catch(err) {
     _albiJobs = [];
   }
@@ -12044,8 +12054,12 @@ function filterJobOptions(q) {
   var search = document.getElementById('entry-job-search');
   if (!dropdown || !_albiJobs) return;
 
+  // Match on the project NAME (which carries the human job number, e.g. "Smith-2417-WTR")
+  // and the real Albi job number — NOT the raw internal id, which produced false hits
+  // (e.g. "2417" surfacing Sarbacker because the digits sat inside its internal id).
+  var ql = q.toLowerCase();
   var filtered = q ? _albiJobs.filter(function(j){
-    return j.name.toLowerCase().includes(q.toLowerCase()) || j.id.includes(q);
+    return j.name.toLowerCase().includes(ql) || (j.number && j.number.includes(q));
   }) : _albiJobs;
 
   if (!filtered.length) {
