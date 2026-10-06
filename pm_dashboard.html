@@ -113,6 +113,8 @@ tbody tr.total-row td{border-top:2px solid var(--border);}
 .pill{font-family:'DM Mono',monospace;font-size:10px;font-weight:500;padding:2px 7px;border-radius:20px;white-space:nowrap;}
 .pill.lead{background:rgba(13,45,94,.07);color:var(--navy);}
 .pill.prod{background:rgba(34,166,108,.12);color:var(--green);}
+.pill.active{background:rgba(23,110,180,.13);color:#1565a0;}
+.pill.closed{background:rgba(34,166,108,.14);color:var(--green);}
 .pill.lost{background:rgba(198,40,40,.1);color:var(--red);}
 .pill.hold{background:rgba(255,152,0,.14);color:#b36b00;}
 .pill.other{background:#e8edf3;color:#7a879b;}
@@ -457,7 +459,7 @@ function renderRecon(){
   const body=rows.map(r=>{
     const pills='<div class="pills">'+
       (r.lead?'<span class="pill lead" title="Leads / New">'+r.lead+' lead</span>':'')+
-      (r.active?'<span class="pill prod" title="In production (active)">'+r.active+' active</span>':'')+
+      (r.active?'<span class="pill active" title="In production (active)">'+r.active+' active</span>':'')+
       (r.closed?'<span class="pill closed" title="Closed / complete">'+r.closed+' closed</span>':'')+
       (r.hold?'<span class="pill hold" title="On hold">'+r.hold+' hold</span>':'')+
       (r.lost?'<span class="pill lost" title="Lost / dead">'+r.lost+' lost</span>':'')+
@@ -496,18 +498,20 @@ function renderRecon(){
 
   document.getElementById('foot').innerHTML=
     '<div class="note">Reconstruction jobs pulled <b>live from Albi</b> (last 12 months): Reconstruction, Board Up, Roofing/Exterior, Raze, Remediation. Switch to the Mitigation tab for water/fire/mold.</div>'+
-    '<div><b>Closing rate</b> = jobs that reached production (In Production + Closed) ÷ all jobs assigned, within the window. '+
-    '<b>Margin</b> is the Albi gross-margin %, revenue-weighted. '+
-    '<b>Avg Job</b> is revenue ÷ jobs that reached production. Window is by job <b>created date</b>.</div>'+
+    '<div><b>Estimated</b> = Albi estimated revenue (the estimate/scope total) for every job in the window. '+
+    '<b>Collected</b> = amount paid to date (Albi paidAmount). '+
+    '<b>Closing rate</b> = jobs that reached production (In Production + Closed) ÷ all jobs assigned. '+
+    '<b>Margin</b> is the Albi gross-margin %, revenue-weighted, over <b>closed jobs only</b> (costs aren\'t final until a job closes). Window is by job <b>created date</b>.</div>'+
     '<div class="legend">'+
       '<span><span class="dot" style="background:var(--navy);opacity:.4;"></span>lead / new</span>'+
-      '<span><span class="dot" style="background:var(--green);"></span>in production + closed</span>'+
+      '<span><span class="dot" style="background:#1565a0;"></span>active (in production)</span>'+
+      '<span><span class="dot" style="background:var(--green);"></span>closed</span>'+
       '<span><span class="dot" style="background:var(--yellow);"></span>on hold</span>'+
       '<span><span class="dot" style="background:var(--red);"></span>lost / dead</span>'+
       '<span><span class="dot" style="background:#aab4c4;"></span>unmapped (?)</span>'+
     '</div>'+
     (excluded>0?'<div style="margin-top:6px;">'+excluded+' of '+inWindow+' projects in this window are assigned to a PM not in the employee list (or unassigned) and are excluded. '+(rows.some(r=>r.other>0)?'Any "?" counts are status words I didn\'t recognize — tell me the exact label and I\'ll bucket it.':'')+'</div>':'')+
-    (rows.some(r=>r.noCogs>0)?'<div style="margin-top:6px;color:#b36b00;">⚠ Margin flags mark PMs with jobs that have revenue but no cost recorded — those margins read high until COGS is entered.</div>':'');
+    (rows.some(r=>r.noCogs>0)?'<div style="margin-top:6px;color:#b36b00;">⚠ Margin flags mark PMs with <b>closed</b> jobs that have revenue but no cost recorded — those margins read high until COGS is entered.</div>':'');
 }
 function kpi(v,l,s){return '<div class="kpi"><div class="kpi-accent"></div><div class="kpi-label">'+l+'</div><div class="kpi-value">'+v+'</div>'+(s?'<div class="kpi-sub">'+s+'</div>':'')+'</div>';}
 
@@ -517,7 +521,7 @@ function computeMitRows(){
   const pms=PMS.filter(p=>MIT_PM_KEYS.has(nkey(p.name)));
   const emailToPM={},nameToPM={};
   pms.forEach(p=>{if(p.email)emailToPM[p.email]=p;if(p.name)nameToPM[p.name.toLowerCase()]=p;});
-  const agg={};pms.forEach(p=>{agg[p.email]={pm:p,jobs:0,active:0,closed:0,revenue:0,mNum:0,mDen:0,noCogs:0,cycleSum:0,cycleN:0};});
+  const agg={};pms.forEach(p=>{agg[p.email]={pm:p,jobs:0,active:0,closed:0,est:0,collected:0,revenue:0,mNum:0,mDen:0,noCogs:0,cycleSum:0,cycleN:0};});
   const byLoc={Appleton:0,'Stevens Point':0,Other:0};
   let excluded=0,inWindow=0;
   (ALBI||[]).forEach(p=>{
@@ -527,25 +531,27 @@ function computeMitRows(){
     if(start){const c=created?new Date(created):null;if(!c||c<start)return;}
     inWindow++;
     const loc=String(p.location||p.locationName||'').toLowerCase();
-    byLoc[loc.includes('appleton')?'Appleton':(loc.includes('stevens')||loc.includes('point'))?'Stevens Point':'Other']+=Number(p.actualRevenue)||0;
+    byLoc[loc.includes('appleton')?'Appleton':(loc.includes('stevens')||loc.includes('point'))?'Stevens Point':'Other']+=Number(p.paidAmount)||0;
     const em=String(p.projectManagerEmail||'').trim().toLowerCase();
     const nm=String(p.projectManager||'').trim().toLowerCase();
     const pm=emailToPM[em]||nameToPM[nm];
     if(!pm){excluded++;return;}
     const a=agg[pm.email];
     a.jobs++;
-    const st=String(p.status||'').toLowerCase();
-    if(/closed|complet|invoic|collect|paid/.test(st))a.closed++;else a.active++;
-    const rev=Number(p.actualRevenue)||0,gm=Number(p.grossMargin);
-    a.revenue+=rev;
-    if(rev>0){if(isFinite(gm)){a.mNum+=gm*rev;a.mDen+=rev;if(gm>=95)a.noCogs++;}else a.noCogs++;}
+    const closed=isClosed(p.status);
+    if(closed)a.closed++;else a.active++;
+    const est=Number(p.estimatedRevenue)||0,paid=Number(p.paidAmount)||0,rev=Number(p.actualRevenue)||0,gm=Number(p.grossMargin);
+    a.est+=est; a.collected+=paid; a.revenue+=rev;
+    // Margin: closed jobs only.
+    if(closed&&rev>0){if(isFinite(gm)){a.mNum+=gm*rev;a.mDen+=rev;if(gm>=95)a.noCogs++;}else a.noCogs++;}
     const s=p.actualStart||p.startDate,e=p.actualCompletion||p.completedDate;
     if(s&&e){const d=(new Date(e)-new Date(s))/86400000;if(d>=0&&d<3650){a.cycleSum+=d;a.cycleN++;}}
   });
   const rows=Object.values(agg).map(a=>({
     name:a.pm.name,email:a.pm.email,jobs:a.jobs,active:a.active,closed:a.closed,
-    revenue:a.revenue,margin:a.mDen>0?(a.mNum/a.mDen):null,
-    avgJob:a.jobs>0?(a.revenue/a.jobs):0,cycle:a.cycleN>0?(a.cycleSum/a.cycleN):null,noCogs:a.noCogs
+    est:a.est,collected:a.collected,revenue:a.revenue,
+    margin:a.mDen>0?(a.mNum/a.mDen):null,mNum:a.mNum,mDen:a.mDen,
+    cycle:a.cycleN>0?(a.cycleSum/a.cycleN):null,noCogs:a.noCogs
   }));
   return {rows,excluded,inWindow,byLoc};
 }
@@ -554,14 +560,18 @@ function renderMit(){
   const {rows,excluded,inWindow,byLoc}=computeMitRows();
   document.getElementById('locCard').style.display='block';renderLoc(byLoc,'Mitigation');
   const totJobs=rows.reduce((s,r)=>s+r.jobs,0);
-  const totRev=rows.reduce((s,r)=>s+r.revenue,0);
-  const totGp=rows.reduce((s,r)=>s+(r.margin!=null?r.revenue*r.margin/100:0),0);
-  const coMargin=totRev>0?(totGp/totRev*100):null;
+  const totActive=rows.reduce((s,r)=>s+r.active,0);
+  const totClosed=rows.reduce((s,r)=>s+r.closed,0);
+  const totEst=rows.reduce((s,r)=>s+r.est,0);
+  const totCollected=rows.reduce((s,r)=>s+r.collected,0);
+  const mNum=rows.reduce((s,r)=>s+r.mNum,0),mDen=rows.reduce((s,r)=>s+r.mDen,0);
+  const coMargin=mDen>0?(mNum/mDen):null;
   document.getElementById('kpiRow').innerHTML=
-    kpi(money(totRev),'Mitigation Revenue','actual, across listed PMs')+
-    kpi(pct(coMargin),'Gross Margin','Albi margin, rev-weighted')+
-    kpi(totJobs,'Mitigation Jobs','in window')+
-    kpi(totJobs?money(totRev/totJobs):'—','Avg Job','revenue ÷ jobs');
+    kpi(totJobs,'Total Jobs',totClosed+' closed · '+totActive+' active')+
+    kpi(totActive,'Active Jobs','in production now')+
+    kpi(money(totEst),'Total Estimated','Albi estimate, all jobs')+
+    kpi(money(totCollected),'Total Collected','paid to date')+
+    kpi(pct(coMargin),'Gross Margin','closed jobs only, rev-weighted');
 
   if(!rows.length||!totJobs){
     document.getElementById('tblWrap').innerHTML='<div class="empty">'+(inWindow>0?('No mitigation jobs matched a listed PM in this window ('+inWindow+' mitigation jobs found, '+excluded+' assigned to a non-listed PM).'):'No mitigation jobs found in this window.')+'</div>';
@@ -576,42 +586,43 @@ function renderMit(){
     '<th data-k="jobs">Jobs '+arr('jobs')+'</th>'+
     '<th data-k="active" class="hide-sm">Active '+arr('active')+'</th>'+
     '<th data-k="closed" class="hide-sm">Closed '+arr('closed')+'</th>'+
-    '<th data-k="revenue">Revenue '+arr('revenue')+'</th>'+
+    '<th data-k="est">Estimated '+arr('est')+'</th>'+
+    '<th data-k="collected">Collected '+arr('collected')+'</th>'+
     '<th data-k="margin">Margin '+arr('margin')+'</th>'+
-    '<th data-k="avgJob" class="hide-sm">Avg Job '+arr('avgJob')+'</th>'+
     '<th data-k="cycle" class="hide-sm">Cycle '+arr('cycle')+'</th>'+
   '</tr>';
   const body=rows.map(r=>{
     const isMe=r.email&&r.email===ME;
-    const marginFlag=r.noCogs>0?'<span class="flag" title="'+r.noCogs+' job(s) have revenue but no cost recorded">⚠ '+r.noCogs+'</span>':'';
+    const marginFlag=r.noCogs>0?'<span class="flag" title="'+r.noCogs+' closed job(s) have revenue but no cost recorded">⚠ '+r.noCogs+'</span>':'';
+    const marginTxt=r.margin==null?'<span title="No closed jobs in window">—</span>':pct(r.margin);
     return '<tr'+(isMe?' class="me-row"':'')+'>'+
       '<td class="pm-name">'+esc(r.name)+(isMe?' <span class="you-badge">You</span>':'')+'</td>'+
       '<td class="num">'+r.jobs+'</td>'+
       '<td class="num hide-sm">'+r.active+'</td>'+
       '<td class="num hide-sm">'+r.closed+'</td>'+
-      '<td class="num">'+moneyFull(r.revenue)+'</td>'+
-      '<td class="num">'+pct(r.margin)+marginFlag+'</td>'+
-      '<td class="num hide-sm">'+(r.avgJob?money(r.avgJob):'—')+'</td>'+
+      '<td class="num">'+moneyFull(r.est)+'</td>'+
+      '<td class="num">'+moneyFull(r.collected)+'</td>'+
+      '<td class="num">'+marginTxt+marginFlag+'</td>'+
       '<td class="num hide-sm">'+(r.cycle!=null?Math.round(r.cycle)+'d':'—')+'</td>'+
     '</tr>';
   }).join('');
   const totalRow='<tr class="total-row">'+
     '<td>Company ('+rows.length+' PMs)</td>'+
     '<td class="num">'+totJobs+'</td>'+
-    '<td class="num hide-sm">'+rows.reduce((s,r)=>s+r.active,0)+'</td>'+
-    '<td class="num hide-sm">'+rows.reduce((s,r)=>s+r.closed,0)+'</td>'+
-    '<td class="num">'+moneyFull(totRev)+'</td>'+
+    '<td class="num hide-sm">'+totActive+'</td>'+
+    '<td class="num hide-sm">'+totClosed+'</td>'+
+    '<td class="num">'+moneyFull(totEst)+'</td>'+
+    '<td class="num">'+moneyFull(totCollected)+'</td>'+
     '<td class="num">'+pct(coMargin)+'</td>'+
-    '<td class="num hide-sm">'+(totJobs?money(totRev/totJobs):'—')+'</td>'+
     '<td class="num hide-sm">—</td>'+
   '</tr>';
   document.getElementById('tblWrap').innerHTML='<table><thead>'+head+'</thead><tbody>'+body+totalRow+'</tbody></table>';
   document.querySelectorAll('thead th[data-k]').forEach(th=>{th.onclick=()=>{const k=th.dataset.k;if(SORT.key===k)SORT.dir*=-1;else{SORT.key=k;SORT.dir=(k==='name')?1:-1;}render();};});
   document.getElementById('foot').innerHTML=
     '<div class="note">Mitigation jobs are pulled <b>live from Albi</b> (they aren\'t synced to the database), limited to the <b>last 12 months</b> for speed. Types: Water/Fire Mitigation, Mold, CAT3, Contents, General Clean, Biohazard. No closing rate — mitigation is dispatched, not sold.</div>'+
-    '<div><b>Revenue</b> = actual revenue. <b>Margin</b> = the Albi gross-margin %, revenue-weighted. <b>Cycle</b> = avg days from start to completion, where Albi has both dates.</div>'+
+    '<div><b>Estimated</b> = Albi estimated revenue (all jobs). <b>Collected</b> = amount paid to date. <b>Margin</b> = the Albi gross-margin %, revenue-weighted, over <b>closed jobs only</b>. <b>Cycle</b> = avg days from start to completion, where Albi has both dates.</div>'+
     (excluded>0?'<div style="margin-top:6px;">'+excluded+' of '+inWindow+' mitigation jobs in this window are assigned to a PM not in the employee list and are excluded.</div>':'')+
-    (rows.some(r=>r.noCogs>0)?'<div style="margin-top:6px;color:#b36b00;">⚠ Margin flags mark PMs with jobs that have revenue but no cost recorded.</div>':'');
+    (rows.some(r=>r.noCogs>0)?'<div style="margin-top:6px;color:#b36b00;">⚠ Margin flags mark PMs with <b>closed</b> jobs that have revenue but no cost recorded.</div>':'');
 }
 
 // wiring
