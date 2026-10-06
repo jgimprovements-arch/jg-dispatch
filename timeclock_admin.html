@@ -5135,7 +5135,7 @@ function _renderCommissionPreview(isAdminUser, myName, canEdit) {
 async function _loadCommPreview(forceRefresh) {
   if (_commPreviewLoading) return;
   _commPreviewLoading = true;
-  if (forceRefresh) _albiJobs = null;  // force refresh of entire cache
+  if (forceRefresh) { _albiJobs = null; try { localStorage.removeItem(_ALBI_CACHE_KEY); } catch(e){} }  // force refresh of entire cache
   try {
     await ensureAlbiJobsLoaded();
     _commPreviewData = _albiJobs || [];
@@ -11929,53 +11929,68 @@ var _albiJobs = null;
 // Standalone Albi load — safe to call from anywhere, caches globally.
 // Stores {id, name, market} for job pickers + {salesPerson, actualRevenue, closedBoolean, updatedAt, status, projectType}
 // for the commission preview feature. Existing consumers only use id/name/market so they're unaffected.
+var _ALBI_CACHE_KEY = 'jg_albi_jobs_v1';
+var _ALBI_CACHE_TTL = 12 * 60 * 60 * 1000;   // 12h — jobs don't churn fast; "↻ Refresh" forces a reload
+
+function _albiNormalize(p) {
+  var jid = String(p.uniqueNumber || p.id || '');
+  if (!jid) return null;
+  var name = p.name || p.projectName || jid;
+  var loc = (p.location || '').toString().toLowerCase();
+  var market = (loc.includes('stevens') || loc.includes('point')) ? 'Stevens Point' : 'Appleton';
+  return {
+    id: jid, name: name, number: String(p.uniqueNumber || ''), market: market,
+    salesPerson: p.salesPerson || null, actualRevenue: p.actualRevenue || null,
+    estimatedRevenue: p.estimatedRevenue || null, closedBoolean: p.closedBoolean === true,
+    status: p.status || null, projectType: p.projectType || null, updatedAt: p.updatedAt || null,
+    closedDate: p.statusDate || p.updatedAt || null, customerName: p.customerName || null, url: p.url || null
+  };
+}
+function _albiFetchPage(page) {
+  return fetch('https://jg-albi-proxy.josh-70f.workers.dev?pageSize=50&page=' + page)
+    .then(function(r){ return r.ok ? r.json() : null; })
+    .then(function(d){ if (d==null) return null; return Array.isArray(d) ? d : (d.data||d.results||d.projects||d.items||[]); })
+    .catch(function(){ return null; });
+}
+
 async function ensureAlbiJobsLoaded() {
   if (_albiJobs) return _albiJobs;
+
+  // 1) Instant path: serve from localStorage if the cache is still fresh.
   try {
-    // Page through the ENTIRE Albi project list, not just the first ~1,000.
-    // The proxy's sort order (newest- vs oldest-first) is unknown, so capping
-    // early could drop exactly the current jobs we need (e.g. a brand-new job
-    // number). Loading all pages and deduping makes the picker order-proof.
-    var byId = {};              // dedupe across pages
-    var page = 1;
-    var MAX_PAGES = 200;        // safety stop (~10k jobs); real list is far smaller
-    while (page <= MAX_PAGES) {
-      // Surface progress so a large first load doesn't look frozen.
-      var dd0 = document.getElementById('entry-job-dropdown');
+    var raw = localStorage.getItem(_ALBI_CACHE_KEY);
+    if (raw) {
+      var cached = JSON.parse(raw);
+      if (cached && cached.ts && (Date.now() - cached.ts) < _ALBI_CACHE_TTL && Array.isArray(cached.jobs) && cached.jobs.length) {
+        _albiJobs = cached.jobs;
+        return _albiJobs;
+      }
+    }
+  } catch(e) {}
+
+  // 2) Fresh load: fetch pages in PARALLEL batches (not one-at-a-time), so the
+  //    whole list comes down in a few round-trips instead of dozens. Dedupe,
+  //    cache, and we're order-proof without a slow sequential crawl.
+  try {
+    var byId = {};
+    var BATCH = 10, PAGE_SIZE = 50, page = 1, MAX_PAGES = 200, done = false;
+    var dd0 = document.getElementById('entry-job-dropdown');
+    while (!done && page <= MAX_PAGES) {
       if (dd0) { dd0.innerHTML = '<div style="padding:10px 14px;font-size:12px;color:var(--muted);">Loading Albi jobs… ' + Object.keys(byId).length + ' so far</div>'; dd0.style.display = 'block'; }
-      var r = await fetch('https://jg-albi-proxy.josh-70f.workers.dev?pageSize=50&page=' + page);
-      if (!r.ok) break;
-      var data = await r.json();
-      var items = Array.isArray(data) ? data : (data.data || data.results || data.projects || data.items || []);
-      if (!items.length) break;
-      items.forEach(function(p) {
-        var jid = String(p.uniqueNumber || p.id || '');
-        if (!jid || byId[jid]) return;
-        var name = p.name || p.projectName || jid;
-        var loc = (p.location || '').toString().toLowerCase();
-        var market = (loc.includes('stevens') || loc.includes('point')) ? 'Stevens Point' : 'Appleton';
-        byId[jid] = {
-          id: jid,
-          name: name,
-          number: String(p.uniqueNumber || ''),   // real Albi job number (may be blank); search uses this + name
-          market: market,
-          // Commission preview fields
-          salesPerson: p.salesPerson || null,
-          actualRevenue: p.actualRevenue || null,
-          estimatedRevenue: p.estimatedRevenue || null,
-          closedBoolean: p.closedBoolean === true,
-          status: p.status || null,
-          projectType: p.projectType || null,
-          updatedAt: p.updatedAt || null,
-          closedDate: p.statusDate || p.updatedAt || null,  // best-effort close date proxy
-          customerName: p.customerName || null,
-          url: p.url || null
-        };
-      });
-      if (items.length < 50) break;   // last page reached
-      page++;
+      var reqs = [];
+      for (var i = 0; i < BATCH; i++) reqs.push(_albiFetchPage(page + i));
+      var pages = await Promise.all(reqs);
+      for (var j = 0; j < pages.length; j++) {
+        var items = pages[j];
+        if (items == null) { done = true; break; }      // fetch error → stop
+        if (!items.length) { done = true; break; }        // past the end
+        items.forEach(function(p){ var n = _albiNormalize(p); if (n && !byId[n.id]) byId[n.id] = n; });
+        if (items.length < PAGE_SIZE) { done = true; break; }  // last page
+      }
+      page += BATCH;
     }
     _albiJobs = Object.keys(byId).map(function(k){ return byId[k]; }).sort(function(a,b){ return a.name.localeCompare(b.name); });
+    try { localStorage.setItem(_ALBI_CACHE_KEY, JSON.stringify({ ts: Date.now(), jobs: _albiJobs })); } catch(e) {}
   } catch(err) {
     _albiJobs = [];
   }
