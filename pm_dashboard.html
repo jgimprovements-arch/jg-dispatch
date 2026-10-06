@@ -335,6 +335,9 @@ function statusBucket(raw){
   if(/new|lead|estimat|inspect|bid|pending|schedul|opportunit|quote/.test(s))return 'lead';
   return 'other';
 }
+// A job is "closed" (done) vs merely "active" (in production). Margin is only
+// meaningful once a job is closed and its costs are in, so we compute margin on these only.
+function isClosed(raw){return /closed|complet|invoic|collect|paid/.test(String(raw||'').toLowerCase());}
 
 function computeRows(){
   const start=winStart();
@@ -342,7 +345,7 @@ function computeRows(){
   const emailToPM={},nameToPM={};
   pms.forEach(p=>{ if(p.email)emailToPM[p.email]=p; if(p.name)nameToPM[p.name.toLowerCase()]=p; });
   const agg={};
-  pms.forEach(p=>{ agg[p.email]={pm:p,jobs:0,prod:0,lead:0,lost:0,hold:0,other:0,revenue:0,paid:0,mNum:0,mDen:0,noCogs:0}; });
+  pms.forEach(p=>{ agg[p.email]={pm:p,jobs:0,prod:0,active:0,closed:0,lead:0,lost:0,hold:0,other:0,est:0,collected:0,revenue:0,mNum:0,mDen:0,noCogs:0}; });
   const byLoc={Appleton:0,'Stevens Point':0,Other:0};
   let excluded=0,inWindow=0;
   (ALBI||[]).forEach(p=>{
@@ -352,31 +355,32 @@ function computeRows(){
     if(start){ const c=created?new Date(created):null; if(!c||c<start)return; }
     inWindow++;
     const loc=String(p.location||p.locationName||'').toLowerCase();
-    byLoc[loc.includes('appleton')?'Appleton':(loc.includes('stevens')||loc.includes('point'))?'Stevens Point':'Other']+=Number(p.actualRevenue)||0;
+    byLoc[loc.includes('appleton')?'Appleton':(loc.includes('stevens')||loc.includes('point'))?'Stevens Point':'Other']+=Number(p.paidAmount)||0;
     const em=String(p.projectManagerEmail||'').trim().toLowerCase();
     const nm=String(p.projectManager||'').trim().toLowerCase();
     const pm=emailToPM[em]||nameToPM[nm];
     if(!pm){excluded++;return;}
     const a=agg[pm.email];
-    const b=statusBucket(p.status);
-    a.jobs++; a[b==='prod'?'prod':b==='lead'?'lead':b==='lost'?'lost':b==='hold'?'hold':'other']++;
-    const rev=Number(p.actualRevenue)||0,paid=Number(p.paidAmount)||0,gm=Number(p.grossMargin);
-    a.revenue+=rev; a.paid+=paid;
-    if(rev>0){ if(isFinite(gm)){a.mNum+=gm*rev; a.mDen+=rev; if(gm>=95)a.noCogs++;} else a.noCogs++; }
+    const b=statusBucket(p.status), closed=isClosed(p.status);
+    a.jobs++;
+    if(b==='prod'){ a.prod++; if(closed)a.closed++; else a.active++; }
+    else a[b]++;
+    const est=Number(p.estimatedRevenue)||0,paid=Number(p.paidAmount)||0,rev=Number(p.actualRevenue)||0,gm=Number(p.grossMargin);
+    a.est+=est; a.collected+=paid; a.revenue+=rev;
+    // Margin: closed jobs only (costs aren't final until a job closes).
+    if(closed&&rev>0){ if(isFinite(gm)){a.mNum+=gm*rev; a.mDen+=rev; if(gm>=95)a.noCogs++;} else a.noCogs++; }
   });
   const rows=Object.values(agg).map(a=>({
-    name:a.pm.name,email:a.pm.email,jobs:a.jobs,prod:a.prod,lead:a.lead,lost:a.lost,hold:a.hold,other:a.other,
+    name:a.pm.name,email:a.pm.email,jobs:a.jobs,prod:a.prod,active:a.active,closed:a.closed,lead:a.lead,lost:a.lost,hold:a.hold,other:a.other,
     closing:a.jobs>0?(a.prod/a.jobs*100):0,
-    revenue:a.revenue,
-    margin:a.mDen>0?(a.mNum/a.mDen):null,
-    avgJob:a.prod>0?(a.revenue/a.prod):0,
-    billed:a.revenue>0?(a.paid/a.revenue*100):null,
+    est:a.est,collected:a.collected,revenue:a.revenue,
+    margin:a.mDen>0?(a.mNum/a.mDen):null,mNum:a.mNum,mDen:a.mDen,
     noCogs:a.noCogs
   }));
   return {rows,excluded,inWindow,byLoc};
 }
 function renderLoc(byLoc,label){
-  document.getElementById('locTitle').textContent='Revenue by Location · '+label;
+  document.getElementById('locTitle').textContent='Collected Revenue by Location · '+label;
   const order=['Appleton','Stevens Point','Other'];
   document.getElementById('locCards').innerHTML=order
     .filter(k=>k!=='Other'||(byLoc[k]||0)>0)
@@ -411,15 +415,20 @@ function renderRecon(){
 
   const totJobs=rows.reduce((s,r)=>s+r.jobs,0);
   const totProd=rows.reduce((s,r)=>s+r.prod,0);
-  const totRev=rows.reduce((s,r)=>s+r.revenue,0);
-  const totGp=rows.reduce((s,r)=>s+(r.margin!=null?r.revenue*r.margin/100:0),0);
-  const coMargin=totRev>0?(totGp/totRev*100):null;
+  const totActive=rows.reduce((s,r)=>s+r.active,0);
+  const totClosed=rows.reduce((s,r)=>s+r.closed,0);
+  const totEst=rows.reduce((s,r)=>s+r.est,0);
+  const totCollected=rows.reduce((s,r)=>s+r.collected,0);
+  const mNum=rows.reduce((s,r)=>s+r.mNum,0),mDen=rows.reduce((s,r)=>s+r.mDen,0);
+  const coMargin=mDen>0?(mNum/mDen):null;
   const coClosing=totJobs>0?(totProd/totJobs*100):0;
   document.getElementById('kpiRow').innerHTML=
-    kpi(money(totRev),'Total Revenue','actual, across listed PMs')+
-    kpi(pct(coMargin),'Gross Margin','Albi margin, rev-weighted')+
+    kpi(totJobs,'Total Jobs',totClosed+' closed · '+totActive+' active')+
+    kpi(totActive,'Active Jobs','in production now')+
     kpi(pct(coClosing),'Closing Rate','reached production ÷ assigned')+
-    kpi(totJobs,'Jobs',totProd+' reached production');
+    kpi(money(totEst),'Total Estimated','Albi estimate, all jobs')+
+    kpi(money(totCollected),'Total Collected','paid to date')+
+    kpi(pct(coMargin),'Gross Margin','closed jobs only, rev-weighted');
 
   if(!rows.length){
     document.getElementById('tblWrap').innerHTML='<div class="empty">No project-manager employees found. Set an employee\'s role to include "Project Manager" in Time Admin.</div>';
@@ -437,32 +446,34 @@ function renderRecon(){
   const head='<tr>'+
     '<th data-k="name">PM '+arr('name')+'</th>'+
     '<th data-k="jobs">Jobs '+arr('jobs')+'</th>'+
+    '<th data-k="active" class="hide-sm">Active '+arr('active')+'</th>'+
     '<th data-k="closing">Closing '+arr('closing')+'</th>'+
-    '<th data-k="revenue">Revenue '+arr('revenue')+'</th>'+
+    '<th data-k="est">Estimated '+arr('est')+'</th>'+
+    '<th data-k="collected">Collected '+arr('collected')+'</th>'+
     '<th data-k="margin">Margin '+arr('margin')+'</th>'+
-    '<th data-k="avgJob" class="hide-sm">Avg Job '+arr('avgJob')+'</th>'+
-    '<th data-k="billed" class="hide-sm">Billed '+arr('billed')+'</th>'+
     '<th class="hide-sm">Status</th>'+
   '</tr>';
 
   const body=rows.map(r=>{
     const pills='<div class="pills">'+
       (r.lead?'<span class="pill lead" title="Leads / New">'+r.lead+' lead</span>':'')+
-      (r.prod?'<span class="pill prod" title="In production + closed">'+r.prod+' prod</span>':'')+
+      (r.active?'<span class="pill prod" title="In production (active)">'+r.active+' active</span>':'')+
+      (r.closed?'<span class="pill closed" title="Closed / complete">'+r.closed+' closed</span>':'')+
       (r.hold?'<span class="pill hold" title="On hold">'+r.hold+' hold</span>':'')+
       (r.lost?'<span class="pill lost" title="Lost / dead">'+r.lost+' lost</span>':'')+
       (r.other?'<span class="pill other" title="Unmapped status">'+r.other+' ?</span>':'')+
     '</div>';
-    const marginFlag=r.noCogs>0?'<span class="flag" title="'+r.noCogs+' job(s) have revenue but no cost recorded — margin may read high">⚠ '+r.noCogs+'</span>':'';
+    const marginFlag=r.noCogs>0?'<span class="flag" title="'+r.noCogs+' closed job(s) have revenue but no cost recorded — margin may read high">⚠ '+r.noCogs+'</span>':'';
+    const marginTxt=r.margin==null?'<span title="No closed jobs in window">—</span>':pct(r.margin);
     const isMe=r.email&&r.email===ME;
     return '<tr'+(isMe?' class="me-row"':'')+'>'+
       '<td class="pm-name">'+esc(r.name)+(isMe?' <span class="you-badge">You</span>':'')+'</td>'+
       '<td class="num">'+r.jobs+'</td>'+
+      '<td class="num hide-sm">'+r.active+'</td>'+
       '<td class="num '+closingClass(r.closing)+'">'+pct(r.closing)+'</td>'+
-      '<td class="num">'+moneyFull(r.revenue)+'</td>'+
-      '<td class="num">'+pct(r.margin)+marginFlag+'</td>'+
-      '<td class="num hide-sm">'+(r.avgJob?money(r.avgJob):'—')+'</td>'+
-      '<td class="num hide-sm">'+pct(r.billed)+'</td>'+
+      '<td class="num">'+moneyFull(r.est)+'</td>'+
+      '<td class="num">'+moneyFull(r.collected)+'</td>'+
+      '<td class="num">'+marginTxt+marginFlag+'</td>'+
       '<td class="hide-sm">'+pills+'</td>'+
     '</tr>';
   }).join('');
@@ -470,11 +481,11 @@ function renderRecon(){
   const totalRow='<tr class="total-row">'+
     '<td>Company ('+rows.length+' PMs)</td>'+
     '<td class="num">'+totJobs+'</td>'+
+    '<td class="num hide-sm">'+totActive+'</td>'+
     '<td class="num '+closingClass(coClosing)+'">'+pct(coClosing)+'</td>'+
-    '<td class="num">'+moneyFull(totRev)+'</td>'+
+    '<td class="num">'+moneyFull(totEst)+'</td>'+
+    '<td class="num">'+moneyFull(totCollected)+'</td>'+
     '<td class="num">'+pct(coMargin)+'</td>'+
-    '<td class="num hide-sm">'+(totProd?money(totRev/totProd):'—')+'</td>'+
-    '<td class="num hide-sm">—</td>'+
     '<td class="hide-sm"></td>'+
   '</tr>';
 
