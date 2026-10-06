@@ -228,8 +228,12 @@ async function tryEnter(email){
 async function boot(){
   if(!window.supabase||!window.supabase.createClient){toast('Database library blocked - check tracking prevention');return;}
   sb=window.supabase.createClient(SB_URL,SB_KEY);
+  document.getElementById('kpiRow').innerHTML='';
+  document.getElementById('locCard').style.display='none';
+  document.getElementById('foot').innerHTML='';
   document.getElementById('tblWrap').innerHTML='<div class="empty">Loading…</div>';
-  await Promise.all([loadPMs(),loadProjects()]);
+  await loadPMs();
+  await loadAlbi();
   render();
 }
 
@@ -239,18 +243,40 @@ async function loadPMs(){
   PMS=(data||[]).filter(e=>e&&e.active!==false&&String(e.role||'').split(',').map(r=>r.trim().toLowerCase()).includes('project manager'))
     .map(e=>({name:String(e.name||'').trim(),email:String(e.email||'').trim().toLowerCase()}));
 }
-async function loadProjects(){
-  PROJECTS=[];
-  const cols='albi_pm_name,albi_pm_email,pm_email,status,albi_status_normalized,actual_revenue,estimated_revenue,gross_profit,paid_amount,billed_pct,created_at,market';
-  let from=0;const page=1000;
-  while(true){
-    const {data,error}=await sb.from('rebuild_projects').select(cols).order('created_at',{ascending:false}).range(from,from+page-1);
-    if(error){toast('Project load failed: '+error.message);break;}
-    const batch=data||[];
-    PROJECTS.push(...batch);
-    if(batch.length<page)break;
-    from+=page; if(from>50000)break;
-  }
+function albiProgress(msg){const w=document.getElementById('tblWrap');if(w)w.innerHTML='<div class="empty">'+esc(msg)+'</div>';}
+async function fetchT(url,ms){
+  const ctl=('AbortController'in window)?new AbortController():null;
+  const t=ctl?setTimeout(()=>ctl.abort(),ms):null;
+  try{return await fetch(url,ctl?{signal:ctl.signal}:{});}finally{if(t)clearTimeout(t);}
+}
+// Pull the last ~12 months of projects from Albi (covers YTD and Trailing-12),
+// keeping only recon + mitigation types. Assumes newest-first; stops early once
+// past the window (2-page grace). Albi's createdAt is the real project date.
+async function loadAlbi(){
+  ALBI=[];ALBI_LOADING=true;ALBI_ERR=null;
+  const cutoff=new Date();cutoff.setFullYear(cutoff.getFullYear()-1);cutoff.setDate(cutoff.getDate()-14);
+  const all=[];let page=1,oldStreak=0;
+  try{
+    while(page<=60){
+      albiProgress('Loading jobs from Albi (last 12 mo)… page '+page+' · '+all.length+' jobs');
+      let r=await fetchT(PROXY_URL+'?pageSize=50&page='+page,15000);
+      if(!r||!r.ok){ALBI_ERR='Albi proxy returned HTTP '+(r?r.status:'(no response)')+' on page '+page;break;}
+      let data=await r.json();
+      const items=Array.isArray(data)?data:(data.data||data.results||data.projects||data.items||[]);
+      if(!items.length)break;
+      let anyRecent=false;
+      items.forEach(p=>{
+        const created=p.createdAt||p.createdDate||p.created_at||'';
+        const c=created?new Date(created):null;
+        if(c&&c>=cutoff)anyRecent=true;
+        if(!c||c>=cutoff){const pt=p.projectType||p.project_type||p.type||'';if(RECON_TYPES.has(pt)||MIT_TYPES.has(pt))all.push(p);}
+      });
+      if(items.length<50)break;
+      if(anyRecent)oldStreak=0;else{oldStreak++;if(oldStreak>=2)break;}
+      page++;
+    }
+  }catch(e){ALBI_ERR=(e&&e.name==='AbortError')?'Albi request timed out (page '+page+').':('Could not reach Albi: '+(e&&e.message||e));}
+  ALBI=all;ALBI_LOADING=false;
 }
 
 function winStart(){
@@ -286,22 +312,24 @@ function computeRows(){
   pms.forEach(p=>{ agg[p.email]={pm:p,jobs:0,prod:0,lead:0,lost:0,hold:0,other:0,revenue:0,gp:0,paid:0,revWithCogs:0,noCogs:0}; });
   const byLoc={Appleton:0,'Stevens Point':0,Other:0};
   let excluded=0,inWindow=0;
-  PROJECTS.forEach(pr=>{
-    if(start){ const c=pr.created_at?new Date(pr.created_at):null; if(!c||c<start)return; }
+  (ALBI||[]).forEach(p=>{
+    const pt=p.projectType||p.project_type||p.type||'';
+    if(!RECON_TYPES.has(pt))return;
+    const created=p.createdAt||p.createdDate||p.created_at||'';
+    if(start){ const c=created?new Date(created):null; if(!c||c<start)return; }
     inWindow++;
-    const m=String(pr.market||'').toLowerCase();
-    byLoc[m.includes('appleton')?'Appleton':(m.includes('stevens')||m.includes('point'))?'Stevens Point':'Other']+=Number(pr.actual_revenue)||0;
-    const em1=String(pr.pm_email||'').trim().toLowerCase();
-    const em2=String(pr.albi_pm_email||'').trim().toLowerCase();
-    const nm=String(pr.albi_pm_name||'').trim().toLowerCase();
-    const pm=emailToPM[em1]||emailToPM[em2]||nameToPM[nm];
+    const loc=String(p.location||p.locationName||'').toLowerCase();
+    byLoc[loc.includes('appleton')?'Appleton':(loc.includes('stevens')||loc.includes('point'))?'Stevens Point':'Other']+=Number(p.actualRevenue)||0;
+    const em=String(p.projectManagerEmail||'').trim().toLowerCase();
+    const nm=String(p.projectManager||'').trim().toLowerCase();
+    const pm=emailToPM[em]||nameToPM[nm];
     if(!pm){excluded++;return;}
     const a=agg[pm.email];
-    const b=statusBucket(pr.albi_status_normalized||pr.status);
+    const b=statusBucket(p.status);
     a.jobs++; a[b==='prod'?'prod':b==='lead'?'lead':b==='lost'?'lost':b==='hold'?'hold':'other']++;
-    const rev=Number(pr.actual_revenue)||0,gp=Number(pr.gross_profit)||0,paid=Number(pr.paid_amount)||0;
+    const rev=Number(p.actualRevenue)||0,gp=Number(p.grossProfit)||0,paid=Number(p.paidAmount)||0;
     a.revenue+=rev; a.paid+=paid;
-    if(rev>0){ a.gp+=gp; a.revWithCogs+=rev; if(!pr.gross_profit&&pr.gross_profit!==0)a.noCogs++; }
+    if(rev>0){ a.gp+=gp; a.revWithCogs+=rev; if(!p.grossProfit&&p.grossProfit!==0)a.noCogs++; }
   });
   const rows=Object.values(agg).map(a=>({
     name:a.pm.name,email:a.pm.email,jobs:a.jobs,prod:a.prod,lead:a.lead,lost:a.lost,hold:a.hold,other:a.other,
@@ -329,6 +357,14 @@ function closingClass(v){return v>=70?'good':v>=40?'warn':'bad';}
 
 function render(){
   document.getElementById('winLabel').textContent=winText();
+  if(ALBI_LOADING)return; // loader shows its own progress
+  if(ALBI_ERR){
+    document.getElementById('kpiRow').innerHTML='';
+    document.getElementById('locCard').style.display='none';
+    document.getElementById('tblWrap').innerHTML='<div class="empty" style="color:var(--red);">⚠ '+esc(ALBI_ERR)+'</div>';
+    document.getElementById('foot').innerHTML='<div class="note">Couldn\'t load from Albi. Open the browser console (F12 → Console), reload, and paste any red error.</div>';
+    return;
+  }
   if(TAB==='mit'){renderMit();return;}
   renderRecon();
 }
@@ -414,7 +450,7 @@ function renderRecon(){
   });
 
   document.getElementById('foot').innerHTML=
-    '<div class="note">This board covers <b>reconstruction jobs only</b> (the rebuild pipeline). Mitigation jobs are a separate Albi project type and aren\'t included yet — ask to add a mitigation view.</div>'+
+    '<div class="note">Reconstruction jobs pulled <b>live from Albi</b> (last 12 months): Reconstruction, Board Up, Roofing/Exterior, Raze, Remediation. Switch to the Mitigation tab for water/fire/mold.</div>'+
     '<div><b>Closing rate</b> = jobs that reached production (In Production + Closed) ÷ all jobs assigned, within the window. '+
     '<b>Margin</b> is revenue-weighted (total gross profit ÷ total revenue). '+
     '<b>Avg Job</b> is revenue ÷ jobs that reached production. Window is by job <b>created date</b>.</div>'+
@@ -430,42 +466,7 @@ function renderRecon(){
 }
 function kpi(v,l,s){return '<div class="kpi"><div class="kpi-accent"></div><div class="kpi-label">'+l+'</div><div class="kpi-value">'+v+'</div>'+(s?'<div class="kpi-sub">'+s+'</div>':'')+'</div>';}
 
-// ── MITIGATION (live Albi pull) ─────────────────────────────────────────────
-function mitProgress(msg){const w=document.getElementById('tblWrap');if(w)w.innerHTML='<div class="empty">'+esc(msg)+'</div>';}
-async function fetchT(url,ms){
-  const ctl=('AbortController'in window)?new AbortController():null;
-  const t=ctl?setTimeout(()=>ctl.abort(),ms):null;
-  try{return await fetch(url,ctl?{signal:ctl.signal}:{});}finally{if(t)clearTimeout(t);}
-}
-async function loadMitProjects(){
-  if(MIT_PROJECTS)return;
-  MIT_LOADING=true; MIT_ERR=null; render();
-  // Bound to the last 12 months. Assuming Albi returns newest-first, stop early
-  // once we hit pages with nothing inside the window (2-page grace for safety).
-  const cutoff=new Date(); cutoff.setFullYear(cutoff.getFullYear()-1);
-  const all=[];let page=1,oldStreak=0;
-  try{
-    while(page<=40){
-      mitProgress('Scanning Albi (last 12 mo)… page '+page+' · '+all.length+' mitigation jobs found');
-      let r=await fetchT(PROXY_URL+'?pageSize=50&page='+page,15000);
-      if(!r||!r.ok){MIT_ERR='Albi proxy returned HTTP '+(r?r.status:'(no response)')+' on page '+page;break;}
-      let data=await r.json();
-      const items=Array.isArray(data)?data:(data.data||data.results||data.projects||data.items||[]);
-      if(!items.length)break;
-      let anyRecent=false;
-      items.forEach(p=>{
-        const created=p.createdAt||p.createdDate||p.created_at||'';
-        const c=created?new Date(created):null;
-        if(c&&c>=cutoff)anyRecent=true;
-        if(!c||c>=cutoff){const pt=p.projectType||p.project_type||p.type||'';if(MIT_TYPES.has(pt))all.push(p);}
-      });
-      if(items.length<50)break;
-      if(anyRecent)oldStreak=0;else{oldStreak++;if(oldStreak>=2)break;}
-      page++;
-    }
-  }catch(e){MIT_ERR=(e&&e.name==='AbortError')?'Albi request timed out (page '+page+').':('Could not reach Albi: '+(e&&e.message||e));}
-  MIT_PROJECTS=all; MIT_LOADING=false;
-}
+// ── MITIGATION (from the shared Albi pull) ─────────────────────────────────
 function computeMitRows(){
   const start=winStart();
   const pms=PMS.filter(p=>MIT_PM_KEYS.has(nkey(p.name)));
@@ -474,7 +475,9 @@ function computeMitRows(){
   const agg={};pms.forEach(p=>{agg[p.email]={pm:p,jobs:0,active:0,closed:0,revenue:0,gp:0,revWithCogs:0,noCogs:0,cycleSum:0,cycleN:0};});
   const byLoc={Appleton:0,'Stevens Point':0,Other:0};
   let excluded=0,inWindow=0;
-  (MIT_PROJECTS||[]).forEach(p=>{
+  (ALBI||[]).forEach(p=>{
+    const pt=p.projectType||p.project_type||p.type||'';
+    if(!MIT_TYPES.has(pt))return;
     const created=p.createdAt||p.createdDate||p.created_at||'';
     if(start){const c=created?new Date(created):null;if(!c||c<start)return;}
     inWindow++;
@@ -502,17 +505,9 @@ function computeMitRows(){
   return {rows,excluded,inWindow,byLoc};
 }
 function renderMit(){
-  document.getElementById('tblTitle').textContent='Leaderboard · Mitigation Jobs (live from Albi)';
-  if(MIT_LOADING){
-    document.getElementById('kpiRow').innerHTML='';
-    document.getElementById('locCard').style.display='none';
-    document.getElementById('tblWrap').innerHTML='<div class="empty">Loading mitigation jobs from Albi… (this can take a few seconds)</div>';
-    document.getElementById('foot').innerHTML='';
-    return;
-  }
+  document.getElementById('tblTitle').textContent='Leaderboard · Mitigation Jobs';
   const {rows,excluded,inWindow,byLoc}=computeMitRows();
-  if(MIT_ERR){document.getElementById('locCard').style.display='none';}
-  else{document.getElementById('locCard').style.display='block';renderLoc(byLoc,'Mitigation');}
+  document.getElementById('locCard').style.display='block';renderLoc(byLoc,'Mitigation');
   const totJobs=rows.reduce((s,r)=>s+r.jobs,0);
   const totRev=rows.reduce((s,r)=>s+r.revenue,0);
   const totGp=rows.reduce((s,r)=>s+(r.margin!=null?r.revenue*r.margin/100:0),0);
@@ -523,14 +518,9 @@ function renderMit(){
     kpi(totJobs,'Mitigation Jobs','in window')+
     kpi(totJobs?money(totRev/totJobs):'—','Avg Job','revenue ÷ jobs');
 
-  if(MIT_ERR){
-    document.getElementById('tblWrap').innerHTML='<div class="empty" style="color:var(--red);">⚠ '+esc(MIT_ERR)+'</div>';
-    document.getElementById('foot').innerHTML='<div class="note">The live Albi pull failed. Open your browser console (F12 → Console) and tell me the red error when you click this tab — that pins down whether it\'s a CORS/permission block or the proxy being unreachable.</div>';
-    return;
-  }
   if(!rows.length||!totJobs){
-    document.getElementById('tblWrap').innerHTML='<div class="empty">'+(inWindow>0?('No mitigation jobs matched a listed PM in this window ('+inWindow+' mitigation jobs found, '+excluded+' assigned to a non-listed PM).'):'Albi returned projects, but none were mitigation types in this window. Try the "All Time" window.')+'</div>';
-    document.getElementById('foot').innerHTML='<div class="note">Mitigation is pulled live from Albi. If this looks thin, the proxy may only be returning active jobs, or mitigation jobs may not carry revenue in Albi — tell me what you expected to see and I\'ll adjust.</div>';
+    document.getElementById('tblWrap').innerHTML='<div class="empty">'+(inWindow>0?('No mitigation jobs matched a listed PM in this window ('+inWindow+' mitigation jobs found, '+excluded+' assigned to a non-listed PM).'):'No mitigation jobs found in this window.')+'</div>';
+    document.getElementById('foot').innerHTML='<div class="note">Mitigation is pulled live from Albi (last 12 months). If this looks thin, tell me what you expected and I\'ll adjust.</div>';
     return;
   }
 
@@ -580,11 +570,10 @@ function renderMit(){
 }
 
 // wiring
-document.getElementById('tabBar').addEventListener('click',async e=>{
+document.getElementById('tabBar').addEventListener('click',e=>{
   const b=e.target.closest('button[data-tab]');if(!b)return;
   TAB=b.dataset.tab;
   document.querySelectorAll('#tabBar button').forEach(x=>x.classList.toggle('on',x===b));
-  if(TAB==='mit'&&!MIT_PROJECTS&&!MIT_LOADING){await loadMitProjects();}
   render();
 });
 document.getElementById('winSeg').addEventListener('click',e=>{
