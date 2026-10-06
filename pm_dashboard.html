@@ -163,7 +163,13 @@ const SB_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZ
 // Leaderboard — admin, office, and PMs can all view.
 const ACCESS_ROLES=['admin','office','project manager'];
 const ADMIN_EMAILS=['josh@jg-restoration.com','josh.greil@jg-restoration.com','lisa@jg-restoration.com','jgimprovements@gmail.com'];
-let sb=null,ME=null,PMS=[],PROJECTS=[],WIN='ytd',SORT={key:'revenue',dir:-1};
+let sb=null,ME=null,PMS=[],PROJECTS=[],WIN='ytd',SORT={key:'revenue',dir:-1},TAB='recon';
+// Mitigation is pulled LIVE from Albi (it isn't synced to the DB). Same proxy
+// the dispatch board uses. These are the emergency/mitigation project types
+// (Board Up lives on the reconstruction side, so it's excluded here).
+const PROXY_URL='https://jg-albi-proxy.josh-70f.workers.dev';
+const MIT_TYPES=new Set(['Water Mitigation','Fire Mitigation','Mold','CAT3','Contents','General Clean','Biohazard']);
+let MIT_PROJECTS=null,MIT_LOADING=false,MIT_ERR=null;
 
 function goHome(){window.location='hub.html';}
 function _hasAccessRole(roleStr){
@@ -242,7 +248,7 @@ function winStart(){
 }
 function winText(){
   const s=winStart();
-  if(!s)return 'All time · '+PROJECTS.length+' projects total';
+  if(!s)return 'All time';
   const f=d=>d.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});
   return f(s)+' → today';
 }
@@ -298,6 +304,12 @@ function closingClass(v){return v>=70?'good':v>=40?'warn':'bad';}
 
 function render(){
   document.getElementById('winLabel').textContent=winText();
+  if(TAB==='mit'){renderMit();return;}
+  renderRecon();
+}
+
+function renderRecon(){
+  document.getElementById('tblTitle').textContent='Leaderboard · Reconstruction Jobs';
   const {rows,excluded,inWindow}=computeRows();
 
   const totJobs=rows.reduce((s,r)=>s+r.jobs,0);
@@ -391,7 +403,147 @@ function render(){
 }
 function kpi(v,l,s){return '<div class="kpi"><div class="kpi-accent"></div><div class="kpi-label">'+l+'</div><div class="kpi-value">'+v+'</div>'+(s?'<div class="kpi-sub">'+s+'</div>':'')+'</div>';}
 
+// ── MITIGATION (live Albi pull) ─────────────────────────────────────────────
+function mitProgress(msg){const w=document.getElementById('tblWrap');if(w)w.innerHTML='<div class="empty">'+esc(msg)+'</div>';}
+async function fetchT(url,ms){
+  const ctl=('AbortController'in window)?new AbortController():null;
+  const t=ctl?setTimeout(()=>ctl.abort(),ms):null;
+  try{return await fetch(url,ctl?{signal:ctl.signal}:{});}finally{if(t)clearTimeout(t);}
+}
+async function loadMitProjects(){
+  if(MIT_PROJECTS)return;
+  MIT_LOADING=true; MIT_ERR=null; render();
+  const all=[];let page=1,scanned=0;
+  try{
+    while(page<=60){
+      mitProgress('Scanning Albi… page '+page+' · '+scanned+' projects read · '+all.length+' mitigation jobs found');
+      let r=await fetchT(PROXY_URL+'?pageSize=50&page='+page,15000);
+      if(!r||!r.ok){MIT_ERR='Albi proxy returned HTTP '+(r?r.status:'(no response)')+' on page '+page;break;}
+      let data=await r.json();
+      const items=Array.isArray(data)?data:(data.data||data.results||data.projects||data.items||[]);
+      if(!items.length)break;
+      scanned+=items.length;
+      items.forEach(p=>{const pt=p.projectType||p.project_type||p.type||'';if(MIT_TYPES.has(pt))all.push(p);});
+      if(items.length<50)break;
+      page++;
+    }
+  }catch(e){MIT_ERR=(e&&e.name==='AbortError')?'Albi request timed out (page '+page+').':('Could not reach Albi: '+(e&&e.message||e));}
+  MIT_PROJECTS=all; MIT_LOADING=false;
+}
+function computeMitRows(){
+  const start=winStart();
+  const emailToPM={},nameToPM={};
+  PMS.forEach(p=>{if(p.email)emailToPM[p.email]=p;if(p.name)nameToPM[p.name.toLowerCase()]=p;});
+  const agg={};PMS.forEach(p=>{agg[p.email]={pm:p,jobs:0,active:0,closed:0,revenue:0,gp:0,revWithCogs:0,noCogs:0,cycleSum:0,cycleN:0};});
+  let excluded=0,inWindow=0;
+  (MIT_PROJECTS||[]).forEach(p=>{
+    const created=p.createdAt||p.createdDate||p.created_at||'';
+    if(start){const c=created?new Date(created):null;if(!c||c<start)return;}
+    inWindow++;
+    const em=String(p.projectManagerEmail||'').trim().toLowerCase();
+    const nm=String(p.projectManager||'').trim().toLowerCase();
+    const pm=emailToPM[em]||nameToPM[nm];
+    if(!pm){excluded++;return;}
+    const a=agg[pm.email];
+    a.jobs++;
+    const st=String(p.status||'').toLowerCase();
+    if(/closed|complet|invoic|collect|paid/.test(st))a.closed++;else a.active++;
+    const rev=Number(p.actualRevenue)||0,gp=Number(p.grossProfit)||0;
+    a.revenue+=rev;
+    if(rev>0){a.gp+=gp;a.revWithCogs+=rev;if(!p.grossProfit&&p.grossProfit!==0)a.noCogs++;}
+    const s=p.actualStart||p.startDate,e=p.actualCompletion||p.completedDate;
+    if(s&&e){const d=(new Date(e)-new Date(s))/86400000;if(d>=0&&d<3650){a.cycleSum+=d;a.cycleN++;}}
+  });
+  const rows=Object.values(agg).map(a=>({
+    name:a.pm.name,email:a.pm.email,jobs:a.jobs,active:a.active,closed:a.closed,
+    revenue:a.revenue,margin:a.revWithCogs>0?(a.gp/a.revWithCogs*100):null,
+    avgJob:a.jobs>0?(a.revenue/a.jobs):0,cycle:a.cycleN>0?(a.cycleSum/a.cycleN):null,noCogs:a.noCogs
+  }));
+  return {rows,excluded,inWindow};
+}
+function renderMit(){
+  document.getElementById('tblTitle').textContent='Leaderboard · Mitigation Jobs (live from Albi)';
+  if(MIT_LOADING){
+    document.getElementById('kpiRow').innerHTML='';
+    document.getElementById('tblWrap').innerHTML='<div class="empty">Loading mitigation jobs from Albi… (this can take a few seconds)</div>';
+    document.getElementById('foot').innerHTML='';
+    return;
+  }
+  const {rows,excluded,inWindow}=computeMitRows();
+  const totJobs=rows.reduce((s,r)=>s+r.jobs,0);
+  const totRev=rows.reduce((s,r)=>s+r.revenue,0);
+  const totGp=rows.reduce((s,r)=>s+(r.margin!=null?r.revenue*r.margin/100:0),0);
+  const coMargin=totRev>0?(totGp/totRev*100):null;
+  document.getElementById('kpiRow').innerHTML=
+    kpi(money(totRev),'Mitigation Revenue','actual, across listed PMs')+
+    kpi(pct(coMargin),'Gross Margin','revenue-weighted')+
+    kpi(totJobs,'Mitigation Jobs','in window')+
+    kpi(totJobs?money(totRev/totJobs):'—','Avg Job','revenue ÷ jobs');
+
+  if(MIT_ERR){
+    document.getElementById('tblWrap').innerHTML='<div class="empty" style="color:var(--red);">⚠ '+esc(MIT_ERR)+'</div>';
+    document.getElementById('foot').innerHTML='<div class="note">The live Albi pull failed. Open your browser console (F12 → Console) and tell me the red error when you click this tab — that pins down whether it\'s a CORS/permission block or the proxy being unreachable.</div>';
+    return;
+  }
+  if(!rows.length||!totJobs){
+    document.getElementById('tblWrap').innerHTML='<div class="empty">'+(inWindow>0?('No mitigation jobs matched a listed PM in this window ('+inWindow+' mitigation jobs found, '+excluded+' assigned to a non-listed PM).'):'Albi returned projects, but none were mitigation types in this window. Try the "All Time" window.')+'</div>';
+    document.getElementById('foot').innerHTML='<div class="note">Mitigation is pulled live from Albi. If this looks thin, the proxy may only be returning active jobs, or mitigation jobs may not carry revenue in Albi — tell me what you expected to see and I\'ll adjust.</div>';
+    return;
+  }
+
+  rows.sort((a,b)=>{let x=a[SORT.key],y=b[SORT.key];if(SORT.key==='name'){x=String(x).toLowerCase();y=String(y).toLowerCase();return x<y?-SORT.dir:x>y?SORT.dir:0;}x=x==null?-1:x;y=y==null?-1:y;return (x-y)*SORT.dir;});
+  const arr=k=>SORT.key===k?('<span class="arr">'+(SORT.dir<0?'▼':'▲')+'</span>'):'';
+  const head='<tr>'+
+    '<th data-k="name">PM '+arr('name')+'</th>'+
+    '<th data-k="jobs">Jobs '+arr('jobs')+'</th>'+
+    '<th data-k="active" class="hide-sm">Active '+arr('active')+'</th>'+
+    '<th data-k="closed" class="hide-sm">Closed '+arr('closed')+'</th>'+
+    '<th data-k="revenue">Revenue '+arr('revenue')+'</th>'+
+    '<th data-k="margin">Margin '+arr('margin')+'</th>'+
+    '<th data-k="avgJob" class="hide-sm">Avg Job '+arr('avgJob')+'</th>'+
+    '<th data-k="cycle" class="hide-sm">Cycle '+arr('cycle')+'</th>'+
+  '</tr>';
+  const body=rows.map(r=>{
+    const isMe=r.email&&r.email===ME;
+    const marginFlag=r.noCogs>0?'<span class="flag" title="'+r.noCogs+' job(s) have revenue but no cost recorded">⚠ '+r.noCogs+'</span>':'';
+    return '<tr'+(isMe?' class="me-row"':'')+'>'+
+      '<td class="pm-name">'+esc(r.name)+(isMe?' <span class="you-badge">You</span>':'')+'</td>'+
+      '<td class="num">'+r.jobs+'</td>'+
+      '<td class="num hide-sm">'+r.active+'</td>'+
+      '<td class="num hide-sm">'+r.closed+'</td>'+
+      '<td class="num">'+moneyFull(r.revenue)+'</td>'+
+      '<td class="num">'+pct(r.margin)+marginFlag+'</td>'+
+      '<td class="num hide-sm">'+(r.avgJob?money(r.avgJob):'—')+'</td>'+
+      '<td class="num hide-sm">'+(r.cycle!=null?Math.round(r.cycle)+'d':'—')+'</td>'+
+    '</tr>';
+  }).join('');
+  const totalRow='<tr class="total-row">'+
+    '<td>Company ('+rows.length+' PMs)</td>'+
+    '<td class="num">'+totJobs+'</td>'+
+    '<td class="num hide-sm">'+rows.reduce((s,r)=>s+r.active,0)+'</td>'+
+    '<td class="num hide-sm">'+rows.reduce((s,r)=>s+r.closed,0)+'</td>'+
+    '<td class="num">'+moneyFull(totRev)+'</td>'+
+    '<td class="num">'+pct(coMargin)+'</td>'+
+    '<td class="num hide-sm">'+(totJobs?money(totRev/totJobs):'—')+'</td>'+
+    '<td class="num hide-sm">—</td>'+
+  '</tr>';
+  document.getElementById('tblWrap').innerHTML='<table><thead>'+head+'</thead><tbody>'+body+totalRow+'</tbody></table>';
+  document.querySelectorAll('thead th[data-k]').forEach(th=>{th.onclick=()=>{const k=th.dataset.k;if(SORT.key===k)SORT.dir*=-1;else{SORT.key=k;SORT.dir=(k==='name')?1:-1;}render();};});
+  document.getElementById('foot').innerHTML=
+    '<div class="note">Mitigation jobs are pulled <b>live from Albi</b> (they aren\'t synced to the database). Types: Water/Fire Mitigation, Mold, CAT3, Contents, General Clean, Biohazard. No closing rate — mitigation is dispatched, not sold.</div>'+
+    '<div><b>Revenue</b> = actual revenue. <b>Margin</b> = revenue-weighted (gross profit ÷ revenue). <b>Cycle</b> = avg days from start to completion, where Albi has both dates.</div>'+
+    (excluded>0?'<div style="margin-top:6px;">'+excluded+' of '+inWindow+' mitigation jobs in this window are assigned to a PM not in the employee list and are excluded.</div>':'')+
+    (rows.some(r=>r.noCogs>0)?'<div style="margin-top:6px;color:#b36b00;">⚠ Margin flags mark PMs with jobs that have revenue but no cost recorded.</div>':'');
+}
+
 // wiring
+document.getElementById('tabBar').addEventListener('click',async e=>{
+  const b=e.target.closest('button[data-tab]');if(!b)return;
+  TAB=b.dataset.tab;
+  document.querySelectorAll('#tabBar button').forEach(x=>x.classList.toggle('on',x===b));
+  if(TAB==='mit'&&!MIT_PROJECTS&&!MIT_LOADING){await loadMitProjects();}
+  render();
+});
 document.getElementById('winSeg').addEventListener('click',e=>{
   const b=e.target.closest('button[data-win]');if(!b)return;
   WIN=b.dataset.win;
