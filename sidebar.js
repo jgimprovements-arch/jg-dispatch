@@ -46,6 +46,7 @@
 
     { section: 'INSIGHTS' },
     { label: 'Adjuster Intel',      icon: '🧠',  url: 'intelligence.html' },
+    { label: 'PM Performance',      icon: '🏆',  url: 'pm_dashboard.html' },
 
     { section: 'ADMIN' },
     { label: 'Admin Panel',         icon: '🛡',  url: 'admin.html' }

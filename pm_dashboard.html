@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<script src="jg-version-check.js"></script>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>JG Restoration — PM Performance</title>
+<link rel="icon" type="image/png" href="https://jgimprovements-arch.github.io/jg-dispatch/logo.png">
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script src="auth.js?v=20260419-1"></script>
+<script src="sidebar.js?v=20260419-1"></script>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<script src="https://unpkg.com/@supabase/supabase-js@2"></script>
+<script>if(!window.supabase||!window.supabase.createClient){document.write('<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"><\/script>');}</script>
+<style>
+:root{
+  --navy:#0d2d5e;--orange:#e85d04;--gold:#f5a623;
+  --bg:#f0ede8;--s1:#faf9f7;--s2:#f0ede8;--s3:#e8e4df;
+  --brd:rgba(13,45,94,.12);--brdH:rgba(13,45,94,.3);
+  --surface:#faf9f7;--border:rgba(13,45,94,.12);--muted:#6b7a96;
+  --acc:#e85d04;--txt:#0d1f3c;--dim:#6b7a96;--mut:#a0abbf;
+  --red:#c02020;--redD:rgba(192,32,32,.08);
+  --grn:#2e7d32;--grnD:rgba(46,125,50,.08);
+  --wrn:#e65100;--wrnD:rgba(230,81,0,.08);--ok:#2e7d32;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--txt);font-family:'DM Sans',system-ui,sans-serif;min-height:100vh;}
+.mono{font-family:'DM Mono',monospace}
+.admin-hdr{background:var(--navy);padding:14px 20px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:95;flex-wrap:wrap;gap:10px;}
+.hdr-title{font-size:16px;font-weight:700;color:#fff;display:flex;align-items:center;gap:10px;}
+.hdr-title span{font-size:20px;}
+.hdr-btn{padding:8px 14px;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;font-family:'DM Sans',sans-serif;background:rgba(255,255,255,.1);color:rgba(255,255,255,.8);border:1px solid rgba(255,255,255,.2);}
+.hdr-btn:hover{background:rgba(255,255,255,.18);color:#fff;}
+.wrap{max-width:1240px;margin:0 auto;padding:18px 16px 90px;}
+.seg{display:inline-flex;background:var(--s1);border:1px solid var(--brd);border-radius:9px;padding:3px;gap:2px;flex-wrap:wrap;}
+.seg button{border:0;background:transparent;font-family:'DM Sans',sans-serif;font-size:12px;font-weight:600;color:var(--dim);padding:7px 14px;border-radius:7px;cursor:pointer;white-space:nowrap;}
+.seg button.on{background:var(--navy);color:#fff;}
+.toolbar{display:flex;gap:12px;align-items:center;justify-content:space-between;flex-wrap:wrap;margin-bottom:16px;}
+.win-label{font-size:12px;color:var(--muted);}
+.kpi-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:20px;}
+.kpi{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:16px 18px;box-shadow:0 1px 4px rgba(13,45,94,.05);}
+.kpi .v{font-family:'DM Mono',monospace;font-size:28px;font-weight:600;color:var(--navy);line-height:1;}
+.kpi .l{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-top:6px;font-weight:700;}
+.kpi .s{font-size:11px;color:var(--dim);margin-top:3px;}
+.tbl-wrap{background:var(--surface);border:1px solid var(--border);border-radius:12px;overflow:hidden;box-shadow:0 1px 4px rgba(13,45,94,.05);}
+table{width:100%;border-collapse:collapse;font-size:13px;}
+thead th{text-align:right;padding:11px 14px;font-size:10px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);background:var(--s3);border-bottom:1px solid var(--border);white-space:nowrap;cursor:pointer;user-select:none;}
+thead th:first-child{text-align:left;}
+thead th:hover{color:var(--navy);}
+thead th .arr{color:var(--orange);font-size:9px;}
+tbody td{padding:11px 14px;border-bottom:1px solid var(--border);vertical-align:middle;text-align:right;font-variant-numeric:tabular-nums;}
+tbody td:first-child{text-align:left;}
+tbody tr:last-child td{border-bottom:none;}
+tbody tr:hover{background:rgba(13,45,94,.02);}
+tbody tr.me-row{background:rgba(232,93,4,.07);box-shadow:inset 3px 0 0 var(--orange);}
+tbody tr.me-row:hover{background:rgba(232,93,4,.1);}
+.you-badge{font-family:'DM Mono',monospace;font-size:9px;font-weight:700;color:#fff;background:var(--orange);border-radius:4px;padding:1px 6px;margin-left:6px;vertical-align:middle;text-transform:uppercase;letter-spacing:.04em;}
+tbody tr.total-row{background:rgba(13,45,94,.04);font-weight:700;}
+tbody tr.total-row td{border-top:2px solid var(--brdH);}
+.pm-name{font-weight:700;color:var(--navy);}
+.num{font-family:'DM Mono',monospace;}
+.good{color:var(--grn);font-weight:700;}
+.warn{color:var(--wrn);font-weight:700;}
+.bad{color:var(--red);font-weight:700;}
+.flag{font-size:9px;color:var(--wrn);background:var(--wrnD);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;white-space:nowrap;}
+.pills{display:inline-flex;gap:4px;justify-content:flex-end;flex-wrap:wrap;}
+.pill{font-family:'DM Mono',monospace;font-size:10px;font-weight:500;padding:2px 7px;border-radius:20px;white-space:nowrap;}
+.pill.lead{background:rgba(13,45,94,.07);color:var(--navy);}
+.pill.prod{background:var(--grnD);color:var(--grn);}
+.pill.lost{background:var(--redD);color:var(--red);}
+.pill.hold{background:var(--wrnD);color:var(--wrn);}
+.pill.other{background:#e8e4df;color:#7a879b;}
+.empty{color:var(--muted);text-align:center;padding:50px 0;font-size:14px;}
+.foot{margin-top:16px;font-size:11px;color:var(--muted);line-height:1.7;}
+.foot b{color:var(--dim);}
+.legend{display:flex;gap:14px;flex-wrap:wrap;margin-top:6px;}
+.legend span{display:inline-flex;align-items:center;gap:5px;}
+.dot{width:9px;height:9px;border-radius:50%;display:inline-block;}
+.toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);background:var(--navy);color:#fff;padding:11px 20px;border-radius:10px;font-size:13px;font-weight:600;z-index:800;opacity:0;transition:opacity .2s;pointer-events:none;}
+.toast.on{opacity:1;}
+.gate{background:#fff;border:1px solid var(--brd);border-radius:12px;padding:26px;text-align:center;max-width:420px;margin:70px auto;}
+.gate h1{font-size:18px;color:var(--navy);margin-bottom:6px;}
+.frow label{display:block;font-size:11px;font-weight:600;color:var(--dim);text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px;}
+input{font-family:'DM Sans',sans-serif;font-size:13px;padding:9px 11px;border:1px solid var(--brd);border-radius:8px;background:#fff;color:var(--txt);width:100%;}
+.btn{background:var(--navy);color:#fff;border:0;border-radius:8px;padding:9px 15px;font-size:13px;font-weight:600;cursor:pointer;font-family:'DM Sans',sans-serif;}
+.btn.acc{background:var(--orange);}
+@media(max-width:720px){.hide-sm{display:none;}}
+</style>
+</head>
+<body>
+<div id="app" style="display:none">
+  <div class="admin-hdr">
+    <div class="hdr-title"><span>📊</span> PM Performance</div>
+    <button class="hdr-btn" onclick="boot()">↻ Refresh</button>
+  </div>
+  <div class="wrap">
+    <div class="toolbar">
+      <div class="seg" id="winSeg">
+        <button data-win="mtd">This Month</button>
+        <button data-win="ytd" class="on">YTD</button>
+        <button data-win="t12">Trailing 12 mo</button>
+        <button data-win="all">All Time</button>
+      </div>
+      <div class="win-label" id="winLabel"></div>
+    </div>
+    <div class="kpi-row" id="kpiRow"></div>
+    <div class="tbl-wrap" id="tblWrap"></div>
+    <div class="foot" id="foot"></div>
+  </div>
+</div>
+
+<div class="gate" id="gate">
+  <h1>📊 PM Performance</h1>
+  <p style="color:var(--muted);font-size:13px;margin-bottom:8px;">Sign in with your JG admin account.</p>
+  <p id="gateMsg" style="color:var(--red);font-size:13px;"></p>
+  <div class="frow" style="text-align:left;margin-top:10px;"><label>Admin email</label><input id="emailInput" placeholder="you@jg-restoration.com"></div>
+  <button class="btn acc" id="gateBtn" style="width:100%;margin-top:10px;">Continue</button>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const SB_URL='https://nuykvchgecpiuikoerze.supabase.co';
+const SB_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im51eWt2Y2hnZWNwaXVpa29lcnplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYyNjM3ODYsImV4cCI6MjA5MTgzOTc4Nn0.39hZ8DdjT_0iFJXPeAL2FXUSLw8FZBirDVzxZTO1W9s';
+// Leaderboard — admin, office, and PMs can all view the full board.
+const ACCESS_ROLES=['admin','office','project manager'];
+const ADMIN_EMAILS=['josh@jg-restoration.com','josh.greil@jg-restoration.com','lisa@jg-restoration.com','jgimprovements@gmail.com'];
+let sb=null,ME=null,PMS=[],PROJECTS=[],WIN='ytd',SORT={key:'revenue',dir:-1};
+
+function _hasAccessRole(roleStr){
+  return String(roleStr||'').split(',').map(r=>r.trim().toLowerCase()).filter(Boolean).some(r=>ACCESS_ROLES.indexOf(r)!==-1);
+}
+async function _emailAllowed(email){
+  if(ADMIN_EMAILS.indexOf(email)!==-1) return true;
+  try{
+    const c=window.supabase.createClient(SB_URL,SB_KEY);
+    const {data}=await c.from('employees').select('role,active').or('email.eq.'+email+',personal_email.eq.'+email).limit(1);
+    const emp=data&&data[0];
+    if(emp&&emp.active!==false&&_hasAccessRole(emp.role)) return true;
+  }catch(err){}
+  return false;
+}
+function toast(m){const t=document.getElementById('toast');t.textContent=m;t.classList.add('on');setTimeout(()=>t.classList.remove('on'),2600);}
+function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+function detectEmail(){try{const r=localStorage.getItem('jg_platform_user')||localStorage.getItem('jg_tc_user');if(r){const u=JSON.parse(r);return u&&u.email?String(u.email).toLowerCase():null;}}catch(e){}return null;}
+function openGate(msg){document.getElementById('gate').style.display='block';document.getElementById('app').style.display='none';if(msg)document.getElementById('gateMsg').textContent=msg;const p=detectEmail();if(p)document.getElementById('emailInput').value=p;}
+async function tryEnter(email){email=String(email||'').trim().toLowerCase();if(!email)return openGate('Enter your email.');const ok=await _emailAllowed(email);if(!ok)return openGate('This view is limited to PM, office, and admin accounts.');ME=email;document.getElementById('gate').style.display='none';document.getElementById('app').style.display='block';await boot();}
+
+async function boot(){
+  if(!window.supabase||!window.supabase.createClient){toast('Database library blocked - check tracking prevention');return;}
+  sb=window.supabase.createClient(SB_URL,SB_KEY);
+  document.getElementById('tblWrap').innerHTML='<div class="empty">Loading…</div>';
+  await Promise.all([loadPMs(),loadProjects()]);
+  render();
+}
+
+// PMs = active employees whose role includes "Project Manager".
+async function loadPMs(){
+  const {data,error}=await sb.from('employees').select('name,email,role,active');
+  if(error){toast('Employee load failed: '+error.message);PMS=[];return;}
+  PMS=(data||[]).filter(e=>e&&e.active!==false&&String(e.role||'').split(',').map(r=>r.trim().toLowerCase()).includes('project manager'))
+    .map(e=>({name:String(e.name||'').trim(),email:String(e.email||'').trim().toLowerCase()}));
+}
+
+// All projects — paginated (REST caps at 1000/req).
+async function loadProjects(){
+  PROJECTS=[];
+  const cols='albi_pm_name,albi_pm_email,pm_email,status,albi_status_normalized,actual_revenue,estimated_revenue,gross_profit,paid_amount,billed_pct,created_at';
+  let from=0;const page=1000;
+  while(true){
+    const {data,error}=await sb.from('rebuild_projects').select(cols).order('created_at',{ascending:false}).range(from,from+page-1);
+    if(error){toast('Project load failed: '+error.message);break;}
+    const batch=data||[];
+    PROJECTS.push(...batch);
+    if(batch.length<page)break;
+    from+=page;
+    if(from>50000)break;
+  }
+}
+
+// ── window ────────────────────────────────────────────────────────────────
+function winStart(){
+  const now=new Date();
+  if(WIN==='mtd')return new Date(now.getFullYear(),now.getMonth(),1);
+  if(WIN==='ytd')return new Date(now.getFullYear(),0,1);
+  if(WIN==='t12'){const d=new Date(now);d.setFullYear(d.getFullYear()-1);return d;}
+  return null; // all time
+}
+function winText(){
+  const s=winStart();
+  if(!s)return 'All time · '+PROJECTS.length+' projects total';
+  const f=d=>d.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});
+  return f(s)+' → today';
+}
+
+// ── status bucketing ────────────────────────────────────────────────────────
+// "Reached production" (what closing rate counts) = anything in or past production,
+// including closed/completed/invoiced. Edit the keyword sets if a status buckets wrong.
+function statusBucket(raw){
+  const s=String(raw||'').toLowerCase();
+  if(!s)return 'other';
+  if(/lost|dead|cancel|declin|void|no\s*sale/.test(s))return 'lost';
+  if(/hold|pause|wait/.test(s))return 'hold';
+  if(/production|active|progress|rebuild|mitigat|closed|complet|invoic|collect|paid|won|job/.test(s))return 'prod';
+  if(/new|lead|estimat|inspect|bid|pending|schedul|opportunit|quote/.test(s))return 'lead';
+  return 'other';
+}
+
+// ── compute ─────────────────────────────────────────────────────────────────
+function computeRows(){
+  const start=winStart();
+  const emailToPM={},nameToPM={};
+  PMS.forEach(p=>{ if(p.email)emailToPM[p.email]=p; if(p.name)nameToPM[p.name.toLowerCase()]=p; });
+
+  const agg={}; // key = pm.email
+  PMS.forEach(p=>{ agg[p.email]={pm:p,jobs:0,prod:0,lead:0,lost:0,hold:0,other:0,revenue:0,gp:0,paid:0,revWithCogs:0,gpCount:0,noCogs:0}; });
+
+  let excluded=0,inWindow=0;
+  PROJECTS.forEach(pr=>{
+    // time window on created_at
+    if(start){ const c=pr.created_at?new Date(pr.created_at):null; if(!c||c<start)return; }
+    inWindow++;
+    // attribute to a PM employee by email (pm_email / albi_pm_email) or name
+    const em1=String(pr.pm_email||'').trim().toLowerCase();
+    const em2=String(pr.albi_pm_email||'').trim().toLowerCase();
+    const nm=String(pr.albi_pm_name||'').trim().toLowerCase();
+    const pm=emailToPM[em1]||emailToPM[em2]||nameToPM[nm];
+    if(!pm){excluded++;return;}
+    const a=agg[pm.email];
+    const b=statusBucket(pr.albi_status_normalized||pr.status);
+    a.jobs++; a[b==='prod'?'prod':b==='lead'?'lead':b==='lost'?'lost':b==='hold'?'hold':'other']++;
+    const rev=Number(pr.actual_revenue)||0;
+    const gp=Number(pr.gross_profit)||0;
+    const paid=Number(pr.paid_amount)||0;
+    a.revenue+=rev; a.paid+=paid;
+    if(rev>0){ a.gp+=gp; a.revWithCogs+=rev; a.gpCount++; if(!pr.gross_profit&&pr.gross_profit!==0)a.noCogs++; }
+  });
+
+  const rows=Object.values(agg).map(a=>{
+    const closing=a.jobs>0?(a.prod/a.jobs*100):0;
+    const margin=a.revWithCogs>0?(a.gp/a.revWithCogs*100):null;
+    const avgJob=a.prod>0?(a.revenue/a.prod):0;
+    const billed=a.revenue>0?(a.paid/a.revenue*100):null;
+    return {name:a.pm.name,email:a.pm.email,jobs:a.jobs,prod:a.prod,lead:a.lead,lost:a.lost,hold:a.hold,other:a.other,
+            closing,revenue:a.revenue,margin,avgJob,billed,noCogs:a.noCogs};
+  });
+  return {rows,excluded,inWindow};
+}
+
+// ── format ──────────────────────────────────────────────────────────────────
+function money(n){n=Number(n)||0;const a=Math.abs(n);if(a>=1e6)return '$'+(n/1e6).toFixed(1)+'M';if(a>=1e3)return '$'+Math.round(n/1e3)+'k';return '$'+Math.round(n).toLocaleString();}
+function moneyFull(n){return '$'+Math.round(Number(n)||0).toLocaleString();}
+function pct(n){return n==null?'—':(Math.round(n)+'%');}
+function closingClass(v){return v>=70?'good':v>=40?'warn':'bad';}
+
+// ── render ──────────────────────────────────────────────────────────────────
+function render(){
+  document.getElementById('winLabel').textContent=winText();
+  const {rows,excluded,inWindow}=computeRows();
+
+  // Company KPIs
+  const totJobs=rows.reduce((s,r)=>s+r.jobs,0);
+  const totProd=rows.reduce((s,r)=>s+r.prod,0);
+  const totRev=rows.reduce((s,r)=>s+r.revenue,0);
+  const totGp=rows.reduce((s,r)=>s+(r.margin!=null?r.revenue*r.margin/100:0),0);
+  const coMargin=totRev>0?(totGp/totRev*100):null;
+  const coClosing=totJobs>0?(totProd/totJobs*100):0;
+  document.getElementById('kpiRow').innerHTML=
+    kpi(money(totRev),'Total Revenue','actual, across listed PMs')+
+    kpi(pct(coMargin),'Gross Margin','revenue-weighted')+
+    kpi(pct(coClosing),'Closing Rate','reached production ÷ assigned')+
+    kpi(totJobs,'Jobs',totProd+' reached production');
+
+  if(!rows.length){
+    document.getElementById('tblWrap').innerHTML='<div class="empty">No project-manager employees found. Set an employee\'s role to include "Project Manager" in the timeclock admin.</div>';
+    document.getElementById('foot').innerHTML='';
+    return;
+  }
+
+  // sort
+  rows.sort((a,b)=>{
+    let x=a[SORT.key],y=b[SORT.key];
+    if(SORT.key==='name'){x=String(x).toLowerCase();y=String(y).toLowerCase();return x<y?-SORT.dir:x>y?SORT.dir:0;}
+    x=x==null?-1:x;y=y==null?-1:y;return (x-y)*SORT.dir;
+  });
+
+  const arr=k=>SORT.key===k?('<span class="arr">'+(SORT.dir<0?'▼':'▲')+'</span>'):'';
+  const head='<tr>'+
+    '<th data-k="name">PM '+arr('name')+'</th>'+
+    '<th data-k="jobs">Jobs '+arr('jobs')+'</th>'+
+    '<th data-k="closing">Closing '+arr('closing')+'</th>'+
+    '<th data-k="revenue">Revenue '+arr('revenue')+'</th>'+
+    '<th data-k="margin">Margin '+arr('margin')+'</th>'+
+    '<th data-k="avgJob" class="hide-sm">Avg Job '+arr('avgJob')+'</th>'+
+    '<th data-k="billed" class="hide-sm">Billed '+arr('billed')+'</th>'+
+    '<th class="hide-sm">Status</th>'+
+  '</tr>';
+
+  const body=rows.map(r=>{
+    const pills='<div class="pills">'+
+      (r.lead?'<span class="pill lead" title="Leads / New">'+r.lead+' lead</span>':'')+
+      (r.prod?'<span class="pill prod" title="In production + closed">'+r.prod+' prod</span>':'')+
+      (r.hold?'<span class="pill hold" title="On hold">'+r.hold+' hold</span>':'')+
+      (r.lost?'<span class="pill lost" title="Lost / dead">'+r.lost+' lost</span>':'')+
+      (r.other?'<span class="pill other" title="Unmapped status">'+r.other+' ?</span>':'')+
+    '</div>';
+    const marginFlag=r.noCogs>0?'<span class="flag" title="'+r.noCogs+' job(s) have revenue but no cost recorded — margin may read high">⚠ '+r.noCogs+'</span>':'';
+    const isMe=r.email&&r.email===ME;
+    return '<tr'+(isMe?' class="me-row"':'')+'>'+
+      '<td class="pm-name">'+esc(r.name)+(isMe?' <span class="you-badge">You</span>':'')+'</td>'+
+      '<td class="num">'+r.jobs+'</td>'+
+      '<td class="num '+closingClass(r.closing)+'">'+pct(r.closing)+'</td>'+
+      '<td class="num">'+moneyFull(r.revenue)+'</td>'+
+      '<td class="num">'+pct(r.margin)+marginFlag+'</td>'+
+      '<td class="num hide-sm">'+(r.avgJob?money(r.avgJob):'—')+'</td>'+
+      '<td class="num hide-sm">'+pct(r.billed)+'</td>'+
+      '<td class="hide-sm">'+pills+'</td>'+
+    '</tr>';
+  }).join('');
+
+  const totalRow='<tr class="total-row">'+
+    '<td>Company ('+rows.length+' PMs)</td>'+
+    '<td class="num">'+totJobs+'</td>'+
+    '<td class="num '+closingClass(coClosing)+'">'+pct(coClosing)+'</td>'+
+    '<td class="num">'+moneyFull(totRev)+'</td>'+
+    '<td class="num">'+pct(coMargin)+'</td>'+
+    '<td class="num hide-sm">'+(totProd?money(totRev/totProd):'—')+'</td>'+
+    '<td class="num hide-sm">—</td>'+
+    '<td class="hide-sm"></td>'+
+  '</tr>';
+
+  document.getElementById('tblWrap').innerHTML='<table><thead>'+head+'</thead><tbody>'+body+totalRow+'</tbody></table>';
+  document.querySelectorAll('thead th[data-k]').forEach(th=>{
+    th.onclick=()=>{const k=th.dataset.k;if(SORT.key===k)SORT.dir*=-1;else{SORT.key=k;SORT.dir=(k==='name')?1:-1;}render();};
+  });
+
+  // footnote
+  document.getElementById('foot').innerHTML=
+    '<div><b>Closing rate</b> = jobs that reached production (In Production + Closed) ÷ all jobs assigned, within the window. '+
+    '<b>Margin</b> is revenue-weighted (total gross profit ÷ total revenue). '+
+    '<b>Avg Job</b> is revenue ÷ jobs that reached production. Window is by job <b>created date</b>.</div>'+
+    '<div class="legend">'+
+      '<span><span class="dot" style="background:var(--navy);opacity:.4;"></span>lead / new</span>'+
+      '<span><span class="dot" style="background:var(--grn);"></span>in production + closed</span>'+
+      '<span><span class="dot" style="background:var(--wrn);"></span>on hold</span>'+
+      '<span><span class="dot" style="background:var(--red);"></span>lost / dead</span>'+
+      '<span><span class="dot" style="background:#aab4c4;"></span>unmapped (?)</span>'+
+    '</div>'+
+    (excluded>0?'<div style="margin-top:6px;">'+excluded+' of '+inWindow+' projects in this window are assigned to a PM who isn\'t in the employee list (or unassigned) and are excluded. '+(rows.some(r=>r.other>0)?'Any "?" status counts mean a status word I didn\'t recognize — tell me the exact label and I\'ll bucket it.':'')+'</div>':'')+
+    (rows.some(r=>r.noCogs>0)?'<div style="margin-top:6px;color:var(--wrn);">⚠ Margin flags mark PMs with jobs that have revenue but no cost recorded — those margins read artificially high until COGS is entered.</div>':'');
+}
+
+function kpi(v,l,s){return '<div class="kpi"><div class="v">'+v+'</div><div class="l">'+l+'</div>'+(s?'<div class="s">'+s+'</div>':'')+'</div>';}
+
+// ── wiring ──────────────────────────────────────────────────────────────────
+document.getElementById('winSeg').addEventListener('click',e=>{
+  const b=e.target.closest('button[data-win]');if(!b)return;
+  WIN=b.dataset.win;
+  document.querySelectorAll('#winSeg button').forEach(x=>x.classList.toggle('on',x===b));
+  render();
+});
+document.getElementById('gateBtn').onclick=()=>tryEnter(document.getElementById('emailInput').value);
+document.getElementById('emailInput').addEventListener('keydown',e=>{if(e.key==='Enter')tryEnter(document.getElementById('emailInput').value);});
+(function(){const e=detectEmail();if(e)tryEnter(e);else openGate('');})();
+</script>
+</body>
+</html>
