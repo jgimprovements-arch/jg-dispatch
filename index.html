@@ -4288,9 +4288,27 @@ function mergeRemoteState(state){
 }
 
 async function pollSharedState(){
-  // CUTOVER 2026-04-26: deprecated. Realtime + _v2RtRefresh covers this.
-  // Keeping the function as a no-op so existing setInterval/setTimeout references don't error.
-  return;
+  // SELF-HEAL BACKSTOP. Realtime (WebSocket) is the primary, instant sync path,
+  // but WebSockets drop silently (laptop sleep, Wi-Fi switch, backgrounded tab)
+  // and any assignment made by another device during that gap is otherwise lost
+  // until a manual reload. This periodic reconcile re-reads the _v2 tables so the
+  // board can never stay stale for more than one interval.
+  //
+  // Guards — skip the re-read when it could stomp live local work:
+  //   • only reconcile the live "today" board (other dates are navigated by hand)
+  //   • not during a date switch
+  //   • not while a card is actively being dragged
+  //   • not within 5s of a local edit, so our own writes settle in the DB first
+  try {
+    if (!_isViewingToday()) return;
+    if (_dateSwitchInProgress) return;
+    if (document.querySelector('.job-card.dragging, .uc.dragging')) return;
+    if (lastLocalChange && (Date.now() - lastLocalChange) < 5000) return;
+    await loadFromV2();
+    render();
+  } catch(e) {
+    console.warn('[poll] reconcile failed', e);
+  }
 }
 
 async function clearBoardState(){
@@ -4593,6 +4611,13 @@ function initRealtime() {
           _rtPollingFallback = false;
           var badge = document.getElementById('sync-badge');
           if (badge) badge.title = 'Live sync active';
+          // CATCH-UP: a fresh subscription (initial boot OR a reconnect after a
+          // drop) means we may have missed INSERT/UPDATE/DELETE events while the
+          // socket was down. Re-read the board once now so assignments made on
+          // another device during the gap appear immediately, not "eventually".
+          if (_isViewingToday() && !_dateSwitchInProgress) {
+            loadFromV2().then(function(){ render(); }).catch(function(){});
+          }
           // Also initialize the time_entries realtime subscription for clock-in indicators
           _initClockedInRealtime();
         } else if (status === 'CLOSED' || status === 'CHANNEL_ERROR') {
@@ -4620,8 +4645,9 @@ document.addEventListener('DOMContentLoaded', function() {
   setTimeout(pollSharedState, 3000); // fetch current state on load
 });
 
-// Keep polling as fallback at longer interval (catches any missed realtime events)
-setInterval(pollSharedState, 60000);
+// Self-heal backstop — reconcile against the DB every 30s so a dropped realtime
+// socket can never leave the board stale for long (see pollSharedState guards).
+setInterval(pollSharedState, 30000);
 
 // ── TECH START TIME & CARD REORDER ───────
 function decToTime(dec){
