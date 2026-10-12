@@ -4394,44 +4394,64 @@ document.addEventListener('DOMContentLoaded', async function _startupRollover(){
   } catch(e) { console.error('[rollover] startup check failed', e); }
 });
 
-setInterval(async function(){
+// Detect the 5AM Central dispatch-day rollover and keep THIS tab in sync.
+// Runs on a 2-minute interval AND whenever the tab regains focus — the focus
+// trigger is what saves a laptop that slept across the rollover (over a
+// weekend), correcting the viewed date before anyone drags a card.
+async function _checkDispatchRollover(){
   try {
     const nowDay = _getDispatchToday();
-    if(nowDay !== _lastKnownDispatchDay){
-      console.log('[rollover] dispatch day changed', _lastKnownDispatchDay, '→', nowDay);
-      const yesterdayDay = _lastKnownDispatchDay; // the day that just ended
-      _lastKnownDispatchDay = nowDay;
+    if(nowDay === _lastKnownDispatchDay) return;
+    console.log('[rollover] dispatch day changed', _lastKnownDispatchDay, '→', nowDay);
+    const yesterdayDay = _lastKnownDispatchDay; // the day that just ended
+    // Was the board tracking "today" (vs. a date the user deliberately picked)?
+    const wasTrackingToday = (currentBoardDate === yesterdayDay);
+    _lastKnownDispatchDay = nowDay;
 
-      // ────────────────────────────────────────────────────────────────
-      // ROLLOVER — DO NOT REMOVE. Stamps all NULL-dated assignments with
-      // yesterday's date so they stop showing on today's board. Without
-      // this, yesterday's schedule persists forever because NULL means
-      // "show on today's view". The 5AM Central rollover is the only
-      // thing that archives the previous day's work.
-      // ────────────────────────────────────────────────────────────────
-      if (yesterdayDay) {
-        try {
-          const _SB = 'https://nuykvchgecpiuikoerze.supabase.co';
-          const _SK = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im51eWt2Y2hnZWNwaXVpa29lcnplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYyNjM3ODYsImV4cCI6MjA5MTgzOTc4Nn0.39hZ8DdjT_0iFJXPeAL2FXUSLw8FZBirDVzxZTO1W9s';
-          await fetch(_SB + '/rest/v1/dispatch_assignments_v2?scheduled_date=is.null', {
-            method: 'PATCH',
-            headers: { 'apikey': _SK, 'Authorization': 'Bearer ' + _SK, 'Content-Type': 'application/json' },
-            body: JSON.stringify({ scheduled_date: yesterdayDay })
-          });
-          console.log('[rollover] stamped NULL assignments →', yesterdayDay);
-        } catch(e) { console.error('[rollover] stamp failed', e); }
-      }
+    // ────────────────────────────────────────────────────────────────
+    // ROLLOVER — DO NOT REMOVE. Stamps all NULL-dated assignments with
+    // yesterday's date so they stop showing on today's board. Without
+    // this, yesterday's schedule persists forever because NULL means
+    // "show on today's view". The 5AM Central rollover is the only
+    // thing that archives the previous day's work.
+    // ────────────────────────────────────────────────────────────────
+    if (yesterdayDay) {
+      try {
+        const _SB = 'https://nuykvchgecpiuikoerze.supabase.co';
+        const _SK = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im51eWt2Y2hnZWNwaXVpa29lcnplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYyNjM3ODYsImV4cCI6MjA5MTgzOTc4Nn0.39hZ8DdjT_0iFJXPeAL2FXUSLw8FZBirDVzxZTO1W9s';
+        await fetch(_SB + '/rest/v1/dispatch_assignments_v2?scheduled_date=is.null', {
+          method: 'PATCH',
+          headers: { 'apikey': _SK, 'Authorization': 'Bearer ' + _SK, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ scheduled_date: yesterdayDay })
+        });
+        console.log('[rollover] stamped NULL assignments →', yesterdayDay);
+      } catch(e) { console.error('[rollover] stamp failed', e); }
+    }
 
-      // Fresh day — clear transient per-day state
-      if(sick.size > 0){
-        sick.clear();
-        showToast('New dispatch day — out list cleared');
-      }
+    // Fresh day — clear transient per-day state
+    if(sick.size > 0){
+      sick.clear();
+      showToast('New dispatch day — out list cleared');
+    }
+
+    // CRITICAL: advance the VIEWED date too. Without this, a tab left open
+    // across the rollover keeps currentBoardDate frozen on yesterday, so every
+    // new assignment is written with yesterday's scheduled_date and never shows
+    // on other devices' (correctly-dated) boards. Only auto-advance when the
+    // board was tracking "today" — never yank a user off a date they chose.
+    if (wasTrackingToday) {
+      await setBoardDate(nowDay);   // advances currentBoardDate + picker UI + reloads
+      showToast('Board advanced to ' + nowDay + ' — new dispatch day');
+    } else {
       render();
       loadFromV2();
     }
   } catch(e) {}
-}, 120000);
+}
+setInterval(_checkDispatchRollover, 120000);
+document.addEventListener('visibilitychange', function(){
+  if (document.visibilityState === 'visible') _checkDispatchRollover();
+});
 
 // ── SUPABASE REALTIME ─────────────────────────────────────────────────────
 // Replace 30s polling with instant WebSocket push
