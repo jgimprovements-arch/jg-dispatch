@@ -1481,6 +1481,7 @@ async function initApp(u) {
     show('🚐 …', false);
     function label(v){ return '🚐 ' + (v.name || 'Vehicle') + (v.vehicle_number ? ' #' + v.vehicle_number : '') + (v.plate ? ' · ' + v.plate : ''); }
     try {
+      var chosenId = null, chosenV = null;
       // 1) Today's explicit assignment from the dispatch board (by id, then name).
       var as = null;
       if (e.id) {
@@ -1492,20 +1493,24 @@ async function initApp(u) {
         if (r2.ok) as = await r2.json();
       }
       if (as && as.length && as[0].vehicle_id) {
-        var rv = await fetch(SB_URL + '/rest/v1/vehicles?select=name,vehicle_number,plate&id=eq.' + encodeURIComponent(as[0].vehicle_id) + '&limit=1', { headers: H });
+        chosenId = as[0].vehicle_id;
+        var rv = await fetch(SB_URL + '/rest/v1/vehicles?select=id,name,vehicle_number,plate,status&id=eq.' + encodeURIComponent(chosenId) + '&limit=1', { headers: H });
         var vs = rv.ok ? await rv.json() : null;
-        show(vs && vs.length ? label(vs[0]) : '🚐 Vehicle assigned', false);
-        return;
-      }
-      // 2) PERMANENT / dedicated vehicle — stored as vehicles.usual_assigned_to = my id.
-      // Covers people with a standing vehicle who have no per-day assignment row.
-      if (e.id) {
-        var rp = await fetch(SB_URL + '/rest/v1/vehicles?select=name,vehicle_number,plate&usual_assigned_to=eq.' + encodeURIComponent(e.id) + '&limit=1', { headers: H });
+        chosenV = vs && vs.length ? vs[0] : null;
+      } else if (e.id) {
+        // 2) PERMANENT / dedicated vehicle — vehicles.usual_assigned_to = my id.
+        var rp = await fetch(SB_URL + '/rest/v1/vehicles?select=id,name,vehicle_number,plate,status&usual_assigned_to=eq.' + encodeURIComponent(e.id) + '&limit=1', { headers: H });
         var pv = rp.ok ? await rp.json() : null;
-        if (pv && pv.length) { show(label(pv[0]), false); return; }
+        if (pv && pv.length) { chosenV = pv[0]; chosenId = pv[0].id; }
       }
-      // 3) Nothing assigned.
-      show('🚐 No vehicle assigned yet', false);
+      // 3) Render. Badge is ALWAYS tappable → change vehicle / mileage / issue.
+      if (chosenV) show(label(chosenV) + '  ›', chosenV.status === 'flagged');
+      else if (chosenId) show('🚐 Vehicle assigned  ›', false);
+      else show('🚐 Tap to set your vehicle  ›', false);
+      el.dataset.vid = chosenId || '';
+      el.style.cursor = 'pointer';
+      el.title = 'Tap to change vehicle, log mileage, or report an issue';
+      el.onclick = function(){ window.openVehicleModal(e, el.dataset.vid || null); };
     } catch(_){ /* leave the placeholder; the 60s timer will retry */ }
   };
   window._refreshVehicleBadge();
