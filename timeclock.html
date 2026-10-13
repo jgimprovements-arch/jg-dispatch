@@ -1475,7 +1475,13 @@ async function initApp(u) {
       el.style.color = warn ? '#8c1414' : '';
       el.style.border = warn ? '1px solid rgba(198,40,40,.3)' : '';
     }
+    // Immediate placeholder — proves this code actually runs. If a tech sees
+    // "🚐 …" (even briefly), the badge is wired; if they see nothing at all,
+    // this function never ran (startup stopped earlier).
+    show('🚐 …', false);
+    function label(v){ return '🚐 ' + (v.name || 'Vehicle') + (v.vehicle_number ? ' #' + v.vehicle_number : '') + (v.plate ? ' · ' + v.plate : ''); }
     try {
+      // 1) Today's explicit assignment from the dispatch board (by id, then name).
       var as = null;
       if (e.id) {
         var r1 = await fetch(SB_URL + '/rest/v1/vehicle_assignments?select=vehicle_id&employee_id=eq.' + encodeURIComponent(e.id) + '&work_date=eq.' + day + '&limit=1', { headers: H });
@@ -1485,14 +1491,22 @@ async function initApp(u) {
         var r2 = await fetch(SB_URL + '/rest/v1/vehicle_assignments?select=vehicle_id&employee_name=eq.' + encodeURIComponent(e.name) + '&work_date=eq.' + day + '&limit=1', { headers: H });
         if (r2.ok) as = await r2.json();
       }
-      if (!as || !as.length || !as[0].vehicle_id) { show('🚐 No vehicle assigned yet', false); return; }
-      var rv = await fetch(SB_URL + '/rest/v1/vehicles?select=name,vehicle_number,plate&id=eq.' + encodeURIComponent(as[0].vehicle_id) + '&limit=1', { headers: H });
-      var vs = rv.ok ? await rv.json() : null;
-      if (!vs || !vs.length) { show('🚐 Vehicle assigned', false); return; }
-      var v = vs[0];
-      var label = '🚐 ' + (v.name || 'Vehicle') + (v.vehicle_number ? ' #' + v.vehicle_number : '') + (v.plate ? ' · ' + v.plate : '');
-      show(label, false);
-    } catch(_){ /* leave whatever is there; the timer will retry */ }
+      if (as && as.length && as[0].vehicle_id) {
+        var rv = await fetch(SB_URL + '/rest/v1/vehicles?select=name,vehicle_number,plate&id=eq.' + encodeURIComponent(as[0].vehicle_id) + '&limit=1', { headers: H });
+        var vs = rv.ok ? await rv.json() : null;
+        show(vs && vs.length ? label(vs[0]) : '🚐 Vehicle assigned', false);
+        return;
+      }
+      // 2) PERMANENT / dedicated vehicle — stored as vehicles.usual_assigned_to = my id.
+      // Covers people with a standing vehicle who have no per-day assignment row.
+      if (e.id) {
+        var rp = await fetch(SB_URL + '/rest/v1/vehicles?select=name,vehicle_number,plate&usual_assigned_to=eq.' + encodeURIComponent(e.id) + '&limit=1', { headers: H });
+        var pv = rp.ok ? await rp.json() : null;
+        if (pv && pv.length) { show(label(pv[0]), false); return; }
+      }
+      // 3) Nothing assigned.
+      show('🚐 No vehicle assigned yet', false);
+    } catch(_){ /* leave the placeholder; the 60s timer will retry */ }
   };
   window._refreshVehicleBadge();
   if (!window._vehBadgeWired) {
