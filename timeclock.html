@@ -1449,8 +1449,33 @@ async function initApp(u) {
     }
   } catch(e) { console.warn('Employee fetch failed:', e.message); }
 
-  // Show today's assigned vehicle in the clock card, if fleet is loaded.
-  try { if (window.JGFleet && TC.employee && TC.employee.id) JGFleet.showVehicleBadge(TC.employee.id, TC.employee.name, TC.employee.market); } catch(e){}
+  // Show today's assigned vehicle in the clock card. Robust wiring:
+  //  • waits for fleet.js to finish loading (it's near the end of the page)
+  //  • passes the tech's NAME too, so fleet can match even if the login resolved
+  //    to a different employee record than the board assigned to
+  //  • re-checks on tab focus and on a timer, so a vehicle assigned AFTER the
+  //    app is open still appears (the old call read once and never again)
+  window._refreshVehicleBadge = function(){
+    try {
+      if (!window.JGFleet || !JGFleet.showVehicleBadge) return;
+      var e = TC && TC.employee; if (!e || (!e.id && !e.name)) return;
+      JGFleet.showVehicleBadge(e.id, e.name, e.market);
+    } catch(_){}
+  };
+  (function _kickVehBadge(n){
+    if (window.JGFleet && JGFleet.showVehicleBadge) { window._refreshVehicleBadge(); return; }
+    if (n > 25) return;                              // give fleet.js ~5s to load
+    setTimeout(function(){ _kickVehBadge(n + 1); }, 200);
+  })(0);
+  if (!window._vehBadgeWired) {
+    window._vehBadgeWired = true;
+    document.addEventListener('visibilitychange', function(){
+      if (document.visibilityState === 'visible') window._refreshVehicleBadge();
+    });
+    setInterval(function(){
+      if (document.visibilityState !== 'hidden') window._refreshVehicleBadge();
+    }, 60000);
+  }
 
  // Show/hide admin button
   if (!isAdmin()) {

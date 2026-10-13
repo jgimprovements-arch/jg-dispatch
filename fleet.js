@@ -377,10 +377,19 @@
   async function showVehicleBadge(empId, empName, market) {
     try {
       var el = document.getElementById('vehicle-badge');
-      if (!el || !empId) return;
+      if (!el || (!empId && !empName)) return;
       var day = dispatchDate();
-      var as = await get('vehicle_assignments?select=vehicle_id,created_by&employee_id=eq.'
-        + encodeURIComponent(empId) + '&work_date=eq.' + encodeURIComponent(day) + '&limit=1');
+      // Primary match: the employee UUID the board assigns against.
+      var as = empId ? await get('vehicle_assignments?select=vehicle_id,created_by&employee_id=eq.'
+        + encodeURIComponent(empId) + '&work_date=eq.' + encodeURIComponent(day) + '&limit=1') : null;
+      // Fallback match BY NAME — covers a tech whose clock-app login resolved to
+      // a different employee record (duplicate UUID) than the board assigned to.
+      // Without this, the PM's assignment is invisible to the tech even though
+      // it exists, because the IDs don't line up.
+      if ((!as || !as.length || !as[0].vehicle_id) && empName) {
+        as = await get('vehicle_assignments?select=vehicle_id,created_by&employee_name=eq.'
+          + encodeURIComponent(empName) + '&work_date=eq.' + encodeURIComponent(day) + '&limit=1');
+      }
 
       // No vehicle assigned yet → offer a self-assign picker. The moment a PM
       // assigns one on the board, this branch stops showing (there's a row),
@@ -419,11 +428,22 @@
   // assignment stamped created_by '<name> (self)' so the board shows it was
   // the tech's choice, not a PM placement.
   async function renderSelfAssign(el, empId, empName, market, day) {
+    // Shown whenever we can't offer a working picker — so the tech always sees a
+    // clear status in the clock card instead of a blank/missing badge.
+    function _showNone() {
+      el.innerHTML = '<span style="font-size:12px;color:#6b7385;">🚐 No vehicle assigned yet</span>';
+      el.style.display = '';
+      el.style.background = 'rgba(13,45,94,.05)';
+      el.style.border = '';
+      el.style.color = '';
+    }
     try {
+      // Can't self-assign without a resolved employee id — just show status.
+      if (!empId) { _showNone(); return; }
       var mk = marketKey(market);
       var vs = await get('vehicles?select=id,name,vehicle_number,plate,status,usual_assigned_to,market'
         + '&status=in.(active,flagged,in_shop)&order=name.asc');
-      if (!vs || !vs.length) { el.style.display = 'none'; return; }
+      if (!vs || !vs.length) { _showNone(); return; }
 
       var list = vs.filter(function (v) {
         // a dedicated vehicle belonging to someone else isn't self-grabbable
@@ -432,7 +452,7 @@
         if (mk && v.market && v.market !== mk) return false;
         return true;
       });
-      if (!list.length) { el.style.display = 'none'; return; }
+      if (!list.length) { _showNone(); return; }
 
       var opts = '<option value="">🚐 pick your vehicle…</option>'
         + list.map(function (v) {
@@ -457,7 +477,7 @@
       };
     } catch (e) {
       console.warn('[fleet] self-assign picker skipped:', e.message);
-      el.style.display = 'none';
+      _showNone();
     }
   }
 
