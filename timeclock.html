@@ -1368,6 +1368,129 @@ function getLocation() {
 }
 
 // INIT -
+// ── Vehicle badge modal (top-level so the badge's onclick can always reach it) ──
+  // Today's dispatch day (Central, 5am rollover) — shared by the badge + modal.
+  window._dispatchDay = function(){
+    var p = new Intl.DateTimeFormat('en-US',{timeZone:'America/Chicago',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',hour12:false}).formatToParts(new Date()).reduce(function(a,x){a[x.type]=x.value;return a;},{});
+    var y=+p.year,m=+p.month,d=+p.day; if(+p.hour<5){var t=new Date(Date.UTC(y,m-1,d));t.setUTCDate(t.getUTCDate()-1);y=t.getUTCFullYear();m=t.getUTCMonth()+1;d=t.getUTCDate();}
+    return y+'-'+String(m).padStart(2,'0')+'-'+String(d).padStart(2,'0');
+  };
+
+  // Tap-the-badge vehicle controls: change/assign vehicle, log mileage, report an issue.
+  // Self-contained (direct REST), matching the write shapes used elsewhere in the app.
+  window.openVehicleModal = async function(emp, currentVid){
+    emp = emp || (TC && TC.employee);
+    if (!emp || !emp.id){ if (typeof toast==='function') toast('Sign in required'); return; }
+    var H  = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY };
+    var Hw = { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' };
+    var day = window._dispatchDay();
+    function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];}); }
+    function vlabel(v){ return (v.name||'Vehicle')+(v.vehicle_number?' #'+v.vehicle_number:'')+(v.plate?' · '+v.plate:''); }
+
+    var ov = document.getElementById('veh-modal'); if (ov) ov.remove();
+    ov = document.createElement('div');
+    ov.id = 'veh-modal';
+    ov.style.cssText = 'position:fixed;inset:0;background:rgba(13,45,94,.5);z-index:99999;display:flex;align-items:flex-end;justify-content:center;';
+    ov.innerHTML = '<div style="background:#fff;width:100%;max-width:520px;border-radius:16px 16px 0 0;max-height:92vh;overflow:auto;padding:18px 18px 28px;font-family:DM Sans,system-ui,sans-serif;"><div id="vm-body" style="color:#334;">Loading…</div></div>';
+    ov.onclick = function(ev){ if (ev.target === ov) ov.remove(); };
+    document.body.appendChild(ov);
+
+    // Load current vehicle details, the eligible list, and who already has what today.
+    var cur = null;
+    if (currentVid){
+      var rc = await fetch(SB_URL+'/rest/v1/vehicles?select=id,name,vehicle_number,plate,status,current_mileage,usual_assigned_to&id=eq.'+encodeURIComponent(currentVid)+'&limit=1',{headers:H});
+      var jc = rc.ok?await rc.json():null; cur = jc&&jc.length?jc[0]:null;
+    }
+    var rlist = await fetch(SB_URL+'/rest/v1/vehicles?select=id,name,vehicle_number,plate,status,usual_assigned_to,market&status=in.(active,flagged,in_shop)&order=name.asc',{headers:H});
+    var list = rlist.ok?await rlist.json():[];
+    var rtak = await fetch(SB_URL+'/rest/v1/vehicle_assignments?select=vehicle_id,employee_id,employee_name&work_date=eq.'+day,{headers:H});
+    var taken = rtak.ok?await rtak.json():[];
+    var takenBy = {}; taken.forEach(function(t){ if (t.employee_id !== emp.id && t.vehicle_id) takenBy[t.vehicle_id]=t.employee_name||'someone'; });
+
+    // Eligible = not a vehicle dedicated to someone else.
+    var elig = list.filter(function(v){ return !(v.usual_assigned_to && v.usual_assigned_to !== emp.id); });
+    var opts = '<option value="">— select a vehicle —</option>' + elig.map(function(v){
+      var tk = takenBy[v.id] ? '  (taken: '+takenBy[v.id]+')' : '';
+      var mine = v.usual_assigned_to===emp.id ? '★ ' : '';
+      return '<option value="'+esc(v.id)+'">'+esc(mine+vlabel(v)+tk)+'</option>';
+    }).join('');
+
+    var curName = cur ? vlabel(cur) : 'None assigned';
+    var curMi = (cur && cur.current_mileage!=null) ? cur.current_mileage : '';
+    var fld = 'width:100%;padding:10px;border:1px solid #cfd6e4;border-radius:8px;font-size:14px;margin-bottom:8px;box-sizing:border-box;';
+    var btn = 'width:100%;padding:11px;border:0;border-radius:8px;font-weight:700;font-size:14px;cursor:pointer;color:#fff;';
+
+    document.getElementById('vm-body').innerHTML =
+      '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">'
+        + '<div style="font-size:16px;font-weight:800;color:#0d2d5e;">🚐 My Vehicle</div>'
+        + '<button id="vm-close" style="border:0;background:#eef0f7;border-radius:8px;padding:6px 14px;font-weight:700;color:#0d2d5e;cursor:pointer;">Done</button>'
+      + '</div>'
+      + '<div style="font-size:13px;margin-bottom:4px;">Currently: <b>'+esc(curName)+'</b>'+(curMi!==''?' · '+Number(curMi).toLocaleString()+' mi':'')+'</div>'
+      + (cur&&cur.status==='flagged'?'<div style="font-size:12px;color:#c62828;margin-bottom:6px;">⚠ This vehicle is flagged for an open issue.</div>':'')
+      + '<hr style="border:none;border-top:1px solid #e1e5ec;margin:14px 0;">'
+      + '<div style="font-weight:700;color:#0d2d5e;margin-bottom:6px;">Change / assign vehicle</div>'
+      + '<select id="vm-veh" style="'+fld+'">'+opts+'</select>'
+      + '<button id="vm-assign" style="'+btn+'background:#0d2d5e;margin-bottom:18px;">Assign to me</button>'
+      + '<div style="font-weight:700;color:#0d2d5e;margin-bottom:6px;">Update mileage</div>'
+      + '<div style="display:flex;gap:8px;margin-bottom:18px;">'
+        + '<input id="vm-mi" type="number" inputmode="numeric" placeholder="Current odometer" value="'+curMi+'" style="flex:1;padding:10px;border:1px solid #cfd6e4;border-radius:8px;font-size:14px;box-sizing:border-box;">'
+        + '<button id="vm-mi-save" style="padding:11px 18px;border:0;border-radius:8px;background:#e85d04;color:#fff;font-weight:700;cursor:pointer;white-space:nowrap;">Save</button>'
+      + '</div>'
+      + '<div style="font-weight:700;color:#0d2d5e;margin-bottom:6px;">Report a maintenance issue</div>'
+      + '<select id="vm-cat" style="'+fld+'">'+['Tire / Wheel','Brakes','Engine','Oil / Fluids','Lights','Body / Damage','Warning light','Other'].map(function(c){return '<option>'+c+'</option>';}).join('')+'</select>'
+      + '<select id="vm-sev" style="'+fld+'"><option value="normal">Minor — OK to keep driving</option><option value="urgent">Urgent — should not be driven</option></select>'
+      + '<textarea id="vm-note" placeholder="Describe the issue…" style="'+fld+'min-height:64px;resize:vertical;"></textarea>'
+      + '<button id="vm-issue" style="'+btn+'background:#c62828;">Submit issue</button>'
+      + '<div id="vm-msg" style="font-size:12px;color:#6b7385;margin-top:10px;text-align:center;min-height:16px;"></div>';
+
+    function msg(t){ var m=document.getElementById('vm-msg'); if(m) m.textContent=t||''; }
+    document.getElementById('vm-close').onclick = function(){ ov.remove(); };
+
+    // ASSIGN / CHANGE — only grab a vehicle no one else already has today.
+    document.getElementById('vm-assign').onclick = async function(){
+      var vid = document.getElementById('vm-veh').value;
+      if (!vid){ msg('Pick a vehicle first.'); return; }
+      if (takenBy[vid]){ msg('That one is already assigned to '+takenBy[vid]+' today.'); return; }
+      msg('Assigning…');
+      var mk = /stevens|point/i.test(emp.market||'') ? 'stevens_point' : 'appleton';
+      var row = { vehicle_id: vid, employee_id: emp.id, employee_name: emp.name, work_date: day, market: mk, created_by: (emp.name||'Tech')+' (self)' };
+      var r = await fetch(SB_URL+'/rest/v1/vehicle_assignments?on_conflict=employee_id,work_date',{method:'POST',headers:Object.assign({},Hw,{Prefer:'resolution=merge-duplicates,return=minimal'}),body:JSON.stringify(row)});
+      if (!r.ok) r = await fetch(SB_URL+'/rest/v1/vehicle_assignments',{method:'POST',headers:Hw,body:JSON.stringify(row)});
+      if (r.ok){ ov.remove(); window._refreshVehicleBadge(); if (typeof toast==='function') toast('🚐 Vehicle updated'); }
+      else msg('Could not assign — try again.');
+    };
+
+    // MILEAGE — update the current (or selected) vehicle's odometer.
+    document.getElementById('vm-mi-save').onclick = async function(){
+      var vid = currentVid || document.getElementById('vm-veh').value;
+      if (!vid){ msg('No vehicle selected for mileage.'); return; }
+      var mi = parseInt((document.getElementById('vm-mi').value||'').replace(/[^0-9]/g,''),10);
+      if (!mi || mi<=0){ msg('Enter a valid odometer number.'); return; }
+      if (cur && cur.current_mileage!=null && mi < cur.current_mileage && !confirm('That is lower than the last recorded '+Number(cur.current_mileage).toLocaleString()+' mi. Save anyway?')){ msg(''); return; }
+      msg('Saving mileage…');
+      var r = await fetch(SB_URL+'/rest/v1/vehicles?id=eq.'+encodeURIComponent(vid),{method:'PATCH',headers:Hw,body:JSON.stringify({current_mileage:mi,updated_at:new Date().toISOString()})});
+      if (r.ok){ msg('✓ Mileage saved'); if (typeof toast==='function') toast('✓ Mileage updated'); }
+      else msg('Could not save mileage.');
+    };
+
+    // ISSUE — report a maintenance problem; urgent flags the vehicle.
+    document.getElementById('vm-issue').onclick = async function(){
+      var vid = currentVid || document.getElementById('vm-veh').value;
+      if (!vid){ msg('Select a vehicle first.'); return; }
+      var note = (document.getElementById('vm-note').value||'').trim();
+      if (!note){ msg('Add a short description.'); return; }
+      var cat = document.getElementById('vm-cat').value, sev = document.getElementById('vm-sev').value;
+      msg('Submitting…');
+      var row = { vehicle_id: vid, category: cat, severity: sev, note: note, status:'open', reported_at:new Date().toISOString(), reported_by: emp.id, reported_by_name: emp.name||null, mileage_at_report: (cur&&cur.current_mileage!=null?cur.current_mileage:null) };
+      var r = await fetch(SB_URL+'/rest/v1/vehicle_issues',{method:'POST',headers:Hw,body:JSON.stringify(row)});
+      if (r.ok){
+        if (sev==='urgent') await fetch(SB_URL+'/rest/v1/vehicles?id=eq.'+encodeURIComponent(vid),{method:'PATCH',headers:Hw,body:JSON.stringify({status:'flagged'})});
+        msg('✓ Issue reported'); document.getElementById('vm-note').value=''; if (typeof toast==='function') toast('🔧 Issue reported');
+      } else msg('Could not submit issue.');
+    };
+  };
+
+
 async function initApp(u) {
   // SSO: mirror this user into the rebuild app's localStorage slot so the
   // Projects tab navigation is seamless — no second login required. Both
@@ -1523,6 +1646,8 @@ async function initApp(u) {
       if (document.visibilityState !== 'hidden') window._refreshVehicleBadge();
     }, 60000);
   }
+
+  // (Vehicle modal + _dispatchDay helper are defined at top level — see above.)
 
  // Show/hide admin button
   if (!isAdmin()) {
