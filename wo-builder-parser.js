@@ -404,7 +404,7 @@ async function callClaude(apiKey, pdfBase64, prompt, label, maxTokens) {
   const RETRYABLE = new Set([408, 425, 429, 500, 502, 503, 504, 520, 522, 524, 529]);
   const MAX_RETRIES = 2;
   const sleep = ms => new Promise(r => setTimeout(r, ms));
-  let resp = null;
+  let resp = null, json = null;
   for (let attempt = 0; ; attempt++) {
     try {
       resp = await fetch(ANTHROPIC_API, {
@@ -421,17 +421,29 @@ async function callClaude(apiKey, pdfBase64, prompt, label, maxTokens) {
       await sleep(1500 * Math.pow(2, attempt)); // 1.5s, 3s
       continue;
     }
-    if (resp.ok) break;
-    if (RETRYABLE.has(resp.status) && attempt < MAX_RETRIES) {
-      await sleep(1500 * Math.pow(2, attempt));
-      continue;
+    if (!resp.ok) {
+      if (RETRYABLE.has(resp.status) && attempt < MAX_RETRIES) {
+        await sleep(1500 * Math.pow(2, attempt));
+        continue;
+      }
+      const errText = await resp.text();
+      throw new Error(`Claude API error (${label}): ${resp.status} ${errText.slice(0, 500)}`);
     }
-    const text = await resp.text();
-    throw new Error(`Claude API error (${label}): ${resp.status} ${text.slice(0, 500)}`);
+    // 200 OK — but the API occasionally returns an empty body with no text
+    // block (transient, more likely on large document requests). Treat that as
+    // retryable too, so one empty response doesn't fail the whole parse.
+    json = await resp.json();
+    const probe = (json.content || []).find(c => c.type === 'text')?.text;
+    if (!probe || !probe.trim()) {
+      if (attempt < MAX_RETRIES) {
+        await sleep(1500 * Math.pow(2, attempt));
+        continue;
+      }
+      throw new Error(`Claude returned no text (${label}) [stop_reason: ${json && json.stop_reason}]`);
+    }
+    break;
   }
-  const json = await resp.json();
   const text = (json.content || []).find(c => c.type === 'text')?.text;
-  if (!text) throw new Error(`Claude returned no text (${label})`);
   const cleaned = text.replace(/^```json\s*|\s*```$/g, '').trim();
   const wasTruncated = json.stop_reason === 'max_tokens';
 
