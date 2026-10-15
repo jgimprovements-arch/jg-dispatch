@@ -18,8 +18,14 @@
 // never have access to it. Origin-enforced auth: only platform-hosted
 // origins can call the proxy.
 const ANTHROPIC_API = 'https://jg-anthropic-proxy.josh-70f.workers.dev';
-const MODEL = 'claude-opus-4-7'; // best for structured document extraction
-const MAX_TOKENS = 16000;
+// Sonnet is several times faster than Opus at the same structured-extraction
+// quality for line-item estimates. Opus emitting a full 16k-token chunk was
+// taking longer than the proxy's ~100s limit and failing with HTTP 524.
+const MODEL = 'claude-sonnet-5';
+// Smaller per-call output keeps each chunk well under the 100s proxy timeout.
+// The chunk loop just does a few more passes (capped at MAX_CHUNKS) to cover
+// every line item, so nothing is lost — each call just finishes faster.
+const MAX_TOKENS = 8000;
 const CHUNK_BATCH_SIZE = 40; // line items per estimate chunk before forcing a continuation call
 
 // ─── Public entrypoint ─────────────────────────────────────────────
@@ -388,16 +394,33 @@ async function callClaude(apiKey, pdfBase64, prompt, label) {
       ],
     }],
   };
-  const resp = await fetch(ANTHROPIC_API, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      // No x-api-key here — the proxy worker injects it server-side
-      // before forwarding to api.anthropic.com.
-    },
-    body: JSON.stringify(body),
-  });
-  if (!resp.ok) {
+  // Retry transient failures: 524 (proxy timeout), 529 (overloaded), 5xx, and
+  // network drops. One slow or busy call no longer kills the whole parse.
+  const RETRYABLE = new Set([408, 425, 429, 500, 502, 503, 504, 520, 522, 524, 529]);
+  const MAX_RETRIES = 2;
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  let resp = null;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      resp = await fetch(ANTHROPIC_API, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          // No x-api-key here — the proxy worker injects it server-side
+          // before forwarding to api.anthropic.com.
+        },
+        body: JSON.stringify(body),
+      });
+    } catch (netErr) {
+      if (attempt >= MAX_RETRIES) throw new Error(`Claude API network error (${label}): ${netErr.message}`);
+      await sleep(1500 * Math.pow(2, attempt)); // 1.5s, 3s
+      continue;
+    }
+    if (resp.ok) break;
+    if (RETRYABLE.has(resp.status) && attempt < MAX_RETRIES) {
+      await sleep(1500 * Math.pow(2, attempt));
+      continue;
+    }
     const text = await resp.text();
     throw new Error(`Claude API error (${label}): ${resp.status} ${text.slice(0, 500)}`);
   }
