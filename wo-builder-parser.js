@@ -388,6 +388,12 @@ async function callClaude(apiKey, pdfBase64, prompt, label, maxTokens) {
   const body = {
     model: MODEL,
     max_tokens: maxTokens || MAX_TOKENS,
+    // Sonnet 5 uses extended thinking by default, which can consume the entire
+    // token budget before emitting any JSON (stop_reason:max_tokens with no
+    // text). This is pure structured extraction, not reasoning, so turn
+    // thinking OFF — the whole budget then goes to the output, which is also
+    // faster (no thinking tokens) and keeps each call well under the timeout.
+    thinking: { type: 'disabled' },
     messages: [{
       role: 'user',
       content: [
