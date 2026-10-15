@@ -26,6 +26,11 @@ const MODEL = 'claude-sonnet-5';
 // The chunk loop just does a few more passes (capped at MAX_CHUNKS) to cover
 // every line item, so nothing is lost — each call just finishes faster.
 const MAX_TOKENS = 8000;
+// Components is a SINGLE (non-chunked) call, so it needs more room than one
+// estimate chunk. Sonnet emits this fast enough to stay under the proxy timeout,
+// and if a very large components list still truncates, recoverTruncatedItems
+// salvages the complete materials.
+const COMPONENTS_MAX_TOKENS = 16000;
 const CHUNK_BATCH_SIZE = 40; // line items per estimate chunk before forcing a continuation call
 
 // ─── Public entrypoint ─────────────────────────────────────────────
@@ -63,7 +68,7 @@ export async function parseAndStoreXactPDFs(sb, projectId, estimateFile, compone
     // exceed max_tokens in one call). Components parsing fits in one call.
     const [estimateData, componentsResult] = await Promise.all([
       callClaudeEstimateChunked(apiKey, estimateB64, msg => onProgress(msg, 40)),
-      callClaude(apiKey, componentsB64, COMPONENTS_PROMPT, 'components'),
+      callClaude(apiKey, componentsB64, COMPONENTS_PROMPT, 'components', COMPONENTS_MAX_TOKENS),
     ]);
     const componentsData = componentsResult.parsed;
     onProgress('Computing totals…', 80);
@@ -154,7 +159,7 @@ export async function parseAndStoreXactPDFs(sb, projectId, estimateFile, compone
     onProgress('Sending to Claude for extraction…', 25);
     const [estimateData, componentsResult] = await Promise.all([
       callClaudeEstimateChunked(apiKey, estimateB64, msg => onProgress(msg, 40)),
-      callClaude(apiKey, componentsB64, COMPONENTS_PROMPT, 'components'),
+      callClaude(apiKey, componentsB64, COMPONENTS_PROMPT, 'components', COMPONENTS_MAX_TOKENS),
     ]);
     const componentsData = componentsResult.parsed;
     onProgress('Got data back from Claude…', 65);
@@ -379,10 +384,10 @@ export async function parseAndStoreXactPDFs(sb, projectId, estimateFile, compone
 }
 
 // ─── Anthropic API call ──────────────────────────────────────────────
-async function callClaude(apiKey, pdfBase64, prompt, label) {
+async function callClaude(apiKey, pdfBase64, prompt, label, maxTokens) {
   const body = {
     model: MODEL,
-    max_tokens: MAX_TOKENS,
+    max_tokens: maxTokens || MAX_TOKENS,
     messages: [{
       role: 'user',
       content: [
