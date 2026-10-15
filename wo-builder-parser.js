@@ -465,12 +465,14 @@ async function callClaude(apiKey, pdfBase64, prompt, label) {
 // find the last point where a complete item object ended, then close the
 // JSON structure ourselves.
 function recoverTruncatedItems(text, label) {
-  // Find the items array start
-  const itemsStartMatch = text.match(/"items"\s*:\s*\[/);
+  // The estimate response uses an "items" array; the components response uses
+  // a "materials" array. Recover whichever one this truncated response has.
+  const itemsStartMatch = text.match(/"(items|materials)"\s*:\s*\[/);
   if (!itemsStartMatch) {
-    console.warn(`[parser] recoverTruncatedItems: no items array found in ${label}`);
+    console.warn(`[parser] recoverTruncatedItems: no items/materials array found in ${label}`);
     return null;
   }
+  const arrayKey = itemsStartMatch[1];
   const itemsStart = itemsStartMatch.index + itemsStartMatch[0].length;
 
   // Walk through the items array tracking brace depth. Every time we close
@@ -518,8 +520,8 @@ function recoverTruncatedItems(text, label) {
 
   try {
     const parsed = JSON.parse(recovered);
-    const itemCount = (parsed.items || []).length;
-    console.log(`[parser] Recovered ${itemCount} complete items from truncated ${label} response`);
+    const itemCount = (parsed.items || parsed.materials || []).length;
+    console.log(`[parser] Recovered ${itemCount} complete ${arrayKey} from truncated ${label} response`);
     return parsed;
   } catch (e) {
     console.warn(`[parser] recoverTruncatedItems parse failed for ${label}:`, e.message);
