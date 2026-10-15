@@ -1484,6 +1484,77 @@ async function loadSubs() {
   state.subs = data || [];
 }
 
+// ──── Auto-provision project subcontractors into the WO roster ────────────
+// A WO assignee is stored as rebuild_subs.id (a foreign key). But a sub that
+// was added only to a project's Relationships lives in
+// rebuild_project_relationships / contact_directory and has NO rebuild_subs
+// row — so it can't be picked in the WO Builder dropdown. This bridges the
+// two stores: any project relationship with role 'subcontractor' that isn't
+// already in rebuild_subs (matched by email, else company name) gets a roster
+// row created, then state.subs is refreshed so wbSubOptionsHtml floats it onto
+// the project. Idempotent: once provisioned, the match check skips it next time.
+async function ensureProjectSubsInRoster() {
+  if (!sb || !state.activeProjectId) return;
+  try {
+    const rels = (state.relationships || []).filter(r => r.role === 'subcontractor');
+    if (!rels.length) return;
+
+    // Pull richer details from contact_directory for linked relationships.
+    const dirIds = [...new Set(rels.map(r => r.directory_contact_id).filter(Boolean))];
+    const dirById = {};
+    if (dirIds.length) {
+      const { data: dir } = await sb.from('contact_directory')
+        .select('id, display_name, organization_name, email, mobile_phone')
+        .in('id', dirIds);
+      (dir || []).forEach(d => { dirById[d.id] = d; });
+    }
+
+    // Build candidate sub records from the relationships.
+    const candidates = rels.map(r => {
+      const d = r.directory_contact_id ? dirById[r.directory_contact_id] : null;
+      const company = ((d && d.organization_name) || r.company || (d && d.display_name) || r.display_name || '').trim();
+      const contact = ((d && d.display_name) || r.display_name || '').trim();
+      const email   = ((d && d.email) || r.email || '').trim();
+      const phone   = ((d && d.mobile_phone) || r.phone || '').trim();
+      return { company_name: company, primary_contact: contact, email, phone };
+    }).filter(c => c.company_name || c.email);
+    if (!candidates.length) return;
+
+    // Fresh full-roster pull (active + inactive) so we never duplicate an
+    // existing — even deactivated — sub.
+    const { data: existing } = await sb.from('rebuild_subs').select('id, company_name, email');
+    const haveEmail = new Set((existing || []).map(s => (s.email || '').trim().toLowerCase()).filter(Boolean));
+    const haveName  = new Set((existing || []).map(s => (s.company_name || '').trim().toLowerCase()).filter(Boolean));
+
+    const seen = new Set();
+    const toInsert = [];
+    for (const c of candidates) {
+      const em = c.email.toLowerCase();
+      const nm = c.company_name.toLowerCase();
+      if ((em && haveEmail.has(em)) || (nm && haveName.has(nm))) continue; // already in roster
+      const key = em || nm;
+      if (seen.has(key)) continue; // duplicate within this project
+      seen.add(key);
+      toInsert.push({
+        company_name: c.company_name || c.primary_contact,
+        primary_contact: c.primary_contact || null,
+        phone: c.phone || null,
+        email: c.email || null,
+        active: true,
+        notes: 'Auto-added from project relationship',
+      });
+    }
+    if (!toInsert.length) return;
+
+    const { error } = await sb.from('rebuild_subs').insert(toInsert);
+    if (error) { console.warn('[ensureProjectSubsInRoster] insert failed:', error.message); return; }
+    console.log(`[ensureProjectSubsInRoster] added ${toInsert.length} sub(s) to roster from project relationships`);
+    await loadSubs(); // refresh so the WO dropdown picks them up
+  } catch (e) {
+    console.warn('[ensureProjectSubsInRoster] error:', e);
+  }
+}
+
 // ──── Load in-house employees (from existing dispatch employees table) ────
 async function loadEmployees() {
   if (!sb) return;
@@ -2304,6 +2375,7 @@ async function selectProject(id) {
   updateUrlHash();
   await Promise.all([loadPhases(), loadSelections(), loadMessages(), loadHistory(), loadDocuments(), loadJournalEntries(), loadTodos(), loadWorkOrders(), loadRelationships(), loadWoBudget(), loadQbActuals(), loadChangeOrders(), loadSov(), loadPlatformConfig(), (typeof loadPacket === 'function' ? loadPacket() : Promise.resolve())]);
   await reconcilePhasesWithWoTrades(); // sync phase names to match WO trades
+  await ensureProjectSubsInRoster();   // bridge project sub relationships into the WO roster
   renderDetail();
 }
 
