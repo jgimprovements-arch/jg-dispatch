@@ -39,6 +39,16 @@ if (itemsTotal > 0) return itemsTotal;
 return sumField(b.materials, 'total') + sumField(b.labor, 'total') + sumField(b.equipment, 'total');
 }
 
+// The default Schedule of Values total. The SOV is the CUSTOMER-facing draw
+// schedule, so it must start from the Contract Price / RCV (what the customer
+// pays), NOT the internal line-item cost/budget. Prefer the parsed RCV; fall
+// back to the line-item sum only if RCV is missing. This matches createDefaultSov.
+function sovDefaultTotal() {
+const upload = state.woBudget?.upload;
+const rcv = upload ? Number(upload.replacement_cost_value) : 0;
+return rcv > 0 ? rcv : computeXactTotalForSov();
+}
+
 const SOV_STATUS_META = {
 draft:           { lbl: 'Draft',              color: 'var(--muted)',  bg: 'rgba(107,122,150,.12)' },
 sent:            { lbl: 'Awaiting Customer',  color: 'var(--gold)',   bg: 'rgba(245,166,35,.12)' },
@@ -149,9 +159,9 @@ return packetHtml + renderSovHeader() + renderSovDrawsTable() + renderSovHistory
 // ─── Empty state ────────────────────────────────────────────────────────────
 function renderSovEmpty() {
 const p = state.activeProject || {};
-const xactTotal = computeXactTotalForSov();
+const xactTotal = sovDefaultTotal();
 const xactHint = xactTotal > 0
-  ? `<div style="margin-top:6px;font-size:12px;color:var(--muted);">Xactimate budget on file: <b>${usd(xactTotal)}</b> — use as contract starting point</div>`
+  ? `<div style="margin-top:6px;font-size:12px;color:var(--muted);">Contract price (RCV) from Xactimate: <b>${usd(xactTotal)}</b> — the Schedule of Values starts here</div>`
   : '';
 return `
   <div class="sov-empty" style="padding:32px 20px;text-align:center;background:#fff;border:1px solid var(--border);border-radius:10px;">
@@ -399,7 +409,7 @@ if (typeof wirePacketActions === 'function') wirePacketActions();
 // ─── Create SOV modal ───────────────────────────────────────────────────────
 function openCreateSovModal() {
 const p = state.activeProject || {};
-const xactTotal = computeXactTotalForSov();
+const xactTotal = sovDefaultTotal();
 const html = `
   <div class="modal-back on" id="sov_create_overlay">
     <div class="modal" style="max-width:560px;">
@@ -408,7 +418,7 @@ const html = `
         <div style="margin-bottom:12px;">
           <label style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:.05em;">Contract Total ($)</label>
           <input type="number" id="sov_form_total" value="${xactTotal.toFixed(2)}" step="0.01" min="0" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;font-size:14px;margin-top:4px;">
-          ${xactTotal ? `<div style="font-size:11px;color:var(--muted);margin-top:2px;">Pre-filled from Xact budget</div>` : ''}
+          ${xactTotal ? `<div style="font-size:11px;color:var(--muted);margin-top:2px;">Pre-filled from Xactimate contract price (RCV)</div>` : ''}
         </div>
         <div style="margin-bottom:12px;">
           <label style="font-size:11px;font-weight:700;color:var(--navy);text-transform:uppercase;letter-spacing:.05em;">Draw Split</label>
