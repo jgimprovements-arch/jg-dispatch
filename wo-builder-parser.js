@@ -582,6 +582,7 @@ async function callClaudeEstimateChunked(apiKey, pdfBase64, onProgress) {
     if (isFirst) {
       metadata = { ...parsed };
       delete metadata.items;
+      delete metadata.is_last_chunk; // control signal, not an estimate field
     }
 
     const newItems = parsed.items || [];
@@ -609,8 +610,15 @@ async function callClaudeEstimateChunked(apiKey, pdfBase64, onProgress) {
     }
     lastLineNumber = highest;
 
-    // If the response wasn't truncated, we likely got everything
-    if (!wasTruncated) break;
+    // Stop ONLY when the model explicitly signals it returned the estimate's
+    // final line item (and the response wasn't truncated mid-item). A clean,
+    // non-truncated response is NOT proof of completeness: the prompt asks for
+    // ~40 items per call, so the model returns a batch and stops cleanly with
+    // many items still remaining. The old `if (!wasTruncated) break;` here quit
+    // after the first batch and silently dropped the rest of the estimate.
+    // The empty-items check above and the line-advance guard below remain as
+    // backstops in case the flag is unreliable.
+    if (parsed.is_last_chunk === true && !wasTruncated) break;
   }
 
   if (chunkIdx >= MAX_CHUNKS) {
@@ -628,6 +636,7 @@ Extract metadata (headers/totals) AND every line item from the FIRST portion of 
 Return ONLY valid JSON (no markdown fences, no explanation) matching exactly this shape:
 
 {
+  "is_last_chunk": false,
   "estimate_number": "BLANDIN-2529-REB",
   "date_entered": "2025-10-14",
   "date_estimated": "2025-10-23",
@@ -660,7 +669,8 @@ Return ONLY valid JSON (no markdown fences, no explanation) matching exactly thi
 
 Rules:
 - Include line items in order starting from line 1.
-- If the estimate is large, prioritize quality over completeness — stop adding items when you sense the response will get cut off. The caller will request the rest in a follow-up call.
+- Return the FIRST 40 line items in ascending line_number order (or ALL of them if the estimate has 40 or fewer). Do NOT try to fit a large estimate into one response — the caller will request the remaining items in follow-up calls, so there is no benefit to cramming.
+- "is_last_chunk": set to true ONLY if the last item you returned is the FINAL line item in the entire estimate (nothing numbered higher exists). If ANY line items remain after the ones you returned, set it to false. When unsure, set it to false.
 - The PDF is grouped into rooms, with each room having sections (Floor, Walls, Doors, Contents, Containment, etc.). Track the current room and section as you go.
 - "level" tracks "Main Level", "Upper Level", etc. (it appears as a bold header above rooms).
 - "line_number" = the leading number on each line ("1.", "2.", "121.", etc.) — these MUST be returned in ascending order.
@@ -681,6 +691,7 @@ A previous call already extracted items up through line_number ${startLine}. Now
 Return ONLY valid JSON (no markdown fences, no explanation) matching this shape:
 
 {
+  "is_last_chunk": false,
   "items": [
     {
       "line_number": ${startLine + 1},
@@ -700,8 +711,9 @@ Return ONLY valid JSON (no markdown fences, no explanation) matching this shape:
 Rules:
 - ONLY return line items with line_number STRICTLY GREATER THAN ${startLine}.
 - Items must be in ascending line_number order.
-- If the response will get cut off, stop early — the caller will request the rest.
-- If there are NO more items past line ${startLine}, return: {"items": []}
+- Return the NEXT 40 line items (line_number > ${startLine}). Do NOT try to return all remaining items at once — the caller will keep requesting more.
+- "is_last_chunk": set to true ONLY if the last item you returned is the FINAL line item in the entire estimate; otherwise set it to false. When unsure, set it to false.
+- If there are NO more items past line ${startLine}, return: {"items": [], "is_last_chunk": true}
 - Do NOT include any top-level metadata (estimate_number, totals, etc.) — only the items array.
 - Same rules as the first chunk: track level/room/section, numbers must be numeric, etc.
 - Do NOT include room dimension headers or floorplan diagrams.
