@@ -739,7 +739,8 @@ Return ONLY valid JSON (no markdown fences, no explanation) matching exactly thi
 }
 
 Rules:
-- Extract ONLY the detailed room-by-room line items (each has a room/section, quantity, unit, and unit price). IGNORE any summary, recap, "Summary by Group", "Summary by Trade", or bid-item recap pages — do NOT return those as line items. They often repeat totals with their own numbering and will corrupt the sequence.
+- For the "items" array, extract ONLY the detailed room-by-room line items (each has a room/section, quantity, unit, and unit price). Do NOT create item entries from summary / recap / "Summary by Group" / "Summary by Trade" / bid-item recap rows — those repeat totals with their own numbering and corrupt the line sequence.
+- IMPORTANT — totals still come from the Summary page: you MUST read the Summary/Recap page of the estimate to populate the top-level TOTAL fields (line_item_total, material_sales_tax, subtotal, overhead, profit, service_sales_tax, replacement_cost_value, net_claim). Those printed totals live on that Summary page. Read them for the totals — just don't list the Summary's rows as individual line items.
 - Include line items in order starting from line 1.
 - Return the FIRST 40 line items in ascending line_number order (or ALL of them if the estimate has 40 or fewer). Do NOT try to fit a large estimate into one response — the caller will request the remaining items in follow-up calls, so there is no benefit to cramming.
 - "is_last_chunk": set to true ONLY if the last item you returned is the FINAL line item in the entire estimate (nothing numbered higher exists). If ANY line items remain after the ones you returned, set it to false. When unsure, set it to false.

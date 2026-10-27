@@ -631,7 +631,7 @@ async function processCoUpload(estimateFile, componentsFile, coNum, title, budge
   statusEl.textContent = 'Parsing estimate + components PDFs...';
   let newItems = [];
   try {
-    const mod = await import('./wo-builder-parser.js?v=2026.10.27-chunking-r2');
+    const mod = await import('./wo-builder-parser.js?v=2026.10.27-chunking-r3');
     const result = await mod.parseAndStoreXactPDFs(sb, state.activeProjectId, estimateFile, componentsFile, {
       onProgress: (stage, pct) => { statusEl.textContent = `${stage} (${pct}%)`; },
       uploadedByEmail: state.pmEmail,
