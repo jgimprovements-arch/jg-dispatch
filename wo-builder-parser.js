@@ -383,6 +383,56 @@ export async function parseAndStoreXactPDFs(sb, projectId, estimateFile, compone
   }
 }
 
+// Pull the JSON object/array out of a response that may be wrapped in prose.
+// The model sometimes narrates ("Looking at the document, I can see...") before
+// or after the JSON, or emits pure prose when it gets confused. This finds the
+// first {...} or [...] block and returns the balanced substring (ignoring braces
+// inside strings). Returns the original string if no opening brace is found, so
+// downstream parse/recovery can decide what to do.
+function extractJsonBlock(s) {
+  if (!s) return s;
+  const fo = s.indexOf('{');
+  const fa = s.indexOf('[');
+  let start;
+  if (fo === -1) start = fa;
+  else if (fa === -1) start = fo;
+  else start = Math.min(fo, fa);
+  if (start === -1) return s;
+  const open = s[start];
+  const close = open === '{' ? '}' : ']';
+  let depth = 0, inStr = false, esc = false;
+  for (let i = start; i < s.length; i++) {
+    const ch = s[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (ch === '\\') esc = true;
+      else if (ch === '"') inStr = false;
+      continue;
+    }
+    if (ch === '"') inStr = true;
+    else if (ch === open) depth++;
+    else if (ch === close) { depth--; if (depth === 0) return s.slice(start, i + 1); }
+  }
+  return s.slice(start); // unbalanced (likely truncated) — let recovery handle
+}
+
+// Compress a sorted list of integers into a compact ranges string for prompts,
+// e.g. [1,2,3,4,40,316] → "1-4, 40, 316". Keeps the "already extracted" list
+// short even for 300+ line estimates.
+function compressRanges(sorted) {
+  if (!sorted || !sorted.length) return '(none yet — this is effectively the first batch)';
+  const parts = [];
+  let start = sorted[0], prev = sorted[0];
+  for (let i = 1; i < sorted.length; i++) {
+    const n = sorted[i];
+    if (n === prev + 1) { prev = n; continue; }
+    parts.push(start === prev ? `${start}` : `${start}-${prev}`);
+    start = prev = n;
+  }
+  parts.push(start === prev ? `${start}` : `${start}-${prev}`);
+  return parts.join(', ');
+}
+
 // ─── Anthropic API call ──────────────────────────────────────────────
 async function callClaude(apiKey, pdfBase64, prompt, label, maxTokens) {
   const body = {
@@ -453,13 +503,24 @@ async function callClaude(apiKey, pdfBase64, prompt, label, maxTokens) {
   const cleaned = text.replace(/^```json\s*|\s*```$/g, '').trim();
   const wasTruncated = json.stop_reason === 'max_tokens';
 
-  // Try to parse as-is first
+  // The model sometimes wraps the JSON in prose ("Looking at the document...")
+  // or emits markdown fences mid-string. Pull out the first balanced {...}/[...]
+  // block before parsing so prose-wrapped JSON still succeeds.
+  const candidate = extractJsonBlock(cleaned);
+
+  // Try to parse the extracted block first
   try {
-    const parsed = JSON.parse(cleaned);
+    const parsed = JSON.parse(candidate);
     return { parsed, wasTruncated };
   } catch (e) {
-    // If not truncated, this is a genuine parse error — propagate.
+    // Not truncated, but still unparseable. Two sub-cases:
+    //   (a) prose-wrapped partial JSON → try to salvage any complete items.
+    //   (b) pure prose with no usable items → propagate (the caller decides;
+    //       for a continuation chunk the chunk loop ends gracefully instead
+    //       of failing the whole parse).
     if (!wasTruncated) {
+      const salvaged = recoverTruncatedItems(candidate, label);
+      if (salvaged) return { parsed: salvaged, wasTruncated: false };
       throw new Error(`Claude returned invalid JSON (${label}): ${e.message}\nFirst 300 chars: ${cleaned.slice(0, 300)}\nstop_reason: ${json.stop_reason}`);
     }
 
@@ -471,7 +532,7 @@ async function callClaude(apiKey, pdfBase64, prompt, label, maxTokens) {
     // are indented one level inside the items array). That's the close of the
     // last fully-emitted item. Truncate just past it, then close the array
     // and object.
-    const recovered = recoverTruncatedItems(cleaned, label);
+    const recovered = recoverTruncatedItems(candidate, label);
     if (recovered) {
       return { parsed: recovered, wasTruncated: true };
     }
@@ -562,21 +623,40 @@ function recoverTruncatedItems(text, label) {
 // pathological PDFs. Should never happen in real restoration estimates.
 async function callClaudeEstimateChunked(apiKey, pdfBase64, onProgress) {
   const allItems = [];
+  const captured = new Set(); // line_numbers already captured
   let metadata = null;
-  let lastLineNumber = 0;
   let chunkIdx = 0;
+  let noNewStreak = 0;
   const MAX_CHUNKS = 50;
 
   while (chunkIdx < MAX_CHUNKS) {
     chunkIdx++;
     const isFirst = chunkIdx === 1;
+    // Continuation is driven by an EXCLUSION LIST of line numbers already
+    // captured, not a "greater than N" threshold. Threshold cursoring breaks
+    // on estimates whose line numbers aren't strictly monotonic in reading
+    // order (summary/recap pages, bid-item lines with high numbers near the
+    // front) — the cursor jumps to the max and skips everything below it.
+    // Exclusion-list is layout-agnostic: "give me items NOT in this set."
+    const coveredRanges = compressRanges([...captured].sort((a, b) => a - b));
     const prompt = isFirst
       ? ESTIMATE_PROMPT_CHUNK_FIRST
-      : ESTIMATE_PROMPT_CHUNK_CONT(lastLineNumber);
+      : ESTIMATE_PROMPT_CHUNK_CONT(coveredRanges);
 
-    if (onProgress) onProgress(`Parsing estimate (chunk ${chunkIdx}, line ${lastLineNumber + 1}+)`);
+    if (onProgress) onProgress(`Parsing estimate (chunk ${chunkIdx}, ${allItems.length} items so far)`);
 
-    const { parsed, wasTruncated } = await callClaude(apiKey, pdfBase64, prompt, `estimate-chunk-${chunkIdx}`);
+    let parsed, wasTruncated;
+    try {
+      ({ parsed, wasTruncated } = await callClaude(apiKey, pdfBase64, prompt, `estimate-chunk-${chunkIdx}`));
+    } catch (e) {
+      // A continuation chunk that comes back as unparseable prose (the model
+      // narrating instead of emitting JSON) must NOT fail the whole parse —
+      // keep what we have and stop. The first chunk failing is still fatal
+      // (no metadata, nothing to build on).
+      if (isFirst) throw e;
+      console.warn(`[parser] Chunk ${chunkIdx} unparseable — ending continuation with ${allItems.length} items: ${e.message}`);
+      break;
+    }
 
     // First call carries metadata
     if (isFirst) {
@@ -586,45 +666,36 @@ async function callClaudeEstimateChunked(apiKey, pdfBase64, onProgress) {
     }
 
     const newItems = parsed.items || [];
-    if (!newItems.length) {
-      // No more items — we're done
-      break;
-    }
 
-    // Append items, skipping any we've already seen (defensive against
-    // Claude returning overlapping ranges)
-    const seenLineNumbers = new Set(allItems.map(i => i.line_number));
+    // Append only genuinely-new items (dedupe by line_number).
+    let addedThisChunk = 0;
     for (const item of newItems) {
-      if (!seenLineNumbers.has(item.line_number)) {
+      const ln = Number(item.line_number);
+      if (!captured.has(ln)) {
+        captured.add(ln);
         allItems.push(item);
-        seenLineNumbers.add(item.line_number);
+        addedThisChunk++;
       }
     }
 
-    // Track highest line number for next continuation
-    const highest = Math.max(lastLineNumber, ...newItems.map(i => Number(i.line_number) || 0));
-    if (highest <= lastLineNumber) {
-      // Couldn't advance — something's stuck. Bail to prevent infinite loop.
-      console.warn(`[parser] Chunk ${chunkIdx} didn't advance line number past ${lastLineNumber}, stopping`);
-      break;
-    }
-    lastLineNumber = highest;
-
-    // Stop ONLY when the model explicitly signals it returned the estimate's
-    // final line item (and the response wasn't truncated mid-item). A clean,
-    // non-truncated response is NOT proof of completeness: the prompt asks for
-    // ~40 items per call, so the model returns a batch and stops cleanly with
-    // many items still remaining. The old `if (!wasTruncated) break;` here quit
-    // after the first batch and silently dropped the rest of the estimate.
-    // The empty-items check above and the line-advance guard below remain as
-    // backstops in case the flag is unreliable.
+    // Clean end: model says it returned the final item and wasn't truncated.
     if (parsed.is_last_chunk === true && !wasTruncated) break;
+
+    // Nothing new this pass (empty, or all duplicates). Allow one retry in
+    // case of a transient blip, then stop — we've likely got everything.
+    if (addedThisChunk === 0) {
+      if (++noNewStreak >= 2) break;
+    } else {
+      noNewStreak = 0;
+    }
   }
 
   if (chunkIdx >= MAX_CHUNKS) {
-    console.warn(`[parser] Hit MAX_CHUNKS=${MAX_CHUNKS} cap. Estimate may be incomplete.`);
+    console.warn(`[parser] Hit MAX_CHUNKS=${MAX_CHUNKS} cap. Estimate may be incomplete (${allItems.length} items).`);
   }
 
+  // Stable ascending order for downstream consumers.
+  allItems.sort((a, b) => (Number(a.line_number) || 0) - (Number(b.line_number) || 0));
   return { ...metadata, items: allItems };
 }
 
@@ -668,6 +739,7 @@ Return ONLY valid JSON (no markdown fences, no explanation) matching exactly thi
 }
 
 Rules:
+- Extract ONLY the detailed room-by-room line items (each has a room/section, quantity, unit, and unit price). IGNORE any summary, recap, "Summary by Group", "Summary by Trade", or bid-item recap pages — do NOT return those as line items. They often repeat totals with their own numbering and will corrupt the sequence.
 - Include line items in order starting from line 1.
 - Return the FIRST 40 line items in ascending line_number order (or ALL of them if the estimate has 40 or fewer). Do NOT try to fit a large estimate into one response — the caller will request the remaining items in follow-up calls, so there is no benefit to cramming.
 - "is_last_chunk": set to true ONLY if the last item you returned is the FINAL line item in the entire estimate (nothing numbered higher exists). If ANY line items remain after the ones you returned, set it to false. When unsure, set it to false.
@@ -683,18 +755,20 @@ Rules:
 - Always return ALL the top-level metadata fields (estimate_number, totals, etc.) even on this first chunk.
 `;
 
-// Continuation chunk: only return items, with line_number > startLine. No metadata.
-const ESTIMATE_PROMPT_CHUNK_CONT = (startLine) => `You are continuing to parse an Xactimate Estimate PDF.
+// Continuation chunk: return line items NOT already captured (exclusion list).
+// Keyed on which line numbers are already done rather than a ">N" threshold,
+// so it works even when numbering isn't monotonic in reading order.
+const ESTIMATE_PROMPT_CHUNK_CONT = (coveredRanges) => `You are continuing to parse an Xactimate Estimate PDF. Earlier calls already extracted SOME of the detailed line items; now return line items that have NOT yet been extracted.
 
-A previous call already extracted items up through line_number ${startLine}. Now extract ONLY the line items with line_number > ${startLine}, in ascending line_number order.
+Line items ALREADY extracted (by their leading line number): ${coveredRanges}
 
-Return ONLY valid JSON (no markdown fences, no explanation) matching this shape:
+Return ONLY a valid JSON object. NO prose, NO explanation, NO markdown fences. Do NOT narrate your reasoning — if you are about to write a sentence like "Looking at the document...", STOP and output JSON only. Shape:
 
 {
   "is_last_chunk": false,
   "items": [
     {
-      "line_number": ${startLine + 1},
+      "line_number": 0,
       "level": "Main Level",
       "room": "Bedroom",
       "section": "Floor",
@@ -709,14 +783,13 @@ Return ONLY valid JSON (no markdown fences, no explanation) matching this shape:
 }
 
 Rules:
-- ONLY return line items with line_number STRICTLY GREATER THAN ${startLine}.
-- Items must be in ascending line_number order.
-- Return the NEXT 40 line items (line_number > ${startLine}). Do NOT try to return all remaining items at once — the caller will keep requesting more.
-- "is_last_chunk": set to true ONLY if the last item you returned is the FINAL line item in the entire estimate; otherwise set it to false. When unsure, set it to false.
-- If there are NO more items past line ${startLine}, return: {"items": [], "is_last_chunk": true}
-- Do NOT include any top-level metadata (estimate_number, totals, etc.) — only the items array.
-- Same rules as the first chunk: track level/room/section, numbers must be numeric, etc.
-- Do NOT include room dimension headers or floorplan diagrams.
+- Return up to 40 detailed line items whose line_number is NOT in the already-extracted ranges above, reading through the estimate in document order (room by room).
+- Do NOT re-return any line item whose number is already in those ranges.
+- Extract ONLY detailed room line items. IGNORE summary / recap / "Summary by Group" / "Summary by Trade" / bid-recap pages, floorplan diagrams, and dimension headers.
+- "is_last_chunk": set to true ONLY if, after the items you return, EVERY line item in the estimate has now been extracted; otherwise false. When unsure, false.
+- If EVERY line item has already been extracted (nothing left), return exactly: {"items": [], "is_last_chunk": true}
+- Do NOT include top-level metadata (estimate_number, totals, etc.) — only "items" and "is_last_chunk".
+- Numbers must be numeric (no $ signs, no commas). Missing values = null.
 `;
 
 // Original ESTIMATE_PROMPT kept as alias for any external callers
