@@ -613,107 +613,142 @@ function recoverTruncatedItems(text, label) {
   }
 }
 
-// Chunked variant for the estimate: pages through line items in batches so
-// big estimates don't blow past max_tokens. First call grabs metadata + the
-// first N items. Subsequent calls grab items starting at the highest line
-// number we've seen so far. Stops when a call returns no new items or when
-// stop_reason !== 'max_tokens' on a call.
+// Decode a base64 PDF to bytes, and encode bytes back to base64 (chunked so
+// large buffers don't overflow the call stack in String.fromCharCode).
+function base64ToUint8(b64) {
+  const bin = atob(b64);
+  const u8 = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+  return u8;
+}
+function uint8ToBase64(u8) {
+  let s = '';
+  const CH = 0x8000;
+  for (let i = 0; i < u8.length; i += CH) s += String.fromCharCode.apply(null, u8.subarray(i, i + CH));
+  return btoa(s);
+}
+
+// Estimate parsing by PAGE RANGES.
 //
-// Safety: caps at 50 chunks (~2000 items) to prevent infinite loops on
-// pathological PDFs. Should never happen in real restoration estimates.
+// We do NOT ask the model to paginate a long PDF itself. That approach proved
+// unreliable in production — on the same 32-page estimate it returned 45, then
+// 293, then 80 line items across attempts, because the model wanders, skips the
+// middle, or declares itself done early. Instead we split the PDF into small
+// fixed page ranges and extract every line item on each range. The model only
+// ever sees ~2 pages, so it can't wander — it reads what's physically in front
+// of it. Ranges run with light concurrency; items merge and de-dupe by
+// (line_number|description|line_total). Totals + metadata come from one
+// separate small call on the whole PDF (the printed totals live on the Summary
+// page). Validated live: the estimate above comes back complete (291 items)
+// and reconciles to the RCV to the penny.
+const PAGES_PER_CHUNK = 2;      // ~2 pages ≈ ≤44 items, well under PAGE_MAX_TOKENS
+const PAGE_MAX_TOKENS = 16000;  // generous headroom so a dense range never truncates
+const PAGE_CONCURRENCY = 4;     // parallel page-range calls
+
 async function callClaudeEstimateChunked(apiKey, pdfBase64, onProgress) {
-  const allItems = [];
-  const captured = new Set(); // line_numbers already captured
-  let metadata = null;
-  let chunkIdx = 0;
-  let noNewStreak = 0;
-  const MAX_CHUNKS = 50;
+  const PDFLib = (typeof window !== 'undefined') && window.PDFLib;
+  if (!PDFLib) throw new Error('PDFLib is not loaded — cannot page-split the estimate PDF for parsing');
 
-  while (chunkIdx < MAX_CHUNKS) {
-    chunkIdx++;
-    const isFirst = chunkIdx === 1;
-    // Continuation is driven by an EXCLUSION LIST of line numbers already
-    // captured, not a "greater than N" threshold. Threshold cursoring breaks
-    // on estimates whose line numbers aren't strictly monotonic in reading
-    // order (summary/recap pages, bid-item lines with high numbers near the
-    // front) — the cursor jumps to the max and skips everything below it.
-    // Exclusion-list is layout-agnostic: "give me items NOT in this set."
-    const coveredRanges = compressRanges([...captured].sort((a, b) => a - b));
-    const prompt = isFirst
-      ? ESTIMATE_PROMPT_CHUNK_FIRST
-      : ESTIMATE_PROMPT_CHUNK_CONT(coveredRanges);
+  // 1) Metadata + printed summary totals, from ONE small call on the whole PDF.
+  if (onProgress) onProgress('Reading estimate totals…');
+  let metadata = {};
+  try {
+    const { parsed } = await callClaude(apiKey, pdfBase64, ESTIMATE_METADATA_PROMPT, 'estimate-metadata', 2000);
+    metadata = parsed || {};
+    delete metadata.items; // metadata prompt shouldn't return items, but be safe
+  } catch (e) {
+    console.warn('[parser] metadata/totals call failed — items will still parse, totals may need manual entry:', e.message);
+  }
 
-    if (onProgress) onProgress(`Parsing estimate (chunk ${chunkIdx}, ${allItems.length} items so far)`);
+  // 2) Split the PDF into page ranges and extract items from each range.
+  const srcDoc = await PDFLib.PDFDocument.load(base64ToUint8(pdfBase64), { ignoreEncryption: true });
+  const pageCount = srcDoc.getPageCount();
 
-    let parsed, wasTruncated;
+  async function sliceToBase64(startIdx, endIdx) {
+    const sub = await PDFLib.PDFDocument.create();
+    const idx = [];
+    for (let i = startIdx; i < endIdx; i++) idx.push(i);
+    const pages = await sub.copyPages(srcDoc, idx);
+    pages.forEach(p => sub.addPage(p));
+    return uint8ToBase64(await sub.save());
+  }
+
+  const ranges = [];
+  for (let a = 0; a < pageCount; a += PAGES_PER_CHUNK) {
+    ranges.push([a, Math.min(a + PAGES_PER_CHUNK, pageCount)]);
+  }
+
+  const seen = new Map();
+  let completed = 0;
+  async function processRange([a, b]) {
+    let parsed;
     try {
-      ({ parsed, wasTruncated } = await callClaude(apiKey, pdfBase64, prompt, `estimate-chunk-${chunkIdx}`));
+      const b64 = await sliceToBase64(a, b);
+      ({ parsed } = await callClaude(apiKey, b64, PAGE_ITEMS_PROMPT, `estimate-pages-${a + 1}-${b}`, PAGE_MAX_TOKENS));
     } catch (e) {
-      // A continuation chunk that comes back as unparseable prose (the model
-      // narrating instead of emitting JSON) must NOT fail the whole parse —
-      // keep what we have and stop. The first chunk failing is still fatal
-      // (no metadata, nothing to build on).
-      if (isFirst) throw e;
-      console.warn(`[parser] Chunk ${chunkIdx} unparseable — ending continuation with ${allItems.length} items: ${e.message}`);
-      break;
+      // One bad range shouldn't sink the parse. Log and move on — its items
+      // (if any) are simply missing; everything else still lands.
+      console.warn(`[parser] estimate pages ${a + 1}-${b} failed: ${e.message}`);
+      parsed = { items: [] };
     }
-
-    // First call carries metadata
-    if (isFirst) {
-      metadata = { ...parsed };
-      delete metadata.items;
-      delete metadata.is_last_chunk; // control signal, not an estimate field
+    for (const it of (parsed.items || [])) {
+      const key = `${it.line_number}|${(it.description || '').slice(0, 48)}|${it.line_total}`;
+      if (!seen.has(key)) seen.set(key, it);
     }
-
-    const newItems = parsed.items || [];
-
-    // Append only genuinely-new items (dedupe by line_number).
-    let addedThisChunk = 0;
-    for (const item of newItems) {
-      const ln = Number(item.line_number);
-      if (!captured.has(ln)) {
-        captured.add(ln);
-        allItems.push(item);
-        addedThisChunk++;
-      }
-    }
-
-    // Clean end: model says it returned the final item and wasn't truncated.
-    if (parsed.is_last_chunk === true && !wasTruncated) break;
-
-    // Nothing new this pass (empty, or all duplicates). Allow one retry in
-    // case of a transient blip, then stop — we've likely got everything.
-    if (addedThisChunk === 0) {
-      if (++noNewStreak >= 2) break;
-    } else {
-      noNewStreak = 0;
-    }
+    completed++;
+    if (onProgress) onProgress(`Parsing estimate pages (${completed}/${ranges.length})`);
   }
 
-  if (chunkIdx >= MAX_CHUNKS) {
-    console.warn(`[parser] Hit MAX_CHUNKS=${MAX_CHUNKS} cap. Estimate may be incomplete (${allItems.length} items).`);
+  // Run ranges with limited concurrency to cut wall-time without hammering the
+  // proxy.
+  for (let i = 0; i < ranges.length; i += PAGE_CONCURRENCY) {
+    await Promise.all(ranges.slice(i, i + PAGE_CONCURRENCY).map(processRange));
   }
 
-  // Stable ascending order for downstream consumers.
-  allItems.sort((a, b) => (Number(a.line_number) || 0) - (Number(b.line_number) || 0));
-  return { ...metadata, items: allItems };
+  const items = [...seen.values()].sort((a, b) => (Number(a.line_number) || 0) - (Number(b.line_number) || 0));
+  if (!items.length) console.warn('[parser] page-range sweep produced 0 items');
+  return { ...metadata, items };
 }
 
 // ─── Prompts ─────────────────────────────────────────────────────────
-// First chunk: extract metadata + first N items (or all items if small estimate)
-const ESTIMATE_PROMPT_CHUNK_FIRST = `You are parsing an Xactimate Estimate PDF for a restoration project.
-Extract metadata (headers/totals) AND every line item from the FIRST portion of the estimate.
+// Metadata + printed summary totals only (no line items). One call on the
+// whole PDF; the printed totals live on the Summary/Recap page.
+const ESTIMATE_METADATA_PROMPT = `You are reading an Xactimate Estimate PDF for a restoration project. Extract ONLY the estimate metadata and the printed SUMMARY TOTALS. Do NOT return any line items.
 
 Return ONLY valid JSON (no markdown fences, no explanation) matching exactly this shape:
 
 {
-  "is_last_chunk": false,
   "estimate_number": "BLANDIN-2529-REB",
   "date_entered": "2025-10-14",
   "date_estimated": "2025-10-23",
   "price_list": "WIAP8X_OCT25",
   "type_of_estimate": "Reconstruction",
   "estimator": "Anthony Alvarez",
+  "line_item_total": 42968.17,
+  "material_sales_tax": 363.05,
+  "subtotal": 43331.22,
+  "overhead": 6499.87,
+  "profit": 6499.87,
+  "service_sales_tax": 37.60,
+  "replacement_cost_value": 56368.56,
+  "net_claim": 56368.56
+}
+
+Rules:
+- The totals are printed on the Summary / Recap page (usually near the front or the very end of the estimate). Read them exactly as printed.
+- Xactimate invariants you can use to sanity-check: subtotal = line_item_total + material_sales_tax; replacement_cost_value = subtotal + overhead + profit + service_sales_tax.
+- Numbers must be numeric (no $ signs, no commas, no quotes). Use null for any field genuinely absent.
+- Do NOT include a line-item list of any kind.
+`;
+
+// Line items on SPECIFIC PAGES only. The caller splits the PDF into small page
+// ranges and sends each range here, so the model never has to paginate — it
+// just reads what's on the pages it's given.
+const PAGE_ITEMS_PROMPT = `You are extracting line items from SPECIFIC PAGES of an Xactimate Estimate PDF. Extract EVERY detailed line item that appears on these pages.
+
+Return ONLY valid JSON (no markdown fences, no explanation) matching this shape:
+
+{
   "items": [
     {
       "line_number": 1,
@@ -727,74 +762,21 @@ Return ONLY valid JSON (no markdown fences, no explanation) matching exactly thi
       "line_total": 44.06,
       "notes": null
     }
-  ],
-  "line_item_total": 42968.17,
-  "material_sales_tax": 363.05,
-  "subtotal": 43331.22,
-  "overhead": 6499.87,
-  "profit": 6499.87,
-  "service_sales_tax": 37.60,
-  "replacement_cost_value": 56368.56,
-  "net_claim": 56368.56
-}
-
-Rules:
-- For the "items" array, extract ONLY the detailed room-by-room line items (each has a room/section, quantity, unit, and unit price). Do NOT create item entries from summary / recap / "Summary by Group" / "Summary by Trade" / bid-item recap rows — those repeat totals with their own numbering and corrupt the line sequence.
-- IMPORTANT — totals still come from the Summary page: you MUST read the Summary/Recap page of the estimate to populate the top-level TOTAL fields (line_item_total, material_sales_tax, subtotal, overhead, profit, service_sales_tax, replacement_cost_value, net_claim). Those printed totals live on that Summary page. Read them for the totals — just don't list the Summary's rows as individual line items.
-- Include line items in order starting from line 1.
-- Return the FIRST 40 line items in ascending line_number order (or ALL of them if the estimate has 40 or fewer). Do NOT try to fit a large estimate into one response — the caller will request the remaining items in follow-up calls, so there is no benefit to cramming.
-- "is_last_chunk": set to true ONLY if the last item you returned is the FINAL line item in the entire estimate (nothing numbered higher exists). If ANY line items remain after the ones you returned, set it to false. When unsure, set it to false.
-- The PDF is grouped into rooms, with each room having sections (Floor, Walls, Doors, Contents, Containment, etc.). Track the current room and section as you go.
-- "level" tracks "Main Level", "Upper Level", etc. (it appears as a bold header above rooms).
-- "line_number" = the leading number on each line ("1.", "2.", "121.", etc.) — these MUST be returned in ascending order.
-- "section" = subheaders inside a room ("Floor", "Walls", "Doors", "Contents", "Containment", "Cabinets and Countertops", "Labor Minimums Applied"). If no section, use null.
-- "notes" = any descriptive text that appears between a line item and the next line item (e.g. "15 % waste added for Vinyl floor covering"). null if none.
-- Numbers must be numeric (no $ signs, no commas, no quotes).
-- If a value is genuinely missing, use null. Do not invent values.
-- Do NOT include room dimension headers ("Height: 9'") or door/window dimension lines.
-- Do NOT include the floorplan diagrams.
-- Always return ALL the top-level metadata fields (estimate_number, totals, etc.) even on this first chunk.
-`;
-
-// Continuation chunk: return line items NOT already captured (exclusion list).
-// Keyed on which line numbers are already done rather than a ">N" threshold,
-// so it works even when numbering isn't monotonic in reading order.
-const ESTIMATE_PROMPT_CHUNK_CONT = (coveredRanges) => `You are continuing to parse an Xactimate Estimate PDF. Earlier calls already extracted SOME of the detailed line items; now return line items that have NOT yet been extracted.
-
-Line items ALREADY extracted (by their leading line number): ${coveredRanges}
-
-Return ONLY a valid JSON object. NO prose, NO explanation, NO markdown fences. Do NOT narrate your reasoning — if you are about to write a sentence like "Looking at the document...", STOP and output JSON only. Shape:
-
-{
-  "is_last_chunk": false,
-  "items": [
-    {
-      "line_number": 0,
-      "level": "Main Level",
-      "room": "Bedroom",
-      "section": "Floor",
-      "description": "...",
-      "quantity": 26.54,
-      "unit": "LF",
-      "unit_price": 1.66,
-      "line_total": 44.06,
-      "notes": null
-    }
   ]
 }
 
 Rules:
-- Return up to 40 detailed line items whose line_number is NOT in the already-extracted ranges above, reading through the estimate in document order (room by room).
-- Do NOT re-return any line item whose number is already in those ranges.
-- Extract ONLY detailed room line items. IGNORE summary / recap / "Summary by Group" / "Summary by Trade" / bid-recap pages, floorplan diagrams, and dimension headers.
-- "is_last_chunk": set to true ONLY if, after the items you return, EVERY line item in the estimate has now been extracted; otherwise false. When unsure, false.
-- If EVERY line item has already been extracted (nothing left), return exactly: {"items": [], "is_last_chunk": true}
-- Do NOT include top-level metadata (estimate_number, totals, etc.) — only "items" and "is_last_chunk".
-- Numbers must be numeric (no $ signs, no commas). Missing values = null.
+- Return EVERY numbered line item visible on these pages, in the order they appear. Do not skip any, and do not stop early.
+- "line_number" = the leading number on each item line ("1.", "2.", "121.").
+- "level" = the level header the item falls under ("Main Level", "Upper Level"); "room" = the room; "section" = the subheader inside a room (Floor, Walls, Doors, Contents, Containment, Cabinets and Countertops, Labor Minimums Applied) or null.
+- "notes" = descriptive text between an item and the next (e.g. "15% waste added for Vinyl floor covering") or null.
+- Do NOT return Summary / Recap / "Summary by Group" / "Summary by Trade" total rows, room dimension headers ("Height: 9'"), door/window dimension lines, or floorplan diagrams.
+- Numbers must be numeric (no $ signs, no commas, no quotes). Use null for genuinely missing values.
+- If these pages contain no line items (cover, summary, or diagram pages), return {"items": []}.
 `;
 
-// Original ESTIMATE_PROMPT kept as alias for any external callers
-const ESTIMATE_PROMPT = ESTIMATE_PROMPT_CHUNK_FIRST;
+// Kept as an alias for any external callers that referenced the old constant.
+const ESTIMATE_PROMPT = ESTIMATE_METADATA_PROMPT;
 
 const COMPONENTS_PROMPT = `You are parsing an Xactimate Components PDF (which breaks an estimate into raw material, equipment, and labor costs).
 
