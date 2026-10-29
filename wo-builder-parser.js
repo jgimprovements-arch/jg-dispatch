@@ -66,11 +66,10 @@ export async function parseAndStoreXactPDFs(sb, projectId, estimateFile, compone
     onProgress('Sending to Claude for extraction…', 25);
     // Estimate uses chunked parsing (big PDFs can have 100+ line items that
     // exceed max_tokens in one call). Components parsing fits in one call.
-    const [estimateData, componentsResult] = await Promise.all([
+    const [estimateData, componentsData] = await Promise.all([
       callClaudeEstimateChunked(apiKey, estimateB64, msg => onProgress(msg, 40)),
-      callClaude(apiKey, componentsB64, COMPONENTS_PROMPT, 'components', COMPONENTS_MAX_TOKENS),
+      callClaudeComponentsBySection(apiKey, componentsB64, msg => onProgress(msg, 55)),
     ]);
-    const componentsData = componentsResult.parsed;
     onProgress('Computing totals…', 80);
     const materialsTotal = sum(componentsData.materials, 'total');
     const equipmentTotal = sum(componentsData.equipment, 'total');
@@ -157,11 +156,10 @@ export async function parseAndStoreXactPDFs(sb, projectId, estimateFile, compone
 
     // ─── 4. Run both Anthropic calls in parallel ───
     onProgress('Sending to Claude for extraction…', 25);
-    const [estimateData, componentsResult] = await Promise.all([
+    const [estimateData, componentsData] = await Promise.all([
       callClaudeEstimateChunked(apiKey, estimateB64, msg => onProgress(msg, 40)),
-      callClaude(apiKey, componentsB64, COMPONENTS_PROMPT, 'components', COMPONENTS_MAX_TOKENS),
+      callClaudeComponentsBySection(apiKey, componentsB64, msg => onProgress(msg, 55)),
     ]);
-    const componentsData = componentsResult.parsed;
     onProgress('Got data back from Claude…', 65);
 
     // ─── 5. Load trade mappings to classify codes/items ───
@@ -710,6 +708,133 @@ async function callClaudeEstimateChunked(apiKey, pdfBase64, onProgress) {
   return { ...metadata, items };
 }
 
+// Components parsing, section-aware. The Components report is three ordered
+// sections — MATERIAL, EQUIPMENT, LABOR COMPONENTS. The old single-call parse
+// truncated after the (long) materials section, silently dropping equipment
+// and labor AND their totals, which left the budget/margin running on a 50%
+// default instead of real cost. Fix: read the PDF text to find each section's
+// page range, then page-split each section and extract its rows (tagged by the
+// known section type — no guessing). Totals come from one small dedicated call.
+// Validated live: labor rows summed to the printed labor subtotal to the penny.
+const COMPONENTS_PAGES_PER_CHUNK = 2;
+
+async function detectComponentSections(pdfBytes) {
+  const pdfjs = (typeof window !== 'undefined') && window.pdfjsLib;
+  if (!pdfjs) return null;
+  try {
+    const pdf = await pdfjs.getDocument({ data: pdfBytes.slice() }).promise;
+    const pageType = [];
+    let current = null; // carries the last-seen section header forward
+    for (let p = 1; p <= pdf.numPages; p++) {
+      const page = await pdf.getPage(p);
+      const tc = await page.getTextContent();
+      const txt = tc.items.map(i => i.str).join(' ');
+      if (/MATERIAL COMPONENTS/i.test(txt)) current = 'material';
+      else if (/EQUIPMENT COMPONENTS/i.test(txt)) current = 'equipment';
+      else if (/LABOR COMPONENTS/i.test(txt)) current = 'labor';
+      pageType.push(current);
+    }
+    const groups = [];
+    for (let i = 0; i < pageType.length; i++) {
+      const t = pageType[i];
+      if (!t) continue; // leading cover/summary pages before the first header
+      const last = groups[groups.length - 1];
+      if (last && last.type === t && last.end === i) last.end = i + 1;
+      else groups.push({ type: t, start: i, end: i + 1 });
+    }
+    return groups;
+  } catch (e) {
+    console.warn('[parser] component section detection failed:', e.message);
+    return null;
+  }
+}
+
+async function callClaudeComponentsBySection(apiKey, componentsBase64, onProgress) {
+  const PDFLib = (typeof window !== 'undefined') && window.PDFLib;
+  const out = { materials: [], equipment: [], labor: [] };
+
+  // 1) Section totals — one small, reliable call.
+  let totals = {};
+  try {
+    const { parsed } = await callClaude(apiKey, componentsBase64, COMPONENTS_TOTALS_PROMPT, 'components-totals', 800);
+    totals = parsed || {};
+  } catch (e) {
+    console.warn('[parser] components totals call failed — totals will come from summed rows:', e.message);
+  }
+
+  const bytes = base64ToUint8(componentsBase64);
+  const groups = PDFLib ? await detectComponentSections(bytes) : null;
+
+  // Fallback: no PDFLib or no detectable section headers → old single-call parse.
+  if (!PDFLib || !groups || !groups.length) {
+    console.warn('[parser] components: no sections detected — using single-call fallback');
+    try {
+      const { parsed } = await callClaude(apiKey, componentsBase64, COMPONENTS_PROMPT, 'components', COMPONENTS_MAX_TOKENS);
+      return parsed || { ...out, ...totals };
+    } catch (e) {
+      console.warn('[parser] components single-call fallback failed:', e.message);
+      return { ...out, ...totals };
+    }
+  }
+
+  const srcDoc = await PDFLib.PDFDocument.load(bytes, { ignoreEncryption: true });
+  async function sliceToBase64(a, b) {
+    const sub = await PDFLib.PDFDocument.create();
+    const idx = [];
+    for (let i = a; i < b; i++) idx.push(i);
+    const pages = await sub.copyPages(srcDoc, idx);
+    pages.forEach(p => sub.addPage(p));
+    return uint8ToBase64(await sub.save());
+  }
+
+  const tasks = [];
+  for (const g of groups) {
+    for (let a = g.start; a < g.end; a += COMPONENTS_PAGES_PER_CHUNK) {
+      tasks.push({ a, b: Math.min(a + COMPONENTS_PAGES_PER_CHUNK, g.end), type: g.type });
+    }
+  }
+
+  const seen = { material: new Set(), equipment: new Set(), labor: new Set() };
+  const bucket = { material: out.materials, equipment: out.equipment, labor: out.labor };
+  let done = 0;
+  async function run(t) {
+    let rows = [];
+    try {
+      const b64 = await sliceToBase64(t.a, t.b);
+      const { parsed } = await callClaude(apiKey, b64, COMPONENTS_SECTION_PROMPT(t.type), `components-${t.type}-pages-${t.a + 1}-${t.b}`, 12000);
+      rows = parsed.rows || [];
+    } catch (e) {
+      console.warn(`[parser] components ${t.type} pages ${t.a + 1}-${t.b} failed: ${e.message}`);
+    }
+    for (const r of rows) {
+      const key = `${r.code}|${(r.description || '').slice(0, 40)}|${r.total}`;
+      if (seen[t.type].has(key)) continue;
+      seen[t.type].add(key);
+      if (t.type === 'labor') {
+        // Labor rows store "hours" (the parser's insert reads l.hours, not quantity).
+        bucket.labor.push({ code: r.code, description: r.description, hours: (r.hours != null ? r.hours : r.quantity), unit_price: r.unit_price, total: r.total });
+      } else {
+        bucket[t.type].push(r);
+      }
+    }
+    done++;
+    if (onProgress) onProgress(`Parsing components (${done}/${tasks.length})`);
+  }
+  for (let i = 0; i < tasks.length; i += PAGE_CONCURRENCY) {
+    await Promise.all(tasks.slice(i, i + PAGE_CONCURRENCY).map(run));
+  }
+
+  out.materials_total = totals.materials_total;
+  out.equipment_total = totals.equipment_total;
+  out.labor_subtotal = totals.labor_subtotal;
+  out.labor_total = totals.labor_total;
+  out.misc_labor = totals.misc_labor || 0;
+  if (!out.materials.length && !out.equipment.length && !out.labor.length) {
+    console.warn('[parser] component section sweep produced 0 rows');
+  }
+  return out;
+}
+
 // ─── Prompts ─────────────────────────────────────────────────────────
 // Metadata + printed summary totals only (no line items). One call on the
 // whole PDF; the printed totals live on the Summary/Recap page.
@@ -834,8 +959,38 @@ Rules:
 - Include ALL rows from each section, even minor ones.
 `;
 
+// Section totals only (no rows) — one small call on the whole components PDF.
+const COMPONENTS_TOTALS_PROMPT = `This is an Xactimate Components report. Extract ONLY the section TOTALS — do NOT return any individual component rows.
+
+Return ONLY valid JSON (no markdown, no prose):
+{ "materials_total": 0, "equipment_total": 0, "labor_subtotal": 0, "misc_labor": 0, "labor_total": 0, "components_grand_total": 0 }
+
+Rules:
+- "misc_labor" = the "Miscellaneous Labor" line at the bottom of the LABOR COMPONENTS section (0 if absent).
+- "labor_subtotal" = the labor "Subtotal"; "labor_total" = the labor "Total".
+- Numbers must be numeric (no $ signs, no commas). Use 0 for any field genuinely absent.
+`;
+
+// Rows from SPECIFIC PAGES of one known component section. The caller detects
+// each section's page range from the PDF text and sends those pages here with
+// the section type, so the model never has to figure out which section a row
+// belongs to — it just reads the rows on the pages it's given.
+const COMPONENTS_SECTION_PROMPT = (type) => `These pages are the ${String(type).toUpperCase()} COMPONENTS section of an Xactimate Components report. Extract EVERY component row listed on these pages.
+
+Return ONLY valid JSON (no markdown, no prose):
+{ "rows": [ { "code": "", "description": "", "quantity": 0, "unit": "", "unit_price": 0, "total": 0, "is_taxable": false } ] }
+
+Rules:
+- Return EVERY component row on these pages, in order. Do not skip any and do not stop early.
+- For LABOR rows, "quantity" is the number of hours and "unit" is "HR".
+- A trailing "*" on the total (e.g. "1,588.59*") means the row is taxable — set is_taxable: true.
+- Skip the section header, the column-header row, any Subtotal / Total / Miscellaneous Labor lines, and page headers/footers.
+- Numbers must be numeric (no $ signs, no commas, no quotes).
+- If these pages contain no component rows, return {"rows": []}.
+`;
+
 // ─── Trade classification helpers ────────────────────────────────────
-function classifyByCode(code, mappings) {
+export function classifyByCode(code, mappings) {
   if (!code) return 'general';
   // Find LONGEST matching prefix (so "CARP-FNC" wins over "CARP" if both exist)
   const matched = mappings
@@ -844,7 +999,7 @@ function classifyByCode(code, mappings) {
   return matched.length ? matched[0].trade_category : 'general';
 }
 
-function classifyEstimateItem(item, mappings) {
+export function classifyEstimateItem(item, mappings) {
   // Estimate items don't have codes — match by description keywords + room context
   const desc = (item.description || '').toLowerCase();
   const section = (item.section || '').toLowerCase();
