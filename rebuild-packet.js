@@ -715,6 +715,58 @@ async function createPacket() {
 }
 
 // ─── ACTION: Send Packet ────────────────────────────────────────────────────
+// Prepend a bright "Review & Sign Online" cover page (with a clickable link)
+// to the packet PDF, so a customer who opens the attachment instead of the
+// email still lands on exactly where to sign. Returns base64 of the new PDF,
+// or null if PDFLib is unavailable or anything fails (caller then attaches the
+// unstamped PDF). Uses a new cover page rather than stamping over page 1 so
+// the contract's own first page isn't obscured.
+async function _stampSignLinkCoverPage(arrayBuffer, signUrl) {
+  const PDFLib = window.PDFLib;
+  if (!PDFLib || !signUrl) return null;
+  try {
+    const { PDFDocument, StandardFonts, PDFName, PDFString, PDFArray, rgb } = PDFLib;
+    const doc = await PDFDocument.load(arrayBuffer, { ignoreEncryption: true });
+    const first = doc.getPages()[0];
+    if (!first) return null;
+    const { width, height } = first.getSize();
+    const cover = doc.insertPage(0, [width, height]);
+    const bold = await doc.embedFont(StandardFonts.HelveticaBold);
+    const reg = await doc.embedFont(StandardFonts.Helvetica);
+    const cx = width / 2;
+    const navy = rgb(0.05, 0.18, 0.37), orange = rgb(0.91, 0.36, 0.016), white = rgb(1, 1, 1), grey = rgb(0.47, 0.52, 0.63), ink = rgb(0.1, 0.15, 0.25);
+    const centered = (text, size, font, y, color) => cover.drawText(text, { x: cx - font.widthOfTextAtSize(text, size) / 2, y, size, font, color });
+
+    centered('Your Contract is Ready to Sign', 22, bold, height - 150, navy);
+    centered('Tap the button below to review and sign online.', 13, reg, height - 182, ink);
+
+    const bw = 320, bh = 56, bx = cx - bw / 2, by = height - 280;
+    cover.drawRectangle({ x: bx, y: by, width: bw, height: bh, color: orange });
+    centered('REVIEW & SIGN ONLINE', 16, bold, by + bh / 2 - 6, white);
+
+    // Clickable link annotation covering the button.
+    const uri = doc.context.obj({ Type: 'Action', S: 'URI' });
+    uri.set(PDFName.of('URI'), PDFString.of(signUrl));
+    const annot = doc.context.obj({ Type: 'Annot', Subtype: 'Link', Rect: [bx, by, bx + bw, by + bh], Border: [0, 0, 0], A: uri });
+    const ref = doc.context.register(annot);
+    const existing = cover.node.lookup(PDFName.of('Annots'));
+    if (existing instanceof PDFArray) existing.push(ref);
+    else cover.node.set(PDFName.of('Annots'), doc.context.obj([ref]));
+
+    centered('Your full contract, Schedule of Values, and estimate follow on the next pages.', 9, reg, by - 38, grey);
+    centered('This cover page is for signing only.', 9, reg, by - 52, grey);
+
+    const bytes = await doc.save();
+    let s = '';
+    const CH = 0x8000;
+    for (let i = 0; i < bytes.length; i += CH) s += String.fromCharCode.apply(null, bytes.subarray(i, i + CH));
+    return btoa(s);
+  } catch (e) {
+    console.warn('[packet] cover-page stamp failed:', e);
+    return null;
+  }
+}
+
 async function sendPacket(isResend) {
   const pkt = state.packet;
   const p = state.activeProject;
@@ -769,13 +821,15 @@ async function sendPacket(isResend) {
       preheader: isResend ? 'Reminder: your JG Restoration contract is awaiting signature' : 'Your JG Restoration contract is ready for signature',
       headline: isResend ? 'Reminder: Contract Awaiting Signature' : 'Contract Ready for Signature',
       intro: 'Hi ' + custFirst + ',',
-      bodyHtml: `<p>${isResend ? 'This is a friendly reminder that your' : 'Your'} JG Restoration contract packet is ready for your review and signature. The packet includes:</p>
-        <ul style="margin:8px 0 14px 18px;padding:0;line-height:1.7;">
-          <li>The signed contract terms</li>
+      bodyHtml: `<p style="margin:0 0 10px;font-size:16px;"><strong>${isResend ? 'This is a reminder — your' : 'Your'} JG Restoration contract is ready to sign online.</strong></p>
+        <p style="margin:0 0 16px;font-size:15px;">👉 <a href="${signUrl}" target="_blank" style="color:#e85d04;font-weight:700;">Click here to review &amp; sign your contract</a></p>
+        <p style="margin:0 0 6px;">The packet includes:</p>
+        <ul style="margin:6px 0 14px 18px;padding:0;line-height:1.7;">
+          <li>The contract terms</li>
           <li>The Schedule of Values (draw schedule)</li>
           <li>The Xactimate estimate detail</li>
         </ul>
-        <p>The full packet PDF is attached to this email for your records. To review and sign, please click the button below.</p>`,
+        <p style="margin:0;">A copy of the full packet PDF is attached for your records — <strong>you don't need to print or sign the PDF.</strong> To sign, tap the button below (or the link above).</p>`,
       ctaLabel: 'Review & Sign Packet',
       ctaUrl: signUrl,
       signoffName: senderDisplayName,
@@ -786,7 +840,17 @@ async function sendPacket(isResend) {
     let attachments;
     if (activePkt.merged_pdf_url) {
       try {
-        const pdfBase64 = await fetchAsBase64(activePkt.merged_pdf_url);
+        // Prepend a "Review & Sign Online" cover page (with the clickable sign
+        // link) so a customer who opens the attachment still sees where to sign.
+        // Falls back to the unstamped PDF if stamping fails for any reason.
+        let pdfBase64 = null;
+        try {
+          const ab = await (await fetch(activePkt.merged_pdf_url)).arrayBuffer();
+          pdfBase64 = await _stampSignLinkCoverPage(ab, signUrl);
+        } catch (stampErr) {
+          console.warn('[packet] sign-link cover-page add failed, attaching unstamped PDF:', stampErr);
+        }
+        if (!pdfBase64) pdfBase64 = await fetchAsBase64(activePkt.merged_pdf_url);
         const filename = `Contract-Packet-${(p.albi_job_number || 'JG').replace(/[^a-zA-Z0-9._-]/g, '_')}.pdf`;
         attachments = [{
           filename,
