@@ -5069,13 +5069,39 @@ Object.defineProperty(window, 'currentUser', { get: () => { try { return JSON.pa
 
 document.addEventListener('DOMContentLoaded', () => { jgCheckAuth(); });</script>
 <script>
-function jgGoogleCb(r){try{const p=JSON.parse(atob(r.credential.split('.')[1]));if(!p.email.endsWith('@jg-restoration.com')){document.getElementById('jg-login-err').textContent='Access restricted to @jg-restoration.com accounts.';return;}const u={name:p.name||p.given_name,email:p.email,picture:p.picture||''};localStorage.setItem(_JG_KEY,JSON.stringify(u));localStorage.setItem(_JG_EXP,String(Date.now()+43200000));jgHideLogin();jgShowUser(u);}catch(e){document.getElementById('jg-login-err').textContent='Sign in failed.';}}
-function jgCheckAuth(){const r=localStorage.getItem(_JG_KEY),e=localStorage.getItem(_JG_EXP);if(r&&e&&Date.now()<parseInt(e)){jgHideLogin();jgShowUser(JSON.parse(r));return true;}jgShowLogin();return false;}
+function jgGoogleCb(r){try{const p=JSON.parse(atob(r.credential.split('.')[1]));if(!p.email.endsWith('@jg-restoration.com')){document.getElementById('jg-login-err').textContent='Access restricted to @jg-restoration.com accounts.';return;}const u={name:p.name||p.given_name,email:p.email,picture:p.picture||''};localStorage.setItem(_JG_KEY,JSON.stringify(u));localStorage.setItem(_JG_EXP,String(Date.now()+43200000));jgHideLogin();jgShowUser(u);jgOnboardingGate(u);}catch(e){document.getElementById('jg-login-err').textContent='Sign in failed.';}}
+function jgCheckAuth(){const r=localStorage.getItem(_JG_KEY),e=localStorage.getItem(_JG_EXP);if(r&&e&&Date.now()<parseInt(e)){jgHideLogin();const u=JSON.parse(r);jgShowUser(u);jgOnboardingGate(u);return true;}jgShowLogin();return false;}
 function jgShowLogin(){const e=document.getElementById('jg-login');if(e)e.style.display='flex';}
 function jgHideLogin(){const e=document.getElementById('jg-login');if(e)e.style.display='none';}
 function jgShowUser(u){const n=document.getElementById('sb-nm'),a=document.getElementById('sb-av');if(n)n.textContent=u.name?u.name.split(' ')[0]:u.email.split('@')[0];if(a)a.innerHTML=u.picture?'<img src="'+u.picture+'" style="width:22px;height:22px;border-radius:50%;">':'👤';}
 function jgSignOut(){if(confirm('Sign out?')){localStorage.removeItem(_JG_KEY);localStorage.removeItem(_JG_EXP);window.location.href='hub.html';}}
-window.addEventListener('storage',e=>{if(e.key===_JG_KEY){if(e.newValue){jgHideLogin();jgShowUser(JSON.parse(e.newValue));}else jgShowLogin();}});
+// ── Onboarding gate (new hires going forward only) ──
+// Onboarding completion (onboarding_signed_at) is the single key to the whole
+// platform. New hires on/after the cutoff who haven't finished onboarding —
+// including anyone let in via a "Skip-Docs" quick invite — are blocked until
+// they complete it. Existing staff (start_date before the cutoff, or null) are
+// grandfathered and never blocked. Fails open on any network error.
+const JG_ONBOARDING_CUTOFF='2026-11-04';
+async function jgOnboardingGate(u){
+  if(!u||!u.email)return;
+  var SBU='https://nuykvchgecpiuikoerze.supabase.co',SBK=SB_KEY;
+  var emp=null;
+  try{var r=await fetch(SBU+'/rest/v1/employees?email=eq.'+encodeURIComponent(u.email)+'&select=id,name,start_date,onboarding_signed_at,invite_pending&limit=1',{headers:{apikey:SBK,Authorization:'Bearer '+SBK}});var rows=r.ok?await r.json():[];emp=rows&&rows[0];}catch(e){return;}
+  if(!emp)return;
+  var hireISO=emp.start_date?(''+emp.start_date).slice(0,10):null;
+  // Fail closed: block when onboarding isn't done AND (hired on/after cutoff OR invite still pending).
+  if(emp.onboarding_signed_at)return;
+  if(!((hireISO&&hireISO>=JG_ONBOARDING_CUTOFF)||emp.invite_pending===true))return;
+  var signUrl=null;
+  try{var ir=await fetch(SBU+'/rest/v1/employee_invites?employee_id=eq.'+emp.id+'&order=sent_at.desc&limit=5&select=token,status,expires_at',{headers:{apikey:SBK,Authorization:'Bearer '+SBK}});var invs=ir.ok?await ir.json():[];var usable=(invs||[]).find(function(i){return i.status!=='accepted'&&i.token&&(!i.expires_at||new Date(i.expires_at)>new Date());});if(usable)signUrl='onboarding.html?invite='+encodeURIComponent(usable.token);}catch(e){}
+  var first=((emp.name||'').split(' ')[0])||'there';
+  var cta=signUrl?'<a href="'+signUrl+'" style="display:block;background:#e85d04;color:#fff;text-decoration:none;font-weight:700;font-size:15px;padding:14px 20px;border-radius:10px;">📑 Complete Onboarding →</a>':'<div style="background:#fff8ed;border:1px solid #f5a623;border-radius:10px;padding:14px 16px;font-size:13px;color:#1a2540;line-height:1.6;">Your onboarding link isn\'t ready yet. Please call the office at <strong>(920)&nbsp;428-4200</strong> to get it, then sign in again.</div>';
+  var ov=document.getElementById('jg-onboarding-gate');
+  if(!ov){ov=document.createElement('div');ov.id='jg-onboarding-gate';ov.style.cssText='position:fixed;inset:0;z-index:999999;background:#f4f6fb;display:flex;align-items:center;justify-content:center;padding:24px;font-family:DM Sans,-apple-system,BlinkMacSystemFont,sans-serif;';document.body.appendChild(ov);}
+  ov.style.display='flex';
+  ov.innerHTML='<div style="max-width:440px;width:100%;background:#fff;border-radius:16px;padding:32px 26px;text-align:center;box-shadow:0 8px 30px rgba(13,45,94,.12);"><div style="font-size:42px;margin-bottom:12px;">📑</div><h2 style="margin:0 0 10px;color:#0d2d5e;font-size:20px;font-weight:800;">Finish onboarding to continue, '+first+'</h2><p style="color:#55617a;font-size:14px;line-height:1.6;margin:0 0 20px;">All new team members must complete onboarding — including the <strong>Non-Compete Agreement</strong> and handbook acknowledgment — before using the platform. It only takes a few minutes.</p>'+cta+'<div style="margin-top:18px;"><button onclick="jgSignOut()" style="background:none;border:none;color:#7884a0;font-size:12px;text-decoration:underline;cursor:pointer;font-family:inherit;">Sign out</button></div></div>';
+}
+window.addEventListener('storage',e=>{if(e.key===_JG_KEY){if(e.newValue){jgHideLogin();const u=JSON.parse(e.newValue);jgShowUser(u);jgOnboardingGate(u);}else jgShowLogin();}});
 
 document.addEventListener("DOMContentLoaded",()=>jgCheckAuth());
 </script>

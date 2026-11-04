@@ -13217,8 +13217,62 @@ function setupRealtime() {
 
 // Notifications module moved to rebuild-notifications.js
 
+// ──── Onboarding gate (new hires going forward only) ────
+// Onboarding completion (onboarding_signed_at) is the single key to the whole
+// platform. New hires on/after the cutoff who haven't finished onboarding —
+// including anyone let in via a "Skip-Docs" quick invite, which sets no
+// onboarding_signed_at — are blocked here until they complete it. Existing
+// staff (start_date before the cutoff, or null) are grandfathered and never
+// blocked.
+const ONBOARDING_GATE_CUTOFF = '2026-11-04';
+async function enforceOnboardingGate() {
+  const email = state.pmEmail;
+  if (!email) return false; // not signed in via platform SSO; nothing to gate
+  let emp = null;
+  try {
+    const r = await fetch(SUPABASE_URL + '/rest/v1/employees?email=eq.' + encodeURIComponent(email) + '&select=id,name,start_date,onboarding_signed_at,invite_pending&limit=1', { headers: { apikey: SUPABASE_ANON_KEY, Authorization: 'Bearer ' + SUPABASE_ANON_KEY } });
+    const rows = r.ok ? await r.json() : [];
+    emp = rows && rows[0];
+  } catch (e) { return false; } // fail open on a network blip — never lock a PM out over connectivity
+  if (!emp) return false;
+  const hireISO = emp.start_date ? ('' + emp.start_date).slice(0, 10) : null;
+  // Fail closed: block when onboarding isn't done AND (hired on/after cutoff OR invite still pending).
+  if (emp.onboarding_signed_at) return false;
+  if (!((hireISO && hireISO >= ONBOARDING_GATE_CUTOFF) || emp.invite_pending === true)) return false;
+  // Blocked — render overlay and look up a usable onboarding invite.
+  let signUrl = null;
+  try {
+    const r = await fetch(SUPABASE_URL + '/rest/v1/employee_invites?employee_id=eq.' + emp.id + '&order=sent_at.desc&limit=5&select=token,status,expires_at', { headers: { apikey: SUPABASE_ANON_KEY, Authorization: 'Bearer ' + SUPABASE_ANON_KEY } });
+    const invs = r.ok ? await r.json() : [];
+    const usable = (invs || []).find(i => i.status !== 'accepted' && i.token && (!i.expires_at || new Date(i.expires_at) > new Date()));
+    if (usable) signUrl = 'onboarding.html?invite=' + encodeURIComponent(usable.token);
+  } catch (e) {}
+  const first = ((emp.name || '').split(' ')[0]) || 'there';
+  const cta = signUrl
+    ? '<a href="' + signUrl + '" style="display:block;background:#e85d04;color:#fff;text-decoration:none;font-weight:700;font-size:15px;padding:14px 20px;border-radius:10px;">📑 Complete Onboarding →</a>'
+    : '<div style="background:#fff8ed;border:1px solid #f5a623;border-radius:10px;padding:14px 16px;font-size:13px;color:#1a2540;line-height:1.6;">Your onboarding link isn\'t ready yet. Please call the office at <strong>(920)&nbsp;428-4200</strong> to get it, then sign in again.</div>';
+  const ov = document.createElement('div');
+  ov.id = 'onboarding-gate';
+  ov.style.cssText = 'position:fixed;inset:0;z-index:999999;background:#f4f6fb;display:flex;align-items:center;justify-content:center;padding:24px;font-family:DM Sans,-apple-system,BlinkMacSystemFont,sans-serif;';
+  ov.innerHTML = '<div style="max-width:440px;width:100%;background:#fff;border-radius:16px;padding:32px 26px;text-align:center;box-shadow:0 8px 30px rgba(13,45,94,.12);">'
+    + '<div style="font-size:42px;margin-bottom:12px;">📑</div>'
+    + '<h2 style="margin:0 0 10px;color:#0d2d5e;font-size:20px;font-weight:800;">Finish onboarding to continue, ' + first + '</h2>'
+    + '<p style="color:#55617a;font-size:14px;line-height:1.6;margin:0 0 20px;">All new team members must complete onboarding — including the <strong>Non-Compete Agreement</strong> and handbook acknowledgment — before using the platform. It only takes a few minutes.</p>'
+    + cta
+    + '<div style="margin-top:18px;"><button id="onboarding-gate-signout" style="background:none;border:none;color:#7884a0;font-size:12px;text-decoration:underline;cursor:pointer;font-family:inherit;">Sign out</button></div>'
+    + '</div>';
+  document.body.appendChild(ov);
+  const so = document.getElementById('onboarding-gate-signout');
+  if (so) so.addEventListener('click', () => { try { localStorage.removeItem('jg_platform_user'); } catch (e) {} window.location.href = 'index.html'; });
+  return true; // blocked
+}
+
 // ──── Boot ────
 (async function init() {
+  // Onboarding gate — block new hires who haven't finished onboarding before
+  // any of the PM board renders.
+  if (await enforceOnboardingGate()) return;
+
   // ─── Rail collapse/expand wiring ───
   const mainEl = document.querySelector('main');
   const collapseBtn = document.getElementById('railCollapseBtn');
