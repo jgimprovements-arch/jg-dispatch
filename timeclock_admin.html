@@ -2466,11 +2466,34 @@ async function autoFillHolidayAbsences() {
   var pastOrToday = ST.holidays.filter(function(d){ return d <= todayIso; });
   if (!pastOrToday.length) return;
 
-  // Build a set of "already covered" {empName, date} pairs from existing absences
+  // Build a set of "already covered" {empName|date} pairs. CRITICAL: query the
+  // DB directly for these specific holiday dates — do NOT use ST.absences, which
+  // is capped at 200 rows and date-filtered, so it does not reliably contain the
+  // existing holiday records. Relying on it caused this generator to re-insert
+  // the full holiday set on EVERY page load (139k+ duplicate rows accumulated).
+  var holDatesCsv = pastOrToday.join(',');
   var coveredAbs = new Set();
-  (ST.absences || []).forEach(function(a){
-    coveredAbs.add(a.employee_name + '|' + a.date);
-  });
+  try {
+    // There should be at most ~one record per (employee, date). If the count on
+    // these dates is far higher, the table still holds old duplicates — bail
+    // (never add more); it resumes automatically once they're cleaned up.
+    var _activeCount = (ST.employees || []).filter(function(e){ return e.active !== false && e.name; }).length;
+    var _expectedMax = _activeCount * pastOrToday.length + _activeCount; // generous buffer
+    var _cntRes = await fetch(SB_URL + '/rest/v1/absence_records?date=in.(' + holDatesCsv + ')&select=id', {
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Prefer': 'count=exact', 'Range': '0-0' }
+    });
+    var _cr = _cntRes.headers.get('content-range') || '';
+    var _totalOnDates = parseInt((_cr.split('/')[1] || '0'), 10) || 0;
+    if (_totalOnDates > _expectedMax) {
+      console.warn('[autoFillHolidayAbsences] ' + _totalOnDates + ' records on holiday dates exceeds expected ~' + _expectedMax + ' — duplicates present; skipping autofill until cleaned up.');
+      return;
+    }
+    var _existing = await sb('/rest/v1/absence_records?date=in.(' + holDatesCsv + ')&select=employee_name,date') || [];
+    _existing.forEach(function(a){ coveredAbs.add(a.employee_name + '|' + a.date); });
+  } catch (e) {
+    console.warn('[autoFillHolidayAbsences] could not verify existing holiday records; skipping to avoid duplicates:', e);
+    return;
+  }
 
   // Also skip if the employee actually clocked in on the holiday — that's
   // worked-on-holiday, deal with separately (premium pay, not auto-pad).
