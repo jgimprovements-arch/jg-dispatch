@@ -5918,6 +5918,15 @@ async function _toApprove(requestId) {
   confirmMsg += 'Dates: ' + r.start_date + ' → ' + r.end_date + '\n';
   confirmMsg += 'Hours: ' + hoursRequested + 'h\n';
   confirmMsg += 'Current PTO balance: ' + ptoAvail.toFixed(1) + 'h\n';
+  // Vacation DAYS remaining this anniversary year (informational — does not block).
+  if (emp && emp.start_date && typeof vacEntitlement === 'function') {
+    var _ve = vacEntitlement(emp, _toData || [], new Date((''+r.start_date).slice(0,10) + 'T12:00:00'));
+    confirmMsg += 'Vacation days this year: ' + _ve.used + ' used of ' + _ve.allotment + ' (' + _ve.remaining + ' remaining)\n';
+    var _reqDays = parseFloat(r.days_requested) || 0;
+    if (_reqDays > _ve.remaining) {
+      confirmMsg += '⚠ This request (' + _reqDays + 'd) exceeds remaining vacation by ' + (_reqDays - _ve.remaining) + ' day(s).\n';
+    }
+  }
   if (hoursRequested > ptoAvail) {
     confirmMsg += '\n⚠ This exceeds their PTO balance by ' + (hoursRequested - ptoAvail).toFixed(1) + 'h.';
     confirmMsg += '\nOnly ' + Math.min(hoursRequested, ptoAvail).toFixed(1) + 'h will be deducted.';
@@ -9065,6 +9074,81 @@ function _fullAddress(emp) {
   return [street, cityLine].filter(Boolean).join(', ');
 }
 
+// ── VACATION ENTITLEMENT (days, anniversary-based) ───────────────────────
+// Handbook (rev. 2022): continuous-service tenure grants paid vacation DAYS —
+// 6 months → 2, 1 year → 5, 2 years → 10, 5+ years → 15. The vacation "year"
+// runs from the hire anniversary to the next anniversary; unused days do NOT
+// carry over (they reset each anniversary). A per-employee override captures a
+// negotiated amount (e.g. 2 weeks = 10 days); the allotment is the HIGHER of
+// the handbook tenure amount and the override, refilling each anniversary.
+function vacTenureDays(startISO, asOf) {
+  if (!startISO) return 0;
+  var start = new Date((''+startISO).slice(0,10) + 'T12:00:00');
+  if (isNaN(start.getTime())) return 0;
+  var ms = asOf - start;
+  if (ms < 0) return 0;
+  var years = ms / (365.25 * 24 * 3600 * 1000);
+  if (years * 12 < 6) return 0;   // < 6 months
+  if (years < 1) return 2;        // 6 months – 1 year
+  if (years < 2) return 5;        // 1 – 2 years
+  if (years < 5) return 10;       // 2 – 5 years
+  return 15;                      // 5+ years
+}
+function vacYearWindow(startISO, asOf) {
+  var start = new Date((''+startISO).slice(0,10) + 'T12:00:00');
+  var anniv = new Date(asOf.getFullYear(), start.getMonth(), start.getDate(), 12, 0, 0);
+  var yrStart = (anniv <= asOf) ? anniv : new Date(asOf.getFullYear()-1, start.getMonth(), start.getDate(), 12, 0, 0);
+  var yrEnd = new Date(yrStart.getFullYear()+1, start.getMonth(), start.getDate(), 12, 0, 0);
+  return { start: yrStart, end: yrEnd };
+}
+function vacEntitlement(emp, vacationRequests, asOf) {
+  asOf = asOf || new Date();
+  var out = { hasStart: !!(emp && emp.start_date), allotment: 0, used: 0, remaining: 0, tenureDays: 0, override: null, source: '', window: null };
+  if (!out.hasStart) return out;
+  var win = vacYearWindow(emp.start_date, asOf);
+  out.window = win;
+  var tenure = vacTenureDays(emp.start_date, asOf);
+  out.tenureDays = tenure;
+  var ovRaw = (emp.vacation_days_override === null || emp.vacation_days_override === undefined || emp.vacation_days_override === '') ? null : Number(emp.vacation_days_override);
+  var ov = (ovRaw != null && !isNaN(ovRaw)) ? ovRaw : null;
+  out.override = ov;
+  out.allotment = (ov != null) ? Math.max(tenure, ov) : tenure;
+  out.source = (ov != null && ov > tenure) ? ('negotiated ' + ov + 'd · handbook ' + tenure + 'd') : ('handbook ' + tenure + 'd');
+  var used = 0;
+  (vacationRequests || []).forEach(function(r){
+    if (r.status !== 'approved') return;
+    var d = new Date((''+r.start_date).slice(0,10) + 'T12:00:00');
+    if (d >= win.start && d < win.end) used += (parseFloat(r.days_requested) || 0);
+  });
+  out.used = used;
+  out.remaining = Math.max(0, out.allotment - used);
+  return out;
+}
+async function saveVacationOverride(empId) {
+  if (typeof isAdmin === 'function' && !isAdmin()) { toast('Admin only'); return; }
+  var inp = document.getElementById('vacOvr_' + empId);
+  var raw = inp ? (''+inp.value).trim() : '';
+  var val = raw === '' ? null : parseInt(raw, 10);
+  if (raw !== '' && (isNaN(val) || val < 0)) { toast('Enter a whole number of days (or blank for handbook default)'); return; }
+  try {
+    var r = await fetch(SB_URL + '/rest/v1/employees?id=eq.' + empId, {
+      method: 'PATCH',
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ vacation_days_override: val })
+    });
+    if (!r.ok) { var t = await r.text(); throw new Error(t.slice(0,160)); }
+    var emp = ST.employees.find(function(e){ return e.id === empId; });
+    if (emp) emp.vacation_days_override = val;
+    if (typeof logActivity === 'function') logActivity('Vacation Override ' + (val == null ? 'Cleared' : 'Set'), (emp ? emp.name : empId) + ' • ' + (val == null ? 'handbook default by tenure' : val + ' days/yr'), 'time_clock', emp ? emp.name : '');
+    toast('✓ Vacation ' + (val == null ? 'override cleared — using handbook default' : 'allotment override set to ' + val + ' days/yr'));
+    if (typeof openEmployeeFile === 'function') { closeModal(); setTimeout(function(){ openEmployeeFile(empId); }, 120); }
+  } catch (e) {
+    console.warn('saveVacationOverride failed:', e);
+    toast('Save failed: ' + (e.message || e));
+  }
+}
+function clearVacationOverride(empId) { var i = document.getElementById('vacOvr_' + empId); if (i) i.value = ''; saveVacationOverride(empId); }
+
 function _buildEmployeeFileBody(emp, invite, ncSig, documents, compHistory, reviews, vacationRequests) {
   var h = '';
   var fmtD = function(iso) { if (!iso) return '—'; var d = new Date(iso); return d.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}); };
@@ -9145,6 +9229,40 @@ function _buildEmployeeFileBody(emp, invite, ncSig, documents, compHistory, revi
   h += _fileRow('PTO Remaining', '<strong style="color:'+(ptoRemaining<8?'#c62828':'#2e7d32')+';">'+ptoRemaining.toFixed(1)+'h</strong>');
   h += _fileRow('Sick Days YTD', sickUsed + ' / ' + sickLimit);
   h += '</div>';
+  h += '</div>';
+
+  // ── VACATION ENTITLEMENT (days, anniversary-based) ──
+  var _vac = vacEntitlement(emp, vacationRequests, new Date());
+  h += '<div style="background:#fff;border:1px solid var(--border);border-radius:10px;padding:16px 18px;margin-bottom:16px;">';
+  h += '<div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:12px;">🌴 Vacation (Days · regenerates on hire anniversary)</div>';
+  if (!_vac.hasStart) {
+    h += '<div style="padding:14px;text-align:center;font-size:12px;color:#e65100;background:rgba(230,81,0,.06);border-radius:8px;">⚠ No hire date on file. Set a <strong>Start Date</strong> for '+((emp.name||'').split(' ')[0]||'this employee')+' to enable vacation tracking.</div>';
+  } else {
+    var _vf = function(d){ return d.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}); };
+    var _annivStr = _vac.window.start.toLocaleDateString('en-US',{month:'long',day:'numeric'});
+    var _remColor = _vac.remaining <= 0 ? '#c62828' : (_vac.remaining <= 2 ? '#e65100' : '#2e7d32');
+    // Stat tiles
+    h += '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:12px;">';
+    h += '<div style="background:rgba(13,45,94,.04);border-radius:8px;padding:12px 10px;text-align:center;"><div style="font-size:24px;font-weight:800;color:var(--navy);line-height:1;">'+_vac.allotment+'</div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;font-weight:700;margin-top:4px;">Allotment</div></div>';
+    h += '<div style="background:rgba(13,45,94,.04);border-radius:8px;padding:12px 10px;text-align:center;"><div style="font-size:24px;font-weight:800;color:var(--navy);line-height:1;">'+_vac.used+'</div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;font-weight:700;margin-top:4px;">Used</div></div>';
+    h += '<div style="background:rgba(46,125,50,.06);border-radius:8px;padding:12px 10px;text-align:center;"><div style="font-size:24px;font-weight:800;color:'+_remColor+';line-height:1;">'+_vac.remaining+'</div><div style="font-size:9px;color:var(--muted);text-transform:uppercase;font-weight:700;margin-top:4px;">Remaining</div></div>';
+    h += '</div>';
+    h += _fileRow('Vacation year', _vf(_vac.window.start)+' → '+_vf(_vac.window.end));
+    h += _fileRow('Allotment', '<strong>'+_vac.allotment+' days</strong> <span style="color:var(--muted);font-size:11px;">('+_vac.source+')</span>');
+    h += _fileRow('Used this year', _vac.used+' day'+(_vac.used===1?'':'s'));
+    h += _fileRow('Remaining', '<strong style="color:'+_remColor+';">'+_vac.remaining+' day'+(_vac.remaining===1?'':'s')+'</strong>');
+    // Override editor
+    h += '<div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border);">';
+    h += '<label style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;">Negotiated override (days / year)</label>';
+    h += '<div style="display:flex;gap:8px;margin-top:6px;align-items:center;">';
+    h += '<input id="vacOvr_'+emp.id+'" type="number" min="0" step="1" value="'+(_vac.override!=null?_vac.override:'')+'" placeholder="handbook default" style="width:140px;padding:7px 10px;border:1.5px solid var(--border);border-radius:6px;font-size:13px;">';
+    h += '<button class="btn btn-sm" onclick="saveVacationOverride(\''+emp.id+'\')" style="background:var(--navy);color:#fff;font-size:12px;">Save</button>';
+    if (_vac.override!=null) h += '<button class="btn btn-sm" onclick="clearVacationOverride(\''+emp.id+'\')" style="background:var(--surface);border:1.5px solid var(--border);color:var(--navy);font-size:12px;">Clear</button>';
+    h += '</div>';
+    h += '<div style="font-size:10px;color:var(--muted);margin-top:6px;line-height:1.5;">Leave blank for the handbook default by tenure. An override applies the <strong>higher</strong> of the two each year — e.g. 10 days to start, then 15 once 5-year tenure is reached.</div>';
+    h += '</div>';
+    h += '<div style="margin-top:10px;font-size:10px;color:var(--muted);">↻ Resets every anniversary ('+_annivStr+'). No carryover — unused days are lost at year end (per handbook).</div>';
+  }
   h += '</div>';
 
   // ── TIME OFF REQUEST HISTORY ──
