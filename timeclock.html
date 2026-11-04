@@ -1060,7 +1060,7 @@ if (!window.supabase || !window.supabase.createClient) {
       <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:10px;">
         <div style="text-align:center;background:rgba(13,45,94,.04);border-radius:10px;padding:10px 6px;">
           <div id="pto-total-val" style="font-size:20px;font-weight:700;color:var(--navy);">--</div>
-          <div style="font-size:10px;color:var(--muted);font-weight:600;margin-top:2px;">TOTAL EARNED</div>
+          <div style="font-size:10px;color:var(--muted);font-weight:600;margin-top:2px;">ALLOTMENT</div>
         </div>
         <div style="text-align:center;background:rgba(13,45,94,.04);border-radius:10px;padding:10px 6px;">
           <div id="pto-used-val" style="font-size:20px;font-weight:700;color:var(--muted);">--</div>
@@ -1630,6 +1630,11 @@ async function initApp(u) {
     }
   } catch(e) { console.warn('Employee fetch failed:', e.message); }
 
+  // Load this employee's PTO/Vacation absences so the day-based balance card
+  // and the Request Time Off modal have real numbers (fire-and-forget; it
+  // re-renders the card when it lands).
+  loadVacationAbsences();
+
   // Show today's assigned vehicle in the clock card. SELF-CONTAINED: queries
   // Supabase directly from this page instead of depending on fleet.js/JGFleet
   // being loaded and ready — that cross-file dependency was the thing failing
@@ -1769,6 +1774,7 @@ async function initApp(u) {
     if (params.get('action') === 'vacation' && TC.employee) {
       switchTab('hours');
       await loadMyHours();  // ensure PTO card + employee data is ready
+      await loadVacationAbsences();  // ensure day-based balance is loaded before the modal
       setTimeout(function(){ openVacationRequest(); }, 400);
       // Clean the URL so refreshes don't keep reopening the modal
       try { window.history.replaceState({}, '', window.location.pathname); } catch(e) {}
@@ -2327,33 +2333,40 @@ function renderStatus() {
     renderSalaryView();
   }
 
-  // PTO balance card — always visible once employee is loaded
+  // Vacation balance card — DAY-BASED, same math as the admin file.
   if (TC.employee) {
-    var ptoAvail  = parseFloat(TC.employee.pto_hours_available || 0);
-    var ptoUsed   = parseFloat(TC.employee.pto_hours_used || 0);
-    var ptoAccrual = parseFloat(TC.employee.pto_accrual_rate || 0);
-    var ptoNotes  = TC.employee.pto_notes || '';
-    var ptoTotal  = ptoAvail + ptoUsed;
-    var ptoPct    = ptoTotal > 0 ? Math.min(100, Math.round((ptoAvail / ptoTotal) * 100)) : 100;
-    var ptoColor  = ptoAvail <= 8 ? 'var(--red)' : ptoAvail <= 24 ? '#e65100' : 'var(--green)';
+    var vac       = tcVacInfo();
+    var allot     = vac.allotment;
+    var usedDays  = vac.used;
+    var remDays   = vac.remaining;
+    var vacPct    = allot > 0 ? Math.min(100, Math.round((remDays / allot) * 100)) : 0;
+    var vacColor  = remDays <= 1 ? 'var(--red)' : remDays <= 3 ? '#e65100' : 'var(--green)';
 
     var card   = document.getElementById('pto-balance-card');
+    var totEl  = document.getElementById('pto-total-val');
+    var usedEl = document.getElementById('pto-used-val');
     var badge  = document.getElementById('pto-badge');
     var bar    = document.getElementById('pto-bar');
     var used   = document.getElementById('pto-used-label');
     var accr   = document.getElementById('pto-accrual-label');
 
-    if (card)  card.style.display  = 'block';
-    if (badge) { badge.textContent = ptoAvail + 'h available'; badge.style.color = ptoColor; }
-    if (bar)   { bar.style.width = ptoPct + '%'; bar.style.background = ptoColor; }
-    if (used)  used.textContent = ptoUsed + 'h used';
-    if (accr)  accr.textContent = ptoAccrual ? 'Accruing ' + ptoAccrual + 'h/period' : (ptoNotes || '');
+    // No start date on file → can't compute; keep the card hidden rather than
+    // show a misleading zero.
+    if (card) card.style.display = vac.hasStart ? 'block' : 'none';
+    if (totEl)  totEl.textContent  = allot;
+    if (usedEl) usedEl.textContent = usedDays;
+    if (badge) { badge.textContent = remDays; badge.style.color = vacColor; }
+    if (bar)   { bar.style.width = vacPct + '%'; bar.style.background = vacColor; }
+    if (used)  used.textContent = usedDays + ' day' + (usedDays !== 1 ? 's' : '') + ' used';
+    if (accr && vac.window) {
+      accr.textContent = 'Resets ' + vac.window.end.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    } else if (accr) { accr.textContent = ''; }
 
-    // Also update the small stat card
+    // Also update the small stat card (days)
     var ptoStatCard = document.getElementById('pto-stat-card');
     var ptoVal = document.getElementById('stat-pto');
-    if (ptoStatCard) ptoStatCard.style.display = 'block';
-    if (ptoVal) { ptoVal.textContent = ptoAvail + 'h'; ptoVal.style.color = ptoColor; }
+    if (ptoStatCard) ptoStatCard.style.display = vac.hasStart ? 'block' : 'none';
+    if (ptoVal) { ptoVal.textContent = remDays + 'd'; ptoVal.style.color = vacColor; }
   }
 
   if (TC.clockedIn) {
@@ -4901,6 +4914,69 @@ async function loadTeamData() {
   }
 }
 
+// ── VACATION BALANCE (day-based, shared source of truth with admin) ───────
+// Ported verbatim from timeclock_admin.html so the PWA and the back office
+// compute the exact same number. Entitlement = handbook days by tenure (or a
+// negotiated override, whichever is higher). "Used" = distinct PTO/Vacation
+// absence dates inside the current hire-anniversary window. Regenerates each
+// anniversary; no carryover (whole days, per handbook).
+function vacTenureDays(startISO, asOf) {
+  if (!startISO) return 0;
+  var start = new Date((''+startISO).slice(0,10) + 'T12:00:00');
+  if (isNaN(start.getTime())) return 0;
+  var ms = asOf - start;
+  if (ms < 0) return 0;
+  var years = ms / (365.25 * 24 * 3600 * 1000);
+  if (years * 12 < 6) return 0;   // < 6 months
+  if (years < 1) return 2;        // 6 months – 1 year
+  if (years < 2) return 5;        // 1 – 2 years
+  if (years < 5) return 10;       // 2 – 5 years
+  return 15;                      // 5+ years
+}
+function vacYearWindow(startISO, asOf) {
+  var start = new Date((''+startISO).slice(0,10) + 'T12:00:00');
+  var anniv = new Date(asOf.getFullYear(), start.getMonth(), start.getDate(), 12, 0, 0);
+  var yrStart = (anniv <= asOf) ? anniv : new Date(asOf.getFullYear()-1, start.getMonth(), start.getDate(), 12, 0, 0);
+  var yrEnd = new Date(yrStart.getFullYear()+1, start.getMonth(), start.getDate(), 12, 0, 0);
+  return { start: yrStart, end: yrEnd };
+}
+function vacEntitlement(emp, ptoAbsences, asOf) {
+  asOf = asOf || new Date();
+  var out = { hasStart: !!(emp && emp.start_date), allotment: 0, used: 0, remaining: 0, tenureDays: 0, override: null, source: '', window: null };
+  if (!out.hasStart) return out;
+  var win = vacYearWindow(emp.start_date, asOf);
+  out.window = win;
+  var tenure = vacTenureDays(emp.start_date, asOf);
+  out.tenureDays = tenure;
+  var ovRaw = (emp.vacation_days_override === null || emp.vacation_days_override === undefined || emp.vacation_days_override === '') ? null : Number(emp.vacation_days_override);
+  var ov = (ovRaw != null && !isNaN(ovRaw)) ? ovRaw : null;
+  out.override = ov;
+  out.allotment = (ov != null) ? Math.max(tenure, ov) : tenure;
+  out.source = (ov != null && ov > tenure) ? ('negotiated ' + ov + 'd · handbook ' + tenure + 'd') : ('handbook ' + tenure + 'd');
+  var usedDates = {};
+  (ptoAbsences || []).forEach(function(a){
+    var reason = (''+(a.reason||'')).toLowerCase();
+    if (reason !== 'pto' && reason !== 'vacation' && reason !== 'vac') return;
+    var iso = (''+a.date).slice(0,10);
+    var d = new Date(iso + 'T12:00:00');
+    if (d >= win.start && d < win.end) usedDates[iso] = true;
+  });
+  out.used = Object.keys(usedDates).length;
+  out.remaining = Math.max(0, out.allotment - out.used);
+  return out;
+}
+// Current employee's day-based vacation info, from the cached absence list.
+function tcVacInfo() { return vacEntitlement(TC.employee, TC.vacAbsences || [], new Date()); }
+// Fetch this employee's PTO/Vacation absences once, cache them, re-render card.
+async function loadVacationAbsences() {
+  if (!TC.employee || !TC.employee.name) return;
+  try {
+    var r = await fetch(SB_URL + '/rest/v1/absence_records?employee_name=eq.' + encodeURIComponent(TC.employee.name) + '&reason=in.(PTO,Vacation,VAC)&select=date,reason&order=date.desc', { headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY } });
+    TC.vacAbsences = r.ok ? (await r.json() || []) : [];
+  } catch (e) { TC.vacAbsences = TC.vacAbsences || []; }
+  try { if (typeof renderStatus === 'function') renderStatus(); } catch (e) {}
+}
+
 // ── VACATION REQUESTS ───────────────────────────────────────────────────
 // Count weekdays (Mon-Fri) between two dates inclusive
 function _vrCountWeekdays(startStr, endStr) {
@@ -4920,7 +4996,8 @@ function _vrCountWeekdays(startStr, endStr) {
 function openVacationRequest() {
   if (!TC.employee) { alert('Please wait for employee data to load'); return; }
   var today = new Date().toISOString().split('T')[0];
-  var ptoAvail = parseFloat(TC.employee.pto_hours_available || 0);
+  var _vac = tcVacInfo();
+  var vacRemaining = _vac.remaining;
 
   // Build modal
   var overlay = document.createElement('div');
@@ -4937,10 +5014,11 @@ function openVacationRequest() {
   html += '<button onclick="closeVacationRequest()" style="background:transparent;border:none;font-size:22px;color:#6b7a96;cursor:pointer;padding:0 6px;">×</button>';
   html += '</div>';
 
-  // PTO summary
+  // Vacation summary (day-based)
+  var _vacColor = vacRemaining <= 1 ? '#c62828' : vacRemaining <= 3 ? '#e65100' : '#2e7d32';
   html += '<div style="background:rgba(46,125,50,.05);border:1px solid rgba(46,125,50,.2);border-radius:10px;padding:10px 14px;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center;">';
-  html += '<div style="font-size:11px;color:#6b7a96;text-transform:uppercase;letter-spacing:.04em;font-weight:700;">PTO Available</div>';
-  html += '<div style="font-size:18px;font-weight:700;color:#2e7d32;">'+ptoAvail.toFixed(1)+'h <span style="font-size:11px;color:#6b7a96;">(' + (ptoAvail/8).toFixed(1) + ' days)</span></div>';
+  html += '<div style="font-size:11px;color:#6b7a96;text-transform:uppercase;letter-spacing:.04em;font-weight:700;">Vacation Available</div>';
+  html += '<div style="font-size:18px;font-weight:700;color:'+_vacColor+';">'+vacRemaining+' day'+(vacRemaining!==1?'s':'')+' <span style="font-size:11px;color:#6b7a96;">of '+_vac.allotment+'</span></div>';
   html += '</div>';
 
   // Policy reminder
@@ -5007,9 +5085,8 @@ function _vrUpdatePreview() {
   }
 
   var days = _vrCountWeekdays(start, end);
-  var hours = days * 8;
-  var ptoAvail = parseFloat(TC.employee.pto_hours_available || 0);
-  var overBalance = hours > ptoAvail;
+  var vacRemaining = tcVacInfo().remaining;
+  var overBalance = days > vacRemaining;
 
   // 30-day notice calculation (calendar days from today to start date)
   var today = new Date(); today.setHours(0,0,0,0);
@@ -5028,7 +5105,7 @@ function _vrUpdatePreview() {
 
   var html = '';
   html += '<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;"><span style="color:#6b7a96;">Dates</span><strong style="color:#0d2d5e;">'+startLabel+' → '+endLabel+'</strong></div>';
-  html += '<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;"><span style="color:#6b7a96;">Workdays requested</span><strong style="color:#0d2d5e;">'+days+' day'+(days!==1?'s':'')+' ('+hours+'h)</strong></div>';
+  html += '<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;"><span style="color:#6b7a96;">Workdays requested</span><strong style="color:#0d2d5e;">'+days+' day'+(days!==1?'s':'')+'</strong></div>';
 
   if (noticeRequired) {
     html += '<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;"><span style="color:#6b7a96;">Notice given</span>';
@@ -5040,11 +5117,11 @@ function _vrUpdatePreview() {
     html += '</div>';
   }
 
-  html += '<div style="display:flex;justify-content:space-between;font-size:12px;"><span style="color:#6b7a96;">PTO balance after</span>';
+  html += '<div style="display:flex;justify-content:space-between;font-size:12px;"><span style="color:#6b7a96;">Vacation balance after</span>';
   if (overBalance) {
-    html += '<strong style="color:#c62828;">-'+(hours-ptoAvail).toFixed(1)+'h (over balance)</strong>';
+    html += '<strong style="color:#c62828;">'+(days-vacRemaining)+' day'+((days-vacRemaining)!==1?'s':'')+' over balance</strong>';
   } else {
-    html += '<strong style="color:#2e7d32;">'+(ptoAvail-hours).toFixed(1)+'h remaining</strong>';
+    html += '<strong style="color:#2e7d32;">'+(vacRemaining-days)+' day'+((vacRemaining-days)!==1?'s':'')+' remaining</strong>';
   }
   html += '</div>';
 
@@ -5057,7 +5134,7 @@ function _vrUpdatePreview() {
   }
 
   if (overBalance) {
-    html += '<div style="margin-top:8px;padding:8px 10px;background:rgba(198,40,40,.08);border-radius:6px;font-size:11px;color:#c62828;">⚠ Over your PTO balance. You can still submit, but manager may deny or partially approve.</div>';
+    html += '<div style="margin-top:8px;padding:8px 10px;background:rgba(198,40,40,.08);border-radius:6px;font-size:11px;color:#c62828;">⚠ Over your vacation balance. You can still submit, but manager may deny or partially approve.</div>';
   }
   if (days === 0) {
     html += '<div style="margin-top:8px;padding:8px 10px;background:rgba(230,81,0,.08);border-radius:6px;font-size:11px;color:#e65100;">⚠ No workdays in selected range. Weekends don\'t count.</div>';
@@ -5609,28 +5686,29 @@ function updatePeriodNavUI(period, offset) {
 
 async function loadMyHours() {
   if (!TC.employee || !TC.employee.id) return;
-  // Update PTO card in this tab
-  var ptoAvail  = parseFloat(TC.employee.pto_hours_available || 0);
-  var ptoUsed   = parseFloat(TC.employee.pto_hours_used || 0);
-  var ptoAccrual = parseFloat(TC.employee.pto_accrual_rate || 0);
-  var ptoTotal  = ptoAvail + ptoUsed;
-  var ptoPct    = ptoTotal > 0 ? Math.min(100, Math.round((ptoAvail / ptoTotal) * 100)) : 100;
-  var ptoColor  = ptoAvail <= 8 ? 'var(--red)' : ptoAvail <= 24 ? '#e65100' : 'var(--green)';
+  // Update the vacation card in this tab — DAY-BASED, same math as renderStatus
+  // and the admin file. Make sure the absence cache is loaded first.
+  if (!TC.vacAbsences) { try { await loadVacationAbsences(); } catch(e) {} }
+  var vac       = tcVacInfo();
+  var allot     = vac.allotment;
+  var usedDays  = vac.used;
+  var remDays   = vac.remaining;
+  var vacPct    = allot > 0 ? Math.min(100, Math.round((remDays / allot) * 100)) : 0;
+  var vacColor  = remDays <= 1 ? 'var(--red)' : remDays <= 3 ? '#e65100' : 'var(--green)';
   var card = document.getElementById('pto-balance-card');
   var badge = document.getElementById('pto-badge');
   var bar = document.getElementById('pto-bar');
   var usedEl = document.getElementById('pto-used-label');
   var accrEl = document.getElementById('pto-accrual-label');
-  var ptoTotal  = ptoAvail + ptoUsed;
-  if (card) card.style.display = 'block';
+  if (card) card.style.display = vac.hasStart ? 'block' : 'none';
   var totalValEl = document.getElementById('pto-total-val');
   var usedValEl  = document.getElementById('pto-used-val');
-  if (totalValEl) totalValEl.textContent = ptoTotal.toFixed(1) + 'h';
-  if (usedValEl)  { usedValEl.textContent = ptoUsed.toFixed(1) + 'h'; }
-  if (badge) { badge.textContent = ptoAvail.toFixed(1) + 'h'; badge.style.color = ptoColor; }
-  if (bar)   { bar.style.width = (ptoTotal > 0 ? Math.min(100, Math.round((ptoAvail/ptoTotal)*100)) : 100) + '%'; bar.style.background = ptoColor; }
-  if (usedEl) usedEl.textContent = ptoAccrual ? 'Accruing ' + ptoAccrual + 'h/period' : '';
-  if (accrEl) accrEl.textContent = TC.employee.pto_notes || '';
+  if (totalValEl) totalValEl.textContent = allot;
+  if (usedValEl)  usedValEl.textContent = usedDays;
+  if (badge) { badge.textContent = remDays; badge.style.color = vacColor; }
+  if (bar)   { bar.style.width = vacPct + '%'; bar.style.background = vacColor; }
+  if (usedEl) usedEl.textContent = usedDays + ' day' + (usedDays !== 1 ? 's' : '') + ' used';
+  if (accrEl) accrEl.textContent = vac.window ? ('Resets ' + vac.window.end.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })) : '';
 
   // Load and show sick day count
   try {

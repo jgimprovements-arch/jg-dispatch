@@ -7997,6 +7997,7 @@ function openQuickInvite() {
   body += '<div style="background:rgba(232,93,4,.06);border:1px solid rgba(232,93,4,.25);border-radius:8px;padding:12px 14px;margin-bottom:14px;font-size:12px;color:var(--text);line-height:1.5;">';
   body += '<strong style="color:var(--orange);">⚡ Skip-Docs Invite</strong><br>';
   body += 'Creates the employee record and grants immediate sign-in access. <strong>No onboarding docs, no handbook, no non-compete.</strong> They can sign in right away.';
+  body += '<br><br>Onboarding is now <strong>mandatory</strong> for new hires — anyone who hasn\'t finished it is blocked from every app until they do. This is the <strong>only</strong> override: it marks onboarding complete, so use it only for contractors, temp workers, or people who signed on paper, and handle those docs separately.';
   body += '</div>';
 
   body += '<div class="form-row">';
@@ -9251,19 +9252,26 @@ function _buildEmployeeFileBody(emp, invite, ncSig, documents, compHistory, revi
   h += _fileRow('Market', val(emp.market));
   h += '</div>';
 
-  // PTO & Sick
+  // Time Off Balance (at a glance) — DAY-BASED vacation + live sick count.
+  // The old hours-based PTO rows were dead: getPtoEarned/getPtoUsed/
+  // getSickDaysUsedYTD were never defined, so the typeof guards always fell
+  // back to 0 and the panel showed 0.0h for everyone. Full vacation detail +
+  // the negotiated override live in the 🌴 panel below; this is the summary.
   h += '<div style="background:#fff;border:1px solid var(--border);border-radius:10px;padding:14px 16px;">';
   h += '<div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;">🏖 Time Off Balance</div>';
-  // Compute PTO info if we can
-  var ptoEarned = typeof getPtoEarned === 'function' ? getPtoEarned(emp) : 0;
-  var ptoUsed = typeof getPtoUsed === 'function' ? getPtoUsed(emp.name) : 0;
-  var ptoRemaining = Math.max(0, ptoEarned - ptoUsed);
-  var sickUsed = typeof getSickDaysUsedYTD === 'function' ? getSickDaysUsedYTD(emp.name) : 0;
-  var sickLimit = emp.sick_days_year ? parseInt(emp.sick_days_year) : 3;
-  h += _fileRow('PTO Earned', ptoEarned.toFixed(1) + 'h');
-  h += _fileRow('PTO Used', ptoUsed.toFixed(1) + 'h');
-  h += _fileRow('PTO Remaining', '<strong style="color:'+(ptoRemaining<8?'#c62828':'#2e7d32')+';">'+ptoRemaining.toFixed(1)+'h</strong>');
-  h += _fileRow('Sick Days YTD', sickUsed + ' / ' + sickLimit);
+  var _vacGlance = vacEntitlement(emp, ptoAbsences, new Date());
+  var _thisYr = new Date().getFullYear();
+  var _sickUsed = (ST.absences||[]).filter(function(a){ return a.employee_name === emp.name && a.reason === 'Sick' && new Date(a.date).getFullYear() === _thisYr; }).length;
+  var _sickLimit = parseInt(emp.sick_day_limit || emp.sick_days_year || 3);
+  if (_vacGlance.hasStart) {
+    var _grColor = _vacGlance.remaining <= 0 ? '#c62828' : (_vacGlance.remaining <= 2 ? '#e65100' : '#2e7d32');
+    h += _fileRow('Vacation remaining', '<strong style="color:'+_grColor+';">'+_vacGlance.remaining+' of '+_vacGlance.allotment+' days</strong>');
+    h += _fileRow('Used this year', _vacGlance.used+' day'+(_vacGlance.used===1?'':'s'));
+  } else {
+    h += _fileRow('Vacation', '<span style="color:#e65100;">Set start date to enable</span>');
+  }
+  var _skColor = _sickUsed >= _sickLimit ? '#c62828' : (_sickUsed >= _sickLimit-1 ? '#e65100' : 'var(--navy)');
+  h += _fileRow('Sick Days YTD', '<strong style="color:'+_skColor+';">'+_sickUsed+' / '+_sickLimit+'</strong>');
   h += '</div>';
   h += '</div>';
 
