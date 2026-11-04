@@ -5920,7 +5920,9 @@ async function _toApprove(requestId) {
   confirmMsg += 'Current PTO balance: ' + ptoAvail.toFixed(1) + 'h\n';
   // Vacation DAYS remaining this anniversary year (informational — does not block).
   if (emp && emp.start_date && typeof vacEntitlement === 'function') {
-    var _ve = vacEntitlement(emp, _toData || [], new Date((''+r.start_date).slice(0,10) + 'T12:00:00'));
+    var _ptoAbs = [];
+    try { _ptoAbs = await sb('/rest/v1/absence_records?employee_name=eq.' + encodeURIComponent(emp.name) + '&reason=in.(PTO,Vacation,VAC)&select=date,reason,hours') || []; } catch(e){}
+    var _ve = vacEntitlement(emp, _ptoAbs, new Date((''+r.start_date).slice(0,10) + 'T12:00:00'));
     confirmMsg += 'Vacation days this year: ' + _ve.used + ' used of ' + _ve.allotment + ' (' + _ve.remaining + ' remaining)\n';
     var _reqDays = parseFloat(r.days_requested) || 0;
     if (_reqDays > _ve.remaining) {
@@ -9040,6 +9042,7 @@ async function openEmployeeFile(empId) {
   var compHistoryData = [];
   var reviewsData = [];
   var vacationRequestsData = [];
+  var ptoAbsencesData = [];
   try {
     var results = await Promise.all([
       sb('/rest/v1/employee_invites?employee_id=eq.' + empId + '&order=sent_at.desc&limit=1'),
@@ -9047,7 +9050,8 @@ async function openEmployeeFile(empId) {
       sb('/rest/v1/employee_documents?employee_id=eq.' + empId + '&order=uploaded_at.desc'),
       sb('/rest/v1/comp_history?employee_id=eq.' + empId + '&order=effective_date.desc'),
       sb('/rest/v1/performance_reviews?employee_id=eq.' + empId + '&order=review_date.desc'),
-      sb('/rest/v1/vacation_requests?or=(employee_id.eq.' + empId + ',employee_name.eq.' + encodeURIComponent(emp.name) + ')&order=submitted_at.desc')
+      sb('/rest/v1/vacation_requests?or=(employee_id.eq.' + empId + ',employee_name.eq.' + encodeURIComponent(emp.name) + ')&order=submitted_at.desc'),
+      sb('/rest/v1/absence_records?employee_name=eq.' + encodeURIComponent(emp.name) + '&reason=in.(PTO,Vacation,VAC)&select=date,reason,hours&order=date.desc')
     ]);
     if (results[0] && results[0].length) inviteData = results[0][0];
     if (results[1] && results[1].length) ncSignatureData = results[1][0];
@@ -9055,10 +9059,11 @@ async function openEmployeeFile(empId) {
     if (results[3]) compHistoryData = results[3];
     if (results[4]) reviewsData = results[4];
     if (results[5]) vacationRequestsData = results[5];
+    if (results[6]) ptoAbsencesData = results[6];
   } catch(e) { console.warn('Could not fetch employee records:', e); }
 
   // Build the file view
-  var body = _buildEmployeeFileBody(emp, inviteData, ncSignatureData, documentsData, compHistoryData, reviewsData, vacationRequestsData);
+  var body = _buildEmployeeFileBody(emp, inviteData, ncSignatureData, documentsData, compHistoryData, reviewsData, vacationRequestsData, ptoAbsencesData);
   showModal('📄 Employee File — ' + emp.name, body, null);
 }
 
@@ -9101,7 +9106,7 @@ function vacYearWindow(startISO, asOf) {
   var yrEnd = new Date(yrStart.getFullYear()+1, start.getMonth(), start.getDate(), 12, 0, 0);
   return { start: yrStart, end: yrEnd };
 }
-function vacEntitlement(emp, vacationRequests, asOf) {
+function vacEntitlement(emp, ptoAbsences, asOf) {
   asOf = asOf || new Date();
   var out = { hasStart: !!(emp && emp.start_date), allotment: 0, used: 0, remaining: 0, tenureDays: 0, override: null, source: '', window: null };
   if (!out.hasStart) return out;
@@ -9114,14 +9119,22 @@ function vacEntitlement(emp, vacationRequests, asOf) {
   out.override = ov;
   out.allotment = (ov != null) ? Math.max(tenure, ov) : tenure;
   out.source = (ov != null && ov > tenure) ? ('negotiated ' + ov + 'd · handbook ' + tenure + 'd') : ('handbook ' + tenure + 'd');
-  var used = 0;
-  (vacationRequests || []).forEach(function(r){
-    if (r.status !== 'approved') return;
-    var d = new Date((''+r.start_date).slice(0,10) + 'T12:00:00');
-    if (d >= win.start && d < win.end) used += (parseFloat(r.days_requested) || 0);
+  // "Used" = distinct PTO/Vacation absence dates within the window. This is the
+  // authoritative record of days actually taken — it captures time off whether
+  // it came through an approved request OR was logged directly as an absence
+  // (many are logged directly, with no request on file). Sick / Holiday /
+  // Bereavement do NOT count against vacation. Counting distinct dates is
+  // dupe-proof. Whole days per handbook.
+  var usedDates = {};
+  (ptoAbsences || []).forEach(function(a){
+    var reason = (''+(a.reason||'')).toLowerCase();
+    if (reason !== 'pto' && reason !== 'vacation' && reason !== 'vac') return;
+    var iso = (''+a.date).slice(0,10);
+    var d = new Date(iso + 'T12:00:00');
+    if (d >= win.start && d < win.end) usedDates[iso] = true;
   });
-  out.used = used;
-  out.remaining = Math.max(0, out.allotment - used);
+  out.used = Object.keys(usedDates).length;
+  out.remaining = Math.max(0, out.allotment - out.used);
   return out;
 }
 async function saveVacationOverride(empId) {
@@ -9149,7 +9162,7 @@ async function saveVacationOverride(empId) {
 }
 function clearVacationOverride(empId) { var i = document.getElementById('vacOvr_' + empId); if (i) i.value = ''; saveVacationOverride(empId); }
 
-function _buildEmployeeFileBody(emp, invite, ncSig, documents, compHistory, reviews, vacationRequests) {
+function _buildEmployeeFileBody(emp, invite, ncSig, documents, compHistory, reviews, vacationRequests, ptoAbsences) {
   var h = '';
   var fmtD = function(iso) { if (!iso) return '—'; var d = new Date(iso); return d.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}); };
   var fmtDT = function(iso) { if (!iso) return '—'; var d = new Date(iso); return d.toLocaleString('en-US',{month:'short',day:'numeric',year:'numeric',hour:'numeric',minute:'2-digit'}); };
@@ -9232,7 +9245,7 @@ function _buildEmployeeFileBody(emp, invite, ncSig, documents, compHistory, revi
   h += '</div>';
 
   // ── VACATION ENTITLEMENT (days, anniversary-based) ──
-  var _vac = vacEntitlement(emp, vacationRequests, new Date());
+  var _vac = vacEntitlement(emp, ptoAbsences, new Date());
   h += '<div style="background:#fff;border:1px solid var(--border);border-radius:10px;padding:16px 18px;margin-bottom:16px;">';
   h += '<div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:12px;">🌴 Vacation (Days · regenerates on hire anniversary)</div>';
   if (!_vac.hasStart) {
