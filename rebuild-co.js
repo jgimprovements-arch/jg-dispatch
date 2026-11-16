@@ -132,6 +132,13 @@ function renderCoSection(mode) {
     const canSendSub = co.status === 'customer_signed' && externalOk;
     const canEdit = co.status === 'draft';
     const canDelete = co.status === 'draft' || co.status === 'sent_to_customer';
+    // Manual admin sign-off: for a CO approved OUTSIDE the portal (paper, email,
+    // verbal). Same gate as sending (main contract must be signed/overridden),
+    // but it records the signature directly and emails no one. Undo is offered
+    // only for a manually-signed CO, so a real portal signature is never nuked.
+    const canMarkManualSigned = co.status === 'draft' && externalOk;
+    const canUnmarkSigned = co.status === 'customer_signed'
+      && String(co.customer_signed_source || '').startsWith('manual');
 
     // For UX, show a locked button (instead of nothing) when CO send is
     // blocked specifically because the main contract isn't signed yet.
@@ -150,12 +157,14 @@ function renderCoSection(mode) {
           <div style="display:flex;gap:6px;flex-wrap:wrap;">
             ${canSendCustomer ? `<button class="btn primary" data-co-act="send-customer" data-co-id="${esc(co.id)}" style="font-size:12px;padding:5px 10px;">✉ Send to Customer</button>` : ''}
             ${blockedSendCustomer ? `<button class="btn primary" disabled title="${esc(externalBlockedReason)}" style="font-size:12px;padding:5px 10px;opacity:.5;cursor:not-allowed;">🔒 Send to Customer</button>` : ''}
+            ${canMarkManualSigned ? `<button class="btn ghost" data-co-act="mark-manual-signed" data-co-id="${esc(co.id)}" title="Record approval obtained outside the portal (paper, email, or verbal). Unlocks line items for work orders. Does NOT email the customer." style="font-size:12px;padding:5px 10px;">✍ Mark Signed (manual)</button>` : ''}
             ${canMarkCustomerSigned ? `<button class="btn primary" data-co-act="mark-customer-signed" data-co-id="${esc(co.id)}" style="font-size:12px;padding:5px 10px;">✓ Mark Customer Signed</button>` : ''}
             ${canSendSub ? `<button class="btn primary" data-co-act="send-sub" data-co-id="${esc(co.id)}" style="font-size:12px;padding:5px 10px;">✉ Send to Sub</button>` : ''}
             ${blockedSendSub ? `<button class="btn primary" disabled title="${esc(externalBlockedReason)}" style="font-size:12px;padding:5px 10px;opacity:.5;cursor:not-allowed;">🔒 Send to Sub</button>` : ''}
             <button class="btn ghost" data-co-act="view-pdf" data-co-id="${esc(co.id)}" style="font-size:12px;padding:5px 10px;">📄 View CO</button>
             ${canEdit ? `<button class="btn ghost" data-co-act="edit" data-co-id="${esc(co.id)}" style="font-size:12px;padding:5px 10px;">✎ Edit</button>` : ''}
             ${canDelete ? `<button class="btn ghost" data-co-act="delete" data-co-id="${esc(co.id)}" style="font-size:12px;padding:5px 10px;color:var(--red);border-color:var(--red);">🗑</button>` : ''}
+            ${canUnmarkSigned ? `<button class="btn ghost" data-co-act="unmark-signed" data-co-id="${esc(co.id)}" title="Revert this manually-signed CO to draft and re-lock its line items. Use only if recorded in error." style="font-size:12px;padding:5px 10px;color:var(--muted);">↩ Unmark Signed</button>` : ''}
           </div>
         </div>
         <div class="wobx-co-body" data-co-body="${esc(co.id)}">
@@ -256,6 +265,55 @@ function wireCoActions() {
         toast(useBucket
           ? `CO #${co.co_number} signed — items in Change Orders bucket, move to WO when ready`
           : `CO #${co.co_number} customer signature recorded — items now available in WO Builder`);
+        renderTabContent();
+
+      } else if (act === 'mark-manual-signed') {
+        // Record a sign-off obtained outside the portal. No email is sent and
+        // no customer_email is required. Audit-stamped with source + approver.
+        const name = prompt('Who approved this change order? (name for the record)');
+        if (name === null) return; // cancelled
+        const signerName = name.trim() || 'Customer';
+        const how = (prompt('How was it approved? (e.g. paper, email, verbal) — optional, for the audit trail') || '').trim().toLowerCase().slice(0, 40);
+        if (!confirm(`Record CO #${co.co_number} as customer-signed (manual)?\n\nThis unlocks its line items for work orders and does NOT email the customer.`)) return;
+        const { error } = await sb.from('rebuild_change_orders')
+          .update({
+            status: 'customer_signed',
+            customer_signed_at: new Date().toISOString(),
+            customer_signed_name: signerName,
+            customer_signed_source: 'manual_admin' + (how ? ':' + how : '')
+          })
+          .eq('id', coId);
+        if (error) { toast('Failed: ' + error.message); return; }
+        // Same unlock behavior as the portal path, honoring the bucket flag.
+        const useBucketM = (state.platformConfig?.feature_co_bucket_workflow === 'true');
+        if (!useBucketM) {
+          await sb.from('rebuild_co_line_items')
+            .update({ is_unassigned: false })
+            .eq('co_id', coId);
+        }
+        if (typeof logToAlbi === 'function') logToAlbi('co_marked_signed_manual', `CO #${co.co_number} recorded customer-signed (manual) by ${state.pmEmail || 'admin'}; approver: ${signerName}${how ? `, via ${how}` : ''}`);
+        await loadChangeOrders();
+        await loadWoBudget();
+        toast(useBucketM
+          ? `CO #${co.co_number} signed (manual) — items in Change Orders bucket, move to WO when ready`
+          : `CO #${co.co_number} signed (manual) — items now available in WO Builder`);
+        renderTabContent();
+
+      } else if (act === 'unmark-signed') {
+        // Reverse a manual sign-off recorded in error: back to draft, re-lock
+        // the CO's line items, clear the recorded signature.
+        if (!confirm(`Revert CO #${co.co_number} to draft?\n\nThis re-locks its line items (pulls them back out of the WO Builder / Change Orders bucket) and clears the recorded signature. Use only if the sign-off was recorded in error.`)) return;
+        await sb.from('rebuild_co_line_items')
+          .update({ is_unassigned: true })
+          .eq('co_id', coId);
+        const { error } = await sb.from('rebuild_change_orders')
+          .update({ status: 'draft', customer_signed_at: null, customer_signed_name: null, customer_signed_source: null })
+          .eq('id', coId);
+        if (error) { toast('Failed: ' + error.message); return; }
+        if (typeof logToAlbi === 'function') logToAlbi('co_signature_reverted', `CO #${co.co_number} manual signature reverted to draft by ${state.pmEmail || 'admin'}`);
+        await loadChangeOrders();
+        await loadWoBudget();
+        toast(`CO #${co.co_number} reverted to draft — line items re-locked`);
         renderTabContent();
 
       } else if (act === 'send-sub') {
