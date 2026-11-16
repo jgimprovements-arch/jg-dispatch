@@ -247,7 +247,7 @@ function wireCoActions() {
       } else if (act === 'mark-customer-signed') {
         const name = prompt('Customer name (for record):') || 'Customer';
         const { error } = await sb.from('rebuild_change_orders')
-          .update({ status: 'customer_signed', customer_signed_at: new Date().toISOString(), customer_signed_name: name })
+          .update({ status: 'customer_signed', signed_at: new Date().toISOString(), signed_name: name })
           .eq('id', coId);
         if (error) { toast('Failed: ' + error.message); return; }
         // Feature flag — when CO bucket workflow is on, items stay
@@ -278,8 +278,8 @@ function wireCoActions() {
         const { error } = await sb.from('rebuild_change_orders')
           .update({
             status: 'customer_signed',
-            customer_signed_at: new Date().toISOString(),
-            customer_signed_name: signerName,
+            signed_at: new Date().toISOString(),
+            signed_name: signerName,
             customer_signed_source: 'manual_admin' + (how ? ':' + how : '')
           })
           .eq('id', coId);
@@ -307,7 +307,7 @@ function wireCoActions() {
           .update({ is_unassigned: true })
           .eq('co_id', coId);
         const { error } = await sb.from('rebuild_change_orders')
-          .update({ status: 'draft', customer_signed_at: null, customer_signed_name: null, customer_signed_source: null })
+          .update({ status: 'draft', signed_at: null, signed_name: null, customer_signed_source: null })
           .eq('id', coId);
         if (error) { toast('Failed: ' + error.message); return; }
         if (typeof logToAlbi === 'function') logToAlbi('co_signature_reverted', `CO #${co.co_number} manual signature reverted to draft by ${state.pmEmail || 'admin'}`);
