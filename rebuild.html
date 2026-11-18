@@ -1800,7 +1800,29 @@ const VALID_SUFFIXES = new Set(['BRD','REB','REM','RZE','EXT']);
 async function logToAlbi(eventType, noteText, opts) {
   opts = opts || {};
   const proj = opts.project || state.activeProject;
-  if (!proj || !proj.albi_project_id) return;
+  if (!proj) return;
+
+  // 1) Local activity ledger (queryable) — best effort, never blocks the UI.
+  //    This is the record the Zapier push below does NOT keep. It captures
+  //    every event for the activity dashboard, including platform-only
+  //    projects with no Albi link.
+  try {
+    await sb.from('activity_log').insert({
+      project_id: proj.id || null,
+      albi_project_id: proj.albi_project_id || null,
+      albi_job_number: proj.albi_job_number || null,
+      event_type: eventType,
+      note_text: noteText,
+      actor_email: state.pmEmail || null,
+      actor_name: state.pmName || null,
+      source: 'platform',
+    });
+  } catch (e) {
+    console.warn('activity_log insert failed:', e);
+  }
+
+  // 2) Push to the Albi timeline (existing behavior) — only when linked.
+  if (!proj.albi_project_id) return;
   const payload = {
     albi_project_id: proj.albi_project_id,
     albi_job_number: proj.albi_job_number || '',

@@ -104,6 +104,7 @@ body{background:var(--bg);color:var(--txt);font-family:'DM Sans',system-ui,sans-
     👥 Platform Users
     <span id="presence-count-badge" style="background:#2e7d32;color:#fff;font-size:10px;font-weight:700;padding:2px 7px;border-radius:10px;margin-left:6px;display:none;">0</span>
   </button>
+  <button class="panel-tab" id="ptab-activity" onclick="switchPanel('activity')">📜 Activity</button>
   <button class="panel-tab" onclick="window.location.href='org_chart.html'">🌳 Org Chart</button>
   <button class="panel-tab" onclick="window.location.href='vehicles.html'">🚐 Fleet</button>
 </div>
@@ -198,6 +199,9 @@ function switchPanel(panel) {
     hdrActions.innerHTML = '<span id="presence-updated" style="font-size:10px;color:rgba(255,255,255,.5);"></span>' +
       '<button class="export-btn" style="background:rgba(255,255,255,.1);color:#fff;" onclick="pr_render()">↻ Refresh</button>';
     pr_render();
+  } else if (panel === 'activity') {
+    hdrActions.innerHTML = '<button class="export-btn" style="background:rgba(255,255,255,.1);color:#fff;" onclick="av_load()">↻ Refresh</button>';
+    av_render();
   }
 }
 
@@ -1292,6 +1296,152 @@ function pr_render(){
 // ═══════════════════════════════════════════════════════════════════════════
 // BOOT
 // ═══════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════
+// ACTIVITY PANEL  (prefix: av_) — combined cross-source "who did what" feed.
+// Sources, each fetched independently so one failure never blanks the feed:
+//   • platform_activity — sales/admin actions this panel already logs
+//   • activity_log      — project events (logToAlbi dual-write); source='albi'
+//                         rows appear automatically once the Albi sync mirrors
+//                         Albi's timeline here
+//   • rebuild_messages  — emails / texts sent from the platform
+// ═══════════════════════════════════════════════════════════════════════════
+var AV = {
+  from: new Date(Date.now() - 14*86400000).toISOString().split('T')[0],
+  to: new Date().toISOString().split('T')[0],
+  person: '', source: '', search: '', rows: [], loading: false
+};
+
+async function av_fetch(url) {
+  try {
+    var r = await fetch(url, { headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY } });
+    if (!r.ok) { console.warn('av_fetch ' + r.status + ' ' + url); return []; }
+    var d = await r.json();
+    return Array.isArray(d) ? d : [];
+  } catch (e) { console.warn('av_fetch error', e); return []; }
+}
+function av_cap(s){ s=String(s||''); return s ? s.charAt(0).toUpperCase()+s.slice(1) : s; }
+function av_esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function av_ts(iso){ var d=new Date(iso); if(isNaN(d)) return '—'; return d.toLocaleDateString('en-US',{month:'short',day:'numeric'})+' '+d.toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'}); }
+function av_srcColor(s){ return ({Email:'#1565c0',Project:'#e85d04',Albi:'#2e7d32',Sales:'#6a1b9a',Employees:'#00838f',Platform:'#546e7a','Work Orders':'#00838f',SOV:'#8d6e63','To-dos':'#5c6bc0',Selections:'#ad1457',Notes:'#616161'})[s] || '#546e7a'; }
+// Generic mapper for the *_history tables + journal: reads whichever
+// actor/type/detail/timestamp column each table happens to use.
+function av_normGeneric(r, source){
+  var actor = r.actor || r.actor_email || r.created_by_name || r.created_by_email || r.author_name || r.author_email || r.performed_by || r.changed_by || r.email || r.name || '—';
+  var type = r.action || r.event_type || r.type || source;
+  var detail = r.note_text || r.notes || r.note || r.body || r.detail || r.description || r.content || r.title || r.summary || '';
+  var ts = r.created_at || r.changed_at || r.ts || r.timestamp || r.updated_at || r.created || null;
+  return { ts: ts, actor: actor, type: type, detail: (''+detail).slice(0,300), context: '', source: source };
+}
+
+function av_render(){ av_load(); }
+
+async function av_load() {
+  AV.loading = true; av_paint();
+  var fromIso = AV.from + 'T00:00:00', toIso = AV.to + 'T23:59:59';
+  var dateF = '&created_at=gte.' + fromIso + '&created_at=lte.' + toIso;
+
+  var tasks = [
+    // platform_activity (sales/admin) — uses its own 'ts' column
+    av_fetch(SB_URL + '/rest/v1/platform_activity?order=ts.desc&limit=1500&ts=gte.' + fromIso + '&ts=lte.' + toIso)
+      .then(function(rs){ return rs.map(function(r){ return { ts:r.ts, actor:(r.performed_by||r.employee_name||'—'), type:(r.action||'event'), detail:(r.detail||''), context:(r.employee_name||''), source:(r.category?av_cap(r.category):'Platform') }; }); }),
+    // activity_log (project events via logToAlbi dual-write; 'albi' once mirrored)
+    av_fetch(SB_URL + '/rest/v1/activity_log?order=created_at.desc&limit=1500' + dateF)
+      .then(function(rs){ return rs.map(function(r){ return { ts:r.created_at, actor:(r.actor_name||r.actor_email||'—'), type:(r.event_type||'event'), detail:(r.note_text||''), context:(r.albi_job_number||''), source:(r.source==='albi'?'Albi':'Project') }; }); }),
+    // emails / texts
+    av_fetch(SB_URL + '/rest/v1/rebuild_messages?order=created_at.desc&limit=1500' + dateF + '&select=subject,recipient_name,recipient_email,sent_by_name,sent_by_email,direction,channel,created_at')
+      .then(function(rs){ return rs.map(function(r){ var out=(r.direction==='outbound'); return { ts:r.created_at, actor:(r.sent_by_name||r.sent_by_email||'—'), type:(out?('✉ '+(r.channel||'email')+' sent'):('📥 '+(r.channel||'email')+' received')), detail:(r.subject||''), context:(r.recipient_name||r.recipient_email||''), source:'Email' }; }); })
+  ];
+
+  // Change-history tables + journal notes — generic mapper, best-effort columns.
+  [['rebuild_work_order_history','Work Orders'],
+   ['rebuild_sov_history','SOV'],
+   ['rebuild_todo_history','To-dos'],
+   ['rebuild_selections_history','Selections'],
+   ['rebuild_journal_entries','Notes']].forEach(function(src){
+    tasks.push(
+      av_fetch(SB_URL + '/rest/v1/' + src[0] + '?order=created_at.desc&limit=800' + dateF)
+        .then(function(rs){ return rs.map(function(r){ return av_normGeneric(r, src[1]); }); })
+    );
+  });
+
+  var parts = await Promise.all(tasks);
+  var norm = [];
+  parts.forEach(function(p){ norm = norm.concat(p || []); });
+  AV.rows = norm.filter(function(x){ return x.ts; }).sort(function(a,b){ return new Date(b.ts) - new Date(a.ts); });
+  AV.loading = false; av_paint();
+}
+
+function av_filtered() {
+  return AV.rows.filter(function(x){
+    if (AV.person && x.actor !== AV.person) return false;
+    if (AV.source && x.source !== AV.source) return false;
+    if (AV.search) {
+      var q = AV.search.toLowerCase();
+      if (!((x.type||'').toLowerCase().indexOf(q)>=0 || (x.detail||'').toLowerCase().indexOf(q)>=0 || (x.actor||'').toLowerCase().indexOf(q)>=0 || (x.context||'').toLowerCase().indexOf(q)>=0)) return false;
+    }
+    return true;
+  });
+}
+function av_setFrom(v){ AV.from=v; av_load(); }
+function av_setTo(v){ AV.to=v; av_load(); }
+function av_setPerson(v){ AV.person=v; av_paint(); }
+function av_setSource(v){ AV.source=v; av_paint(); }
+function av_setSearch(v){ AV.search=v; av_paint(); }
+function av_clear(){ AV.person=''; AV.source=''; AV.search=''; av_paint(); }
+
+function av_paint() {
+  var a = document.getElementById('app'); if (!a) return;
+  var rows = av_filtered();
+  var people = {}, sources = {};
+  AV.rows.forEach(function(x){ people[x.actor]=1; sources[x.source]=1; });
+  var peopleList = Object.keys(people).sort();
+  var sourceList = Object.keys(sources).sort();
+
+  var h = '<div style="padding:16px;max-width:1300px;margin:0 auto;">';
+  h += '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:14px;">';
+  h += '<input type="date" value="'+AV.from+'" onchange="av_setFrom(this.value)" style="padding:8px 10px;border-radius:6px;border:1.5px solid var(--brd);font-size:12px;">';
+  h += '<span style="font-size:12px;color:var(--dim);">to</span>';
+  h += '<input type="date" value="'+AV.to+'" onchange="av_setTo(this.value)" style="padding:8px 10px;border-radius:6px;border:1.5px solid var(--brd);font-size:12px;">';
+  h += '<select onchange="av_setPerson(this.value)" style="padding:8px 10px;border-radius:6px;border:1.5px solid var(--brd);font-size:12px;"><option value="">All people</option>'+peopleList.map(function(p){return '<option value="'+av_esc(p)+'"'+(AV.person===p?' selected':'')+'>'+av_esc(p)+'</option>';}).join('')+'</select>';
+  h += '<select onchange="av_setSource(this.value)" style="padding:8px 10px;border-radius:6px;border:1.5px solid var(--brd);font-size:12px;"><option value="">All sources</option>'+sourceList.map(function(s){return '<option value="'+av_esc(s)+'"'+(AV.source===s?' selected':'')+'>'+av_esc(s)+'</option>';}).join('')+'</select>';
+  h += '<input type="text" placeholder="Search…" value="'+av_esc(AV.search)+'" oninput="av_setSearch(this.value)" style="padding:8px 10px;border-radius:6px;border:1.5px solid var(--brd);font-size:12px;min-width:160px;">';
+  h += '</div>';
+
+  if (AV.loading) { h += '<div style="text-align:center;padding:50px;color:var(--dim);">Loading activity…</div></div>'; a.innerHTML=h; return; }
+
+  var byPerson = {};
+  AV.rows.forEach(function(x){ if (AV.source && x.source!==AV.source) return; byPerson[x.actor]=(byPerson[x.actor]||0)+1; });
+  var top = Object.keys(byPerson).map(function(k){return [k,byPerson[k]];}).sort(function(a,b){return b[1]-a[1];}).slice(0,12);
+  h += '<div class="section-hdr">Activity by person · '+AV.from+' → '+AV.to+'</div>';
+  h += '<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px;">';
+  top.forEach(function(e){ h += '<button onclick="av_setPerson(this.getAttribute(\'data-p\'))" data-p="'+av_esc(e[0])+'" style="border:1.5px solid '+(AV.person===e[0]?'var(--orange)':'var(--border)')+';background:var(--surface);border-radius:20px;padding:5px 12px;font-size:12px;cursor:pointer;font-family:DM Sans,sans-serif;"><b>'+av_esc(e[0])+'</b> · '+e[1]+'</button>'; });
+  if(!top.length) h += '<span style="color:var(--dim);font-size:12px;">No activity in this window.</span>';
+  h += '</div>';
+
+  h += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;"><div class="section-hdr" style="margin:0;">Feed · '+rows.length+' events</div>';
+  if(AV.person||AV.source||AV.search) h += '<button class="btn" onclick="av_clear()" style="font-size:11px;">Clear filters</button>';
+  h += '</div>';
+  h += '<div style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;font-size:11px;">';
+  h += '<thead><tr style="background:var(--navy);color:#fff;">';
+  ['Time','Source','Who','Action','Detail','Re'].forEach(function(c){ h+='<th style="padding:7px 10px;text-align:left;font-size:9px;text-transform:uppercase;">'+c+'</th>'; });
+  h += '</tr></thead><tbody>';
+  rows.slice(0,400).forEach(function(x,i){
+    h += '<tr style="background:'+(i%2===0?'var(--s1)':'#fff')+';border-bottom:1px solid var(--border);">';
+    h += '<td style="padding:6px 10px;font-family:DM Mono,monospace;font-size:10px;color:var(--dim);white-space:nowrap;">'+av_ts(x.ts)+'</td>';
+    h += '<td style="padding:6px 10px;"><span style="font-size:10px;padding:1px 7px;border-radius:10px;background:'+av_srcColor(x.source)+';color:#fff;font-weight:600;">'+av_esc(x.source)+'</span></td>';
+    h += '<td style="padding:6px 10px;font-weight:600;white-space:nowrap;">'+av_esc(x.actor)+'</td>';
+    h += '<td style="padding:6px 10px;">'+av_esc(x.type)+'</td>';
+    h += '<td style="padding:6px 10px;color:var(--dim);max-width:380px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+av_esc(x.detail)+'</td>';
+    h += '<td style="padding:6px 10px;color:var(--dim);white-space:nowrap;">'+av_esc(x.context)+'</td>';
+    h += '</tr>';
+  });
+  if(!rows.length) h += '<tr><td colspan="6" style="padding:24px;text-align:center;color:var(--dim);">No activity matches these filters.</td></tr>';
+  h += '</tbody></table></div>';
+  if(rows.length>400) h += '<div style="text-align:center;padding:8px;font-size:11px;color:var(--dim);">Showing 400 of '+rows.length+' — narrow the window or filters.</div>';
+  h += '</div>';
+  a.innerHTML = h;
+}
+
 async function bootAdmin() {
   // Default: Sales tab
   switchPanel('sales');
