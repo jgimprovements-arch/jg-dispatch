@@ -1308,7 +1308,7 @@ function pr_render(){
 var AV = {
   from: new Date(Date.now() - 14*86400000).toISOString().split('T')[0],
   to: new Date().toISOString().split('T')[0],
-  person: '', source: '', search: '', rows: [], loading: false
+  person: '', source: '', search: '', rows: [], loading: false, employees: null
 };
 
 async function av_fetch(url) {
@@ -1337,6 +1337,13 @@ function av_render(){ av_load(); }
 
 async function av_load() {
   AV.loading = true; av_paint();
+  // Load the active employee roster once — the people filter lists STAFF only,
+  // not the partners/contacts/adjusters that show up as actors on some rows.
+  if (!AV.employees) {
+    var _emps = await av_fetch(SB_URL + '/rest/v1/employees?active=eq.true&select=name');
+    AV.employees = {};
+    _emps.forEach(function(e){ if (e && e.name) AV.employees[String(e.name).trim().toLowerCase()] = 1; });
+  }
   var fromIso = AV.from + 'T00:00:00', toIso = AV.to + 'T23:59:59';
   var dateF = '&created_at=gte.' + fromIso + '&created_at=lte.' + toIso;
 
@@ -1388,13 +1395,14 @@ function av_setPerson(v){ AV.person=v; av_paint(); }
 function av_setSource(v){ AV.source=v; av_paint(); }
 function av_setSearch(v){ AV.search=v; av_paint(); }
 function av_clear(){ AV.person=''; AV.source=''; AV.search=''; av_paint(); }
+function av_isEmp(name){ if(!AV.employees || !Object.keys(AV.employees).length) return true; return !!AV.employees[String(name||'').trim().toLowerCase()]; }
 
 function av_paint() {
   var a = document.getElementById('app'); if (!a) return;
   var rows = av_filtered();
   var people = {}, sources = {};
   AV.rows.forEach(function(x){ people[x.actor]=1; sources[x.source]=1; });
-  var peopleList = Object.keys(people).sort();
+  var peopleList = Object.keys(people).filter(av_isEmp).sort();
   var sourceList = Object.keys(sources).sort();
 
   var h = '<div style="padding:16px;max-width:1300px;margin:0 auto;">';
@@ -1410,13 +1418,29 @@ function av_paint() {
   if (AV.loading) { h += '<div style="text-align:center;padding:50px;color:var(--dim);">Loading activity…</div></div>'; a.innerHTML=h; return; }
 
   var byPerson = {};
-  AV.rows.forEach(function(x){ if (AV.source && x.source!==AV.source) return; byPerson[x.actor]=(byPerson[x.actor]||0)+1; });
+  AV.rows.forEach(function(x){ if (!av_isEmp(x.actor)) return; if (AV.source && x.source!==AV.source) return; byPerson[x.actor]=(byPerson[x.actor]||0)+1; });
   var top = Object.keys(byPerson).map(function(k){return [k,byPerson[k]];}).sort(function(a,b){return b[1]-a[1];}).slice(0,12);
   h += '<div class="section-hdr">Activity by person · '+AV.from+' → '+AV.to+'</div>';
   h += '<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px;">';
   top.forEach(function(e){ h += '<button onclick="av_setPerson(this.getAttribute(\'data-p\'))" data-p="'+av_esc(e[0])+'" style="border:1.5px solid '+(AV.person===e[0]?'var(--orange)':'var(--border)')+';background:var(--surface);border-radius:20px;padding:5px 12px;font-size:12px;cursor:pointer;font-family:DM Sans,sans-serif;"><b>'+av_esc(e[0])+'</b> · '+e[1]+'</button>'; });
   if(!top.length) h += '<span style="color:var(--dim);font-size:12px;">No activity in this window.</span>';
   h += '</div>';
+
+  // When an employee is selected, show their activity TYPES (by source) as
+  // clickable chips to drill into one kind of activity.
+  if (AV.person) {
+    var pRows = AV.rows.filter(function(x){ return x.actor === AV.person; });
+    var bySrc = {}; pRows.forEach(function(x){ bySrc[x.source]=(bySrc[x.source]||0)+1; });
+    var srcChips = Object.keys(bySrc).map(function(k){return [k,bySrc[k]];}).sort(function(a,b){return b[1]-a[1];});
+    h += '<div class="section-hdr">'+av_esc(AV.person)+' · activity types</div>';
+    h += '<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px;">';
+    h += '<button onclick="av_setSource(\'\')" style="border:1.5px solid '+(!AV.source?'var(--orange)':'var(--border)')+';background:var(--surface);border-radius:20px;padding:5px 12px;font-size:12px;cursor:pointer;font-family:DM Sans,sans-serif;font-weight:'+(!AV.source?'700':'500')+';">All types · '+pRows.length+'</button>';
+    srcChips.forEach(function(e){
+      var on = (AV.source===e[0]);
+      h += '<button onclick="av_setSource(this.getAttribute(\'data-s\'))" data-s="'+av_esc(e[0])+'" style="border:1.5px solid '+(on?av_srcColor(e[0]):'var(--border)')+';background:'+(on?av_srcColor(e[0]):'var(--surface)')+';color:'+(on?'#fff':'var(--txt)')+';border-radius:20px;padding:5px 12px;font-size:12px;cursor:pointer;font-family:DM Sans,sans-serif;"><b>'+av_esc(e[0])+'</b> · '+e[1]+'</button>';
+    });
+    h += '</div>';
+  }
 
   h += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;"><div class="section-hdr" style="margin:0;">Feed · '+rows.length+' events</div>';
   if(AV.person||AV.source||AV.search) h += '<button class="btn" onclick="av_clear()" style="font-size:11px;">Clear filters</button>';
